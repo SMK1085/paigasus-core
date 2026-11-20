@@ -714,42 +714,70 @@ async fn an_unknown_field_survives_the_relay_byte_for_byte() {
     relay.shut_down().await;
 }
 
+/// The delivery count of each pending entry of the group, from `XPENDING <key> relay - + 10`.
+async fn delivery_counts(node: &ContainerAsync<Redis>) -> Vec<String> {
+    let out = redis_cli(node, &["XPENDING", KEY, "relay", "-", "+", "10"]).await;
+    let lines: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    // Each entry is four lines: the id, the consumer, the idle time and the delivery count.
+    lines.chunks(4).filter(|c| c.len() == 4).map(|c| c[3].to_owned()).collect()
+}
+
 #[tokio::test]
 async fn flushall_with_two_relays_counts_one_reset() {
     let Some((node, redis_url)) = redis_7_4("decision_log_redis relay flushall").await else {
         return;
     };
+    let port = free_port();
+    let Some((nats, nats_url)) = start_nats(Some(port), "decision_log_redis relay flushall").await else {
+        return;
+    };
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
-    // The entries are in Redis before the relays start, so that the first XLEN sample of each relay is 3. NATS
-    // is unreachable, so that no entry is published and deleted. A long sample interval keeps that sample the
-    // last one until the flush.
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    // NATS is down until after the flush, so that no entry is published and deleted before it. The test starts
+    // NATS again after the flush, so that each relay can finish its carried batch and then find the loss.
+    nats.stop().await.expect("stop NATS");
     for seq in 1..=3 {
         xadd(&node, &event_with_org(seq, ORG_A), 0).await;
     }
-    let dead = format!("nats://127.0.0.1:{}", free_port());
     let mut relays = Vec::new();
     for name in ["i1", "i2"] {
         let v = Arc::new(AtomicU64::new(0));
-        let mut s = fast(name);
-        s.sample_every = Duration::from_secs(120);
-        relays.push(Relay::start(connected_slot(&redis_url).await, relay_js(&dead, Arc::clone(&v)).await, s, v));
+        relays.push(Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast(name), v));
     }
     wait_for("the backlog gauge reads 3", || async { snap.gauge("gateway_decision_log_backlog") == Some(3.0) }).await;
-    // Both relays must be in the group before the flush. A relay registers its consumer with its first
-    // `XREADGROUP`, after its group setup. Without this, a late relay could treat the group made after the
-    // flush as its own startup, and the test would pass without the dedup it claims to prove.
-    wait_for("both relays are consumers", || async {
-        let consumers = redis_cli(&node, &["XINFO", "CONSUMERS", KEY, "relay"]).await;
-        consumers.contains("i1") && consumers.contains("i2")
+    // One relay reads the three entries. The other claims them after 300 ms of idle time, so each entry has two
+    // deliveries. Then BOTH relays hold a batch, and neither reads Redis until it can publish. This is the worst
+    // case for the dedup and for the estimate.
+    wait_for("both relays hold the three entries", || async {
+        let counts = delivery_counts(&node).await;
+        counts.len() == 3 && counts.iter().all(|c| c == "2")
     })
     .await;
     redis_cli(&node, &["FLUSHALL"]).await;
+    // Five samples of the stream with no group. They must not replace the sample from before the loss.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        snap.get("gateway_decision_log_redis_resets_total", &[]),
+        0,
+        "a relay that holds a batch does not read Redis, so it finds the loss only after NATS returns"
+    );
+    nats.start().await.expect("start NATS");
     wait_for("one reset", || async { snap.get("gateway_decision_log_redis_resets_total", &[]) >= 1 }).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(snap.get("gateway_decision_log_redis_resets_total", &[]), 1, "two relays count one incident");
-    assert_eq!(snap.get("gateway_decision_log_lost_estimate_total", &[]), 3, "the estimate is the last XLEN sample");
+    assert_eq!(
+        snap.get("gateway_decision_log_lost_estimate_total", &[]),
+        3,
+        "the estimate is the last XLEN sample from before the loss, not a sample of the stream after it"
+    );
+    // Each relay settled its batch after the flush, so XACK found no group and acked 0 of 3.
+    let text = logs.text();
+    assert!(
+        text.contains("the relay acked fewer entries than it settled") && text.contains("acked=0") && text.contains("settled=3"),
+        "a settle after the loss logs the two counts: {text}"
+    );
     for r in relays {
         r.shut_down().await;
     }
@@ -865,6 +893,68 @@ async fn the_relay_creates_a_bounded_stream_and_warns_on_drift() {
     );
     let mut stream = admin.get_stream(dl_js::STREAM).await.expect("the stream exists");
     assert_eq!(stream.info().await.expect("stream info").config.max_bytes, -1, "the relay did not change the stream");
+    relay.shut_down().await;
+}
+
+/// The `max_bytes` of each stream of the misroute test. JetStream reserves `max_bytes` of the file store for each
+/// stream. Two streams of `MAX_BYTES` (18 GiB each) do not fit a store that the server derives from the free disk of
+/// a small CI runner, and the second create fails with 10047. So the streams are small, and the store is fixed.
+const MISROUTE_STREAM_BYTES: i64 = 67_108_864;
+/// A broker with a fixed JetStream file store of 1 GiB, so that the test does not depend on the free disk of the host.
+const MISROUTE_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
+"#;
+
+/// A drifted `GATEWAY_DECISIONS` lost the decision subjects, and another stream holds them. The relay sends
+/// `Nats-Expected-Stream`, so the broker refuses the publish (10060) and stores nothing. The relay keeps the event in
+/// Redis and does not count it as rejected. When the operator repairs the streams, the event goes out.
+#[tokio::test]
+async fn a_publish_that_another_stream_would_take_stays_in_redis() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis relay misroute").await else {
+        return;
+    };
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", MISROUTE_CONF.as_bytes().to_vec());
+    let Some(nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay misroute").await else {
+        return;
+    };
+    let nats_url = format!("nats://127.0.0.1:{}", paigasus_test_docker::mapped_port(&nats, 4222, "decision_log_redis relay misroute").await);
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+    let admin = test_js(&nats_url).await;
+    let mut drifted = dl_js::stream_config(MISROUTE_STREAM_BYTES);
+    drifted.subjects = vec!["gateway.decision-old.>".to_owned()];
+    admin.create_stream(drifted).await.expect("make the drifted stream");
+    let mut other = dl_js::stream_config(MISROUTE_STREAM_BYTES);
+    other.name = "OTHER".to_owned();
+    admin.create_stream(other).await.expect("make the other stream");
+
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    let v = Arc::new(AtomicU64::new(0));
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, Arc::clone(&v)).await, fast("i1"), v);
+    // Wait for the misroute report, or for the end of the entry (the fault that this test guards against).
+    wait_for("the relay reports the misroute or deletes the entry", || async {
+        logs.text().contains("another JetStream stream holds the decision subject") || xlen(&node).await == 0
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(xlen(&node).await, 1, "the event stays in Redis");
+    assert_eq!(snap.published(), 0);
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a misroute is not a rejection");
+    let mut stream = admin.get_stream("OTHER").await.expect("the other stream exists");
+    assert_eq!(stream.info().await.expect("stream info").state.messages, 0, "the other stream stored nothing");
+
+    // The operator repairs the streams. The relay publishes the kept event to GATEWAY_DECISIONS.
+    admin.delete_stream("OTHER").await.expect("delete the other stream");
+    admin.update_stream(dl_js::stream_config(MISROUTE_STREAM_BYTES)).await.expect("repair the subjects");
+    wait_for("the kept event is published", || async { snap.published() == 1 && xlen(&node).await == 0 }).await;
+    let got = stream_messages(&admin).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].msg_id, decision_id(1));
     relay.shut_down().await;
 }
 
@@ -1070,6 +1160,7 @@ async fn concurrent_refusals_are_published_again_one_at_a_time_and_then_rejected
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::DEBUG);
     let admin = jetstream::new(
         async_nats::ConnectOptions::with_user_and_password("admin".into(), "admin".into())
             .connect(format!("nats://127.0.0.1:{port}"))
@@ -1092,6 +1183,16 @@ async fn concurrent_refusals_are_published_again_one_at_a_time_and_then_rejected
     .await;
     assert_eq!(snap.published(), 0);
     relay.shut_down().await;
+    // Each entry has one attempt in the concurrent batch, and one solo attempt after the AMBIGUOUS result. A
+    // relay that rejected a concurrent refusal at once would show no solo attempt.
+    let text = logs.text();
+    let attempts = |concurrent: bool| {
+        text.lines()
+            .filter(|l| l.contains("the relay publishes an entry") && l.contains(&format!("concurrent={concurrent}")))
+            .count()
+    };
+    assert_eq!(attempts(true), 2, "two attempts in the concurrent batch:\n{text}");
+    assert_eq!(attempts(false), 2, "one solo attempt for each refused entry:\n{text}");
 }
 
 /// A broker config whose JetStream holds 1 MiB of file storage for the whole server.

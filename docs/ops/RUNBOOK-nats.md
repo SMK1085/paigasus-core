@@ -282,8 +282,10 @@ limits, `max-age` 30 days, `max-bytes` 90 % of the account disk, `discard old`, 
 120 s, max message size 65 536, 1 replica. The values are in `ops/nats/subjects.env`. The relay makes
 the same stream if it is absent, and it warns about a drift but does not change a stream that exists.
 
-**Sizing.** `disk = peak decisions per second x average event bytes x 86 400 x 30`. At 600 bytes
-per event, the default disk of 20 GiB holds about 13 decisions per second, sustained, for 30 days.
+**Sizing.** The stream gets 90 % of the account disk (`max-bytes`), not the full disk. So
+`disk = peak decisions per second x average event bytes x 86 400 x 30 / 0.9`. At 600 bytes per event,
+the default disk of 20 GiB gives a stream of 19 327 352 832 bytes. That holds about 12.4 decisions per
+second, sustained, for 30 days. At 13 decisions per second, `discard old` removes events before 30 days.
 For more traffic, set `DECISIONS_ACCOUNT_DISK_BYTES` before you run `provision-decisions.sh`, or
 accept that `discard old` keeps fewer days.
 
@@ -297,7 +299,9 @@ default. This warning is expected.
 
 **The relay and the account limit.** Before the relay makes or checks `GATEWAY_DECISIONS`, it reads the account
 storage limit with `$JS.API.INFO`. It sets `max-bytes` to 90 % of that limit, the rule of `subjects.env`, when
-that is below the default of 19 327 352 832 bytes. With no limit, or a larger one, it uses the default. So a
+that is below the default of 19 327 352 832 bytes. With no limit, or a larger one, it uses the default. If the
+account also has a per-stream limit (`storage_max_stream_bytes`, untiered or in the tier `R1`), the value is
+never above that limit, because the broker refuses a stream above it too. So a
 smaller `DECISIONS_ACCOUNT_DISK_BYTES` does not make the broker refuse the create, and a stream that
 `provision-decisions.sh` made for that limit is not a drift. If the query fails, the relay logs
 `the relay cannot read the account limits; it uses the default max_bytes` and uses the default. A publisher user
