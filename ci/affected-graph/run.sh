@@ -329,7 +329,8 @@ run_suite() {
   run_case "gateway-core->services" "rs/crates/libs/paigasus-gateway-core/src/lib.rs" \
     "paigasus-gateway-core-rs,paigasus-gateway-rs,gateway-console-ts"
   # paigasus-test-docker edit -> the dev-only Docker policy crate + the services whose suites use it
-  # (SMA-726): IAM, the agent host's Postgres suites (SMA-786), and the gateway's Redis suites (SMA-677 PR 2), plus gateway-console-ts, whose
+  # (SMA-726): IAM, the agent host's Postgres suites (SMA-786), and the gateway's Redis
+  # suites (SMA-677 PR 2), plus gateway-console-ts, whose
   # playground project runs the real gateway binary (measured with /bin/bash, as for redis above).
   run_case "test-docker->services" "rs/crates/libs/paigasus-test-docker/src/lib.rs" \
     "paigasus-test-docker-rs,paigasus-agent-host-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
