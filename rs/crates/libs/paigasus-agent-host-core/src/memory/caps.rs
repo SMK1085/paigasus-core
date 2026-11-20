@@ -14,7 +14,9 @@ pub struct MemoryCaps {
     pub max_store_bytes: u64,
     /// The largest number of files in a scope.
     pub max_store_files: u64,
-    /// The largest file that `view` returns in full, in UTF-8 bytes.
+    /// The cut of each file that the run start loads (`layout::run_start_context`), in UTF-8
+    /// bytes. A longer file is cut and gets a truncation note. `view` does not use this cap: it
+    /// cuts at 16,000 characters.
     pub max_loaded_file_bytes: u64,
 }
 

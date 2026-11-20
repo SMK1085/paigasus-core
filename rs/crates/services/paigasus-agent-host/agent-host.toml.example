@@ -17,4 +17,4 @@
 # max_file_bytes = 65536          # greater than 0
 # max_store_bytes = 1048576       # greater than 0
 # max_store_files = 512           # greater than 0
-# max_loaded_file_bytes = 8192    # greater than 0, at most max_file_bytes
+# max_loaded_file_bytes = 8192    # the cut of a file loaded at run start (not view). Greater than 0, at most max_file_bytes

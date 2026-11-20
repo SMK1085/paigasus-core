@@ -230,6 +230,9 @@ impl MemoryWorkspace {
     }
 
     /// Seal the workspace and apply the buffer to the store.
+    ///
+    /// It takes the buffer and seals the workspace before `apply`. So on any error, a `Store`
+    /// error included, the buffer is gone. The caller must not retry with the same workspace.
     pub async fn commit(&mut self) -> Result<(), MemoryApplyError> {
         let set = self.take_changes();
         self.store.apply(&set, &self.caps).await

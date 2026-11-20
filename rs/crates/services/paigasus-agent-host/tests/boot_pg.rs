@@ -30,7 +30,7 @@ fn migrations() -> i64 {
 }
 
 #[tokio::test]
-async fn a_fresh_database_boots_and_applies_m0001_once() {
+async fn a_fresh_database_boots_and_applies_every_migration_once() {
     let Some((_node, url)) = support::start_raw_postgres().await else {
         eprintln!("skipping boot test: Docker unavailable");
         return;
