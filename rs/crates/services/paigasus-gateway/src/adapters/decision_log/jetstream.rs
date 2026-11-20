@@ -107,6 +107,23 @@ pub fn account_max_storage(account: &jetstream::account::Account) -> i64 {
     }
 }
 
+/// The per-stream file storage limit of the account (`storage_max_stream_bytes`) in a `$JS.API.INFO` reply. The
+/// untiered limit comes first, then the tier `R1`, as in [`account_max_storage`]. `None` when there is no such
+/// limit. A broker refuses a stream with a `max_bytes` above this limit.
+#[must_use]
+pub fn account_max_stream_bytes(account: &jetstream::account::Account) -> Option<i64> {
+    let tier = account.tiers.get("R1").and_then(|t| t.limits.storage_max_stream_bytes);
+    account.limits.storage_max_stream_bytes.filter(|n| *n > 0).or_else(|| tier.filter(|n| *n > 0))
+}
+
+/// The `max_bytes` of the stream for an account: [`max_bytes_for`] of the account storage limit, and never above
+/// the per-stream limit of the account ([`account_max_stream_bytes`]).
+#[must_use]
+pub fn max_bytes_for_account(account: &jetstream::account::Account) -> i64 {
+    let bytes = max_bytes_for(account_max_storage(account));
+    account_max_stream_bytes(account).map_or(bytes, |cap| bytes.min(cap))
+}
+
 /// The stream config, with `max_bytes` from [`max_bytes_for`]. `provision-decisions.sh` makes the same stream from
 /// `ops/nats/subjects.env`. The relay calls `get_or_create_stream` with this value, so a stream that the relay
 /// makes is never unbounded.
@@ -185,12 +202,16 @@ pub fn api_error_of(err: &jetstream::context::PublishError) -> Option<ApiError> 
 ///   10118 `JSStreamOfflineErr`, 10039 `JSNotEnabledForAccountErr` and 10076 `JSNotEnabledErr`: JetStream is
 ///   not available now.
 ///
+/// - 10060 `JSStreamNotMatchErr` ("expected stream does not match"): the relay sends `Nats-Expected-Stream:
+///   GATEWAY_DECISIONS`, and another stream holds the subject. This is a configuration fault of the broker, not a
+///   property of the message. The relay keeps the event until an operator repairs the streams.
+///
 /// Three codes come from newer servers. Their names and texts are from the `async-nats` 0.53 `ErrorCode` table:
 /// - 10158 `STREAM_DUPLICATE_MESSAGE_CONFLICT` ("Stream duplicate message conflict"): the broker still
 ///   processes a message with the same id. A retry gets the result of that message.
 /// - 10167 `STREAM_TOO_MANY_REQUESTS` ("Stream too many requests"): the stream is busy now.
 /// - 10194 `STREAM_OFFLINE_REASON` ("Stream offline reason"): the stream is offline now.
-pub const TRANSIENT_CODES: [u64; 15] = [10002, 10023, 10028, 10047, 10077, 10120, 10008, 10009, 10063, 10118, 10039, 10076, 10158, 10167, 10194];
+pub const TRANSIENT_CODES: [u64; 16] = [10002, 10023, 10028, 10047, 10077, 10120, 10008, 10009, 10063, 10118, 10039, 10076, 10060, 10158, 10167, 10194];
 
 /// The class of a PubAck error. A status 503 with no server code is transient too: `nats-server` sends it when a
 /// clustered stream cannot propose the message. Each other code rejects this message, for example 10054
@@ -376,6 +397,7 @@ mod tests {
             (500, 10118), // stream offline
             (503, 10039), // JetStream not enabled for the account
             (503, 10076), // JetStream not enabled
+            (400, 10060), // expected stream does not match: another stream holds the subject
             (400, 10158), // duplicate message conflict: the same message id is in process (newer servers)
             (429, 10167), // stream too many requests (newer servers)
             (500, 10194), // stream offline reason (newer servers)
@@ -391,7 +413,6 @@ mod tests {
             (400, 10054, "message_too_large"),
             (400, 10097, "header_too_large"),
             (400, 10109, "stream_sealed"),
-            (400, 10060, "jetstream_rejected"), // expected stream does not match
             (500, 10111, "jetstream_rejected"), // rollup failed
             (400, 10070, "jetstream_rejected"), // wrong last message id, if a future client maps it to `Other`
             (400, 0, "jetstream_rejected"),     // no code and not 503
@@ -491,6 +512,34 @@ mod tests {
         // Just below the default disk: 90 % of it is below the default.
         assert_eq!(max_bytes_for(21_474_836_470), 19_327_352_823);
         assert_eq!(stream_config(max_bytes_for(268_435_456)).max_bytes, 241_591_910);
+    }
+
+    #[test]
+    fn max_bytes_for_account_never_goes_above_the_per_stream_limit() {
+        use jetstream::account::{Account, Tier};
+        let mut account = Account::default();
+        assert_eq!(account_max_stream_bytes(&account), None, "no per-stream limit");
+        assert_eq!(max_bytes_for_account(&account), MAX_BYTES);
+        account.limits.max_storage = Some(21_474_836_480);
+        account.limits.storage_max_stream_bytes = Some(1_073_741_824);
+        assert_eq!(max_bytes_for_account(&account), 1_073_741_824, "the per-stream limit is below 90 % of the disk");
+        account.limits.storage_max_stream_bytes = Some(i64::MAX);
+        assert_eq!(max_bytes_for_account(&account), MAX_BYTES, "a larger per-stream limit does not raise the value");
+        account.limits.storage_max_stream_bytes = Some(-1);
+        assert_eq!(max_bytes_for_account(&account), MAX_BYTES, "-1 is no limit");
+        account.limits.storage_max_stream_bytes = Some(0);
+        assert_eq!(max_bytes_for_account(&account), MAX_BYTES, "0 is no limit");
+        // A tiered account has its limits in the tier `R1`.
+        account.limits.max_storage = Some(0);
+        let mut r1 = Tier::default();
+        r1.limits.max_storage = Some(268_435_456);
+        r1.limits.storage_max_stream_bytes = Some(104_857_600);
+        account.tiers.insert("R1".to_owned(), r1);
+        assert_eq!(account_max_stream_bytes(&account), Some(104_857_600));
+        assert_eq!(max_bytes_for_account(&account), 104_857_600);
+        // 90 % of the account disk stays the limit when it is below the per-stream limit.
+        account.tiers.get_mut("R1").expect("the tier").limits.storage_max_stream_bytes = Some(268_435_456);
+        assert_eq!(max_bytes_for_account(&account), 241_591_910);
     }
 
     #[test]

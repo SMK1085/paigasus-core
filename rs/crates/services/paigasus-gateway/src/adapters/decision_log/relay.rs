@@ -7,6 +7,7 @@
 //!
 //! Logs name error kinds and classes only. They never hold an event, a payload or the URL.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +25,7 @@ use redis::streams::{StreamAutoClaimReply, StreamInfoConsumersReply, StreamReadR
 use tokio::sync::{Mutex, watch};
 use tokio::time::Instant;
 
-use super::jetstream::{MAX_BYTES, PublishClass, account_max_storage, api_error_of, classify, max_bytes_for, stream_config, subject_for, violation_since};
+use super::jetstream::{MAX_BYTES, PublishClass, STREAM, api_error_of, classify, max_bytes_for_account, stream_config, subject_for, violation_since};
 use super::redis_conn::RedisSlot;
 use super::supervised::run_supervised;
 use super::{DropReason, count_dropped};
@@ -35,6 +36,17 @@ const COUNT: usize = 256;
 const IN_FLIGHT: usize = 32;
 /// The most pages of one claim run.
 const CLAIM_PAGES: usize = 16;
+/// The server error code of a publish that `Nats-Expected-Stream` refused: another stream holds the subject.
+const STREAM_NOT_MATCH: u64 = 10060;
+/// `XLEN` of the stream, and 1 when the stream has the consumer group `ARGV[1]` (else 0), in one atomic step.
+const SAMPLE_SCRIPT: &str = "local n = redis.call('XLEN', KEYS[1]) \
+     if redis.call('EXISTS', KEYS[1]) == 0 then return {n, 0} end \
+     for _, g in ipairs(redis.call('XINFO', 'GROUPS', KEYS[1])) do \
+       for i = 1, #g, 2 do \
+         if g[i] == 'name' and g[i + 1] == ARGV[1] then return {n, 1} end \
+       end \
+     end \
+     return {n, 0}";
 
 /// What the relay needs to know about the stream and about its own timing. `new` gives the production values.
 #[derive(Debug, Clone)]
@@ -124,7 +136,7 @@ struct State {
     js: jetstream::Context,
     s: RelaySettings,
     violations: Arc<AtomicU64>,
-    /// The last `XLEN` sample. `None` until the first one.
+    /// The last `XLEN` sample of the stream while it had the consumer group. `None` until the first one.
     sample: StdMutex<Option<u64>>,
     inner: Mutex<Inner>,
 }
@@ -157,6 +169,42 @@ async fn nap(d: Duration, shutdown: &mut watch::Receiver<()>) {
         () = tokio::time::sleep(d) => {}
         _ = shutdown.changed() => {}
     }
+}
+
+/// Page through `XAUTOCLAIM`. `page` runs one call with the cursor. The ids that Redis reports as deleted count as
+/// `redis_deleted`. A failed page does not discard the pages before it: Redis already moved those entries to this
+/// consumer, and `XREADGROUP >` never returns them again. So the result holds the claimed entries AND the error.
+async fn claim_pages<F, Fut>(mut page: F) -> (Vec<Entry>, Option<redis::RedisError>)
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<StreamAutoClaimReply, redis::RedisError>>,
+{
+    let mut out = Vec::new();
+    let mut cursor = "0-0".to_owned();
+    for _ in 0..CLAIM_PAGES {
+        let reply = match page(cursor).await {
+            Ok(reply) => reply,
+            Err(err) => return (out, Some(err)),
+        };
+        count_dropped(DropReason::RedisDeleted, reply.deleted_ids.len() as u64);
+        for id in reply.claimed {
+            let bytes = match id.map.get("e") {
+                Some(Value::BulkString(b)) => Some(Bytes::from(b.clone())),
+                _ => None,
+            };
+            out.push(Entry {
+                id: id.id,
+                bytes,
+                done: false,
+                solo: false,
+            });
+        }
+        if reply.next_stream_id == "0-0" {
+            break;
+        }
+        cursor = reply.next_stream_id;
+    }
+    (out, None)
 }
 
 fn entries_of(reply: Option<StreamReadReply>) -> Vec<Entry> {
@@ -249,12 +297,13 @@ impl State {
         }
     }
 
-    /// The `max_bytes` for the stream. The relay reads the account storage limit with `$JS.API.INFO` and takes 90 %
-    /// of it when that is below [`MAX_BYTES`]. A broker refuses a stream above the account limit, so a fixed value
-    /// would stall the relay on a smaller account. If the query fails, the relay uses `MAX_BYTES` and goes on.
+    /// The `max_bytes` for the stream. The relay reads the account limits with `$JS.API.INFO` and takes 90 % of the
+    /// storage limit when that is below [`MAX_BYTES`], and never more than the per-stream limit of the account
+    /// ([`max_bytes_for_account`]). A broker refuses a stream above either limit, so a fixed value would stall the
+    /// relay on a smaller account. If the query fails, the relay uses `MAX_BYTES` and goes on.
     async fn stream_max_bytes(&self) -> i64 {
         match self.js.query_account().await {
-            Ok(account) => max_bytes_for(account_max_storage(&account)),
+            Ok(account) => max_bytes_for_account(&account),
             Err(err) => {
                 tracing::warn!(kind = ?err.kind(), "the relay cannot read the account limits; it uses the default max_bytes");
                 MAX_BYTES
@@ -310,41 +359,23 @@ impl State {
         }
     }
 
-    /// `XAUTOCLAIM` of the entries that another consumer holds for too long. The ids that Redis reports as
-    /// deleted count as `redis_deleted`.
-    async fn claim(&self, conn: &mut paigasus_redis::RedisHandle) -> Result<Vec<Entry>, redis::RedisError> {
-        let mut out = Vec::new();
-        let mut cursor = "0-0".to_owned();
-        for _ in 0..CLAIM_PAGES {
-            let reply: StreamAutoClaimReply = redis::cmd("XAUTOCLAIM")
+    /// `XAUTOCLAIM` of the entries that another consumer holds for too long ([`claim_pages`]).
+    async fn claim(&self, conn: &paigasus_redis::RedisHandle) -> (Vec<Entry>, Option<redis::RedisError>) {
+        let idle = u64::try_from(self.s.claim_idle.as_millis()).unwrap_or(u64::MAX);
+        claim_pages(|cursor| {
+            let mut conn = conn.clone();
+            let cmd = redis::cmd("XAUTOCLAIM")
                 .arg(&self.s.key)
                 .arg(self.s.group)
                 .arg(&self.s.consumer)
-                .arg(u64::try_from(self.s.claim_idle.as_millis()).unwrap_or(u64::MAX))
-                .arg(&cursor)
+                .arg(idle)
+                .arg(cursor)
                 .arg("COUNT")
                 .arg(COUNT)
-                .query_async(conn)
-                .await?;
-            count_dropped(DropReason::RedisDeleted, reply.deleted_ids.len() as u64);
-            for id in reply.claimed {
-                let bytes = match id.map.get("e") {
-                    Some(Value::BulkString(b)) => Some(Bytes::from(b.clone())),
-                    _ => None,
-                };
-                out.push(Entry {
-                    id: id.id,
-                    bytes,
-                    done: false,
-                    solo: false,
-                });
-            }
-            if reply.next_stream_id == "0-0" {
-                break;
-            }
-            cursor = reply.next_stream_id;
-        }
-        Ok(out)
+                .clone();
+            async move { cmd.query_async::<StreamAutoClaimReply>(&mut conn).await }
+        })
+        .await
     }
 
     /// `XGROUP DELCONSUMER` for each other consumer with no pending entry and an idle time above the limit.
@@ -372,11 +403,14 @@ impl State {
         let Some(subject) = subject_for(&event.org_id) else {
             return Outcome::Rejected;
         };
-        let mut msg = PublishMessage::build().payload(bytes);
+        // `Nats-Expected-Stream`: if another stream holds the subject (a drifted `GATEWAY_DECISIONS`), the broker
+        // refuses the message with 10060 and stores nothing. 10060 is transient, so the event stays in Redis.
+        let mut msg = PublishMessage::build().payload(bytes).expected_stream(STREAM);
         if !event.decision_id.is_empty() {
             msg = msg.message_id(&event.decision_id);
         }
         let generation = self.violations.load(Ordering::SeqCst);
+        tracing::debug!(concurrent, "the relay publishes an entry");
         let started = Instant::now();
         let result = match self.js.send_publish(subject, msg).await {
             Ok(ack) => ack.await.map(|_| ()),
@@ -395,6 +429,10 @@ impl State {
                     Outcome::Rejected
                 }
                 PublishClass::Transient if err.kind() == jetstream::context::PublishErrorKind::StreamNotFound => Outcome::StreamGone,
+                PublishClass::Transient if api_error_of(&err).is_some_and(|a| a.code == STREAM_NOT_MATCH) => {
+                    tracing::error!(stream = STREAM, "another JetStream stream holds the decision subject; the relay keeps the event in Redis");
+                    Outcome::Transient
+                }
                 PublishClass::Transient => Outcome::Transient,
             },
         }
@@ -472,10 +510,13 @@ impl State {
             }
             if now >= inner.next_claim {
                 inner.next_claim = now + self.s.claim_every;
-                match self.claim(&mut conn).await {
-                    Ok(entries) => inner.carry.extend(entries),
-                    Err(err) if is_code(&err, "NOGROUP") => self.handle_nogroup(&mut conn, &mut inner).await,
-                    Err(err) => tracing::warn!(kind = ?err.kind(), "the relay cannot claim entries"),
+                // Keep the entries of the pages that Redis gave before an error.
+                let (entries, failed) = self.claim(&conn).await;
+                inner.carry.extend(entries);
+                match failed {
+                    None => {}
+                    Some(err) if is_code(&err, "NOGROUP") => self.handle_nogroup(&mut conn, &mut inner).await,
+                    Some(err) => tracing::warn!(kind = ?err.kind(), "the relay cannot claim entries"),
                 }
             }
         }
@@ -586,8 +627,13 @@ impl State {
         loop {
             if let Some(handle) = self.slot.get() {
                 let mut conn = handle.clone();
-                if let Ok(n) = redis::cmd("XLEN").arg(&self.s.key).query_async::<u64>(&mut conn).await {
-                    self.set_sample(Some(n));
+                let script = redis::Script::new(SAMPLE_SCRIPT);
+                if let Ok((n, has_group)) = script.key(&self.s.key).arg(self.s.group).invoke_async::<(u64, u64)>(&mut conn).await {
+                    // A stream without the group is a stream after a Redis loss that no relay has found yet. Its
+                    // length is not the lost backlog, so the sample of the stream before the loss stays.
+                    if has_group == 1 {
+                        self.set_sample(Some(n));
+                    }
                     #[allow(clippy::cast_precision_loss)]
                     gauge!(names::GATEWAY_DECISION_LOG_BACKLOG).set(n as f64);
                 }
@@ -640,4 +686,57 @@ pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings
     });
     let sampler = state.sampler(shutdown);
     tokio::join!(relay, sampler);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn page(next: &str, ids: &[&str]) -> StreamAutoClaimReply {
+        StreamAutoClaimReply {
+            next_stream_id: next.to_owned(),
+            claimed: ids
+                .iter()
+                .map(|id| redis::streams::StreamId {
+                    id: (*id).to_owned(),
+                    map: HashMap::from([("e".to_owned(), Value::BulkString(b"x".to_vec()))]),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_claim_page_keeps_the_entries_of_the_pages_before_it() {
+        let mut cursors = Vec::new();
+        let (entries, err) = claim_pages(|cursor| {
+            cursors.push(cursor.clone());
+            async move {
+                match cursor.as_str() {
+                    "0-0" => Ok(page("5-0", &["1-0", "2-0"])),
+                    "5-0" => Ok(page("9-0", &["5-0"])),
+                    _ => Err(redis::RedisError::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "the third page timed out"))),
+                }
+            }
+        })
+        .await;
+        assert_eq!(cursors, ["0-0", "5-0", "9-0"], "the claim follows the cursor");
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["1-0", "2-0", "5-0"], "the entries of the first two pages stay");
+        assert!(entries.iter().all(|e| e.bytes.as_deref() == Some(b"x".as_slice()) && !e.done && !e.solo));
+        assert!(err.is_some_and(|e| e.is_timeout() || e.kind() == redis::ErrorKind::Io), "the error of the third page is returned");
+    }
+
+    #[tokio::test]
+    async fn a_claim_stops_at_the_end_cursor_with_no_error() {
+        let (entries, err) = claim_pages(|cursor| async move {
+            assert_eq!(cursor, "0-0", "one page only");
+            Ok(page("0-0", &["1-0"]))
+        })
+        .await;
+        assert_eq!(entries.len(), 1);
+        assert!(err.is_none());
+    }
 }
