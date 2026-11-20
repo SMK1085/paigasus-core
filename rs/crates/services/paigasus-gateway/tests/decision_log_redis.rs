@@ -13,6 +13,8 @@ use std::time::{Duration, SystemTime};
 use async_nats::jetstream;
 use bytes::Bytes;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use paigasus_gateway::adapters::decision_log::gen_kv::NatsGenKv;
+use paigasus_gateway::adapters::decision_log::generation::{GenKv, KvError, entry_key};
 use paigasus_gateway::adapters::decision_log::jetstream as dl_js;
 use paigasus_gateway::adapters::decision_log::redis_conn::breaker_metrics;
 use paigasus_gateway::adapters::decision_log::relay::delete_consumer_if_empty;
@@ -1312,4 +1314,62 @@ async fn the_relay_sizes_the_stream_to_a_smaller_account_limit() {
     assert!(!text.contains("cannot read the account limits"), "the relay grants cover $JS.API.INFO: {text}");
     assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "no permission violation");
     relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn the_kv_adapter_makes_the_bucket_and_does_a_cas() {
+    let Some((_nats, url)) = start_nats(None, "decision_log_redis kv adapter").await else {
+        return;
+    };
+    let key = entry_key(KEY);
+    let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, key.clone());
+    assert!(kv.get().await.expect("get on a new bucket").is_none(), "no entry before the first create");
+    let admin = test_js(&url).await;
+    let store = admin.get_key_value(dl_js::GEN_BUCKET).await.expect("the adapter made the bucket");
+    let info = admin.get_stream(format!("KV_{}", dl_js::GEN_BUCKET)).await.expect("the bucket stream").cached_info().clone();
+    assert_eq!(info.config.max_bytes, dl_js::GEN_MAX_BYTES);
+    assert_eq!(info.config.max_messages_per_subject, 1, "history 1");
+    assert_eq!(info.config.storage, jetstream::stream::StorageType::File);
+    assert!(info.config.allow_direct, "the direct get is on");
+    let r1 = kv.create(Bytes::from_static(b"a")).await.expect("first create");
+    assert_eq!(kv.create(Bytes::from_static(b"b")).await, Err(KvError::WrongRevision), "a create on a live key");
+    let r2 = kv.update(Bytes::from_static(b"c"), r1).await.expect("update with the right revision");
+    assert!(r2 > r1);
+    assert_eq!(kv.update(Bytes::from_static(b"d"), r1).await, Err(KvError::WrongRevision), "a stale revision");
+    let got = kv.get().await.expect("get").expect("an entry");
+    assert_eq!((got.value.as_ref(), got.revision, got.live), (&b"c"[..], r2, true));
+    store.delete(&key).await.expect("admin delete");
+    let marker = kv.get().await.expect("get after delete").expect("a marker entry");
+    assert!(!marker.live, "a delete marker is not live");
+    kv.create(Bytes::from_static(b"e")).await.expect("a create over a marker");
+}
+
+#[tokio::test]
+async fn the_kv_adapter_makes_the_handle_again_after_an_outage() {
+    let port = free_port();
+    let Some((nats, url)) = start_nats(Some(port), "decision_log_redis kv outage").await else {
+        return;
+    };
+    let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, entry_key(KEY));
+    kv.get().await.expect("get while NATS is up");
+    nats.stop().await.expect("stop NATS");
+    let down = kv.get().await;
+    assert!(matches!(down, Err(KvError::Timeout | KvError::Other)), "get while NATS is down: {down:?}");
+    nats.start().await.expect("start NATS");
+    wait_for("get works again", || async { kv.get().await.is_ok() }).await;
+}
+
+#[tokio::test]
+async fn the_kv_adapter_makes_the_bucket_again_after_it_is_deleted() {
+    let Some((_nats, url)) = start_nats(None, "decision_log_redis kv adapter deleted bucket").await else {
+        return;
+    };
+    let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, entry_key(KEY));
+    kv.create(Bytes::from_static(b"a")).await.expect("create makes the bucket");
+    let admin = test_js(&url).await;
+    admin.delete_stream(format!("KV_{}", dl_js::GEN_BUCKET)).await.expect("admin deletes the bucket stream");
+    let after_delete = kv.get().await;
+    assert!(after_delete.is_err(), "the cached handle fails on a deleted bucket: {after_delete:?}");
+    let again = kv.get().await.expect("the handle is made again and the bucket too");
+    assert!(again.is_none(), "the new bucket is empty");
 }
