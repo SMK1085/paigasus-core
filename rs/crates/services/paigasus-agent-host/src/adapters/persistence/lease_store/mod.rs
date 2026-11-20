@@ -4,6 +4,7 @@
 //! time that decides that a lease is valid is the database clock (AG4).
 
 mod claim;
+mod complete;
 mod take;
 
 use std::time::Duration;
