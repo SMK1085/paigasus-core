@@ -587,16 +587,22 @@ There are three kinds of loss:
 
 Known limits, which the runbook states:
 
-- A Redis failover that keeps the group but loses the last writes is not seen live. The export
-  shows the gaps.
+- A Redis restore to a state that is newer than the last successful KV write is not seen live. The
+  export shows the gaps. This is a limit of SMA-821 (§5.5 of its spec).
 - The live metrics are per process. A dashboard and the alerts use `sum()` over the instances.
-- The reset count is best-effort. Three cases are not counted. (a) A new relay that makes the group
-  at its start does not count a reset, because it cannot tell a first start from a start after a
-  loss. (b) A relay that holds a batch settles it with `XACK`, which returns 0 and no `NOGROUP` when
-  the stream or the group is missing. If a new relay makes the group before the next read, no relay
-  counts the reset. (c) If Redis makes the group but the reply to `XGROUP CREATE` is lost, the retry
-  gets `BUSYGROUP` and does not count. A durable record of the recovery would close these cases. It
-  is not built. The export shows the gaps.
+- The reset count is no longer best-effort for the cases (a), (b) and (c) of SMA-755. SMA-821 counts
+  them with a generation record in the NATS KV bucket `GATEWAY_DECISIONS_GEN`. See
+  `docs/superpowers/specs/2026-11-20-sma-821-decision-log-generation-record-design.md`. The other limits of
+  SMA-821 (§5.5) stay:
+  - NATS loses the KV entry (a lost bucket, a new NATS account): the next step counts nothing.
+  - Somebody deletes only the generation key or only the epoch key: a false reset or a false loss.
+    An operator `XSETID` or `RESTORE ... REPLACE` on the stream key alone is not detected.
+  - The estimates are the last stored sample, with about 15 s of error.
+  - During the rolling deploy from SMA-755, one incident can count twice.
+  - A relay that made an ambiguous counting write and stops before its next KV get loses that count.
+  - The deployment rule (§5.2) is only detected, not prevented.
+  - A restore to an older generation is missed when the relay that wrote the newer generation has
+    stopped and no other relay saw a failed KV step.
 - If only the consumer group is removed (`XGROUP DESTROY`), `NOGROUP` counts a reset, but the stream
   still holds its events. The relay reads them again from ID 0, so the lost estimate overcounts.
 - A cross-account import of `gateway.decision.>` into an account with a stream that captures it gives
