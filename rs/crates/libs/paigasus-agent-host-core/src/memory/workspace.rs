@@ -141,6 +141,28 @@ impl MemoryWorkspace {
         Ok(file.map(|f| f.content))
     }
 
+    /// Read a file whose content moves but does not go to the model (the sources of `rename`). It
+    /// answers from the buffer and the cache first, like `read`. Unlike `read`, it keeps the
+    /// first-sight version as the baseline: when the store now holds another version than the run
+    /// first saw, it is a conflict, and nothing moves.
+    pub(super) async fn read_for_move(&mut self, path: &MemoryPath) -> Result<Option<String>, WorkspaceError> {
+        match self.changes.get(path) {
+            Some(MemoryChange::Put { content, .. }) => return Ok(Some(content.clone())),
+            Some(MemoryChange::Delete { .. }) => return Ok(None),
+            None => {}
+        }
+        if let Some(k) = self.known.get(path) {
+            if k.version.is_none() {
+                return Ok(None);
+            }
+            if let Some(c) = &k.content {
+                return Ok(Some(c.clone()));
+            }
+        }
+        let version = self.baseline(path).await?;
+        Ok(version.and_then(|_| self.known.get(path).and_then(|k| k.content.clone())))
+    }
+
     /// True when the file exists for this run. This is an internal check: the model does not get
     /// the content, so the first-sight version stays the baseline. It answers from the buffer
     /// and the cache first. A path that the run has not seen is fetched. When a listing saw the
@@ -359,11 +381,17 @@ impl MemoryWorkspace {
                 Err(WorkspaceError::Conflict { path: path.clone(), also })
             }
             Some(v) => {
-                self.known.entry(path.clone()).or_insert(Known {
+                let known = self.known.entry(path.clone()).or_insert(Known {
                     version: None,
                     size: 0,
                     content: None,
                 });
+                // The store holds the baseline version, so its content is the baseline content.
+                if known.content.is_none()
+                    && let Some(f) = fetched
+                {
+                    known.content = Some(f.content);
+                }
                 Ok(v)
             }
             None => {

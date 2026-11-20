@@ -385,7 +385,7 @@ async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Resul
     }
     let mut contents = Vec::with_capacity(moves.len());
     for (source, _) in &moves {
-        contents.push(ws.read(source).await?.ok_or_else(|| missing_path(&source.to_tool_path()))?);
+        contents.push(ws.read_for_move(source).await?.ok_or_else(|| missing_path(&source.to_tool_path()))?);
     }
     let puts = moves.iter().map(|(_, target)| target.clone()).zip(contents).collect();
     let removes = moves.into_iter().map(|(source, _)| source).collect();
@@ -775,6 +775,24 @@ mod tests {
         let mut fresh = MemoryWorkspace::new(store, scope, MemoryCaps::default());
         assert_eq!(content(&mut fresh, "/a/x").await.as_deref(), Some("changed"));
         assert_eq!(content(&mut fresh, "/a/y").await.as_deref(), Some("changed"));
+        assert_eq!(content(&mut fresh, "/b/x").await, None);
+    }
+
+    #[tokio::test]
+    async fn rename_of_a_listed_source_changed_outside_the_run_is_a_conflict() {
+        let (store, scope, mut ws) = committed_parts(&[("/a/x", "v1")], MemoryCaps::default()).await;
+        // The listing records /a/x at its first version, with no content.
+        run(&mut ws, json!({"command":"view","path":"/memories"})).await.unwrap();
+        other_writer(&store, &scope, "/a/x", "v2").await;
+        let err = run(&mut ws, json!({"command":"rename","old_path":"/memories/a","new_path":"/memories/b"})).await.unwrap_err();
+        assert_eq!(
+            err,
+            "The file /memories/a/x changed outside this run. Your changes to it in this run are gone. Use view to read it again."
+        );
+        assert!(ws.take_changes().changes.is_empty());
+        ws.commit().await.unwrap();
+        let mut fresh = MemoryWorkspace::new(store, scope, MemoryCaps::default());
+        assert_eq!(content(&mut fresh, "/a/x").await.as_deref(), Some("v2"));
         assert_eq!(content(&mut fresh, "/b/x").await, None);
     }
 
