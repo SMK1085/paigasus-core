@@ -61,13 +61,32 @@ impl ClaimRepository for PgLeaseStore {
             lost("complete");
             return Err(CompleteError::LeaseLost);
         };
-        if let Err(e) = txn.commit().await {
-            handle.poison();
-            return Err(store(e));
-        }
+        // A failed commit, or a commit future that the caller drops, leaves the state of the run
+        // unknown: the database may have completed it. The handle is then poisoned.
+        commit_or_poison(handle, txn.commit()).await.map_err(store)?;
         handle.record_complete();
         Ok(done.into_iter().map(EventId::from_uuid).collect())
     }
+}
+
+/// Await the commit of the transaction. The handle is poisoned unless the commit returns `Ok`.
+/// This covers a failed commit and a future that the caller drops while the commit is pending.
+async fn commit_or_poison<E>(handle: &mut LeaseHandle, commit: impl std::future::Future<Output = Result<(), E>>) -> Result<(), E> {
+    struct PoisonUnlessDisarmed<'a> {
+        handle: &'a mut LeaseHandle,
+        armed: bool,
+    }
+    impl Drop for PoisonUnlessDisarmed<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                self.handle.poison();
+            }
+        }
+    }
+    let mut guard = PoisonUnlessDisarmed { handle, armed: true };
+    let result = commit.await;
+    guard.armed = result.is_err();
+    result
 }
 
 /// Steps 1 to 4 of §8.5 in the open transaction. `None` means that the lease is lost.
@@ -100,4 +119,34 @@ async fn complete_in(txn: &DatabaseTransaction, handle: &LeaseHandle, claim: &Cl
         }
     }
     Ok(Some(done))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paigasus_agent_host_core::ids::InboxId;
+    use paigasus_agent_host_core::run::LeaseToken;
+    use std::time::Duration;
+
+    fn handle() -> LeaseHandle {
+        LeaseHandle::new(InboxId::new(Uuid::nil(), Uuid::nil()), LeaseToken(1), "h".to_owned())
+    }
+
+    #[tokio::test]
+    async fn a_commit_that_the_caller_drops_poisons_the_handle() {
+        let mut h = handle();
+        let pending = std::future::pending::<Result<(), String>>();
+        let outcome = tokio::time::timeout(Duration::from_millis(20), commit_or_poison(&mut h, pending)).await;
+        assert!(outcome.is_err(), "the commit never returns");
+        assert!(h.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_poisons_and_a_good_commit_does_not() {
+        let mut h = handle();
+        assert_eq!(commit_or_poison(&mut h, async { Ok::<(), String>(()) }).await, Ok(()));
+        assert!(!h.is_poisoned());
+        assert!(commit_or_poison(&mut h, async { Err::<(), String>("x".into()) }).await.is_err());
+        assert!(h.is_poisoned());
+    }
 }

@@ -264,6 +264,8 @@ pub enum ConfigError {
     IamCallTimeoutOutOfRange(u64),
     #[error("iam.tls = \"loopback_insecure\" needs iam.grpc_addr to be a loopback host (127.0.0.0/8, localhost or ::1): the link carries raw credentials")]
     IamLoopbackInsecureNotLoopback,
+    #[error("iam.tls = \"tls\" needs iam.grpc_addr to use the https scheme: an http address sends the credentials in plain text")]
+    IamTlsNeedsHttps,
     #[error("mid_run.policy = \"{}\" is not supported: it needs the Helikon turn-boundary change (ADR (h)); use \"queue\"", policy_name(.0))]
     MidRunPolicyNotSupported(MidRunPolicy),
     #[error("nats.channels: the filters \"{a}\" and \"{b}\" can match the same subject")]
@@ -274,6 +276,8 @@ pub enum ConfigError {
     NatsSourceEmpty(String),
     #[error("nats.channels: a source has {0} characters; the limit is {1}")]
     NatsSourceTooLong(usize, usize),
+    #[error("nats.channels: the source \"{0}\" is not a URI-reference (RFC 3986)")]
+    NatsSourceNotUri(String),
     #[error("nats.channels: the source \"{0}\" is used by two channels")]
     NatsDuplicateSource(String),
     #[error("nats: the section needs at least one channel")]
@@ -341,6 +345,30 @@ fn is_loopback_host(grpc_addr: &str) -> bool {
     host == "localhost" || host.parse::<Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false) || host.parse::<Ipv6Addr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
+/// True when `s` uses only the characters that RFC 3986 allows in a URI-reference, and each `%`
+/// starts a valid percent escape. A space, a control character and a non-ASCII character are not
+/// allowed. The characters `<>"{}|\^` and the backtick are not allowed either.
+fn is_uri_reference(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' => {
+                if !(i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit()) {
+                    return false;
+                }
+                i += 3;
+                continue;
+            }
+            c if c.is_ascii_alphanumeric() => {}
+            b'-' | b'.' | b'_' | b'~' | b':' | b'/' | b'?' | b'#' | b'[' | b']' | b'@' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' => {}
+            _ => return false,
+        }
+        i += 1;
+    }
+    true
+}
+
 /// The channel rules of spec §9.1.
 fn validate_nats_channels(channels: &[ChannelConfig]) -> Result<(), ConfigError> {
     if channels.is_empty() {
@@ -357,6 +385,9 @@ fn validate_nats_channels(channels: &[ChannelConfig]) -> Result<(), ConfigError>
         let chars = a.source.chars().count();
         if chars > paigasus_cloudevents::URI_MAX_CHARS {
             return Err(ConfigError::NatsSourceTooLong(chars, paigasus_cloudevents::URI_MAX_CHARS));
+        }
+        if !is_uri_reference(&a.source) {
+            return Err(ConfigError::NatsSourceNotUri(a.source.clone()));
         }
         for b in &channels[i + 1..] {
             if a.source == b.source {
@@ -450,6 +481,11 @@ impl Config {
             }
             if matches!(iam.tls, IamTlsConfig::LoopbackInsecure) && !is_loopback_host(&iam.grpc_addr) {
                 return Err(ConfigError::IamLoopbackInsecureNotLoopback);
+            }
+            // tonic picks the transport from the scheme: an `http://` address stays plain text,
+            // also when a TLS config is set.
+            if matches!(iam.tls, IamTlsConfig::Tls { .. }) && !iam.grpc_addr.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("https://")) {
+                return Err(ConfigError::IamTlsNeedsHttps);
             }
         }
         if self.mid_run.policy != MidRunPolicy::Queue {
@@ -863,6 +899,48 @@ mod tests {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
             let cfg = with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:nats:")]);
             assert_eq!(cfg.validate(), Err(ConfigError::NatsSourceEmpty("urn:paigasus:agents:nats:".to_string())));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_uri_reference_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            for bad in [
+                "urn:paigasus:agents:nats:iam west",
+                "urn:paigasus:agents:nats:a%zz",
+                "urn:paigasus:agents:nats:a%4",
+                "urn:paigasus:agents:nats:\u{e4}",
+                "urn:paigasus:agents:nats:a<b",
+            ] {
+                assert_eq!(with_channels(vec![channel("iam.>", 1, bad)]).validate(), Err(ConfigError::NatsSourceNotUri(bad.to_string())), "{bad}");
+            }
+            assert_eq!(with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:nats:iam-west_1.x~y%41")]).validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tls_needs_an_https_iam_address() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let tls = |addr: &str| IamClientConfig {
+                grpc_addr: addr.to_owned(),
+                tls: IamTlsConfig::Tls {
+                    ca_cert_path: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                call_timeout_ms: 2000,
+            };
+            let mut cfg = with_url();
+            for bad in ["http://iam.internal:9090", "iam.internal:9090", "HTTP://x:1"] {
+                cfg.iam = Some(tls(bad));
+                assert_eq!(cfg.validate(), Err(ConfigError::IamTlsNeedsHttps), "{bad}");
+            }
+            cfg.iam = Some(tls("HTTPS://iam.internal:9090"));
+            assert_eq!(cfg.validate(), Ok(()));
             Ok(())
         });
     }
