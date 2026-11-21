@@ -1133,6 +1133,15 @@ smoke_agent_host() {
   # the bundled time zone data works. The row is due one minute ago. The default scheduler loop
   # runs without any setting. A miss is an error, and `fire_attempts` must stay 0.
   local ah_psql=(docker exec "$AH_PG_NAME" psql -U postgres -d agent_host -v ON_ERROR_STOP=1 -tA)
+  # Run one bounded query; the output goes through a file, never a `$( )` capture of with_deadline.
+  ah_query() {
+    local q_out q_rc=0
+    q_out="$(mktemp "${TMPDIR:-/tmp}/paigasus-ah-q.XXXXXX")" || return 1
+    with_deadline 10 "${ah_psql[@]}" -c "$1" >"$q_out" 2>/dev/null || q_rc=$?
+    cat "$q_out"
+    rm -f "$q_out"
+    return "$q_rc"
+  }
   "${ah_psql[@]}" -c "
     WITH i AS (
       INSERT INTO inbox (id, org_id, agent_id, principal_id)
@@ -1144,11 +1153,15 @@ smoke_agent_host() {
     FROM i" >/dev/null
   # Every psql call below runs under `with_deadline`, so a stalled psql cannot outlive the 30 s
   # budget. The budget is absolute: `$SECONDS` tracks the elapsed time.
-  local ah_fired=0 ah_start=$SECONDS ah_remaining ah_out
+  local ah_fired=0 ah_start=$SECONDS ah_remaining ah_out ah_tmp
   while :; do
     ah_remaining=$((30 - (SECONDS - ah_start)))
     [ "$ah_remaining" -le 0 ] && break
-    ah_out="$(with_deadline "$(cap_timeout "$ah_remaining" 5)" "${ah_psql[@]}" -c "SELECT count(*) FROM inbox_event WHERE source = 'urn:paigasus:agents:timer:agent'" 2>/dev/null || echo 0)"
+    # Capture into a file, not `$( )`: the with_deadline watchdog holds a capture pipe open (SMA-670 M7).
+    ah_tmp="$(mktemp "${TMPDIR:-/tmp}/paigasus-ah-q.XXXXXX")"
+    with_deadline "$(cap_timeout "$ah_remaining" 5)" "${ah_psql[@]}" -c "SELECT count(*) FROM inbox_event WHERE source = 'urn:paigasus:agents:timer:agent'" >"$ah_tmp" 2>/dev/null || echo 0 >"$ah_tmp"
+    ah_out="$(cat "$ah_tmp")"
+    rm -f "$ah_tmp"
     case "$ah_out" in '' | *[!0-9]*) ah_out=0 ;; esac
     ah_fired="$ah_out"
     [ "$ah_fired" -ge 1 ] && break
@@ -1171,13 +1184,13 @@ smoke_agent_host() {
     echo "  agent-host exact fire count skipped: the time in Berlin is ${ah_berlin_hm}, close to the 09:00 slot"
   else
     local ah_events ah_count
-    ah_events="$(with_deadline 10 "${ah_psql[@]}" -c "SELECT count(*) FROM inbox_event WHERE source = 'urn:paigasus:agents:timer:agent'")"
-    ah_count="$(with_deadline 10 "${ah_psql[@]}" -c "SELECT max(fire_count) FROM timer")"
+    ah_events="$(ah_query "SELECT count(*) FROM inbox_event WHERE source = 'urn:paigasus:agents:timer:agent'")"
+    ah_count="$(ah_query "SELECT max(fire_count) FROM timer")"
     [ "$ah_events" = "1" ] || { echo "::error::agent-host made ${ah_events} timer events, expected exactly 1" >&2; return 1; }
     [ "$ah_count" = "1" ] || { echo "::error::agent-host timer row has fire_count=${ah_count}, expected 1" >&2; return 1; }
   fi
   local ah_attempts
-  ah_attempts="$(with_deadline 10 "${ah_psql[@]}" -c "SELECT max(fire_attempts) FROM timer")"
+  ah_attempts="$(ah_query "SELECT max(fire_attempts) FROM timer")"
   [ "$ah_attempts" = "0" ] || { echo "::error::agent-host timer row has fire_attempts=${ah_attempts}, expected 0" >&2; return 1; }
   echo "  agent-host fired a due Europe/Berlin schedule (bundled time zone data works in the image)"
   # The NEGATIVE row: stop Postgres. /readyz must report 503, and the in-image healthcheck must

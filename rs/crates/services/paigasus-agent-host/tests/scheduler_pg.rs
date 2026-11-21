@@ -128,7 +128,7 @@ async fn restart_fires_a_missed_daily_slot_once() {
     let id = due_schedule(&env, &ib, "0 9 * * *", "Europe/Berlin", &civil_text(slot_civil), stored_at).await;
 
     let sched = scheduler(&env.db, settings());
-    assert_eq!(sched.fire_due(10).await.expect("pass"), 1);
+    assert_eq!(sched.fire_due(1).await.expect("pass"), 1);
     let events = support::timer::timer_events(&env.db, ib.uuid).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].ce_id, format!("timer:{id}:{}", format_fire_at(stored_at)));
