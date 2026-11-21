@@ -1022,4 +1022,31 @@ mod tests {
         assert_eq!(events.len(), 1, "the fail-closed deny must still be audited, like any other decision");
         assert_eq!(events[0].effect, Effect::Deny);
     }
+
+    /// The agent host probes `IsAuthorized` on the nil organization for an unknown inbox. The
+    /// answer must be a `Deny` with no error. An error (for example `NotFound`) would make the
+    /// host answer `503` for an unknown inbox on a healthy IAM, which shows which inboxes exist.
+    /// The real loader raises `ResourceNotFound` for the nil org (`authz_entity_slice.rs`).
+    #[tokio::test]
+    async fn the_nil_org_probe_of_the_agent_host_is_a_deny_and_not_an_error() {
+        let fx = fixture();
+        let policies: Arc<dyn PolicyStore> = Arc::new(FakePolicyStore::new(starter_policies(), Generations::memory()));
+        let grants: Arc<dyn RoleGrantStore> = Arc::new(FakeRoleGrantStore::new(vec![]));
+        let snapshot = Arc::new(PolicySnapshot::new(policies, grants).await.expect("snapshot builds"));
+        let authorizer = CedarAuthorizer::new(
+            snapshot,
+            Arc::new(ResourceNotFoundSliceLoader) as Arc<dyn EntitySliceLoader>,
+            Arc::new(MemoryDecisionCache::new()) as Arc<dyn DecisionCache>,
+            Arc::new(Generations::memory()) as Arc<dyn GenerationsReader>,
+            Arc::new(CapturingAuditSink::default()) as Arc<dyn AuditSink>,
+        );
+        let req = AccessRequest {
+            principal: fx.principal.clone(),
+            action: Action::WriteInboxEvent,
+            resource: Prn::build("iam", "", None, "organization", Uuid::nil()).expect("static test prn parts are valid"),
+            context: RequestContext::empty(),
+        };
+        let decision = authorizer.is_authorized(&req).await.expect("the nil-org probe must answer, never error");
+        assert_eq!(decision.effect, Effect::Deny);
+    }
 }

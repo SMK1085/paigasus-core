@@ -32,6 +32,18 @@
 //!
 //! Both halves therefore snapshot the persisted ids ONCE before their loop and decide fatality
 //! against it ([`classify_failure`]).
+//!
+//! **An operator's policy at a starter id is fatal, and nothing is written.** A release that adds
+//! a starter policy reserves its id from then on. An OLDER release did not, so its `PutPolicy`
+//! could create an operator row at that id. Converging that row would replace the operator's
+//! policy, and the policy would silently stop governing decisions. So before the loop writes any
+//! row, [`reconcile_policies`] asks the store for every such row
+//! ([`SystemPolicyReconciler::operator_authored_starter_ids`]). If there is one, boot fails with
+//! [`AuthzError::StarterPolicyIdCollision`], which names every colliding id. There is no
+//! automatic rename. The loop also checks each row again under its row lock
+//! ([`StarterPolicyOutcome::OperatorAuthored`]), because an older replica can still create such a
+//! row during a rolling deploy. A system row that drifted is NOT this case, and it converges as
+//! before: see `authz::reconcile::classify_starter_policy` for the rule that tells them apart.
 
 use metrics::counter;
 use paigasus_iam_core::authz::model::root_prn;
@@ -127,7 +139,22 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
         }
     };
 
-    for doc in authz_roles::starter_policies() {
+    // Before ANY write: an operator's policy at a starter id makes boot fail, and a boot that
+    // fails here changes nothing. A failed READ is warned about and does not stop boot: the loop
+    // below checks each row again under its row lock and refuses the same rows, so the scan is
+    // the first line, not the only one.
+    let docs = authz_roles::starter_policies();
+    match deps.policies.operator_authored_starter_ids(&docs, STARTER_POLICY_REVISION).await {
+        Ok(ids) if !ids.is_empty() => return Err(refuse_operator_collisions(ids)),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(
+            error = %err,
+            "could not scan for operator-authored policies at starter policy ids; each row is checked again during reconciliation"
+        ),
+    }
+
+    let mut collisions: Vec<String> = Vec::new();
+    for doc in docs {
         let outcome = match deps.policies.reconcile_system(&doc, STARTER_POLICY_REVISION).await {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -159,7 +186,10 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
                 }
             }
         };
-        count(outcome.metric_label());
+        // A collision is counted once, in `refuse_operator_collisions`. Do not count it here too.
+        if !matches!(outcome, StarterPolicyOutcome::OperatorAuthored) {
+            count(outcome.metric_label());
+        }
 
         match &outcome {
             StarterPolicyOutcome::Unchanged => {}
@@ -207,7 +237,13 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
                 );
                 record_reconcile_audit(deps, &doc, "external_modification", *content_changed, previous_content).await;
             }
+            // The adapter wrote nothing. Keep going, so the error names EVERY colliding id.
+            StarterPolicyOutcome::OperatorAuthored => collisions.push(doc.policy_id.clone()),
         }
+    }
+    if !collisions.is_empty() {
+        collisions.sort();
+        return Err(refuse_operator_collisions(collisions));
     }
 
     // A failed scan degrades to "no orphans", which is indistinguishable from a healthy database
@@ -229,6 +265,18 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
         );
     }
     Ok(())
+}
+
+/// Logs and counts each operator-authored policy at a starter id, and builds the boot error.
+fn refuse_operator_collisions(ids: Vec<String>) -> AuthzError {
+    for id in &ids {
+        count(StarterPolicyOutcome::OperatorAuthored.metric_label());
+        tracing::error!(
+            policy_id = %id,
+            "an operator-authored policy uses a reserved starter policy id; refusing to boot rather than overwrite it. Rename the policy: create it again under a new policy_id and delete the old row, with the previous release or with SQL"
+        );
+    }
+    AuthzError::StarterPolicyIdCollision(ids)
 }
 
 /// One audit entry recording content this boot is about to destroy. Best-effort by design
@@ -405,6 +453,10 @@ mod tests {
         /// The `known` set the orphan scan was called with, captured so a test can prove the
         /// scan ran and was handed the code-defined ids.
         orphan_known: Mutex<Vec<String>>,
+        /// What the pre-loop collision scan returns.
+        collisions: Vec<String>,
+        /// Simulates the collision scan itself failing.
+        collisions_fail: bool,
     }
 
     impl ScriptedPolicies {
@@ -436,6 +488,12 @@ mod tests {
                 return Err(backend_error("snapshot read failed"));
             }
             Ok(self.existing.clone())
+        }
+        async fn operator_authored_starter_ids(&self, _docs: &[PolicyDocument], _revision: u32) -> Result<Vec<String>, AuthzError> {
+            if self.collisions_fail {
+                return Err(backend_error("collision scan failed"));
+            }
+            Ok(self.collisions.clone())
         }
     }
 
@@ -517,6 +575,91 @@ mod tests {
                 description,
             },
         }
+    }
+
+    /// Counts of `operator_collision` that a recorder saw. The tests below run on the current-thread
+    /// runtime, so a thread-local recorder guard sees every `count` call.
+    fn collision_count(snapshotter: &metrics_util::debugging::Snapshotter) -> u64 {
+        use metrics_util::debugging::DebugValue;
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .filter(|(key, _, _, _)| key.key().name() == names::IAM_STARTER_POLICY_RECONCILES_TOTAL && key.key().labels().any(|l| l.key() == "outcome" && l.value() == "operator_collision"))
+            .map(|(_, _, _, v)| if let DebugValue::Counter(n) = v { *n } else { 0 })
+            .sum()
+    }
+
+    /// The pre-scan finds operator policies at starter ids: boot fails BEFORE it calls
+    /// `reconcile_system` for any row, so it writes nothing, and the error names every id.
+    #[tokio::test]
+    async fn a_pre_scan_collision_refuses_boot_before_any_write() {
+        let policies = Arc::new(ScriptedPolicies {
+            existing: all_starter_ids(),
+            collisions: vec!["agent_event_writer".to_string(), "tool_policy_reader".to_string()],
+            ..Default::default()
+        });
+        let roles = ScriptedRoles::seeded();
+        let entries = FakeAuditLog::default();
+        let d = deps_with_roles(policies.clone(), roles.clone(), Arc::new(entries.clone()));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let err = reconcile_starter(&d).await.expect_err("a collision must refuse boot");
+        let AuthzError::StarterPolicyIdCollision(ids) = err else {
+            panic!("expected StarterPolicyIdCollision, got {err:?}")
+        };
+        assert_eq!(ids, vec!["agent_event_writer".to_string(), "tool_policy_reader".to_string()]);
+        assert_eq!(collision_count(&snapshotter), 2, "one count for each colliding id");
+        assert!(policies.seen.lock().unwrap().is_empty(), "no starter row may be reconciled after a collision");
+        assert!(roles.seen.lock().unwrap().is_empty(), "no role may be reconciled after a collision");
+        assert!(entries.0.lock().unwrap().is_empty(), "a refused boot overwrites nothing, so it audits nothing");
+    }
+
+    /// The in-loop guard: a row that the scan did not report (an older replica created it during
+    /// a rolling deploy, or the scan read failed) still refuses boot. The loop goes on so that the
+    /// error names EVERY colliding id, and the roles half does not run.
+    #[tokio::test]
+    async fn an_in_loop_collision_refuses_boot_and_names_every_id() {
+        let policies = Arc::new(ScriptedPolicies {
+            outcome: Mutex::new(Some(StarterPolicyOutcome::OperatorAuthored)),
+            existing: all_starter_ids(),
+            collisions_fail: true,
+            ..Default::default()
+        });
+        let roles = ScriptedRoles::seeded();
+        let d = deps_with_roles(policies.clone(), roles.clone(), Arc::new(FakeAuditLog::default()));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let err = reconcile_starter(&d).await.expect_err("a collision must refuse boot");
+        let AuthzError::StarterPolicyIdCollision(ids) = err else {
+            panic!("expected StarterPolicyIdCollision, got {err:?}")
+        };
+        let mut want = all_starter_ids();
+        want.sort();
+        assert_eq!(ids, want, "every colliding id, sorted");
+        assert_eq!(collision_count(&snapshotter), want.len() as u64, "one count for each colliding id, not two");
+        assert_eq!(policies.seen.lock().unwrap().len(), starter_policies().len(), "the loop must visit every starter policy");
+        assert!(roles.seen.lock().unwrap().is_empty(), "the roles half must not run after a collision");
+    }
+
+    /// A failed scan READ does not stop boot by itself: with no collision in the loop, boot
+    /// finishes as before.
+    #[tokio::test]
+    async fn a_failed_collision_scan_does_not_stop_a_clean_boot() {
+        let policies = Arc::new(ScriptedPolicies {
+            existing: all_starter_ids(),
+            collisions_fail: true,
+            ..Default::default()
+        });
+        let d = deps(policies.clone(), Arc::new(FakeAuditLog::default()));
+        reconcile_policies(&d).await.unwrap();
+        assert_eq!(policies.seen.lock().unwrap().len(), starter_policies().len());
     }
 
     #[tokio::test]

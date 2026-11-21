@@ -289,6 +289,24 @@ async fn authz_slice_nonexistent_resource_node_is_an_error() {
     assert!(matches!(err, paigasus_iam_core::AuthzError::ResourceNotFound(_)), "expected AuthzError::ResourceNotFound, got {err:?}");
 }
 
+/// The agent host probes the nil organization (SMA-787 sweep). The loader must raise
+/// `ResourceNotFound` for it, so that `CedarAuthorizer` answers `Deny` and not an error.
+#[tokio::test]
+async fn authz_slice_nil_organization_is_resource_not_found() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+
+    let principal_uuid = mint_uuid7(1_700_000_000_105, [15u8; 10]);
+    seed_principal(&db, principal_uuid).await;
+    let principal = principal_prn(principal_uuid);
+
+    let loader = PgEntitySliceLoader::new(db.clone(), Generations::memory());
+    let nil_org = paigasus_iam_core::OrganizationId::from_uuid(Uuid::nil());
+    let err = loader.load(nil_org.prn(), &principal).await.unwrap_err();
+    assert!(matches!(err, paigasus_iam_core::AuthzError::ResourceNotFound(_)), "expected AuthzError::ResourceNotFound, got {err:?}");
+}
+
 /// SMA-444 cross-tenant-escalation regression (FIX 1, the root-cause fix): loading a slice for
 /// a team PRN whose org slot is WRONG must parent the team on its REAL stored org, never the
 /// PRN's (forgeable) org slot. `TenancyNodeRef::from_prn`/`TeamId::from_prn` only check that a

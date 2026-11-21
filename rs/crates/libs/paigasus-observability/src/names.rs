@@ -169,8 +169,8 @@ pub const IAM_JIT_PROVISIONING_FAILURES_TOTAL: &str = "iam_jit_provisioning_fail
 /// reconcile_roles`'s own `count("failed")` call). A role's successful outcome
 /// (seeded/converged/unchanged) is never counted here, only its failure. `outcome` is a closed
 /// set — `unchanged` | `seeded` | `adopted` | `reconciled` | `externally_modified` |
-/// `stale_binary` | `orphaned` | `failed` — never derived from anything caller-supplied, so it
-/// cannot mint cardinality.
+/// `stale_binary` | `orphaned` | `failed` | `operator_collision` — never derived from anything
+/// caller-supplied, so it cannot mint cardinality.
 ///
 /// `externally_modified` is the one worth alerting on: it means something other than this
 /// service wrote a system-owned policy row, which boot has just reverted. `stale_binary` means
@@ -178,6 +178,9 @@ pub const IAM_JIT_PROVISIONING_FAILURES_TOTAL: &str = "iam_jit_provisioning_fail
 /// deploy, suspicious if it persists. `orphaned` counts system POLICY rows whose id is no longer
 /// code-defined; nothing can delete those automatically — an orphaned system ROLE row is
 /// WARN-logged but NOT counted here, an asymmetry with the policy half.
+///
+/// `operator_collision` means that boot refused to start, because an operator policy uses a
+/// starter policy id. It is counted once for each such id. Alert on it: the replica does not start.
 ///
 /// `failed` is the one label the two halves share: a starter-policy AND a system-role
 /// reconciliation error both land here under the identical label, distinguishable only via the

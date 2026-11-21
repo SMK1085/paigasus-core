@@ -331,6 +331,16 @@ pub enum AuthzError {
     /// `RoleService::grant` answers it with the existing grant; nothing else may see it.
     #[error("a grant for this principal, role and scope already exists")]
     DuplicateGrant,
+    /// Boot found operator-authored policies at starter policy ids. An older release accepted
+    /// each id because it did not know it as a starter id. Boot does not overwrite these rows,
+    /// because the operator's policy would then silently stop governing decisions. Boot refuses
+    /// to start instead. Raised ONLY by `application::bootstrap::reconcile_policies`. Holds the
+    /// colliding ids, sorted.
+    #[error(
+        "operator-authored policies use reserved starter policy ids: {}. Boot does not overwrite them. Rename each policy: with the previous release, or with SQL, create it again under a new policy_id and delete the old row. Then start this release again",
+        .0.join(", ")
+    )]
+    StarterPolicyIdCollision(Vec<String>),
     /// A backend (storage/transport) failure. `#[error(transparent)]` forwards `Display`
     /// (and `source()`) to the wrapped error verbatim — callers never see more than what
     /// the underlying source already exposes.
@@ -477,5 +487,8 @@ mod tests {
     #[test]
     fn duplicate_grant_has_a_static_message() {
         assert_eq!(AuthzError::DuplicateGrant.to_string(), "a grant for this principal, role and scope already exists");
+        let collision = AuthzError::StarterPolicyIdCollision(vec!["agent_event_writer".to_string(), "tool_policy_reader".to_string()]).to_string();
+        assert!(collision.contains("reserved starter policy ids: agent_event_writer, tool_policy_reader."), "{collision}");
+        assert!(collision.contains("Rename each policy"), "{collision}");
     }
 }

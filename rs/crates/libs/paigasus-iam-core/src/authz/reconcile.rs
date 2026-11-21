@@ -23,7 +23,11 @@
 //! 1. no row → `Absent`
 //! 2. `revision > code_revision` → `StaleBinary { provenance_ok }` (defer, but say whether the
 //!    row we are deferring to actually looks like a newer release's work)
-//! 3. `!system` → `ExternallyModified`
+//! 3. `!system`, split in two:
+//!    - (3) no fingerprint AND no revision AND content differs from code → `OperatorAuthored`
+//!      (a row an older release's `PutPolicy` wrote at an id that a later release made a
+//!      starter id). This writes nothing, and boot refuses to finish.
+//!    - (3a) any other `!system` row → `ExternallyModified`
 //! 4. no fingerprint AND no revision → `Adopted` (a genuine pre-m0010 row)
 //! 5. no fingerprint BUT a revision → `ExternallyModified` (the column was CLEARED)
 //! 6. fingerprint mismatch → `ExternallyModified`
@@ -91,6 +95,13 @@ pub enum StarterPolicyOutcome {
     /// Something other than this service wrote the row (stale fingerprint, or `system` cleared
     /// to dodge convergence). Converge, warn, and audit.
     ExternallyModified { content_changed: bool, previous_content: PolicyContent },
+    /// The row has the shape that the public `PutPolicy` API writes: `system = false`, no
+    /// fingerprint, no revision, and content that is not the code-defined content. An older
+    /// release accepted the id because it did not know it as a starter id. This service never
+    /// writes that shape. Writes NOTHING: converging it would replace an operator's policy and
+    /// the policy would silently stop governing decisions. Boot refuses to finish instead
+    /// (`AuthzError::StarterPolicyIdCollision`), and the operator renames the policy.
+    OperatorAuthored,
 }
 
 impl StarterPolicyOutcome {
@@ -109,6 +120,7 @@ impl StarterPolicyOutcome {
             StarterPolicyOutcome::Adopted { .. } => "adopted",
             StarterPolicyOutcome::Reconciled => "reconciled",
             StarterPolicyOutcome::ExternallyModified { .. } => "externally_modified",
+            StarterPolicyOutcome::OperatorAuthored => "operator_collision",
         }
     }
 
@@ -121,7 +133,7 @@ impl StarterPolicyOutcome {
             // `StaleBinary` writes NOTHING in either provenance state, so it can never justify a
             // fleet-wide cache invalidation — including the bad-provenance case, where a bump
             // every boot of every replica would be pure churn over a row nobody touched.
-            StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. } => false,
+            StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. } | StarterPolicyOutcome::OperatorAuthored => false,
             StarterPolicyOutcome::Adopted { content_changed, .. } | StarterPolicyOutcome::ExternallyModified { content_changed, .. } => *content_changed,
         }
     }
@@ -174,6 +186,15 @@ fn provenance_ok(stored: &StoredPolicyRow<'_>) -> bool {
     stored.system && stored.fingerprint.is_some_and(|fp| fp == content_fingerprint(stored.kind, stored.source, stored.description))
 }
 
+/// Whether a stored row has the shape of an operator-authored policy: the shape that
+/// `PutPolicy` writes (`system = false`, no fingerprint, no revision) with content that is not
+/// the code-defined content. `content_changed` is the comparison against the code-defined
+/// document. A row with the code-defined content is NOT operator-authored: converging it changes
+/// only the `system` flag and the provenance columns, so it destroys nothing.
+fn operator_authored(stored: &StoredPolicyRow<'_>, content_changed: bool) -> bool {
+    !stored.system && stored.fingerprint.is_none() && stored.revision.is_none() && content_changed
+}
+
 /// Decide what boot should do with one starter policy. See the truth table in the SMA-477
 /// design §3.1; the ORDER of these checks is load-bearing (module docs) and documented
 /// per-branch below.
@@ -210,14 +231,26 @@ pub fn classify_starter_policy(stored: Option<StoredPolicyRow<'_>>, code: &Polic
         previous_content: previous(),
     };
 
-    // (3) `!system` is treated as broken provenance, not as an operator's own policy: we only
-    // ever write these rows with `system = true`, so a cleared flag means something else wrote
-    // it — and without this, one `UPDATE policy SET system = false` would exempt a starter
+    // (3a) Every other `!system` row is treated as broken provenance, not as an operator's own
+    // policy: we only ever write these rows with `system = true`, so a cleared flag means
+    // something else wrote it — and without this, one `UPDATE policy SET system = false` would exempt a starter
     // policy from convergence forever (D6). This precedes the fingerprint branches below
     // BECAUSE it must: clearing the flag and the fingerprint in the same statement would
     // otherwise land in (4)'s adoption path, which is INFO and (when content is untouched) not
     // even audited.
     if !stored.system {
+        // (3) First, the one shape that this service never writes and the public `PutPolicy` API
+        // always writes: no fingerprint, no revision, and content that is not ours. An older
+        // release did not reserve this id, so an operator could create it. Converging it would
+        // destroy that operator's policy, so this writes nothing and boot refuses to finish.
+        //
+        // This is not a cheaper bypass of (3a). The outcome is a REFUSED boot, which is louder
+        // than a converge. A row with ANY provenance column left, or with the code-defined
+        // content, still goes to (3a) and converges as before.
+        if operator_authored(&stored, content_changed) {
+            return StarterPolicyOutcome::OperatorAuthored;
+        }
+        // (3a)
         return externally_modified();
     }
 
@@ -702,6 +735,7 @@ mod tests {
             .metric_label(),
             "externally_modified"
         );
+        assert_eq!(StarterPolicyOutcome::OperatorAuthored.metric_label(), "operator_collision");
     }
 
     /// AC6/D10: `content_changed()` is the ONLY input to the `policy_gen` bump, so a wrong answer
@@ -758,6 +792,7 @@ mod tests {
                 true,
                 "an edit that was converged away",
             ),
+            (StarterPolicyOutcome::OperatorAuthored, false, "a collision writes nothing; boot refuses instead"),
         ];
         for (outcome, want, why) in cases {
             assert_eq!(outcome.content_changed(), want, "{outcome:?}: {why}");
@@ -785,6 +820,78 @@ mod tests {
         assert_eq!(node_kind_str(NodeKind::Organization), "organization");
         assert_eq!(node_kind_str(NodeKind::Team), "team");
         assert_eq!(node_kind_str(NodeKind::Project), "project");
+    }
+
+    /// The shape an older release's `PutPolicy` wrote at an id that a later release made a
+    /// starter id: `system = false`, no fingerprint, no revision, operator content.
+    fn operator_row() -> StoredPolicyRow<'static> {
+        StoredPolicyRow {
+            kind: PolicyKind::Static,
+            source: "permit(principal, action, resource) when { false };",
+            description: "operator policy",
+            system: false,
+            fingerprint: None,
+            revision: None,
+        }
+    }
+
+    #[test]
+    fn an_operator_authored_row_at_a_starter_id_is_a_collision_not_an_edit() {
+        let code = code_doc();
+        assert_eq!(classify_starter_policy(Some(operator_row()), &code, 1), StarterPolicyOutcome::OperatorAuthored);
+    }
+
+    /// Each field alone makes the content differ, so each one alone must make the row a collision.
+    #[test]
+    fn any_content_difference_on_the_put_policy_shape_is_a_collision() {
+        let code = code_doc();
+        let (_, base) = matching_row(&code);
+        let put_shape = StoredPolicyRow {
+            system: false,
+            fingerprint: None,
+            revision: None,
+            ..base
+        };
+        for (name, row) in [
+            (
+                "source",
+                StoredPolicyRow {
+                    source: "permit(principal, action, resource);",
+                    ..put_shape
+                },
+            ),
+            ("description", StoredPolicyRow { description: "other", ..put_shape }),
+            (
+                "kind",
+                StoredPolicyRow {
+                    kind: PolicyKind::Static,
+                    ..put_shape
+                },
+            ),
+        ] {
+            assert_eq!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::OperatorAuthored, "{name} alone differs");
+        }
+    }
+
+    /// The boundary of the collision rule. Each of these rows keeps ONE sign that this service
+    /// wrote it (a provenance column, or the code-defined content), so it is a drifted system row
+    /// and keeps the SMA-477 handling: converge, warn and audit.
+    #[test]
+    fn a_non_system_row_with_any_sign_of_our_provenance_still_converges() {
+        let code = code_doc();
+        let (fp, _) = matching_row(&code);
+        let fp: &'static str = fp.leak();
+        let with_fingerprint = StoredPolicyRow {
+            fingerprint: Some(fp),
+            ..operator_row()
+        };
+        let with_revision = StoredPolicyRow { revision: Some(1), ..operator_row() };
+        for (name, row) in [("a fingerprint", with_fingerprint), ("a revision", with_revision)] {
+            assert!(
+                matches!(classify_starter_policy(Some(row), &code, 1), StarterPolicyOutcome::ExternallyModified { content_changed: true, .. }),
+                "a non-system row with {name} is a drifted system row"
+            );
+        }
     }
 
     fn code_role() -> Role {

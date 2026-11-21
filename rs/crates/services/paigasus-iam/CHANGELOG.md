@@ -10,6 +10,18 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+### Fixed
+
+- Boot does not overwrite an operator policy at a starter policy id any more. A release that adds
+  a starter policy reserves its id. An older release did not reserve it, so its `PutPolicy` could
+  create an operator policy with that id. Boot replaced that policy with the starter policy, and
+  the operator policy stopped governing decisions. Now boot checks every starter id before it
+  writes a row. If an operator policy uses a starter id, boot writes nothing and does not start.
+  The error names each colliding id and tells the operator to rename the policy. There is no
+  automatic rename. The new `operator_collision` outcome of
+  `iam_starter_policy_reconciles_total` counts each colliding id. This applies to every starter
+  policy, for example `tool_policy_reader` and `agent_event_writer` (SMA-787 follow-up).
+
 ## [0.3.0] - 2026-11-20
 
 ### Added
