@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01UpSHXr2wHfvAV5xpPKaV6v",
+  "agent_id": "aaae161aee43aa7b7",
+  "subagent_type": "general-purpose",
+  "task_description": "Triage moon ci failure on PR 515",
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 100127,
+    "cache_read_tokens": 421143,
+    "output_tokens": 5843,
+    "api_call_count": 6
+  },
+  "started_at": "2026-11-21T00:32:09.590908+01:00",
+  "completed_at": "2026-11-21T00:32:54.385763+01:00"
+}

@@ -1,0 +1,20 @@
+{
+  "tool_use_id": "toolu_01V7aEEqm5J4fcFB9RftSTig",
+  "agent_id": "aee0bfc0a69b02ea4",
+  "subagent_type": "general-purpose",
+  "task_description": "Fix affected-smoke next-env race",
+  "files": [
+    "ci/affected-graph/README.md",
+    "ci/affected-graph/cargo_moon_parity.py",
+    "ci/affected-graph/python_env_ban.py"
+  ],
+  "token_usage": {
+    "input_tokens": 74,
+    "cache_creation_tokens": 139312,
+    "cache_read_tokens": 4925368,
+    "output_tokens": 25201,
+    "api_call_count": 37
+  },
+  "started_at": "2026-11-21T00:56:39.341219+01:00",
+  "completed_at": "2026-11-21T01:04:40.919042+01:00"
+}

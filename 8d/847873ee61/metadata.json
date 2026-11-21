@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.13.1",
+  "checkpoint_id": "8d847873ee61",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-841-affected-smoke-next-env-race",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "ci/affected-graph/README.md",
+    "ci/affected-graph/cargo_moon_parity.py",
+    "ci/affected-graph/python_env_ban.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8d/847873ee61/0/metadata.json",
+      "transcript": "/8d/847873ee61/0/full.jsonl",
+      "compact_transcript": "/8d/847873ee61/0/transcript.jsonl",
+      "content_hash": "/8d/847873ee61/0/content_hash.txt",
+      "prompt": "/8d/847873ee61/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 23671,
+    "cache_read_tokens": 3544898,
+    "output_tokens": 12552,
+    "api_call_count": 18,
+    "subagent_tokens": {
+      "input_tokens": 36,
+      "cache_creation_tokens": 151693,
+      "cache_read_tokens": 2103999,
+      "output_tokens": 11004,
+      "api_call_count": 18
+    }
+  },
+  "redaction": {
+    "replacements": 506,
+    "layers": {
+      "betterleaks": 42,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 464,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
