@@ -924,7 +924,9 @@ async fn the_decision_reader_reads_with_an_ordered_consumer() {
     let (client, _events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
     let js = jetstream::new(client);
     let stream = js.get_stream_no_info(GW_STREAM).await.expect("get_stream_no_info makes no network call");
-    // The account has `max_mem: 0`: this create fails if an ordered consumer asks for memory storage.
+    // The account has `max_mem: 0`, and the stream is file-backed. The ordered consumer still asks for memory
+    // storage of its own state (`OrderedConfig` sets `memory_storage: true` in async-nats 0.53), so this create
+    // proves that the reader works under these limits. It does not prove that the consumer uses no memory.
     // `DeliverPolicy::All` here, not `ByStartTime`: the latter needs the `time` crate, and the
     // permission subjects are the same for both.
     let consumer = stream
@@ -991,8 +993,17 @@ async fn a_gateway_account_user_cannot_see_iam_events() {
 
     // A user with the stream API right in the gateway account still does not find IAM_EVENTS.
     let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    // The broker must answer "stream not found". A timeout or a disconnect is also an error, but it proves nothing
+    // about what the gateway account can see.
     let found = jetstream::new(pclient).get_stream(STREAM).await;
-    assert!(found.is_err(), "IAM_EVENTS lives in another account and must not be visible");
+    match found.map(|_| ()).map_err(|e| e.kind()) {
+        Err(jetstream::context::GetStreamErrorKind::JetStream(err)) => assert_eq!(
+            err.error_code(),
+            jetstream::ErrorCode::STREAM_NOT_FOUND,
+            "IAM_EVENTS lives in another account and must not be visible: {err}"
+        ),
+        other => panic!("the broker must answer stream not found for IAM_EVENTS, got {other:?}"),
+    }
 }
 
 /// After a reconnect, an ordered consumer calls `consumer.get_info()` (async-nats 0.52 `pull.rs:990`),

@@ -464,7 +464,9 @@ pub trait DecisionLog: Send + Sync {
 - One **writer task** reads the channel and runs
   `XADD <prefix>:decisions MAXLEN ~ <2 × max_len> * e <bytes>` through the `RedisHandle`. It sends
   up to 64 `XADD`s in one pipeline.
-  - A failed write counts each event of the batch as `dropped{reason="write_error"}`.
+  - A failed write counts each event of the batch as `dropped{reason="write_error"}`. This is an
+    uncertain write outcome, not an exact count of lost events: Redis can accept an `XADD` whose
+    reply times out, and the relay then publishes that event.
   - An open breaker counts each event as `dropped{reason="breaker_open"}`.
   - The writer does not retry. The event is already late, and a retry would hold the channel.
 - **The backlog cap.** `max_len` defaults to 100 000. The relay deletes each entry after its
@@ -544,20 +546,27 @@ pub trait DecisionLog: Send + Sync {
 
 There are three kinds of loss:
 
-1. **Drops that the gateway sees**, counted exactly in `gateway_decision_log_dropped_total{reason}`.
+1. **Drops that the gateway sees**, counted in `gateway_decision_log_dropped_total{reason}`.
    The reasons are: `queue_full`, `closed`, `redis_unavailable`, `write_error`, `breaker_open`,
-   `backlog_full`, `publish_rejected`, `redis_deleted`, `shutdown`.
+   `backlog_full`, `publish_rejected`, `redis_deleted`, `shutdown`. Each count is exact as a count of
+   the events that the gateway gave up. For `write_error` it is not an exact count of lost events:
+   the batch was in flight, and Redis can have stored it (a reply timeout). `shutdown` has two parts.
+   Events that were still in the queue at the shutdown deadline never went to Redis, so they are lost.
+   A batch that was in flight at the deadline has an unknown result, and Redis can have stored it.
 2. **A Redis loss that the relay detects.** When Redis loses the stream, it loses the consumer
    group too, and the next command returns `NOGROUP`. The relay runs `XGROUP CREATE … 0
    MKSTREAM`. Only one relay gets `OK`. That relay:
-   - counts 1 in `gateway_decision_log_redis_resets_total` (an exact count of the incidents)
+   - counts 1 in `gateway_decision_log_redis_resets_total` (a best-effort count of the incidents,
+     not an exact one; see the known limits below)
    - adds its last `XLEN` sample to `gateway_decision_log_lost_estimate_total`, and logs it
 
    The estimate is **not a bound**: it is the last sample. Entries that the writer added after
    the sample make it undercount. Entries that the relays published after the sample make it
    overcount. With a 15 s sample, the error is about 15 s of writes or publishes. The
    dashboard says "estimate". If no relay has a sample, it adds 0 and logs that the loss is
-   unknown.
+   unknown. The sampler keeps a sample only while the stream has the consumer group. After a loss
+   that no relay has found yet (for example while each relay holds a batch during a NATS outage),
+   the stream has no group, so its length does not replace the sample from before the loss.
 3. **Exact gaps in the export.** Each record has a `sequence` per `(instance_id, org)`, which
    starts at 1 when the instance starts. The CLI reports, per instance, the sequence numbers that
    are missing inside the exported range. This is exact for the events of the exported org, also
@@ -569,16 +578,31 @@ There are three kinds of loss:
    new `instance_id`, so a sequence never starts again inside one `(instance_id, org)` pair.
    Records with an empty org use the pair `(instance_id, "")`.
    - The counter increases when `record` accepts the record, before the `try_send`. So a
-     `dropped` event also makes a gap, and the gap count in the export is the true total of
-     missing events for that org.
-   - The export cannot see a gap at the end of a range: an event after the last exported one is
-     outside the range. The summary says "gaps inside the range only".
+     `dropped` event also makes a gap. Inside the exported range, the gap count is the number of
+     sequence numbers that are missing between observed events of one `(instance_id, org)` pair.
+   - The export cannot see a gap at the start or at the end of a range. It compares only the
+     observed sequence numbers. If sequence 1 is lost and 2 and 3 are exported, it reports no gap.
+     An event after the last exported one is outside the range. So the gap count is not the true
+     total of missing events. The summary says "gaps inside the range only".
 
 Known limits, which the runbook states:
 
 - A Redis failover that keeps the group but loses the last writes is not seen live. The export
   shows the gaps.
 - The live metrics are per process. A dashboard and the alerts use `sum()` over the instances.
+- The reset count is best-effort. Three cases are not counted. (a) A new relay that makes the group
+  at its start does not count a reset, because it cannot tell a first start from a start after a
+  loss. (b) A relay that holds a batch settles it with `XACK`, which returns 0 and no `NOGROUP` when
+  the stream or the group is missing. If a new relay makes the group before the next read, no relay
+  counts the reset. (c) If Redis makes the group but the reply to `XGROUP CREATE` is lost, the retry
+  gets `BUSYGROUP` and does not count. A durable record of the recovery would close these cases. It
+  is not built. The export shows the gaps.
+- If only the consumer group is removed (`XGROUP DESTROY`), `NOGROUP` counts a reset, but the stream
+  still holds its events. The relay reads them again from ID 0, so the lost estimate overcounts.
+- A cross-account import of `gateway.decision.>` into an account with a stream that captures it gives
+  two PubAck responders. The foreign stream answers 10060. If that answer comes first, the relay retries
+  without end, although `GATEWAY_DECISIONS` stored the event. Nothing in `ops/nats` exports the subject
+  today.
 
 ### 5.9 Metrics and alerts
 
@@ -653,12 +677,14 @@ logs a warning and does not change the stream.
 The relay does not know `DECISIONS_ACCOUNT_DISK_BYTES`. So before `get_or_create_stream` it reads
 the account storage limit with `$JS.API.INFO` (`query_account`). When the limit is above 0, the
 relay uses `min(19 327 352 832, limit × 9 / 10)` as `max-bytes`; with no limit it uses the
-default. The drift check uses the same value. A failed query gives the default and a warning; it
+default. It never goes above the per-stream limit of the account (`storage_max_stream_bytes`,
+untiered or in the tier `R1`), because the broker refuses a stream above that limit too. The drift check uses the same value. A failed query gives the default and a warning; it
 does not stop the relay. Without this, a smaller account disk makes the broker refuse the create,
 and the relay stalls (CodeRabbit review).
 
 The runbook gets a sizing formula: `disk = peak decisions per second × average event bytes ×
-86 400 × 30`. At 600 bytes per event, 20 GiB holds about 13 decisions per second, sustained, for
+86 400 × 30 / 0.9`, because the stream gets 90 % of the account disk. At 600 bytes per event, 20 GiB
+gives a stream of 19 327 352 832 bytes, which holds about 12.4 decisions per second, sustained, for
 30 days. An operator with more traffic raises the account disk, or the stream keeps fewer days
 (`discard old`).
 
@@ -883,7 +909,7 @@ ca_file = "/etc/paigasus/nats/ca.pem"   # optional
 | D10 | The CLI is a subcommand of `paigasus-gateway`, with no `clap`. | my call |
 | D11 | The argument digest is HMAC-SHA256 with a deployment key, and no length is logged. | my call, after challenge (A1) |
 | D12 | A NATS account of its own, `PAIGASUS_GATEWAY`, with a required `max-bytes`. | my call, after challenge B1 |
-| D13 | Loss: exact drop counts, an exact Redis-reset count, an estimate (not a bound), and exact gaps per `(instance, org)` sequence in the export. | my call, after challenge |
+| D13 | Loss: exact drop counts (`write_error` and an in-flight `shutdown` batch are uncertain write outcomes), a best-effort Redis-reset count, an estimate (not a bound), and exact gaps between the observed events per `(instance, org)` sequence in the export. | my call, after challenge |
 | D14 | Neither Redis nor NATS can stop the boot or the data plane. | my call, after challenge (A2) |
 | D15 | Tenant mode `off` writes records, because floor blocks are real. | my call, after challenge |
 | D16 | The encoder skips records that Dogwood cannot parse, and the CLI reports them. | my call, after challenge B2 |

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! SMA-755 Task 13, § 5.11: the reader and the CLI binary against a real JetStream. Six events of two orgs
-//! go into a stream made with `stream_config(MAX_BYTES)`. The reader returns the four of one org, in stream order. The
+//! go into a stream made with `stream_config(STREAM_BYTES)`. The reader returns the four of one org, in stream order. The
 //! real `paigasus-gateway decisions export` binary writes a trace file of `@` lines only and exits 0. The
 //! reader is bounded by the stored time (`until + max_lag`) and by a raw count (`2 x max_events`).
 //!
@@ -22,7 +22,7 @@ use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, R
 use paigasus_kernel::CedarUid;
 use prost::Message;
 use tempfile::TempDir;
-use testcontainers_modules::nats::{Nats, NatsServerCmd};
+use testcontainers_modules::nats::Nats;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -73,13 +73,26 @@ struct Stack {
     js: jetstream::Context,
 }
 
+/// The `max_bytes` of the stream of these tests. JetStream reserves the full `max_bytes` of a stream from the file
+/// store when it makes the stream. A broker with no config derives its store from the free disk of the host, so a
+/// stream of `MAX_BYTES` (18 GiB) fails with 10047 on a small CI runner. So the stream is small, and the store is
+/// fixed (see `STORE_CONF`). No test here depends on the size.
+const STREAM_BYTES: i64 = 67_108_864;
+/// A broker with a fixed JetStream file store of 1 GiB, so that the tests do not depend on the free disk of the host.
+const STORE_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
+"#;
+
 async fn stack(what: &str) -> Option<Stack> {
-    let cmd = NatsServerCmd::default().with_jetstream();
-    let node = paigasus_test_docker::start_or_skip(Nats::default().with_cmd(&cmd), what).await?;
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", STORE_CONF.as_bytes().to_vec());
+    let node = paigasus_test_docker::start_or_skip(image, what).await?;
     let port = paigasus_test_docker::mapped_port(&node, 4222, what).await;
     let url = format!("nats://127.0.0.1:{port}");
     let js = jetstream::new(async_nats::connect(&url).await.expect("the test client connects"));
-    js.create_stream(dl_js::stream_config(dl_js::MAX_BYTES)).await.expect("the stream is made");
+    js.create_stream(dl_js::stream_config(STREAM_BYTES)).await.expect("the stream is made");
     Some(Stack { _node: node, url, js })
 }
 
@@ -168,12 +181,20 @@ async fn the_reader_and_the_binary_export_one_org() {
     assert!(!stderr.contains("the read stopped at"), "the read reached the end of the stream: {stderr}");
     assert_eq!(std::fs::read_to_string(&report).unwrap(), stderr, "the report is the stderr summary");
 
-    // A bad argument is exit 1, and a URL on argv is refused.
+    // A URL on argv is refused at the CLI boundary. The command is complete otherwise (a valid range and a URL in
+    // the environment), so only `--nats-url` can make it fail. The error names the flag and never prints its value.
     let bad = std::process::Command::new(env!("CARGO_BIN_EXE_paigasus-gateway"))
-        .args(["decisions", "export", "--org", ORG_A, "--nats-url", "nats://x"])
+        .args(["decisions", "export", "--org", ORG_A])
+        .args(range(t0))
+        .args(["--nats-url", "nats://user:secret-pw@127.0.0.1:4222"])
+        .env("PAIGASUS_NATS_URL", &stack.url)
         .output()
         .unwrap();
-    assert_eq!(bad.status.code(), Some(1));
+    let bad_stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert_eq!(bad.status.code(), Some(1), "{bad_stderr}");
+    assert!(bad_stderr.contains("unknown argument --nats-url"), "the error names the flag: {bad_stderr}");
+    assert!(!bad_stderr.contains("secret-pw") && !bad_stderr.contains("nats://"), "the error never prints the value: {bad_stderr}");
+    assert!(bad.stdout.is_empty(), "no trace on a refused command");
 }
 
 #[tokio::test]

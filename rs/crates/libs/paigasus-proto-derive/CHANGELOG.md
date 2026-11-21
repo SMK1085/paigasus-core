@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.7.0...paigasus-proto-derive-v0.8.0) - 2026-11-20
+
+### Added
+
+- *(rs)* add the agent-host M0 skeleton (SMA-786) ([#512](https://github.com/SMK1085/paigasus-core/pull/512))
+- *(rs)* add the gateway tool decision log (SMA-755) ([#509](https://github.com/SMK1085/paigasus-core/pull/509))
+- *(rs)* re-compile tool policies and hold changed versions (SMA-781)
+- *(rs)* IAM tool policy settings and the gateway IAM policy source (SMA-775) ([#485](https://github.com/SMK1085/paigasus-core/pull/485))
+- *(rs)* add the IAM tool catalog, tool policy sets and the policy compiler (SMA-774) ([#478](https://github.com/SMK1085/paigasus-core/pull/478))
+- *(rs)* add Cedar InvokeTool decisions to the gateway (SMA-752) ([#475](https://github.com/SMK1085/paigasus-core/pull/475))
+- *(rs)* add the /v1/responses ingress with tool-call interception (SMA-769) ([#472](https://github.com/SMK1085/paigasus-core/pull/472))
+
+### Fixed
+
+- *(rs)* keep the Responses schema of blocked shell and computer results (SMA-776) ([#484](https://github.com/SMK1085/paigasus-core/pull/484))
+
 ## [0.7.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.6.0...paigasus-proto-derive-v0.7.0) - 2026-11-13
 
 ### Added
