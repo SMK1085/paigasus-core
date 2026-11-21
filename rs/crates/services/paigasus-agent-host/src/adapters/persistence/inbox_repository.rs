@@ -19,9 +19,15 @@ const INSERT_SQL: &str = "INSERT INTO inbox_event (id, inbox_id, source, ce_id, 
      ON CONFLICT (inbox_id, source, ce_id) DO NOTHING \
      RETURNING id";
 
-/// The stored row of a key. `data` is `NULL` for a missing key and for JSON `null`.
-const STORED_SQL: &str = "SELECT id, ce_type, (envelope -> 'data')::text AS data FROM inbox_event \
-     WHERE inbox_id = $1 AND source = $2 AND ce_id = $3";
+/// The stored row of a key, with the data compare done by Postgres. `jsonb` equality compares
+/// numbers by value, so `1e18` and `1000000000000000000` are equal. An integer in the `i64` or
+/// `u64` range keeps all its digits. A larger integer does not, because `serde_json` has
+/// `arbitrary_precision` off and reads it as `f64`.
+/// JSON `null` and an absent value are the same: `NULLIF` turns both into SQL `NULL`.
+/// `$4` is the new data as text, or `NULL` when the new envelope has no data.
+const STORED_SQL: &str = "SELECT id, ce_type, \
+     (NULLIF(envelope -> 'data', 'null'::jsonb) IS NOT DISTINCT FROM NULLIF($4::text::jsonb, 'null'::jsonb)) AS data_equal \
+     FROM inbox_event WHERE inbox_id = $1 AND source = $2 AND ce_id = $3";
 
 const INBOX_SQL: &str = "SELECT org_id, agent_id, principal_id, \
      (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_us FROM inbox WHERE id = $1";
@@ -97,11 +103,6 @@ fn domain_err(e: DomainError) -> RepositoryError {
     store(e)
 }
 
-/// JSON `null` and an absent value are the same: both become `None`.
-fn normalize(v: Option<serde_json::Value>) -> Option<serde_json::Value> {
-    v.filter(|v| !v.is_null())
-}
-
 #[async_trait]
 impl InboxRepository for PgInboxRepository {
     async fn get_by_uuid(&self, id: Uuid) -> Result<Option<Inbox>, RepositoryError> {
@@ -136,8 +137,13 @@ impl InboxRepository for PgInboxRepository {
             return Ok(InsertOutcome::Inserted { id: EventId::from_uuid(id) });
         }
 
-        // No row: a stored row holds the key. Compare its type and data in Rust.
-        let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, STORED_SQL, [inbox.into(), event.source.clone().into(), event.ce_id.clone().into()]);
+        // No row: a stored row holds the key. Compare its type in Rust and its data in Postgres.
+        let new_data: Option<String> = event.envelope.get("data").map(|d| d.to_string());
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            STORED_SQL,
+            [inbox.into(), event.source.clone().into(), event.ce_id.clone().into(), new_data.into()],
+        );
         let row = self
             .db
             .query_one_raw(stmt)
@@ -146,10 +152,8 @@ impl InboxRepository for PgInboxRepository {
             .ok_or_else(|| RepositoryError::Store("the stored row of a duplicate key is gone".to_string()))?;
         let id: Uuid = row.try_get("", "id").map_err(db_err)?;
         let stored_type: String = row.try_get("", "ce_type").map_err(db_err)?;
-        let stored_data: Option<String> = row.try_get("", "data").map_err(db_err)?;
-        let stored_data = stored_data.map(|s| serde_json::from_str::<serde_json::Value>(&s)).transpose().map_err(store)?;
-        let new_data = event.envelope.get("data").cloned();
-        let payload_matches = stored_type == event.ce_type && normalize(stored_data) == normalize(new_data);
+        let data_equal: bool = row.try_get("", "data_equal").map_err(db_err)?;
+        let payload_matches = stored_type == event.ce_type && data_equal;
         Ok(InsertOutcome::Duplicate {
             id: EventId::from_uuid(id),
             payload_matches,

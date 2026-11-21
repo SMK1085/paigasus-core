@@ -204,7 +204,7 @@ async fn an_unknown_inbox_and_a_refused_caller_get_the_same_403() {
     let unknown_repo = Arc::new(FakeInbox::empty());
     let unknown_iam = Arc::new(StubIam::api_key(owner()));
     let (s1, b1) = post().send(&router(&unknown_repo, &unknown_iam)).await;
-    assert_eq!(unknown_iam.self_queries(), 0, "an unknown inbox makes no self-query");
+    assert_eq!(unknown_iam.self_queries(), 1, "an unknown inbox makes the same self-query as a non-owner caller");
 
     // Refused caller: a known inbox, a caller that is not the owner, and IAM says no.
     let repo = Arc::new(FakeInbox::with(inbox()));
@@ -216,6 +216,46 @@ async fn an_unknown_inbox_and_a_refused_caller_get_the_same_403() {
     assert_eq!(s2, StatusCode::FORBIDDEN);
     assert_eq!(b1, b2, "the two bodies are byte-equal");
     assert_eq!(code(&b1), "forbidden");
+}
+
+// When IAM is down for the self-query, an existing inbox and an unknown inbox must give the
+// same answer. Else a caller learns which inboxes exist.
+#[tokio::test]
+async fn a_self_query_outage_is_503_for_an_existing_inbox() {
+    let repo = Arc::new(FakeInbox::with(inbox()));
+    let iam = Arc::new(StubIam::api_key(u(0x11)).self_query_outage());
+    let (status, body) = post().send(&router(&repo, &iam)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(code(&body), "iam-unavailable");
+}
+
+#[tokio::test]
+async fn a_self_query_outage_is_503_for_an_unknown_inbox() {
+    let repo = Arc::new(FakeInbox::empty());
+    let iam = Arc::new(StubIam::api_key(u(0x11)).self_query_outage());
+    let (status, body) = post().send(&router(&repo, &iam)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(code(&body), "iam-unavailable");
+}
+
+#[tokio::test]
+async fn a_self_query_outage_gives_byte_equal_answers_for_both_inboxes() {
+    let known_iam = Arc::new(StubIam::api_key(u(0x11)).self_query_outage());
+    let (s1, b1) = post().send(&router(&Arc::new(FakeInbox::with(inbox())), &known_iam)).await;
+    let unknown_iam = Arc::new(StubIam::api_key(u(0x11)).self_query_outage());
+    let (s2, b2) = post().send(&router(&Arc::new(FakeInbox::empty()), &unknown_iam)).await;
+    assert_eq!((s1, &b1), (s2, &b2));
+    assert_eq!(known_iam.calls(), unknown_iam.calls(), "both requests make the same IAM calls");
+}
+
+// The owner fast path makes no self-query, so a self-query outage does not touch it.
+#[tokio::test]
+async fn the_owner_path_is_202_during_a_self_query_outage() {
+    let repo = Arc::new(FakeInbox::with(inbox()));
+    let iam = Arc::new(StubIam::api_key(owner()).self_query_outage());
+    let (status, _) = post().send(&router(&repo, &iam)).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(iam.self_queries(), 0);
 }
 
 #[tokio::test]

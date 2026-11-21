@@ -22,7 +22,7 @@ use paigasus_cloudevents::{ExtensionValue, ParseError};
 use serde_json::json;
 
 use super::Ingress;
-use super::auth::{Caller, authenticate, authorize_write, bearer_token};
+use super::auth::{Caller, authenticate, authorize_write, bearer_token, deny_unknown_inbox};
 use super::bytes::EnvelopeBytes;
 use super::error::ApiError;
 use super::path::{InboxIdField, UuidPath};
@@ -87,12 +87,15 @@ pub async fn post_event(
     Extension(caller): Extension<Caller>,
     EnvelopeBytes(body): EnvelopeBytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    // 4. The inbox lookup. An unknown inbox and a refused caller get the same 403 (step 5).
+    // 4. The inbox lookup. An unknown inbox and a refused caller get the same answer (step 5):
+    // the same IAM calls, `403`, and `503` during an IAM outage.
     let inbox = state.inboxes.get_by_uuid(inbox_uuid).await.map_err(|e| {
         tracing::error!(error = %e, "the inbox lookup failed");
         ApiError::StoreUnavailable
     })?;
-    let inbox = inbox.ok_or(ApiError::Forbidden)?;
+    let Some(inbox) = inbox else {
+        return Err(deny_unknown_inbox(&*state.ingress.iam, &caller).await);
+    };
 
     // 5. Authorisation.
     authorize_write(&*state.ingress.iam, &caller, &inbox).await?;

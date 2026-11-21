@@ -115,7 +115,18 @@ pub async fn authenticate_discovery(iam: &dyn Iam, token: &str) -> Result<(), Ap
     }
 }
 
+/// The org PRN and the principal PRN of a self-query for `org`.
+fn self_query_prns(caller: &Caller, org: Uuid) -> (String, String) {
+    let org_prn = Prn::build(IAM_SERVICE, "", None, ORGANIZATION, org).expect("static organization PRN parts are valid").canonical();
+    (org_prn, caller.principal.as_prn().canonical())
+}
+
 /// Authorise a write into `inbox` (§6.3 steps 1 to 3, in that order).
+///
+/// A refusal that needs no IAM answer (a key out of scope) still runs the self-query, and then
+/// returns [`ApiError::Forbidden`] whatever the answer is. Only an IAM outage changes it, to
+/// [`ApiError::IamUnavailable`]. So an outage gives the same answer for an inbox that exists, an
+/// inbox of another org and an inbox that does not exist (see [`deny_unknown_inbox`]).
 pub async fn authorize_write(iam: &dyn Iam, caller: &Caller, inbox: &Inbox) -> Result<(), ApiError> {
     let org = inbox.org();
 
@@ -123,7 +134,7 @@ pub async fn authorize_write(iam: &dyn Iam, caller: &Caller, inbox: &Inbox) -> R
     if let CallerKind::ApiKey { scope_prn } = &caller.kind
         && !key_scope_allows(scope_prn, org)
     {
-        return Err(ApiError::Forbidden);
+        return Err(refusal_after_probe(iam, caller, org).await);
     }
 
     // 2. The owner path. A UUID comparison: `PrincipalId::parse` made `caller.principal`.
@@ -136,8 +147,7 @@ pub async fn authorize_write(iam: &dyn Iam, caller: &Caller, inbox: &Inbox) -> R
     }
 
     // 3. The non-owner path: the self-query against the org of the inbox.
-    let org_prn = Prn::build(IAM_SERVICE, "", None, ORGANIZATION, org).expect("static organization PRN parts are valid").canonical();
-    let principal_prn = caller.principal.as_prn().canonical();
+    let (org_prn, principal_prn) = self_query_prns(caller, org);
     match iam.is_authorized_self(&caller.credential, &principal_prn, WRITE_INBOX_EVENT_ACTION, &org_prn).await {
         Ok(true) => Ok(()),
         Ok(false) => Err(ApiError::Forbidden),
@@ -150,6 +160,27 @@ pub async fn authorize_write(iam: &dyn Iam, caller: &Caller, inbox: &Inbox) -> R
             Err(mapped)
         }
     }
+}
+
+/// The answer for an inbox that does not exist. It must look like a non-owner caller on an
+/// inbox that exists: the same IAM calls, and the same answer during an IAM outage. So this runs
+/// the self-query against a nil org and returns [`ApiError::Forbidden`], or
+/// [`ApiError::IamUnavailable`] when IAM is unavailable. Without it, an outage is `503` for an
+/// inbox that exists and `403` for one that does not, and a caller learns which inboxes exist.
+pub async fn deny_unknown_inbox(iam: &dyn Iam, caller: &Caller) -> ApiError {
+    refusal_after_probe(iam, caller, Uuid::nil()).await
+}
+
+/// Run a self-query for its outage only. The verdict and every other error are ignored: the
+/// refusal is already decided. A probe can fail in ways that a real self-query cannot (a key
+/// of another org), and these failures must not change the answer.
+async fn refusal_after_probe(iam: &dyn Iam, caller: &Caller, org: Uuid) -> ApiError {
+    let (org_prn, principal_prn) = self_query_prns(caller, org);
+    let outage = match iam.is_authorized_self(&caller.credential, &principal_prn, WRITE_INBOX_EVENT_ACTION, &org_prn).await {
+        Err(err) => authz_error(err) == ApiError::IamUnavailable,
+        Ok(_) => false,
+    };
+    if outage { ApiError::IamUnavailable } else { ApiError::Forbidden }
 }
 
 /// The caller of an active API key.
@@ -571,7 +602,44 @@ mod tests {
         for principal in [stranger(), owner()] {
             let iam = FakeIam::new(key(&principal_prn(principal), &org_prn(other_org())), not_a_token(), Leg::Ok(true));
             assert_eq!(write(&iam).await, Err(ApiError::Forbidden));
-            assert_eq!(iam.calls(), vec!["introspect_api_key"], "no self-query for a key out of scope");
+            assert_eq!(iam.calls(), vec!["introspect_api_key", "is_authorized_self"], "a key out of scope runs a probe self-query");
+        }
+    }
+
+    // The probe ignores the verdict: IAM that says yes does not open the door for a key out of scope.
+    #[tokio::test]
+    async fn a_key_out_of_scope_stays_forbidden_when_the_probe_says_yes_or_fails() {
+        for probe in [
+            Leg::Ok(true),
+            Leg::Ok(false),
+            Leg::Rpc(Code::PermissionDenied, Some(ErrorReason::Forbidden)),
+            Leg::Rpc(Code::Unauthenticated, None),
+        ] {
+            let iam = FakeIam::new(key(&principal_prn(stranger()), &org_prn(other_org())), not_a_token(), probe);
+            assert_eq!(write(&iam).await, Err(ApiError::Forbidden));
+        }
+    }
+
+    // An outage gives the same answer for a key out of scope, a non-owner and an unknown inbox.
+    #[tokio::test]
+    async fn an_outage_of_the_self_query_is_503_on_every_refusal_path() {
+        let outage = || Leg::Rpc(Code::Unavailable, None);
+        let out_of_scope = FakeIam::new(key(&principal_prn(stranger()), &org_prn(other_org())), not_a_token(), outage());
+        assert_eq!(write(&out_of_scope).await, Err(ApiError::IamUnavailable));
+        let non_owner = FakeIam::new(key(&principal_prn(stranger()), &org_prn(org())), not_a_token(), outage());
+        assert_eq!(write(&non_owner).await, Err(ApiError::IamUnavailable));
+        let unknown = FakeIam::new(key(&principal_prn(stranger()), &org_prn(org())), not_a_token(), outage());
+        let caller = authenticate(&unknown, TOKEN).await.expect("caller");
+        assert_eq!(deny_unknown_inbox(&unknown, &caller).await, ApiError::IamUnavailable);
+        assert_eq!(unknown.calls(), non_owner.calls());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_inbox_is_forbidden_when_iam_answers() {
+        for verdict in [true, false] {
+            let iam = FakeIam::new(key(&principal_prn(stranger()), &org_prn(org())), not_a_token(), Leg::Ok(verdict));
+            let caller = authenticate(&iam, TOKEN).await.expect("caller");
+            assert_eq!(deny_unknown_inbox(&iam, &caller).await, ApiError::Forbidden, "verdict {verdict}");
         }
     }
 
@@ -583,7 +651,7 @@ mod tests {
             for principal in [owner(), stranger()] {
                 let iam = FakeIam::new(key(&principal_prn(principal), &scope), not_a_token(), Leg::Ok(true));
                 assert_eq!(write(&iam).await, Err(ApiError::Forbidden), "scope {scope}, principal {principal}");
-                assert_eq!(iam.calls(), vec!["introspect_api_key"]);
+                assert_eq!(iam.calls(), vec!["introspect_api_key", "is_authorized_self"]);
             }
         }
     }
