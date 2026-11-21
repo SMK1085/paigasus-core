@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Provisions the gateway tool decision log (SMA-755 § 5.10): the PAIGASUS_GATEWAY account, its three
-# users, the GATEWAY_DECISIONS stream and (SMA-821) the GATEWAY_DECISIONS_GEN key-value bucket. The account
+# users, the GATEWAY_DECISIONS stream and (SMA-821) the GATEWAY_DECISIONS_GEN key-value bucket. Only this script makes the
+# bucket (D20); the relay only gets it. The account
 # allows 2 streams: the decision stream and the stream KV_GATEWAY_DECISIONS_GEN of the bucket use both.
 # It is idempotent: run it again and it changes nothing that exists. `provision.sh` calls it for a new
 # environment, and an operator can run it alone for an environment that already has the IAM account.
@@ -80,7 +81,8 @@ add_user() {
   local name="$1"; shift
   local -n pub_ref="$1"; shift
   local -n sub_ref="$1"; shift
-  local edit="${1:-}"
+  local edit="${1:-}"; shift || true
+  local revoke=("$@")
 
   local args=() s
   for s in "${pub_ref[@]}"; do args+=(--allow-pub "$s"); done
@@ -92,12 +94,21 @@ add_user() {
   # user that exists before SMA-821 gets the generation bucket subjects. `nsc edit user` adds and is idempotent.
   if [ "$edit" = "edit" ]; then
     nsc edit user --account "$GATEWAY_ACCOUNT" --name "$name" "${args[@]}"
+    # Removing a subject from the array does NOT revoke it on an existing user: `nsc edit user` only adds.
+    # So revoke each removed grant by name. `--rm` is idempotent: it exits 0 when the subject is absent
+    # (MEASURED with nsc 2.15.0 in `natsio/nats-box:0.20.2`).
+    for s in "${revoke[@]}"; do
+      nsc edit user --account "$GATEWAY_ACCOUNT" --name "$name" --rm "$s"
+    done
   fi
   nsc generate creds --account "$GATEWAY_ACCOUNT" --name "$name" > "$OUT_DIR/$name.creds"
   chmod 600 "$OUT_DIR/$name.creds"
 }
 
-add_user gateway-decision-publisher   GW_DEC_PUBLISHER_PUB   GW_DEC_PUBLISHER_SUB edit
+# D20 (SMA-821): the publisher had `$JS.API.STREAM.CREATE.KV_…` in an earlier build. It could make the bucket
+# as a mirror of GATEWAY_DECISIONS and read every decision (MEASURED). Revoke it on an existing user.
+add_user gateway-decision-publisher   GW_DEC_PUBLISHER_PUB   GW_DEC_PUBLISHER_SUB edit \
+  '$JS.API.STREAM.CREATE.KV_'"$DECISIONS_GEN_BUCKET"
 add_user gateway-decision-reader      GW_DEC_READER_PUB      GW_DEC_READER_SUB
 add_user gateway-decision-provisioner GW_DEC_PROVISIONER_PUB GW_DEC_PROVISIONER_SUB
 
