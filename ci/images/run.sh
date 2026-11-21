@@ -1153,6 +1153,21 @@ smoke_agent_host() {
     docker logs "$AH_NAME" 2>&1 | tail -n 20 >&2
     return 1
   fi
+  # The schedule must fire once, not once for each pass. The default poll interval is 5 s, so wait
+  # 6 s, then count. The next slot is 09:00 Europe/Berlin: a run within 2 minutes before it could
+  # fire the schedule a second time for a good reason, so the exact count is skipped then.
+  sleep 6
+  local ah_berlin_hm
+  ah_berlin_hm="$(TZ=Europe/Berlin date +%H%M)"
+  if [ "$ah_berlin_hm" -ge 0858 ] && [ "$ah_berlin_hm" -le 0901 ]; then
+    echo "  agent-host exact fire count skipped: the time in Berlin is ${ah_berlin_hm}, close to the 09:00 slot"
+  else
+    local ah_events ah_count
+    ah_events="$("${ah_psql[@]}" -c "SELECT count(*) FROM inbox_event WHERE source = 'urn:paigasus:agents:timer:agent'")"
+    ah_count="$("${ah_psql[@]}" -c "SELECT max(fire_count) FROM timer")"
+    [ "$ah_events" = "1" ] || { echo "::error::agent-host made ${ah_events} timer events, expected exactly 1" >&2; return 1; }
+    [ "$ah_count" = "1" ] || { echo "::error::agent-host timer row has fire_count=${ah_count}, expected 1" >&2; return 1; }
+  fi
   local ah_attempts
   ah_attempts="$("${ah_psql[@]}" -c "SELECT max(fire_attempts) FROM timer")"
   [ "$ah_attempts" = "0" ] || { echo "::error::agent-host timer row has fire_attempts=${ah_attempts}, expected 0" >&2; return 1; }

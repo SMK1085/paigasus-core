@@ -143,7 +143,7 @@ mod tests {
         let event = build_fire_event(&follow_up(TimerOrigin::Agent), ts(FIRE_AT), ts(FIRE_AT), EventId::from_uuid(Uuid::from_u128(9))).unwrap();
         let text = "timer:00000000-0000-0000-0000-000000000001:2026-03-29T01:00:00Z";
         assert_eq!(event.ce_id, text);
-        assert_eq!(text.len(), 63);
+        assert_eq!(event.ce_id.len(), 63);
         assert_eq!(event.envelope["id"], text);
     }
 

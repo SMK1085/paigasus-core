@@ -343,7 +343,13 @@ impl PgScheduler {
                  failure = CASE WHEN fire_attempts + 1 >= $3 THEN $4::text ELSE failure END, \
                  next_fire_at = CASE WHEN fire_attempts + 1 >= $3 THEN next_fire_at ELSE to_timestamp($2::bigint) END \
                  WHERE id = $1 AND status = 'active' AND fire_attempts = $5::bigint RETURNING status",
-                vec![ctx.id.into(), next.into(), i64::from(self.settings.max_fire_attempts).into(), failure_text(category).into(), ctx.attempts.into()],
+                vec![
+                    ctx.id.into(),
+                    next.into(),
+                    i64::from(self.settings.max_fire_attempts).into(),
+                    failure_text(category).into(),
+                    ctx.attempts.into(),
+                ],
             ))
             .await?;
         row.map(|r| r.try_get::<String>("", "status")).transpose()

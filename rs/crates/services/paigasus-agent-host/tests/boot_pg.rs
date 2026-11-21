@@ -221,6 +221,9 @@ async fn a_boot_with_timers_fires_a_due_row() {
         if let Some(event) = events.first() {
             assert_eq!(event.source, "urn:paigasus:agents:timer:agent");
             assert_eq!(event.status, "pending");
+            // Two more poll intervals pass. The follow-up fired once, so no second event may appear.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert_eq!(support::timer::timer_events(&db, inbox).await.len(), 1, "exactly one event for the timer");
             return;
         }
         assert!(std::time::Instant::now() < deadline, "no timer event within 10 s; log:\n{}", child.tail());

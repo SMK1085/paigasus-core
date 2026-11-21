@@ -13,6 +13,7 @@ package paigasus.agents.v1;
 // 4. Envelope rule: a message never repeats a CloudEvents envelope attribute (`id`, `source`,
 //    `type`, `time`, `subject`) or an extension (`threadid`, `actorprn`, `correlationid`,
 //    `schemaversion`). The envelope is the only place for those values.
+
 import "google/protobuf/timestamp.proto";
 
 // A message that the host sends out to the user of a run.

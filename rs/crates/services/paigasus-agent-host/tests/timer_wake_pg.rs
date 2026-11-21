@@ -70,6 +70,7 @@ async fn a_follow_up_wakes_the_agent_at_the_set_time() {
     // The run is 2 s old when the agent calls the tool. The due time must come from the time of the
     // call, not from the start of the run.
     tokio::time::sleep(Duration::from_secs(2)).await;
+    let call_now = store.db_now().await.expect("db now before the call");
     let ctx = ToolContext::new(Arc::new(()), TracerHandle::default(), CancellationToken::new(), 0, 3);
     let reply = Tool::<()>::invoke(&tool, &ctx, json!({"in_seconds": 2, "note": "check the reply"})).await.expect("the tool answers");
     let text = reply.content.as_str().expect("a text reply").to_owned();
@@ -95,6 +96,14 @@ async fn a_follow_up_wakes_the_agent_at_the_set_time() {
     let before = support::timer::timer_state(&db, timer_id).await;
     assert_eq!(before.status, "active");
     let due_us = before.next_fire_at_us;
+    // The due time is the database time of the call plus 2 s, rounded up to a whole second. A clock
+    // that used the start of the run would give a due time about 2 s earlier than this.
+    let from_call_us = due_us - call_now.as_microsecond();
+    assert!(
+        (1_900_000..=3_500_000).contains(&from_call_us),
+        "the due time is {from_call_us} us after the call; it must be 2 s to 3.5 s"
+    );
+    assert_eq!(due_us % 1_000_000, 0, "the due time is a whole second");
 
     let scheduler = Arc::new(PgScheduler::new(
         db.clone(),
