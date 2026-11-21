@@ -16,7 +16,11 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   a starter policy reserves its id. An older release did not reserve it, so its `PutPolicy` could
   create an operator policy with that id. Boot replaced that policy with the starter policy, and
   the operator policy stopped governing decisions. Now boot checks every starter id before it
-  writes a row. If an operator policy uses a starter id, boot writes nothing and does not start.
+  writes a starter row. If an operator policy uses a starter id, boot writes no policy row and
+  does not start. (Migrations run before this check.) The reconciliation loop checks each row
+  again. A collision that only the loop finds also stops boot, but the other starter rows can
+  converge first, also the rows after the colliding row. Boot never changes the colliding row. A
+  row whose reconciliation fails is checked again, and boot stops when that check also fails.
   The error names each colliding id and tells the operator to rename the policy. There is no
   automatic rename. The new `operator_collision` outcome of
   `iam_starter_policy_reconciles_total` counts each colliding id. This applies to every starter

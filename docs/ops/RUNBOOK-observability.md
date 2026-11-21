@@ -2746,9 +2746,9 @@ already unchanged is not counted at all, and (unlike a policy) neither is an orp
 | `adopted` | Both provenance columns were NULL, so the row's provenance was unknowable. That is expected for a row seeded before m0010 — but it is not proof of one; see below. | None on the first boot after upgrading. Afterwards, investigate. Also see below if it changed content. |
 | `stale_binary` | The stored row was written by a NEWER release **and its provenance checks out**; this replica left it alone. | Expected briefly during a deploy. Persisting means an old replica is still running — or that the fleet was permanently rolled back, in which case it persists forever until a build with a higher `STARTER_POLICY_REVISION` ships. See below. |
 | `externally_modified` | Something other than this service wrote the row. Converged and audited — **except** when the row also claims a newer revision, which is warned about but *not* repaired (see below). | **Investigate.** |
-| `operator_collision` | An operator-authored policy uses a starter policy id. An older release accepted the id, because that release did not know it as a starter id. Boot refused to start and did not change the colliding row. The check runs before any write, so normally boot writes nothing. If the row appears after the check, boot stops at that row. Rows before it can already be converged. | **Act before the next boot.** Rename the policy. See "An operator policy at a starter policy id" below. |
+| `operator_collision` | An operator-authored policy uses a starter policy id. An older release accepted the id, because that release did not know it as a starter id. Boot refused to start and did not change the colliding row. The check runs before any starter write, so normally boot writes no policy row. If the check fails, or the row appears after it, the loop finds the row. Then boot still refuses to start, but other starter rows, before and after it, can already be converged. | **Act before the next boot.** Rename the policy. See "An operator policy at a starter policy id" below. |
 | `orphaned` | A `system = true` **policy** row whose id is no longer code-defined. An orphaned system **role** row is WARN-logged (`reconcile_roles`) but does NOT increment this counter — a deliberate asymmetry with the policy half. | Retire it with `POST /v1/authz/system-policies/{id}/retire` once the fleet has converged — see "Retiring an orphaned system-owned row (SMA-481)" below. |
-| `failed` | Converging one row errored — a starter **policy** row or a system **role** row, both under this same label. A row that already existed is kept for this boot; an absent row that couldn't be seeded is fatal. So is **any** failure when the pre-loop id snapshot was itself unreadable, because no row can then be proven to exist. | Check the ERROR log line — it names which of the three cases this was, and its `policy_id` vs `role_key` field says which half failed (the metric alone can't). Transient at low volume in the survivable case. |
+| `failed` | Converging one row errored — a starter **policy** row or a system **role** row, both under this same label. A row that already existed is kept for this boot; an absent row that couldn't be seeded is fatal. A starter **policy** row is kept only when a second ownership check proves that it is not an operator policy; a failed check is fatal. So is **any** failure when the pre-loop id snapshot was itself unreadable, because no row can then be proven to exist. | Check the ERROR log line — it names which case this was, and its `policy_id` vs `role_key` field says which half failed (the metric alone can't). Transient at low volume in the survivable case. |
 
 **`externally_modified` — the one that matters.** It logs
 
@@ -2839,7 +2839,13 @@ Boot does not overwrite this row. An overwrite replaces the operator's policy, a
 then stops governing decisions with no other signal. Boot checks every starter id before it
 writes any row. If it finds such a row, it writes nothing, logs one ERROR line for each id, and
 increments `iam_starter_policy_reconciles_total{outcome="operator_collision"}` once for each id.
-Then the replica does not start. A row can appear after the check, for example from an older replica. Then boot stops at that row, and the starter rows before it can already be converged. This is the same state that a normal boot writes. Boot never changes the colliding row. The error names every colliding id:
+Then the replica does not start. The check can fail, or a row can appear after it, for example
+from an older replica. Then the reconciliation loop finds the row. The loop does not stop at that
+row. It converges the other starter rows, before and after the colliding row, and then boot
+refuses to start. These writes are the same writes that a normal boot makes. Boot never changes
+the colliding row. If the reconciliation of a row fails, boot checks the row again. If that check
+also fails, boot refuses to start, because it cannot prove that the row is not an operator
+policy. The error names every colliding id:
 
 ```text
 operator-authored policies use reserved starter policy ids: agent_event_writer. Boot does not overwrite them. Rename each policy: ...

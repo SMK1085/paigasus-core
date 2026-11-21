@@ -125,8 +125,11 @@ pub trait SystemPolicyReconciler: Send + Sync {
     async fn reconcile_system(&self, doc: &PolicyDocument, revision: u32) -> Result<StarterPolicyOutcome, AuthzError>;
     /// Ids of persisted rows at the ids of `docs` that classify as
     /// [`StarterPolicyOutcome::OperatorAuthored`] against their code-defined document at
-    /// `revision`. Read-only. Boot calls it BEFORE it writes any starter row, so a refused boot
-    /// changes nothing. Sorted ascending by id, so the error message is stable.
+    /// `revision`. Read-only. Boot calls it BEFORE it writes any starter row, so a refusal by this
+    /// pre-scan writes no policy row. Boot also calls it for one row whose `reconcile_system`
+    /// failed, to prove that the stored row is not an operator's policy. A refusal in the loop
+    /// does not have the no-write guarantee: other starter rows can converge before boot fails.
+    /// Sorted ascending by id, so the error message is stable.
     async fn operator_authored_starter_ids(&self, docs: &[PolicyDocument], revision: u32) -> Result<Vec<String>, AuthzError>;
     /// Ids of persisted `system = true` rows NOT in `known` — retired starter policies that
     /// nothing can now delete ([`PolicyStore::delete`] refuses a system row). Reported, never

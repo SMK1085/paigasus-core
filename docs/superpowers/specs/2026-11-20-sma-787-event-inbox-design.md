@@ -136,8 +136,10 @@ because the IAM and gateway copies live in service crates.
    calls: for an unknown inbox, the host runs the non-owner self-query against a nil org and
    ignores the verdict. A key out of scope runs the same probe. During an IAM outage the self-query
    fails, and every one of these paths gives `503` `iam-unavailable`. So the outage does not show
-   which inbox exists to a caller that is not the owner. One path differs: an OIDC caller that is
-   not a member of the inbox org gets `403` with no IAM call, also during an outage. That answer
+   which inbox exists to a caller that is not the owner. One path differs: an OIDC caller that
+   owns the inbox but is not a member of the inbox org gets `403` with no further IAM call, also
+   during an outage. An OIDC caller that does not own the inbox runs the self-query, so an outage
+   gives it `503`. That answer
    does not reveal other inboxes. The owner path makes no self-query and does not change. (Changed in the
    SMA-787 follow-up sweep. Before, an outage gave `503` for an existing inbox and `403` for an
    unknown inbox.)
