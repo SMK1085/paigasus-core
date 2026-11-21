@@ -385,9 +385,11 @@ It also runs several checks that the per-case project sets structurally **cannot
     no further patch could close. It also gave a false red on `cd` and `source` lines.
   - Scope: every file that git tracks, except the exclusions. The gate reads each file as UTF-8.
   - A tracked file that is missing on disk is not skipped. The gate reads its index blob instead
-    (`_read_tracked`, SMA-841). Reason: `ci/next-env/run.sh` removes each `next-env.d.ts` for the
-    full run of `next typegen`, and `buf generate` (`clean: true`) removes its output directories.
-    `moon ci` runs those tasks at the same time as this gate. Before SMA-841 the gate then exited 2
+    (`_read_tracked`, SMA-841). Reason: `ci/next-env/run.sh` removed each `next-env.d.ts` for the
+    full run of `next typegen` until the follow-up sweep after PR 516. It now runs typegen in a
+    scratch copy. The fallback stays, because other writers remain: `buf generate`
+    (`clean: true`) removes its output directories. `moon ci` runs such tasks at the same time
+    as this gate. Before SMA-841 the gate then exited 2
     with `tracked by git but not a file on disk` (PR 515, two attempts). The gate still exits 2 when
     the index holds no regular-file blob for the path (no entry, a conflict, a symlink or a gitlink),
     and G4 applies to the blob. Residual: a file that a tool writes again at the same time can be

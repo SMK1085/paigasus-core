@@ -280,9 +280,10 @@ tasks:
       node ../../../ci/tailwind-source/run.mjs --app ts/apps/gateway-console
     deps:
       - '~:build'
-      # repo:next-env-drift ALSO depends on this project's build, because `next typegen` writes
-      # into .next. Without this edge, that gate and this task would run concurrently over the
-      # same directory.
+      # repo:next-env-drift ALSO depends on this project's build. Until the follow-up sweep after
+      # PR 516, its `next typegen` wrote into this app's .next. It now writes into a scratch copy,
+      # but it can still replace next-env.d.ts on drift. The edge keeps the two from running
+      # concurrently.
       - 'repo:next-env-drift'
       # Stated here rather than left to `~:build`'s own edge. @paigasus/console-core's
       # testing/fake-iam.ts imports @paigasus/proto directly, so this task is a reader of the
@@ -370,7 +371,7 @@ tasks:
     deps:
       # The production build. On a cache hit Moon restores `.next`, standalone tree included.
       - '~:build'
-      # repo:next-env-drift writes into .next too; the same serialization `test` has.
+      # repo:next-env-drift; the same serialization `test` has (see the comment there).
       - 'repo:next-env-drift'
       # Stated here for the same reason as in `test`: @paigasus/console-core's testing/fake-iam.ts
       # imports @paigasus/proto, so this tier reads the generated tree itself.

@@ -492,11 +492,20 @@ async fn start_nats(port: Option<u16>, what: &str) -> Option<(ContainerAsync<Nat
         .with_cmd(["-c", "/etc/nats-test.conf"])
         .with_copy_to("/etc/nats-test.conf", RELAY_ACCOUNT_CONF.as_bytes().to_vec());
     let node = match port {
-        Some(p) => paigasus_test_docker::start_or_skip(image.with_mapped_port(p, 4222.tcp()), what).await?,
+        Some(p) => paigasus_test_docker::start_or_skip(image.with_mapped_port(p, 4222.tcp()).with_network(own_network()), what).await?,
         None => paigasus_test_docker::start_or_skip(image, what).await?,
     };
     let port = paigasus_test_docker::mapped_port(&node, 4222, what).await;
     Some((node, format!("nats://127.0.0.1:{port}")))
+}
+
+/// A Docker network for one container that a test stops. Docker gives a freed bridge address to
+/// the next container at once, and the host port of a stopped container can still forward for a
+/// short time. On the default bridge, a reconnect after `stop()` can then reach the NATS of
+/// another test and publish there.
+fn own_network() -> String {
+    let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).expect("the clock is after 1970").as_nanos();
+    format!("paigasus-dl-{}-{nanos}", std::process::id())
 }
 
 fn free_port() -> u16 {
@@ -1275,7 +1284,8 @@ async fn a_real_permission_refusal_is_rejected_and_a_later_outage_is_not() {
     let image = Nats::default()
         .with_cmd(["-c", "/etc/nats-test.conf"])
         .with_copy_to("/etc/nats-test.conf", NO_PUBLISH_CONF.as_bytes().to_vec())
-        .with_mapped_port(port, 4222.tcp());
+        .with_mapped_port(port, 4222.tcp())
+        .with_network(own_network());
     let Some(nats) = paigasus_test_docker::start_or_skip(image, "decision_log_redis relay permission").await else {
         return;
     };

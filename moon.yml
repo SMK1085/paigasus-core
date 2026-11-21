@@ -149,11 +149,12 @@ tasks:
       bash ci/next-env/run.sh --negative-control
       bash ci/next-env/run.sh
     toolchain: 'system'
-    # Ordered AFTER each app's build, not merely to have a fresh tree: `next typegen` writes
-    # into that app's own `.next`, which is `<app>-ts:build`'s declared output. Letting both run
-    # concurrently would race on that directory (a build cleaning .next under a running
-    # typegen), which is the flake shape SMA-427 already paid for with wasm-pack's destructive
-    # --out-dir. One `deps` edge per app serializes it against this gate.
+    # Ordered AFTER each app's build. Until the follow-up sweep after PR 516, `next typegen` wrote
+    # into that app's own `.next`, which is `<app>-ts:build`'s declared output, and the two raced
+    # on that directory (a build cleaning .next under a running typegen). That is the flake shape
+    # SMA-427 already paid for with wasm-pack's destructive --out-dir. The gate now runs typegen in
+    # a scratch copy with its own `.next`. The gate still reads the app's node_modules and the
+    # working-tree next-env.d.ts, so the edges stay. One `deps` edge per app serializes it.
     deps:
       - 'iam-console-ts:build'
       - 'gateway-console-ts:build'
