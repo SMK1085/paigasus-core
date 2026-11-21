@@ -32,7 +32,8 @@ Notes:
   reference to it, so it compiles, and the result above is from that version.
 - Rows 3 and 4 change the SQL so that the bind count stays valid (`$4::text = ''` and a `$1..$3`
   null check). The queries run, and the tests fail on the assertion, not on a SQL error.
-- Rows 1 to 4 need Docker. The core suite passes for those rows, as expected.
+- Rows 1, 3 and 4 need Docker. The core suite passes for those rows, as expected. Row 2 fails in
+  the core suite.
 - After the last row, `git diff --stat -- rs/` printed nothing.
 - Row 16 came from the final review. It ran on the core suite with 140 tests. The mutation
   replaces the term with an empty `extend`, because a plain removal fails `unused_mut` under

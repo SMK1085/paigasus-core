@@ -221,7 +221,9 @@ a read cache and a `MemoryChangeSet`.
 - **The conflict steps (SMA-843).** A conflict on a path P drops the group of P. It also drops
   every group that has a guard that covers P, also a guard-only group, when the store holds P. It
   then marks P as "re-sight". The next fresh listing of a directory that holds P records P as a
-  first sight, so a `view` of the directory lets the retry pass.
+  first sight, so a `view` of the directory lets the retry pass. The mark ends after that listing.
+  A retry of the directory command with no `view` also passes, because the listing of that command
+  records P as a first sight.
 - **The early check: `check_dir` (SMA-843).** `delete` and `rename` of a directory first list the
   source in the store. A stored path that the run saw with another version, or saw as absent, is a
   conflict. A path that the run saw as present and that the store no longer holds is a conflict.
@@ -338,17 +340,19 @@ CREATE TABLE memory_file (
 - `usage` reads the `memory_scope` row: O(1).
 - **`apply` and the scope lock.** One transaction. First `INSERT … ON CONFLICT DO NOTHING` the scope
   row, then `SELECT … FOR UPDATE` it. This row lock serializes the two writers of a scope (a run
-  commit and the console) and gives `MemoryCaps::check` its `before` value. Then each change:
-  - `Put { Absent }`: `INSERT … ON CONFLICT DO NOTHING`. Zero rows is `Conflict`.
-  - `Put { Version(v) }`: `UPDATE … SET content = $c, version = nextval(…), updated_at = now()
-    WHERE … AND version = v`. Zero rows is `Conflict`.
-  - `Delete { Version(v) }`: `DELETE … WHERE … AND version = v`. Zero rows is `Conflict`.
+  commit and the console) and gives `MemoryCaps::check` its `before` value. The steps run in this
+  order: the lock, the guards, the changes, the caps.
   - **The guard step (SMA-843).** It runs right after the scope row lock and before the first
     change. For each guard, it reads the paths with `path = $dir OR path LIKE $prefix`, with every
     scope column bound, in byte order. A path that no change names is a `Conflict`. So a guard
     conflict wins over every cap refusal.
   - **The empty set (SMA-843).** A set with no change and no guard takes no scope row and no lock.
     A set with a guard and no change takes the scope row and the lock.
+  - Then each change:
+    - `Put { Absent }`: `INSERT … ON CONFLICT DO NOTHING`. Zero rows is `Conflict`.
+    - `Put { Version(v) }`: `UPDATE … SET content = $c, version = nextval(…), updated_at = now()
+      WHERE … AND version = v`. Zero rows is `Conflict`.
+    - `Delete { Version(v) }`: `DELETE … WHERE … AND version = v`. Zero rows is `Conflict`.
   - Then the new counts go to the scope row, and `MemoryCaps::check(before, after)` runs.
   - On every error path the transaction is rolled back explicitly (`migration_lock.rs` records that
     the `Drop` of a `DatabaseTransaction` can panic).
@@ -487,8 +491,9 @@ not available now. Try again later.") and keeps the cause for the log.
 A commit-time `Conflict` or `CapExceeded` can still happen (a write after the last command, or a
 guard conflict of §6.4). The model is no longer running, so the text cannot reach it. The contract:
 
-- **A guard-only set is applied (SMA-843).** The commit path calls `apply_in` for every commit set
-  where `is_empty()` is false. This includes a set with guards and no change. A guard conflict is a
+- **A guard-only set is applied (SMA-843).** The commit path calls `apply_in` (Postgres) or
+  `apply` (S3) for every commit set where `is_empty()` is false. This includes a set with guards and
+  no change. A guard conflict is a
   `Conflict`, and the outcome rules below apply to it.
 
 - **Postgres** (`MemoryCommit::InTransaction`): `RunCommitter` calls `apply_in` inside the run
