@@ -1669,11 +1669,19 @@ async fn a_relay_with_no_bucket_counts_no_bucket_and_publishes_every_event() {
     let _local = metrics::set_default_local_recorder(&recorder);
     let admin = test_js(&nats_url).await;
     let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    // Block the publishes, so that the events stay in Redis and the backlog gauge has a value to show.
+    block_publishes(&admin).await;
     for seq in 1..=10 {
         xadd(&node, &event_with_org(seq, ORG_A), 0).await;
     }
-    wait_for("10 events are published and Redis is empty", || async { snap.published() == 10 && xlen(&node).await == 0 }).await;
     wait_for("the KV step counts no_bucket", || async { check_errors(&snap, "no_bucket") > 0 }).await;
+    wait_for("the backlog gauge reads 10 while the bucket is missing", || async {
+        snap.gauge("gateway_decision_log_backlog") == Some(10.0)
+    })
+    .await;
+    unblock_publishes(&admin).await;
+    wait_for("10 events are published and Redis is empty", || async { snap.published() == 10 && xlen(&node).await == 0 }).await;
+    wait_for("the backlog gauge reads 0 again", || async { snap.gauge("gateway_decision_log_backlog") == Some(0.0) }).await;
     assert_eq!(snap.dropped("publish_rejected"), 0, "a missing bucket rejects no event");
     assert!(admin.get_key_value(dl_js::GEN_BUCKET).await.is_err(), "the relay did not make the bucket");
     relay.shut_down().await;
