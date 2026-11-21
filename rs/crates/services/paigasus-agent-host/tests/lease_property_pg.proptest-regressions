@@ -1,0 +1,2 @@
+# SPDX-License-Identifier: Apache-2.0
+# proptest failure seeds for lease_property_pg. Commit every seed it writes.

@@ -9,7 +9,7 @@ node:
   # next LTS line.
   version: '26.13.1'
 pnpm:
-  version: '11.3.0'
+  version: '12.22.0'
 
 rust:
   version: '1.100.0'

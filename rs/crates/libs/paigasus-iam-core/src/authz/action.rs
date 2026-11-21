@@ -55,6 +55,10 @@ pub enum Action {
     /// dead-letter actions above.
     RetireSystemPolicy,
     InvokeModel,
+    /// Write an event into an agent inbox of an organization (SMA-787 §6.1). Of the scoped starter
+    /// roles, only the dedicated `agent_event_writer` grants it directly; `org_admin` never holds
+    /// it. `platform_admin` permits every action, so it permits this one too.
+    WriteInboxEvent,
     /// Mint a user principal (SMA-584). Authorized at `Root` only: a user principal has no
     /// owner tenancy node (users attach to orgs/teams later, via memberships), so there is no
     /// narrower resource to scope against. Checked in `adapters::http::users` and
@@ -136,6 +140,7 @@ impl Action {
         Action::DiscardOutboxDeadLetter,
         Action::RetireSystemPolicy,
         Action::InvokeModel,
+        Action::WriteInboxEvent,
         Action::CreateUser,
         Action::GetUser,
         Action::LinkExternalIdentity,
@@ -197,6 +202,7 @@ impl Action {
             Action::DiscardOutboxDeadLetter => "DiscardOutboxDeadLetter",
             Action::RetireSystemPolicy => "RetireSystemPolicy",
             Action::InvokeModel => "InvokeModel",
+            Action::WriteInboxEvent => "WriteInboxEvent",
             Action::CreateUser => "CreateUser",
             Action::GetUser => "GetUser",
             Action::LinkExternalIdentity => "LinkExternalIdentity",
@@ -277,6 +283,7 @@ impl Action {
             | Action::DiscardOutboxDeadLetter
             | Action::RetireSystemPolicy
             | Action::InvokeModel
+            | Action::WriteInboxEvent
             | Action::CreateUser
             | Action::LinkExternalIdentity
             | Action::UnlinkExternalIdentity
@@ -369,6 +376,7 @@ mod tests {
                 | Action::DiscardOutboxDeadLetter
                 | Action::RetireSystemPolicy
                 | Action::InvokeModel
+                | Action::WriteInboxEvent
                 | Action::CreateUser
                 | Action::GetUser
                 | Action::LinkExternalIdentity
@@ -390,9 +398,14 @@ mod tests {
         }
         assert_eq!(
             Action::ALL.len(),
-            54,
-            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies + 2 SMA-775 tool policy settings + 1 SMA-781 tool policy re-compile"
+            55,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies + 2 SMA-775 tool policy settings + 1 SMA-781 tool policy re-compile + 1 SMA-787 WriteInboxEvent"
         );
+    }
+    #[test]
+    fn write_inbox_event_is_a_write_action() {
+        assert_eq!(Action::parse("WriteInboxEvent"), Some(Action::WriteInboxEvent));
+        assert!(Action::WriteInboxEvent.is_write());
     }
     #[test]
     fn list_audit_log_is_a_read_action() {

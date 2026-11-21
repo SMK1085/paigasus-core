@@ -18,7 +18,7 @@ ARG APP
 ARG BASE_PATH
 WORKDIR /build
 # Node 25 and later do not bundle corepack, so the builder installs a pinned corepack first.
-RUN npm install -g corepack@0.36.0 && corepack enable && corepack prepare pnpm@11.3.0 --activate
+RUN npm install -g corepack@0.36.0 && corepack enable && corepack prepare pnpm@12.22.0 --activate
 COPY . /build/
 # SMA-634. WORKDIR is /build, which is ts/, so @paigasus/kernel's `file:` specifiers
 # (../../../rs/crates/bindings/…) resolve to /rs/crates/bindings/…. The named context supplies

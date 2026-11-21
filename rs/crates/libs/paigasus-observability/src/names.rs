@@ -74,6 +74,60 @@ pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_over
 pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_policy_nats_invalidations_total";
 /// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
 pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";
+/// Tool-policy findings (SMA-755 § 5.9). `side` = `request` | `response`; `kind` = `name_collision` |
+/// `unparsed_arguments` | `other` (a kind that this service does not know).
+pub const GATEWAY_TOOL_POLICY_FINDINGS_TOTAL: &str = "gateway_tool_policy_findings_total";
+// Gateway tool decision log (SMA-755 § 5.9). No label carries a tool name, an org or an argument.
+/// Records that the decision log accepted from the recorder (counted before the queue).
+pub const GATEWAY_DECISION_LOG_RECORDED_TOTAL: &str = "gateway_decision_log_recorded_total";
+/// Events that the writer put into the Redis stream.
+pub const GATEWAY_DECISION_LOG_WRITTEN_TOTAL: &str = "gateway_decision_log_written_total";
+/// Events that the gateway dropped; `reason` = `queue_full` | `closed` | `redis_unavailable` |
+/// `write_error` | `breaker_open` | `backlog_full` | `publish_rejected` | `redis_deleted` | `shutdown`.
+pub const GATEWAY_DECISION_LOG_DROPPED_TOTAL: &str = "gateway_decision_log_dropped_total";
+/// Panics that a decision-log task caught and survived; `task` = `writer` | `relay`.
+pub const GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL: &str = "gateway_decision_log_task_restarts_total";
+/// Events with a JetStream PubAck (the relay).
+pub const GATEWAY_DECISION_LOG_PUBLISHED_TOTAL: &str = "gateway_decision_log_published_total";
+/// Losses of entries of the Redis decision stream that the relays detected: a lost stream, or a return to an
+/// older state (SMA-821). One per incident over all relays.
+pub const GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL: &str = "gateway_decision_log_redis_resets_total";
+/// An estimate of the events in the Redis losses. The estimate is the last stored `XLEN` sample. It can undercount
+/// (writes after the sample) or overcount (publishes after the sample).
+pub const GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL: &str = "gateway_decision_log_lost_estimate_total";
+/// Seconds from the publish of an event to its PubAck.
+pub const GATEWAY_DECISION_LOG_PUBLISH_SECONDS: &str = "gateway_decision_log_publish_seconds";
+/// `XLEN` of the decision stream, sampled every 15 s by the relay.
+pub const GATEWAY_DECISION_LOG_BACKLOG: &str = "gateway_decision_log_backlog";
+/// Failed Redis reset checks of the relay against the NATS KV bucket `GATEWAY_DECISIONS_GEN`; `kind` = `timeout` |
+/// `permission` | `no_bucket` | `redis` | `foreign_writer` | `other` (SMA-821).
+pub const GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL: &str = "gateway_decision_log_generation_check_errors_total";
+/// Unix time in seconds of the last Redis reset that a relay of this pod detected (SMA-821). The gauge is not primed.
+pub const GATEWAY_DECISION_LOG_LAST_RESET_TIMESTAMP_SECONDS: &str = "gateway_decision_log_last_reset_timestamp_seconds";
+// Agent host HTTP
+pub const AGENT_HOST_HTTP_REQUESTS_TOTAL: &str = "agent_host_http_requests_total";
+pub const AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS: &str = "agent_host_http_request_duration_seconds";
+pub const AGENT_HOST_HTTP_INFLIGHT_REQUESTS: &str = "agent_host_http_inflight_requests";
+// Agent host inbox. Each series carries the label `channel` (`http` or `nats`).
+/// Events stored as new rows by the one insert path.
+pub const AGENT_HOST_INBOX_EVENTS_INSERTED_TOTAL: &str = "agent_host_inbox_events_inserted_total";
+/// Inserts that found a stored row with the same key.
+pub const AGENT_HOST_INBOX_EVENTS_DUPLICATE_TOTAL: &str = "agent_host_inbox_events_duplicate_total";
+/// Duplicates whose type or data differ from the stored row.
+pub const AGENT_HOST_INBOX_EVENTS_PAYLOAD_MISMATCH_TOTAL: &str = "agent_host_inbox_events_payload_mismatch_total";
+/// Lease losses of the agent host. The label `operation` is `heartbeat`, `claim`, `complete` or `deadline`.
+pub const AGENT_HOST_LEASE_LOST_TOTAL: &str = "agent_host_lease_lost_total";
+/// Claims that committed with at least one event. Each claim opens one run.
+pub const AGENT_HOST_CLAIMS_TOTAL: &str = "agent_host_claims_total";
+/// Inbox events that a claim moved to `dead` (spec §8.4.1).
+pub const AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL: &str = "agent_host_inbox_events_dead_total";
+// Agent host NATS source (spec §9.3).
+/// NATS messages ended with `term` because the body does not parse.
+pub const AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL: &str = "agent_host_nats_messages_terminated_total";
+/// NATS messages acked and skipped because the event does not name the inbox org (spec §9.4).
+pub const AGENT_HOST_NATS_MESSAGES_TENANCY_SKIPPED_TOTAL: &str = "agent_host_nats_messages_tenancy_skipped_total";
+/// NATS messages on a subject that no channel maps. Each one is a boot-check gap.
+pub const AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL: &str = "agent_host_nats_messages_unmapped_total";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -306,11 +360,23 @@ pub const IAM_NATS_PUBLISH_DURATION_SECONDS: &str = "iam_nats_publish_duration_s
 pub const IAM_NATS_CONNECTED: &str = "iam_nats_connected";
 
 /// Every metric family this workspace emits — the drift test (`tests/drift.rs`) extracts every
-/// `iam_`/`gateway_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
+/// `iam_`/`gateway_`/`agent_host_`-prefixed identifier from the committed dashboard/rule `expr`s, strips a
 /// trailing `_bucket`/`_sum`/`_count` histogram/summary suffix, and asserts each one is in `ALL`.
 /// Label keys, PromQL function/keyword tokens, and template vars never match the prefix filter,
 /// so they need no separate allowlist.
 pub const ALL: &[&str] = &[
+    AGENT_HOST_HTTP_REQUESTS_TOTAL,
+    AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS,
+    AGENT_HOST_HTTP_INFLIGHT_REQUESTS,
+    AGENT_HOST_INBOX_EVENTS_INSERTED_TOTAL,
+    AGENT_HOST_INBOX_EVENTS_DUPLICATE_TOTAL,
+    AGENT_HOST_INBOX_EVENTS_PAYLOAD_MISMATCH_TOTAL,
+    AGENT_HOST_LEASE_LOST_TOTAL,
+    AGENT_HOST_CLAIMS_TOTAL,
+    AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL,
+    AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL,
+    AGENT_HOST_NATS_MESSAGES_TENANCY_SKIPPED_TOTAL,
+    AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,
@@ -340,6 +406,18 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
     GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
     GATEWAY_TOOL_POLICY_NATS_CONNECTED,
+    GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+    GATEWAY_DECISION_LOG_RECORDED_TOTAL,
+    GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
+    GATEWAY_DECISION_LOG_DROPPED_TOTAL,
+    GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+    GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+    GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+    GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+    GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
+    GATEWAY_DECISION_LOG_BACKLOG,
+    GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL,
+    GATEWAY_DECISION_LOG_LAST_RESET_TIMESTAMP_SECONDS,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -431,7 +509,31 @@ mod tests {
 
     #[test]
     fn the_gateway_tool_policy_decision_families_are_registered() {
-        for name in [GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL, GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS] {
+        for name in [
+            GATEWAY_TOOL_POLICY_DECISIONS_TOTAL,
+            GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
+            GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
+            GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_decision_log_families_are_registered() {
+        for name in [
+            GATEWAY_DECISION_LOG_RECORDED_TOTAL,
+            GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
+            GATEWAY_DECISION_LOG_DROPPED_TOTAL,
+            GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+            GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+            GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+            GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+            GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
+            GATEWAY_DECISION_LOG_BACKLOG,
+            GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL,
+            GATEWAY_DECISION_LOG_LAST_RESET_TIMESTAMP_SECONDS,
+        ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }
     }

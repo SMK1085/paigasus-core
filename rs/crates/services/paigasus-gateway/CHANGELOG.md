@@ -10,6 +10,8 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-20
+
 ### Added
 
 - A new setting, `[dpop] enabled` (`GATEWAY_DPOP__ENABLED`), turns on the DPoP scheme on the
@@ -21,6 +23,53 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   `invalid-dpop-proof`. The DPoP quota of IAM is 429 `rate-limited` with `Retry-After`. The
   metric `gateway_iam_calls_total` gets the result label `denied`, not `unavailable`. With DPoP
   off, no response changes (SMA-700).
+
+- A new table, `[limits]`, sets a rate limit and a token budget for `POST /v1/chat/completions`. It
+  is off unless the table exists. The settings are `principal_requests_per_minute`,
+  `org_requests_per_minute`, `tokens_per_period` and `budget_period` (`daily`, `weekly` or
+  `monthly`). The `[[limits.org]]` entries set a limit or `exempt = true` for one organization.
+  `backend` is `memory` (default) or `redis`. With `redis`, set `GATEWAY_LIMITS__REDIS_URL`. If
+  Redis is unavailable after boot, the gateway admits requests with no limit and logs it. A
+  refusal is 429 `rate-limited` (with `Retry-After`) or 429 `budget-exhausted` (SMA-677).
+- A new table, `[tool_interception]`, holds each tool call of a chat completion until its
+  arguments are complete. The gateway asks the decider and replaces a blocked call with an
+  assistant notice. It is off by default. A decision is an SSE comment `: paigasus-decision` or,
+  for a non-stream answer, the header `paigasus-tool-decisions`. With `on_failure = "block"`, a
+  non-stream answer that the gateway cannot check is 502 `tool-interception-malformed-response`
+  (SMA-749).
+- A new route, `POST /v1/responses`, serves the OpenAI Responses API with the same tool call
+  interception. It is off by default (`[responses] enabled = false`), and the route answers 404
+  then. With interception on, a request for server-side state is 400
+  `responses-stateful-not-supported` (SMA-769).
+- A new table, `[tool_policy]`, makes Cedar `InvokeTool` decisions. It is off by default and needs
+  `[tool_interception]`. The mode of an organization is `off`, `log_only` or `enforce`.
+  `on_policy_unavailable` is `open` or `closed`, and it has no default. The platform floor is
+  always enforced. The policies come from a directory (`source.kind = "file"`) or from IAM
+  (`source.kind = "iam"`). With `iam`, the gateway needs `iam.service_credential_file`, reads the
+  mode and the fail mode of each organization from IAM, and refuses `[[tool_policy.org]]` entries.
+  An optional `[tool_policy.nats]` table receives policy invalidation events (SMA-752, SMA-775).
+- A blocked `computer_call_output` in `enforce` mode refuses the request with 400
+  `tool-result-unreplaceable` (SMA-776).
+- A new table, `[decision_log]`, records each tool policy decision in a Redis stream. A relay
+  publishes the records to the NATS JetStream stream `GATEWAY_DECISIONS`. It is off by default. It
+  needs `[tool_policy]`, `redis_url`, `digest_key`, `digest_key_id` and `[decision_log.nats]`. A
+  Redis or NATS outage at boot does not stop the gateway. The release also adds a trace export
+  command, metrics and alerts for the log (SMA-755).
+
+### Changed
+
+- The HTTP client of the gateway uses `reqwest` 0.13 with the operating-system trust store. The
+  image no longer has a compiled-in Mozilla root list. On Linux, an empty system store with no
+  `extra_ca_bundle_path` is a client build error (SMA-809).
+- The gateway refuses to boot when `tool_policy.nats.ca_file` is set and the URL is plain
+  `nats://`. `async-nats` 0.53 makes a root certificate imply TLS (SMA-809).
+
+### Fixed
+
+- The gateway charges the last SSE record of a stream that ends without a blank line. Before this
+  fix, the token budget missed that usage (SMA-730).
+- A blocked `shell_call_output` now becomes one schema-valid chunk, with the notice in `stderr`
+  and exit code 1. The upstream accepts it (SMA-776).
 
 ## [0.2.0] - 2026-10-01
 

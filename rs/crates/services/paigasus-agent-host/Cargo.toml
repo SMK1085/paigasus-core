@@ -1,0 +1,98 @@
+[package]
+name = "paigasus-agent-host"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "paigasus-agent-host"
+path = "src/main.rs"
+
+[lib]
+name = "paigasus_agent_host"
+path = "src/lib.rs"
+
+[dependencies]
+# `adapters::persistence` — the migrator and the advisory-lock runner. `postgres-array` binds
+# the `uuid[]` parameters of the claim (`lease_store::claim`).
+sea-orm = { workspace = true, features = ["postgres-array"] }
+sea-orm-migration = { workspace = true }
+async-trait = { workspace = true }
+# `config` — layered configuration.
+figment = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+# `adapters::http` and `adapters::boot` — the routes, the JSON bodies and the shared layers.
+axum = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+paigasus-observability = { workspace = true }
+# `main.rs` — logging, the `describe_*` lines and the boot error type.
+paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0" }
+metrics = { workspace = true }
+anyhow = { workspace = true }
+# `adapters::helikon` — the agent runtime.
+# Exact pin (SMA-786 §6.9): the facade re-exports the core, and one facade PATCH release
+# already moved the core from 0.5 to 0.6. A facade bump re-checks §6.9 of the spec.
+paigasus-helikon = { version = "=0.6.12", default-features = false, features = ["runtime-tokio"] }
+# `application::lease_keeper` — the cancellation token. It is the type that Helikon re-exports.
+tokio-util = { workspace = true }
+paigasus-agent-host-core = { workspace = true }
+# `adapters::persistence` and `application::ingest` — ids and microsecond timestamps.
+# `adapters::helikon::memory_tool::run_nonce` — a random value per run. `v4` needs `getrandom`,
+# which this native-only service crate may use. `tests/memory_pg.rs` also reads scope UUIDs.
+uuid = { workspace = true, features = ["serde", "v4"] }
+jiff = { workspace = true }
+# `adapters::id` — the kernel mints a UUIDv7 from the host clock and `rand` entropy.
+paigasus-kernel = { workspace = true }
+rand = { workspace = true }
+# `adapters::iam::client` — the outbound IAM gRPC adapter (spec §6.2). `tonic` gives the
+# `Channel` and the `Status`; ring-backed rustls and the platform trust store, as in the gateway.
+tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
+# `adapters::http::auth` reads the `ErrorInfo` reason of an IAM `Status`.
+tonic-types = { workspace = true }
+# The generated IAM clients and messages, and the `ErrorReason` registry of `http::error`.
+paigasus-proto = { workspace = true }
+# `adapters::http::ingress` parses and builds the CloudEvents envelope (spec §5.2).
+paigasus-cloudevents = { workspace = true }
+# `adapters::http::service_info` — the `GET /v1/service-info` body (spec §5.3).
+paigasus-service-info = { workspace = true }
+# `adapters::nats::consumer` — the JetStream pull consumer of the inbox (spec §9). The workspace
+# line selects the ring provider (no aws-lc-rs).
+async-nats = { workspace = true }
+# The same creds callback as the gateway and IAM (SMA-493 D8): it re-reads the creds file on every
+# connect attempt. `{ workspace = true }`, so `moon.yml` hand-declares the `dependsOn` edge.
+paigasus-nats-creds = { workspace = true }
+# `adapters::nats::consumer` reads the message stream of the pull consumer. The test model of
+# `adapters::helikon` also names the `BoxStream` type of the core `Model` trait.
+futures = { workspace = true }
+
+# figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+# The Postgres tests. `paigasus-test-docker` owns the Docker-skip policy.
+paigasus-test-docker = { workspace = true }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres", "nats"] }
+reqwest = { workspace = true }
+# reqwest 0.13 uses `rustls-no-provider` (SMA-809). A test installs the `ring` CryptoProvider
+# before it builds a `Client`, or reqwest panics.
+rustls = { workspace = true }
+# `tests/support/fake_iam.rs` — the fake IAM gRPC server listens through a `TcpListenerStream`.
+tokio-stream = { workspace = true, features = ["net"] }
+# The tests of `application::lease_keeper` run on paused time.
+tokio = { workspace = true, features = ["test-util"] }
+# The counter tests of `application::ingest` read a local `DebuggingRecorder`.
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
+# `tests/lease_property_pg.rs` — the sequential property test of the lease and the claim.
+proptest = { workspace = true }
+# `tests/memory_pg.rs` runs the conformance suite of `MemoryStore` against Postgres.
+paigasus-agent-host-core = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

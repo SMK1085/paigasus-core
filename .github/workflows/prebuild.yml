@@ -107,7 +107,7 @@ jobs:
       # Pin node/pnpm/rust via proto (matches .prototools / rust-toolchain.toml). Every leg runs on a
       # real glibc/macOS/Windows host (no job-level container), so GitHub JS actions work everywhere —
       # incl. the musl legs, which cross-compile via zig instead of an Alpine container (that container
-      # can't run JS actions on arm64 and ships pnpm 9 vs the repo's pnpm 11 lockfile — SMA-428 CI,
+      # can't run JS actions on arm64 and ships pnpm 9 vs the repo's pnpm 12 lockfile — SMA-428 CI,
       # decision #6 revised).
       - name: Set up proto + Moon
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095  # v0

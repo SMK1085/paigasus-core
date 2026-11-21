@@ -21,6 +21,8 @@ members = [
   "crates/bindings/paigasus-node-bindings",
   "crates/bindings/paigasus-py-bindings",
   "crates/bindings/paigasus-wasm",
+  "crates/libs/paigasus-agent-host-core",
+  "crates/libs/paigasus-cloudevents",
   "crates/libs/paigasus-gateway-core",
   "crates/libs/paigasus-iam-core",
   "crates/libs/paigasus-kernel",
@@ -33,6 +35,7 @@ members = [
   "crates/libs/paigasus-redis",
   "crates/libs/paigasus-service-info",
   "crates/libs/paigasus-test-docker",
+  "crates/services/paigasus-agent-host",
   "crates/services/paigasus-gateway",
   "crates/services/paigasus-iam",
 ]
@@ -103,7 +106,13 @@ tonic-types = "0.14"
 # expects. Consumers add the features they need (e.g. the iam service's gRPC boot test
 # needs `net` for `TcpListenerStream`); no default features at the workspace baseline.
 tokio-stream = { version = "0.1", default-features = false }
+# tokio-util — the `CancellationToken` of the agent host's `LeaseKeeper` (SMA-787 §8.6). Helikon
+# 0.6.12 re-exports `tokio_util::sync::CancellationToken` as its run-context token, so the two are
+# one type. Keep the 0.7 line that Helikon resolves, so the lock holds one tokio-util.
+tokio-util = { version = "0.7", default-features = false }
 thiserror = "2"
+# jiff: core time type (SMA-786 section 6.2); Helikon core needs >= 0.2.46, which Task 8 brings in.
+jiff = "0.2"
 anyhow = "1"
 figment = { version = "0.10", features = ["toml", "env"] }
 # Prefer native `async fn` in traits (stable since 1.75); use async-trait only when
@@ -182,13 +191,13 @@ proc-macro2 = "1"
 # it. repo:publish-metadata expresses that as a publish GROUP (a connected component of the
 # in-set dependency graph, computed at runtime from `publish = true` crates), running one
 # `cargo publish --dry-run -p paigasus-proto-derive -p paigasus-proto`.
-paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "0.7.0" }
+paigasus-proto-derive = { path = "crates/libs/paigasus-proto-derive", version = "0.8.0" }
 # In-tree path dep: the bindings (and future consumers) build against the live kernel, so a
 # kernel edit rebuilds them. This is also the cargo-side half of the affected-graph edge.
-paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.2.1" }
+paigasus-kernel = { path = "crates/libs/paigasus-kernel", version = "0.3.0" }
 # In-tree path dep: paigasus-iam's gRPC adapter binds the generated `paigasus.iam.v1` types
 # (Task 16) — same in-tree-freshness rationale as paigasus-kernel above.
-paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.7.0" }
+paigasus-proto = { path = "crates/libs/paigasus-proto", version = "0.8.0" }
 # In-tree path dep: the shared observability lib (metrics recorder, `/metrics` router, axum
 # request-metrics layer, metric-name registry — SMA-446 Unit 1). Service crates instrument
 # their hot paths through it (Unit 2 — `paigasus-gateway` is the first consumer); same
@@ -205,6 +214,10 @@ paigasus-nats-creds = { path = "crates/libs/paigasus-nats-creds", version = "0.0
 # In-tree path dep: the gateway's sans-IO tool-call interception core (SMA-749). `version` is
 # required: `rs/deny.toml` sets `wildcards = "deny"`.
 paigasus-gateway-core = { path = "crates/libs/paigasus-gateway-core", version = "0.0.0" }
+# In-tree path dep: the agent host's pure domain crate (SMA-786). `version` is required:
+# `rs/deny.toml` sets `wildcards = "deny"`.
+paigasus-agent-host-core = { path = "crates/libs/paigasus-agent-host-core", version = "0.0.0" }
+paigasus-cloudevents = { path = "crates/libs/paigasus-cloudevents", version = "0.0.0" }
 # paigasus-service-info — the shared `ServiceInfo` builder + HTTP DTO (SMA-505). Owns the wire
 # invariants both services must not re-derive: the UNSPECIFIED sentinel is never advertised,
 # ordering is deterministic, and `capabilities` is always emitted (as `[]` when empty) so a
@@ -233,9 +246,11 @@ sea-orm-migration = { version = "2", default-features = false, features = [
 # the JWKS cache; rustls + bundled webpki roots match the reqwest posture above — no
 # second crypto provider). Default features (acl/streams/geospatial/script/num-bigint)
 # are all unneeded for a plain SET/GET cache, so trimmed — same "minimal baseline, add
-# per-crate" posture as reqwest/sea-orm above.
+# per-crate" posture as reqwest/sea-orm above. `streams` (SMA-755) is the one exception: the
+# gateway decision log writes a Redis Stream (`XADD`, and `XREADGROUP`/`XAUTOCLAIM` in the relay).
+# It adds the `redis::streams` types only and no crate (measured with `cargo tree -e features`).
 redis = { version = "1", default-features = false, features = [
-  "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots",
+  "tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots", "streams",
 ] }
 # cedar-policy — embedded Cedar authorization engine (ADR-0013). Pure evaluation; consumed by
 # paigasus-iam-core + paigasus-iam, and by paigasus-kernel under its off-by-default feature

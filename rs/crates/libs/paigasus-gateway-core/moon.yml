@@ -27,3 +27,6 @@ tasks:
     deps: ['^:build']
   test:
     deps: ['^:build']
+    # SMA-755: the encoder test writes and checks the trace fixtures of the policy compiler.
+    inputs:
+      - '/rs/tools/paigasus-policy-compiler/tests/fixtures/decision-trace*'

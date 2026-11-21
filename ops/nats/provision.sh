@@ -80,7 +80,15 @@ add_user() {
 
 add_user iam-publisher    PUBLISHER_PUB   PUBLISHER_SUB
 add_user gateway-consumer CONSUMER_PUB    CONSUMER_SUB
+add_user agent-host-consumer AGENT_HOST_CONSUMER_PUB AGENT_HOST_CONSUMER_SUB
 add_user iam-provisioner  PROVISIONER_PUB PROVISIONER_SUB
+
+# --- 2b. The gateway decision-log account (SMA-755) ----------------------------------------------
+# A separate account with its own limits and three users. It is a child run of the same bash, with the
+# same OPERATOR, OUT_DIR, NATS_URL and PUSH. It is idempotent, so a re-run of this script is safe. On
+# pass two (PUSH=1) it also pushes its account and makes the GATEWAY_DECISIONS stream. It runs before the
+# resolver config below, so that the config holds both accounts.
+"${BASH:-bash}" "$here/provision-decisions.sh"
 
 # --- 3. Resolver config -----------------------------------------------------------------------
 # The broker needs this stanza to validate the account JWTs minted above. Without it, every
@@ -145,5 +153,25 @@ nats --server "$NATS_URL" --creds "$OUT_DIR/iam-provisioner.creds" \
   --max-deliver 5 \
   --defaults
 
-echo "provisioned. Deploy iam-publisher.creds with paigasus-iam and gateway-consumer.creds with the gateway."
+# The agent host's durable (SMA-787 §9.2). The host never creates a stream or a consumer, so the
+# operator makes this durable here. Each flag has a reason:
+#   --pull            the host fetches batches; no push delivery, no deliver subject.
+#   --ack explicit    the host acks each message after its handler ran; no ack, no progress.
+#   --deliver new     a new durable reads only events from now on. The host does not replay history.
+#   --max-deliver=-1  unlimited redelivery. A failed message must not drop out of the inbox. The
+#                     `=` form is needed because natscli reads `-1` as a flag otherwise.
+#   --wait 30s        the ack wait. A message with no ack in 30 s is redelivered.
+# One `--filter` per subject, never comma-joined (see the gateway durable above).
+agent_filter_args=()
+for s in "${AGENT_HOST_FILTER_SUBJECTS[@]}"; do agent_filter_args+=(--filter "$s"); done
+nats --server "$NATS_URL" --creds "$OUT_DIR/iam-provisioner.creds" \
+  consumer add "$STREAM_NAME" "$AGENT_HOST_DURABLE_NAME" \
+  --pull "${agent_filter_args[@]}" \
+  --ack explicit \
+  --deliver new \
+  --max-deliver=-1 \
+  --wait 30s \
+  --defaults
+
+echo "provisioned. Deploy iam-publisher.creds with paigasus-iam, gateway-consumer.creds with the gateway and agent-host-consumer.creds with the agent host."
 echo "KEEP iam-provisioner.creds OUT of any deployment — it can create and delete streams."

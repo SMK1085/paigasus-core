@@ -14,6 +14,13 @@
 extern crate self as paigasus_proto;
 
 pub mod paigasus {
+    pub mod agents {
+        pub mod v1 {
+            // Generated code is excluded from the strict lint gate.
+            #![allow(clippy::all, warnings)]
+            include!("generated/paigasus/agents/v1/paigasus.agents.v1.rs");
+        }
+    }
     pub mod gateway {
         pub mod v1 {
             // Generated code is excluded from the strict lint gate.

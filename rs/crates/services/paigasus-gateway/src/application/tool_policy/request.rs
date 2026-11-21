@@ -12,7 +12,8 @@ use std::time::Instant;
 use bytes::Bytes;
 use metrics::{counter, histogram};
 use paigasus_gateway_core::{
-    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, plan_request, rewrite_request,
+    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, name_collisions, plan_request,
+    rewrite_request,
 };
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
 use paigasus_kernel::{Prn, to_cedar_uid};
@@ -20,6 +21,8 @@ use paigasus_observability::names;
 use uuid::Uuid;
 
 use super::cache::{Lookup, PolicyCache};
+use super::decider::finding_label;
+use crate::application::decision_log::DecisionRecorder;
 use crate::config::ToolPolicySettings;
 use crate::domain::org_of;
 use crate::domain::tool_policy::TenantSettings;
@@ -80,6 +83,7 @@ pub struct RequestOutcome {
 pub struct RequestToolPolicy {
     cache: Arc<PolicyCache>,
     settings: ToolPolicySettings,
+    recorder: Arc<DecisionRecorder>,
 }
 
 /// Count and log a refusal, or a refusal that enforce mode would make (P-10, D17: log-only is
@@ -122,8 +126,14 @@ impl Drop for OverheadSample {
 impl RequestToolPolicy {
     /// `settings` must come from a config that passed `GatewayConfig::validate`.
     #[must_use]
-    pub fn new(cache: Arc<PolicyCache>, settings: ToolPolicySettings) -> Self {
-        RequestToolPolicy { cache, settings }
+    pub fn new(cache: Arc<PolicyCache>, settings: ToolPolicySettings, recorder: Arc<DecisionRecorder>) -> Self {
+        RequestToolPolicy { cache, settings, recorder }
+    }
+
+    /// The shared decision recorder (P-8).
+    #[must_use]
+    pub fn recorder(&self) -> &Arc<DecisionRecorder> {
+        &self.recorder
     }
 
     #[cfg(test)]
@@ -213,10 +223,11 @@ impl RequestToolPolicy {
     }
 
     /// D17, P-10: an unreadable turn is refused only in enforce mode; log-only counts it.
-    fn check_turn(ctx: &DecisionContext, turn: &ToolTurn, mode: TenantMode) -> Result<(), Refused> {
+    fn check_turn(&self, ctx: &DecisionContext, turn: &ToolTurn, mode: TenantMode) -> Result<(), Refused> {
         if !matches!(turn, ToolTurn::Parsed(_)) && mode != TenantMode::Off {
             refusal_event(ctx, mode, &Refusal::UnreadableTurn, "unreadable_turn", mode == TenantMode::Enforce);
             if mode == TenantMode::Enforce {
+                self.recorder.record_refusal(ctx, Some(mode));
                 return Err(Refused {
                     refusal: Refusal::UnreadableTurn,
                     entries: Vec::new(),
@@ -224,6 +235,13 @@ impl RequestToolPolicy {
             }
         }
         Ok(())
+    }
+
+    /// One decision record per request entry (SMA-755 P-5).
+    fn record_entries(&self, ctx: &DecisionContext, mode: TenantMode, entries: &[RequestEntry]) {
+        for e in entries {
+            self.recorder.record_request(ctx, Some(mode), e);
+        }
     }
 
     async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refused> {
@@ -239,23 +257,29 @@ impl RequestToolPolicy {
                 } else {
                     fin.on_unavailable
                 };
-                Self::check_turn(ctx, turn, fin.mode)?;
+                self.check_turn(ctx, turn, fin.mode)?;
                 (set, fin.mode, on)
             }
             _ => {
                 // D7, D34: the settings of the scope's org; without an org, the global values.
                 let (mode, on) = org.map_or((self.settings.default_mode, self.settings.on_policy_unavailable), |o| self.settings.tenant(o));
-                Self::check_turn(ctx, turn, mode)?;
+                self.check_turn(ctx, turn, mode)?;
                 (self.policy_set(ctx, org, mode, on, model, format).await, mode, on)
             }
         };
         let snapshot = PolicySnapshot::new(set, mode, on);
 
         let (body, entries) = if let ToolTurn::Parsed(facts) = turn {
+            // One finding per colliding tool name (SMA-755 § 5.9).
+            for _ in name_collisions(&facts.definitions) {
+                counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "request", "kind" => finding_label("name_collision")).increment(1);
+            }
             let plan = plan_request(&snapshot, format, facts);
             if let Some(cause) = plan.refusal() {
                 let refusal = Refusal::from_cause(cause);
                 refusal_event(ctx, mode, &refusal, refusal.label(), true);
+                self.record_entries(ctx, mode, &plan.entries);
+                self.recorder.record_refusal(ctx, Some(mode));
                 return Err(Refused { refusal, entries: plan.entries });
             }
             let body = if plan.is_noop() {
@@ -266,6 +290,8 @@ impl RequestToolPolicy {
                 // Never send the original bytes for an enforced plan (controller ruling, Task 10).
                 // This request is refused, so it counts once: the unenforced causes stay silent.
                 refusal_event(ctx, mode, &Refusal::UnreadableTurn, "rewrite_failed", true);
+                self.record_entries(ctx, mode, &plan.entries);
+                self.recorder.record_refusal(ctx, Some(mode));
                 return Err(Refused {
                     refusal: Refusal::UnreadableTurn,
                     entries: plan.entries,
@@ -286,6 +312,7 @@ impl RequestToolPolicy {
             counter!(names::GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, "side" => "request", "mode" => mode.as_str(), "effect" => effect, "basis" => "policy").increment(1);
         }
 
+        self.record_entries(ctx, mode, &entries);
         let snapshot = Arc::new(snapshot.with_request_elapsed(started.elapsed()));
         Ok(RequestOutcome { body, entries, snapshot })
     }
@@ -354,6 +381,82 @@ mod tests {
         v["tools"]
             .as_array()
             .map_or_else(Vec::new, |a| a.iter().map(|t| t["function"]["name"].as_str().expect("name").to_owned()).collect())
+    }
+
+    #[tokio::test]
+    async fn a_removal_and_a_refusal_are_recorded() {
+        use paigasus_gateway_core::decision_log::{AppliedEffect, RecordedAction, Side};
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        // A removal that the request goes on with: one record.
+        let (log, rec) = testing::memory_recorder();
+        let enforce = testing::policy_with(&source, settings(TenantMode::Enforce), rec);
+        let out = run(&enforce, chat_request(&["x", "y"], "")).await.expect("forwarded");
+        assert_eq!(tool_names(&out.body), ["y"]);
+        let records = log.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(
+            (records[0].request_action, records[0].applied, records[0].side),
+            (Some(RecordedAction::RemoveDefinition), AppliedEffect::Block, Side::Request)
+        );
+        assert_eq!(
+            (records[0].tool.name.as_str(), records[0].block_code, records[0].mode),
+            ("x", Some(BlockCode::Policy), Some(TenantMode::Enforce))
+        );
+        // A refused request: its entry, then one refusal record.
+        let (log, rec) = testing::memory_recorder();
+        let enforce = testing::policy_with(&source, settings(TenantMode::Enforce), rec);
+        let refused = run(&enforce, chat_request(&["x", "y"], r#","tool_choice":"weird""#)).await.expect_err("refused");
+        assert_eq!(refused.refusal, Refusal::UnknownToolChoice);
+        let records = log.records();
+        let actions: Vec<_> = records.iter().map(|r| r.request_action).collect();
+        assert_eq!(actions, [Some(RecordedAction::RemoveDefinition), Some(RecordedAction::Refuse)], "{records:?}");
+        let refusal = &records[1];
+        assert_eq!((refusal.applied, refusal.block_code, refusal.tool.name.as_str()), (AppliedEffect::Block, None, ""));
+        assert_eq!(records.iter().map(|r| r.sequence).collect::<Vec<_>>(), [1, 2]);
+        // An unreadable turn in enforce is refused with no entry: only the refusal record.
+        let (log, rec) = testing::memory_recorder();
+        let enforce = testing::policy_with(&source, settings(TenantMode::Enforce), rec);
+        let dup = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
+        assert_eq!(run(&enforce, dup).await.err().map(|r| r.refusal), Some(Refusal::UnreadableTurn));
+        let actions: Vec<_> = log.records().iter().map(|r| r.request_action).collect();
+        assert_eq!(actions, [Some(RecordedAction::Refuse)]);
+    }
+
+    #[tokio::test]
+    async fn a_log_only_would_refuse_writes_no_refusal_record() {
+        use paigasus_gateway_core::decision_log::{AppliedEffect, RecordedAction};
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        let (log, rec) = testing::memory_recorder();
+        let log_only = testing::policy_with(&source, settings(TenantMode::LogOnly), rec);
+        // An unreadable turn: forwarded, counted as a would-refuse, no record at all.
+        let dup = Bytes::from_static(br#"{"model":"m","model":"n","messages":[]}"#);
+        run(&log_only, dup).await.expect("log_only forwards");
+        assert!(log.records().is_empty(), "{:?}", log.records());
+        // An unknown tool choice with a tenant removal: forwarded. The removal is recorded as observed, there is no refusal.
+        run(&log_only, chat_request(&["x", "y"], r#","tool_choice":"weird""#)).await.expect("log_only forwards");
+        let records = log.records();
+        assert_eq!(records.iter().map(|r| r.request_action).collect::<Vec<_>>(), [Some(RecordedAction::RemoveDefinition)], "{records:?}");
+        assert_eq!(records[0].applied, AppliedEffect::Observe);
+    }
+
+    #[tokio::test]
+    async fn request_side_findings_are_counted() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let enforce = testing::policy(&source, settings(TenantMode::Enforce));
+        // Two definitions with one normal form, and one that is alone.
+        run(&enforce, chat_request(&["a", "A", "b"], "")).await.expect("forwarded");
+        let m = Snap::take(&snapshotter);
+        let finding = |side: &str, kind: &str| m.counter(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
+        assert_eq!((finding("request", "name_collision"), finding("response", "name_collision")), (1, 0));
+        // No collision, no finding.
+        run(&enforce, chat_request(&["a", "b"], "")).await.expect("forwarded");
+        assert_eq!(
+            Snap::take(&snapshotter).counter(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", "request"), ("kind", "name_collision")]),
+            0
+        );
     }
 
     #[tokio::test]
@@ -723,7 +826,7 @@ mod tests {
             let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
             let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
             let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
-            let outcomes = decide_calls(&out.snapshot, &turn, &calls);
+            let outcomes = decide_calls(&out.snapshot, &turn, &calls, &Instant::now);
             let want = if global == OnUnavailable::Closed {
                 Decision::Block { code: BlockCode::PolicyUnavailable }
             } else {
@@ -826,7 +929,7 @@ mod tests {
         let mut s = settings_from_source(TenantMode::Enforce);
         s.on_policy_unavailable = global;
         let cache = PolicyCache::new(Arc::new(IamHistoryAnswer(answer)), crate::application::tool_policy::CacheSettings::from_settings(&s));
-        RequestToolPolicy::new(cache, s)
+        RequestToolPolicy::new(cache, s, Arc::new(DecisionRecorder::tracing()))
     }
 
     /// The decision on one call to the tool `y` under `snapshot`.
@@ -834,7 +937,7 @@ mod tests {
         let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
         let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
         let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
-        let outcomes = decide_calls(snapshot, &turn, &calls);
+        let outcomes = decide_calls(snapshot, &turn, &calls, &Instant::now);
         assert_eq!(outcomes.len(), 1);
         outcomes[0].decision
     }

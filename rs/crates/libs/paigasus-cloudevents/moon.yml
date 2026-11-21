@@ -1,0 +1,17 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+id: 'paigasus-cloudevents-rs'
+layer: 'library'
+language: 'rust'
+
+dependsOn: []
+
+# SMA-528 — this crate has no upstream crate, so the group is empty.
+fileGroups:
+  upstreams: []
+
+tasks:
+  build:
+    deps: ['^:build']
+  test:
+    deps: ['^:build']

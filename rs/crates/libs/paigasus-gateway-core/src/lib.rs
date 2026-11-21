@@ -7,6 +7,7 @@
 mod anthropic;
 mod body;
 mod decider;
+pub mod decision_log;
 mod interceptor;
 mod json;
 mod limits;
@@ -20,7 +21,7 @@ mod turn;
 mod types;
 
 pub use body::{BodyCalls, parse_body};
-pub use decider::{AllowAll, DecideFuture, DecisionContext, ToolCallDecider};
+pub use decider::{AllowAll, DecideFuture, DecidedCall, DecisionContext, ToolCallDecider};
 pub use interceptor::{Action, DeciderError, Interceptor, Metric};
 pub use json::Malformed;
 pub use limits::{Limits, OnFailure};

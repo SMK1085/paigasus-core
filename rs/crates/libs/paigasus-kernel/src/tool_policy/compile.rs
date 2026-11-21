@@ -266,15 +266,36 @@ impl ToolPolicies {
     }
 }
 
+/// The action group of a tool name: the parent of its Cedar action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActionGroup {
+    /// The name is in the catalog (parent `InvokeTool`).
+    Catalog,
+    /// The name is not in the catalog (parent `Unregistered`).
+    Unregistered,
+}
+
+impl ActionGroup {
+    /// The wire name of the group.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::Unregistered => "unregistered",
+        }
+    }
+}
+
 /// The action of a call, with parent `InvokeTool` (a catalog name) or `Unregistered` (D22).
-pub(crate) fn action_entity(policies: &ToolPolicies, normalised: &str) -> (EntityUid, Entities) {
+pub(crate) fn action_entity(policies: &ToolPolicies, normalised: &str) -> (EntityUid, Entities, ActionGroup) {
     let uid = action_uid(normalised);
     if policies.catalog.contains(normalised) {
-        return (uid, policies.entities.clone());
+        return (uid, policies.entities.clone(), ActionGroup::Catalog);
     }
     let entity = Entity::new_no_attrs(uid.clone(), HashSet::from([action_uid(GROUP_UNREGISTERED)]));
     let entities = policies.entities.clone().add_entities([entity], None).expect("a new action entity adds to the action entities");
-    (uid, entities)
+    (uid, entities, ActionGroup::Unregistered)
 }
 
 #[cfg(test)]
@@ -369,13 +390,13 @@ mod tests {
     #[test]
     fn catalog_and_unregistered_parents() {
         let p = compile_with_catalog(&["Read_File"]).unwrap();
-        let (uid, ents) = action_entity(&p, "read_file");
+        let (uid, ents, _) = action_entity(&p, "read_file");
         assert_eq!(parents(&ents, &uid), [GROUP_INVOKE]);
-        let (uid, ents) = action_entity(&p, "x");
+        let (uid, ents, _) = action_entity(&p, "x");
         assert_eq!(uid.id().unescaped(), "x");
         assert_eq!(parents(&ents, &uid), [GROUP_UNREGISTERED]);
         // The catalog entities stay unchanged for the next call.
-        let (uid, ents) = action_entity(&p, "read_file");
+        let (uid, ents, _) = action_entity(&p, "read_file");
         assert_eq!(parents(&ents, &uid), [GROUP_INVOKE]);
     }
 

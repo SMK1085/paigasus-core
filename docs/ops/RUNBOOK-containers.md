@@ -243,6 +243,9 @@ build itself — they bite the first operator who deploys without reading this s
     AND ((l.classid::bigint << 32) | l.objid::bigint) = 5580559;
   ```
 
+  The agent host (`paigasus-agent-host`) uses the key `5580786` in its own database. Run the same
+  query against the agent-host database and replace `5580559` with `5580786`.
+
   The parentheses are load-bearing — Postgres gives `<<` and `|` equal precedence. Then
   `SELECT pg_terminate_backend(<pid>)`. **This needs privileges the IAM application role usually
   lacks**: `query_start` reads as NULL for other users' backends without `pg_read_all_stats`, and

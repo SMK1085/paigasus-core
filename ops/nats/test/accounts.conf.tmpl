@@ -37,10 +37,48 @@ accounts {
         }
       },
       {
+        nkey: "{{AGENT_HOST_CONSUMER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.agent-host-inbox", "$JS.API.CONSUMER.INFO.IAM_EVENTS.agent-host-inbox", "$JS.ACK.IAM_EVENTS.agent-host-inbox.>" ] }
+          subscribe: { allow: [ "_INBOX_AGH.>" ] }
+        }
+      },
+      {
         nkey: "{{PROVISIONER_NKEY}}"
         permissions: {
           publish:   { allow: [ "$JS.API.INFO", "$JS.API.STREAM.>", "$JS.API.CONSUMER.>" ] }
           subscribe: { allow: [ "_INBOX_PROV.>" ] }
+        }
+      }
+    ]
+  }
+
+  # The gateway tool decision log (SMA-755). A separate account, so a full decision stream cannot stop
+  # IAM_EVENTS. max_mem 0: the stream is file-backed. The reader's ordered consumer asks for memory
+  # storage of its state (async-nats 0.53 sets memory_storage), and the broker accepts it under max_mem 0.
+  PAIGASUS_GATEWAY: {
+    jetstream: { max_mem: 0, max_file: 268435456, max_streams: 2, max_consumers: 16 }
+
+    users: [
+      {
+        nkey: "{{GW_DEC_PUBLISHER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "gateway.decision.>", "$JS.API.INFO", "$JS.API.STREAM.INFO.GATEWAY_DECISIONS", "$JS.API.STREAM.CREATE.GATEWAY_DECISIONS", "$JS.API.STREAM.INFO.KV_GATEWAY_DECISIONS_GEN", "$JS.API.DIRECT.GET.KV_GATEWAY_DECISIONS_GEN.>", "$KV.GATEWAY_DECISIONS_GEN.>" ] }
+          subscribe: { allow: [ "_INBOX_GW_DEC.>" ] }
+        }
+      },
+      {
+        nkey: "{{GW_DEC_READER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS", "$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS.>", "$JS.API.CONSUMER.DELETE.GATEWAY_DECISIONS.*", "$JS.API.CONSUMER.MSG.NEXT.GATEWAY_DECISIONS.*", "$JS.API.CONSUMER.INFO.GATEWAY_DECISIONS.*" ] }
+          subscribe: { allow: [ "_INBOX_GW_RD.>" ] }
+        }
+      },
+      {
+        nkey: "{{GW_DEC_PROVISIONER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.INFO", "$JS.API.STREAM.>" ] }
+          subscribe: { allow: [ "_INBOX_GW_PROV.>" ] }
         }
       }
     ]

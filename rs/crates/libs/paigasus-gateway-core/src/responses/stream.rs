@@ -255,9 +255,14 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::decider::DecidedCall;
     use crate::interceptor::{Action, Interceptor, Metric};
     use crate::limits::Limits;
     use crate::types::{Decision, Format, ToolCall};
+
+    fn plain(d: Vec<Decision>) -> Vec<DecidedCall> {
+        d.into_iter().map(DecidedCall::from).collect()
+    }
 
     fn rec(v: &Value) -> Record {
         Record {
@@ -701,7 +706,7 @@ mod tests {
         assert!(i.is_deciding(HoldKey::Response), "the hold is still the decider's");
         assert!(acts.contains(&Action::Count(Metric::RecordDropped("after_done"))), "{acts:?}");
         assert!(!acts.contains(&Action::Count(Metric::OnFailure("malformed"))), "{acts:?}");
-        let out = emitted(&i.decided(HoldKey::Response, Ok(vec![Decision::Block { code: BlockCode::Policy }]), t0));
+        let out = emitted(&i.decided(HoldKey::Response, Ok(plain(vec![Decision::Block { code: BlockCode::Policy }])), t0));
         assert!(out.contains("(policy)") && !out.contains("X1") && !out.contains("(malformed)"), "{out}");
     }
 
@@ -719,7 +724,7 @@ mod tests {
             before.contains(r#""position":1,"name":"web_search_call""#) && before.contains(r#""decision":"unenforceable""#),
             "{before}"
         );
-        let after = emitted(&i.decided(HoldKey::Response, Ok(vec![Decision::Allow]), t0));
+        let after = emitted(&i.decided(HoldKey::Response, Ok(plain(vec![Decision::Allow])), t0));
         let call = after
             .find("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0")
             .expect("call released");
@@ -823,10 +828,10 @@ mod tests {
                             decides += 1;
                             use crate::types::ToolCallKind as K;
                             assert!(calls.iter().all(|c| matches!(c.kind, K::Function | K::Custom | K::Computer | K::Shell | K::ApplyPatch)), "{name}");
-                            pending.extend(i.decided(hold, Ok(vec![Decision::Allow; calls.len()]), t0));
+                            pending.extend(i.decided(hold, Ok(plain(vec![Decision::Allow; calls.len()])), t0));
                         }
                         Action::Count(m) => assert!(!matches!(m, Metric::RecordDropped(_)), "{name}: {m:?}"),
-                        Action::Wake(_) => {}
+                        Action::Wake(_) | Action::Reported(_) => {}
                     }
                 }
             }

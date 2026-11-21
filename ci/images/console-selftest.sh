@@ -624,8 +624,8 @@ stub_reset() {
 # The fixture .prototools for the N rows: a fixed node pin, so a Node bump in the real
 # .prototools does not red this self-test.
 mkdir -p "$T/fx-node" "$T/fx-nopin"
-printf '%s\n' 'node = "24.16.0"' 'pnpm = "11.3.0"' > "$T/fx-node/.prototools"
-printf '%s\n' 'pnpm = "11.3.0"' > "$T/fx-nopin/.prototools"
+printf '%s\n' 'node = "24.16.0"' 'pnpm = "12.22.0"' > "$T/fx-node/.prototools"
+printf '%s\n' 'pnpm = "12.22.0"' > "$T/fx-nopin/.prototools"
 
 # SMA-688: each image row takes `<app> <image>` and must hand docker the IMAGE, never a name it
 # builds from `<app>`. The rows pass the load-oci name, which differs from `<app>:dev`, so a row
@@ -1300,7 +1300,7 @@ pin_rows P16 "$T/fn-console_smoke_cleanup.sh" 'docker network rm "$CONSOLE_SMOKE
 # library) and fails unless each CONSOLE smoke step sets CONSOLE_PARITY_REQUIRED: '1' in its own
 # step env, nothing else sets the variable, and the host-build step comes first. A console smoke
 # step is a step whose run: calls `ci/images/run.sh all-consoles`, or `ci/images/run.sh smoke`
-# with a first argument other than the cargo keys iam and gateway.
+# with a first argument other than the cargo keys iam, gateway and agent-host.
 W1_WF="$REPO/.github/workflows/images.yml"
 
 # w1_scan <workflow> — one line per step of the steps: list, in file order:
@@ -1337,7 +1337,7 @@ w1_scan() {
         rest = substr(line, p + 22)
         if (rest == "" || substr(rest, 1, 1) == " ") {
           sub(/^ +/, "", rest); w = rest; sub(/ .*/, "", w); gsub("[\"" q "]", "", w)
-          if (w != "" && w != "iam" && w != "gateway") console = 1
+          if (w != "" && w != "iam" && w != "gateway" && w != "agent-host") console = 1
         }
       }
     }
