@@ -382,6 +382,41 @@ async fn a_refusal_keeps_the_outer_transaction_usable() {
 }
 
 #[tokio::test]
+async fn a_sql_error_in_the_savepoint_is_a_store_error_and_the_transaction_stays_usable() {
+    let Some(env) = env().await else {
+        eprintln!("skipping timer_store_pg: Docker unavailable");
+        return;
+    };
+    let x = new_inbox(&env).await;
+    let y = new_inbox(&env).await;
+    let now = env.store.db_now().await.expect("now");
+    // The thread belongs to inbox Y. The composite foreign key (thread_id, inbox_id) fails with 23503.
+    let bad = Timer::new(TimerParts {
+        id: TimerId::from_uuid(Uuid::new_v4()),
+        inbox: x.id.clone(),
+        kind: TimerKind::FollowUp,
+        thread: Some(ThreadId::from_uuid(y.thread)),
+        note: Note::parse("check the build").expect("note"),
+        origin: TimerOrigin::Agent,
+        status: TimerStatus::Active,
+        next_fire_at: hours(now, 1),
+    });
+
+    let txn = env.db.begin().await.expect("begin");
+    support::timer::lock_lease_row(&txn, x.uuid).await;
+    let err = env.store.apply_in(&txn, &x.id, &TimerCaps::default(), ins(vec![bad])).await.expect_err("foreign key");
+    assert!(matches!(err, ApplyError::Store(_)), "{err:?}");
+    let row = txn
+        .query_one_raw(Statement::from_string(DatabaseBackend::Postgres, "SELECT 1::bigint AS n"))
+        .await
+        .expect("the outer transaction still runs a query")
+        .expect("row");
+    assert_eq!(row.try_get::<i64>("", "n").expect("n"), 1);
+    txn.commit().await.expect("the outer transaction commits");
+    assert_eq!(count(&env, &x, "").await, 0);
+}
+
+#[tokio::test]
 async fn the_lease_row_lock_serializes_apply_in() {
     let Some(env) = env().await else {
         eprintln!("skipping timer_store_pg: Docker unavailable");

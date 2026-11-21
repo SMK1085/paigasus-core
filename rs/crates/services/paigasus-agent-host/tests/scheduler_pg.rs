@@ -215,6 +215,11 @@ async fn crash_between_insert_and_commit() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert_eq!(
+        support::scalar_i64(&env.db, &format!("SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE pid = {pid}")).await,
+        0,
+        "the backend of A is still alive after 5 s, so B would skip the locked row"
+    );
     assert_eq!(support::timer::timer_events(&env.db, ib.uuid).await.len(), 0, "the insert of A never committed");
 
     let pool_b = support::connect(&env.url).await;
@@ -332,9 +337,45 @@ async fn a_double_fire_is_a_matching_duplicate() {
     assert_eq!(sched.fire_due(10).await.expect("pass"), 1);
     assert_eq!(events_like(&env, &ib, &format!("timer:{id}:{}", format_fire_at(at))).await, 1, "one event for the ce_id");
     assert_eq!(support::lease::counter(&recorder, names::AGENT_HOST_TIMER_FIRED_TOTAL, Some(("outcome", "duplicate"))), 1);
+    // A matching duplicate: the stored data equals the data of the second build, so the fire path
+    // takes the `payload_matches = true` branch and logs no warning.
+    let stored = support::timer::timer_events(&env.db, ib.uuid).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].envelope["data"],
+        json!({
+            "timerId": id.hyphenated().to_string(),
+            "origin": "TIMER_ORIGIN_AGENT",
+            "kind": "TIMER_KIND_SCHEDULE",
+            "fireAt": format_fire_at(at),
+            "note": "",
+            "cron": "0 * * * *",
+            "tz": "UTC",
+        })
+    );
     let state = support::timer::timer_state(&env.db, id).await;
     assert_eq!(state.fire_count, 2);
     assert!(state.next_fire_at_us > now.as_microsecond(), "the row advanced again");
+}
+
+#[tokio::test]
+async fn two_back_offs_from_the_same_read_count_one_attempt() {
+    let Some(env) = env().await else {
+        eprintln!("skipping scheduler_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let id = due_follow_up(&env, &ib, 30).await;
+    let before = db_now(&env).await;
+    let sched = scheduler(&env.db, settings());
+    // Two workers read `fire_attempts = 0` and both fail. Only the first back-off counts.
+    assert!(sched.back_off_after_read(id, 0, "test category").await.expect("first"));
+    assert!(!sched.back_off_after_read(id, 0, "test category").await.expect("second"), "the second found the row changed");
+    let state = support::timer::timer_state(&env.db, id).await;
+    assert_eq!((state.status.as_str(), state.fire_attempts), ("active", 1));
+    // The wait comes from the value that was read: base 60 s * 2^0.
+    let wait_us = state.next_fire_at_us - before.as_microsecond();
+    assert!((59_000_000..=62_000_000).contains(&wait_us), "{wait_us}");
 }
 
 #[tokio::test]

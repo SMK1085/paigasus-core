@@ -225,6 +225,7 @@ impl PgScheduler {
                 fail: Fail::Permanent { category },
             } => {
                 metrics::counter!(paigasus_observability::names::AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL, "class" => "permanent").increment(1);
+                // `false` means another worker handled the row. The row is still processed.
                 self.back_off(&ctx, &category).await?;
                 Ok(true)
             }
@@ -280,19 +281,22 @@ impl PgScheduler {
     }
 
     /// Put a bad row back by the back-off, or to `failed` at the last attempt. It runs in a new
-    /// transaction, after the fire transaction rolled back.
-    async fn back_off(&self, ctx: &Ctx, category: &str) -> Result<(), RepositoryError> {
+    /// transaction, after the fire transaction rolled back. It returns `false` when another worker
+    /// already handled the row since this worker read `ctx.attempts`.
+    async fn back_off(&self, ctx: &Ctx, category: &str) -> Result<bool, RepositoryError> {
         let txn = self.db.begin().await.map_err(|e| transient(&e.to_string()))?;
         match self.back_off_in(&txn, ctx, category).await {
             Ok(status) => {
                 txn.commit().await.map_err(|e| transient(&e.to_string()))?;
-                if status.as_deref() == Some("failed") {
-                    metrics::counter!(paigasus_observability::names::AGENT_HOST_TIMER_FAILED_TOTAL, "kind" => ctx.kind.clone(), "origin" => ctx.origin.clone()).increment(1);
-                    tracing::warn!(timer_id = %ctx.id, category, "a timer is failed after too many attempts");
-                } else {
-                    tracing::info!(timer_id = %ctx.id, category, "a timer fire failed and is backed off");
+                match status.as_deref() {
+                    None => return Ok(false),
+                    Some("failed") => {
+                        metrics::counter!(paigasus_observability::names::AGENT_HOST_TIMER_FAILED_TOTAL, "kind" => ctx.kind.clone(), "origin" => ctx.origin.clone()).increment(1);
+                        tracing::warn!(timer_id = %ctx.id, category, "a timer is failed after too many attempts");
+                    }
+                    Some(_) => tracing::info!(timer_id = %ctx.id, category, "a timer fire failed and is backed off"),
                 }
-                Ok(())
+                Ok(true)
             }
             Err(e) => {
                 let _ = txn.rollback().await;
@@ -301,6 +305,30 @@ impl PgScheduler {
         }
     }
 
+    /// Back off one row from the `fire_attempts` value that a fire read. It returns `false` when
+    /// the row changed since that read, so no second attempt is counted. It exists for the test of
+    /// that race.
+    ///
+    /// # Errors
+    /// A database error.
+    pub async fn back_off_after_read(&self, id: Uuid, attempts_read: i64, category: &str) -> Result<bool, RepositoryError> {
+        let row = self
+            .db
+            .query_one_raw(stmt("SELECT kind, origin FROM timer WHERE id = $1", vec![id.into()]))
+            .await
+            .map_err(|e| transient(&e.to_string()))?
+            .ok_or_else(|| RepositoryError::Store("the timer does not exist".to_string()))?;
+        let ctx = Ctx {
+            id,
+            kind: row.try_get("", "kind").map_err(|e| transient(&e.to_string()))?,
+            origin: row.try_get("", "origin").map_err(|e| transient(&e.to_string()))?,
+            attempts: attempts_read,
+        };
+        self.back_off(&ctx, category).await
+    }
+
+    /// The UPDATE matches only while `fire_attempts` still has the value that the fire read. The
+    /// wait comes from that same value. No row means that another worker handled the row.
     async fn back_off_in(&self, txn: &DatabaseTransaction, ctx: &Ctx, category: &str) -> Result<Option<String>, DbErr> {
         let ms = self.settings.statement_timeout.as_millis().max(1);
         txn.execute_unprepared(&format!("SET LOCAL statement_timeout = '{ms}ms'")).await?;
@@ -314,8 +342,8 @@ impl PgScheduler {
                  status = CASE WHEN fire_attempts + 1 >= $3 THEN 'failed' ELSE status END, \
                  failure = CASE WHEN fire_attempts + 1 >= $3 THEN $4::text ELSE failure END, \
                  next_fire_at = CASE WHEN fire_attempts + 1 >= $3 THEN next_fire_at ELSE to_timestamp($2::bigint) END \
-                 WHERE id = $1 AND status = 'active' RETURNING status",
-                vec![ctx.id.into(), next.into(), i64::from(self.settings.max_fire_attempts).into(), failure_text(category).into()],
+                 WHERE id = $1 AND status = 'active' AND fire_attempts = $5::bigint RETURNING status",
+                vec![ctx.id.into(), next.into(), i64::from(self.settings.max_fire_attempts).into(), failure_text(category).into(), ctx.attempts.into()],
             ))
             .await?;
         row.map(|r| r.try_get::<String>("", "status")).transpose()
