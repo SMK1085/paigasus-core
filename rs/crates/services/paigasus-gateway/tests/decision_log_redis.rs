@@ -141,6 +141,12 @@ async fn redis_cli(node: &ContainerAsync<Redis>, args: &[&str]) -> String {
     String::from_utf8(out).expect("redis-cli output is utf-8").trim().to_string()
 }
 
+/// Make the consumer group. `redis-cli` exits 0 on a command error, so check that Redis answered `OK`.
+async fn make_group(node: &ContainerAsync<Redis>) {
+    let reply = redis_cli(node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    assert_eq!(reply, "OK", "XGROUP CREATE was refused: {reply}");
+}
+
 async fn xlen(node: &ContainerAsync<Redis>) -> u64 {
     redis_cli(node, &["XLEN", KEY]).await.parse().expect("an integer XLEN")
 }
@@ -822,6 +828,24 @@ async fn wait_for_a_hung_kv_step(snap: &Tally) {
     tokio::time::sleep(Duration::from_millis(400)).await;
 }
 
+/// Wait until the Redis epoch has not changed for 1 s. The epoch moves only when a KV step ends its `detect`, so
+/// with NATS paused and a long KV timeout this shows that a KV step is in flight. The 30 s limit is for this
+/// signal only.
+async fn wait_for_a_stalled_epoch(node: &ContainerAsync<Redis>) {
+    let mut last = redis_cli(node, &["GET", &epoch_key(KEY)]).await;
+    let mut since = tokio::time::Instant::now();
+    let deadline = since + Duration::from_secs(30);
+    while since.elapsed() < Duration::from_secs(1) {
+        assert!(tokio::time::Instant::now() < deadline, "the Redis epoch kept moving: no KV step is stuck");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let now = redis_cli(node, &["GET", &epoch_key(KEY)]).await;
+        if now != last {
+            last = now;
+            since = tokio::time::Instant::now();
+        }
+    }
+}
+
 #[tokio::test]
 async fn flushall_with_two_relays_counts_one_reset() {
     let Some((node, redis_url)) = redis_7_4("decision_log_redis relay flushall").await else {
@@ -917,7 +941,7 @@ async fn the_upgrade_from_sma_755_counts_nothing() {
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
     // The state of SMA-755: a group, no generation key, no epoch key, and an empty KV.
-    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    make_group(&node).await;
     let admin = test_js(&nats_url).await;
     let v = dl_js::Violations::default();
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, v.clone()).await, fast("i1"), v);
@@ -953,6 +977,9 @@ async fn the_backlog_gauge_updates_while_the_kv_step_hangs() {
     wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
     block_publishes(&admin).await;
     nats.pause().await.expect("pause NATS");
+    // A KV step needs NATS before it can change the Redis epoch. The step starts at each 200 ms tick, and the
+    // KV timeout is 30 s. So an epoch that does not move for 1 s means that a KV step is now stuck in flight.
+    wait_for_a_stalled_epoch(&node).await;
     for want in 1..=3u64 {
         xadd(&node, &event_with_org(want, ORG_A), 0).await;
         let reached = tokio::time::timeout(
@@ -1046,7 +1073,7 @@ async fn a_production_drain_during_a_hung_kv_step_aborts_nothing_and_leaves_no_s
 
 /// Make the group and read `n` entries as a consumer that dies before it acks.
 async fn read_as_dead_instance(node: &ContainerAsync<Redis>, n: u64) -> Vec<String> {
-    redis_cli(node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    make_group(node).await;
     let mut ids = Vec::new();
     for seq in 1..=n {
         ids.push(xadd(node, &event_with_org(seq, ORG_A), 0).await);
@@ -1395,7 +1422,7 @@ async fn a_consumer_with_a_new_pending_entry_is_not_deleted() {
         return;
     };
     let mut conn = paigasus_redis::connect(&redis_url, breaker_metrics()).await.expect("connect to the test Redis");
-    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    make_group(&node).await;
     redis_cli(&node, &["XADD", KEY, "*", "e", "x"]).await;
     // The relay read XINFO while "c1" had no pending entry. Now another relay claims an entry into "c1".
     redis_cli(&node, &["XREADGROUP", "GROUP", "relay", "c1", "COUNT", "1", "STREAMS", KEY, ">"]).await;
@@ -1770,7 +1797,7 @@ async fn the_detection_script_repairs_the_generation_and_increments_the_epoch() 
         return;
     };
     let mut conn = script_conn(&url).await;
-    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    make_group(&node).await;
     assert_eq!(
         detect(&mut conn, KEY, "relay", "id-1").await.expect("detect 1"),
         RedisView::Live {
@@ -1827,7 +1854,7 @@ async fn the_sample_script_reads_the_keys_and_writes_nothing() {
             epoch: None
         }
     );
-    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    make_group(&node).await;
     redis_cli(&node, &["XADD", KEY, "*", "e", "x"]).await;
     redis_cli(&node, &["SET", &gen_key(KEY), "id-9"]).await;
     redis_cli(&node, &["SET", &epoch_key(KEY), "7"]).await;
@@ -1870,7 +1897,7 @@ async fn the_detection_script_returns_a_write_error_and_changes_no_epoch() {
         return;
     };
     let mut conn = script_conn(&url).await;
-    redis_cli(&node, &["XGROUP", "CREATE", KEY, "relay", "0", "MKSTREAM"]).await;
+    make_group(&node).await;
     // SET denied: the first write fails. Nothing is written.
     let err = detect_with_denied(&node, &mut conn, "-set", "+set").await.expect_err("SET is denied");
     assert!(err.to_string().contains("no permissions to run the 'set' command"), "the ACL error text is returned: {err}");
@@ -2049,6 +2076,44 @@ async fn a_publisher_without_kv_grants_still_relays_every_event() {
     );
     assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "still no publish violation");
     assert!(check_errors(&snap, "permission") > 0, "the KV step still counts permission errors");
+    relay.shut_down().await;
+}
+
+/// A KV refusal on the connection while a publish waits for its ack must not turn the ack timeout into a
+/// rejection. Only a refusal of a `gateway.decision.` subject (`violations.publish`) does that. A paused broker
+/// sends no `-ERR`, so the test adds the KV refusal to the shared counter, as the connection does for a refusal.
+#[tokio::test]
+async fn a_kv_refusal_during_a_held_publish_does_not_reject_the_event() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis kv refusal during held publish").await else {
+        return;
+    };
+    let Some((nats, nats_url)) = start_nats(None, "decision_log_redis kv refusal during held publish").await else {
+        return;
+    };
+    provision_bucket(&nats_url).await;
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::DEBUG);
+    let v = dl_js::Violations::default();
+    let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, v.clone()).await, fast("i1"), v.clone());
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    wait_for("the first event is published", || async { snap.published() == 1 && xlen(&node).await == 0 }).await;
+    let attempts = |text: &str| text.matches("the relay publishes an entry").count();
+    nats.pause().await.expect("pause NATS");
+    let attempts_before = attempts(&logs.text());
+    xadd(&node, &event_with_org(2, ORG_A), 0).await;
+    wait_for("the relay starts the publish", || async { attempts(&logs.text()) > attempts_before }).await;
+    // The publish is now held: NATS is paused, and the ack timeout is 5 s. A KV refusal arrives during the wait.
+    v.kv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // Wait for the ack timeout, which makes the second attempt for the same entry.
+    wait_for("the publish times out and the entry is tried again", || async { attempts(&logs.text()) >= attempts_before + 2 }).await;
+    assert_eq!(v.publish.load(std::sync::atomic::Ordering::SeqCst), 0, "no publish violation");
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a KV refusal during a timeout does not reject the event");
+    assert_eq!(xlen(&node).await, 1, "the event stays in Redis");
+    nats.unpause().await.expect("unpause NATS");
+    wait_for("the second event is published", || async { snap.published() == 2 && xlen(&node).await == 0 }).await;
+    assert_eq!(snap.dropped("publish_rejected"), 0, "no event was rejected");
     relay.shut_down().await;
 }
 
