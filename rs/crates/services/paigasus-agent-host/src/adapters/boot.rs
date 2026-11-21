@@ -108,6 +108,7 @@ async fn migrating_response(_req: Request) -> Result<Response, std::convert::Inf
 mod tests {
     use super::*;
     use crate::adapters::http::{AppState, app_router, error};
+    use crate::adapters::persistence::inbox_repository::PgInboxRepository;
     use axum::body::Body;
     use sea_orm::DatabaseConnection;
 
@@ -141,7 +142,15 @@ mod tests {
     async fn after_install_the_app_router_answers() {
         let slot = BootSlot::new();
         let router = boot_http_router(slot.clone(), None);
-        slot.install(app_router(AppState { db: DatabaseConnection::default() }, None)).unwrap();
+        slot.install(app_router(
+            AppState {
+                db: DatabaseConnection::default(),
+                inboxes: Arc::new(PgInboxRepository::new(DatabaseConnection::default())),
+                ingress: None,
+            },
+            None,
+        ))
+        .unwrap();
         let (status, body) = call(&router, "/anything").await;
         let (code, _message) = error::NOT_FOUND;
         assert_eq!(status, StatusCode::NOT_FOUND);

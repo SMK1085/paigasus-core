@@ -6,10 +6,12 @@ language: 'rust'
 
 dependsOn:
   - 'paigasus-agent-host-core-rs'
+  - 'paigasus-cloudevents-rs'
   - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-proto-rs'
+  - 'paigasus-service-info-rs'
   - 'paigasus-test-docker-rs'
 
 # The transitive dependsOn closure's sources, consumed by build/test/lint via
@@ -18,6 +20,8 @@ fileGroups:
   upstreams:
     - '/rs/crates/libs/paigasus-agent-host-core/src/**/*'
     - '/rs/crates/libs/paigasus-agent-host-core/Cargo.toml'
+    - '/rs/crates/libs/paigasus-cloudevents/src/**/*'
+    - '/rs/crates/libs/paigasus-cloudevents/Cargo.toml'
     - '/rs/crates/libs/paigasus-kernel/src/**/*'
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-logging/src/**/*'
@@ -28,6 +32,8 @@ fileGroups:
     - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto/src/**/*'
     - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+    - '/rs/crates/libs/paigasus-service-info/src/**/*'
+    - '/rs/crates/libs/paigasus-service-info/Cargo.toml'
     - '/rs/crates/libs/paigasus-test-docker/src/**/*'
     - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
 

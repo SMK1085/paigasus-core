@@ -10,10 +10,13 @@
 //! The binary connects to the database first and binds second, as `paigasus-iam` does. A replica
 //! that migrates, or that waits for the lock, is then present and not ready, and not absent.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
-use paigasus_agent_host::adapters::http::{AppState, app_router};
+use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
+use paigasus_agent_host::adapters::iam::IamClient;
+use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
 use paigasus_agent_host::config::Config;
 use paigasus_observability::names;
@@ -194,7 +197,23 @@ async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot
         migrations_applied = migration.migrations_applied,
         "database migrations complete"
     );
-    slot.install(app_router(AppState { db: db.clone() }, None))?;
+    let ingress = match &config.iam {
+        Some(iam) => Some(Arc::new(Ingress {
+            iam: Arc::new(IamClient::connect(iam)?),
+            max_body_bytes: config.ingress.max_body_bytes,
+        })),
+        None => {
+            tracing::info!("no [iam] section is set; the event ingress and the service-info route are off");
+            None
+        }
+    };
+    tracing::info!(worker_enabled = config.worker.enabled, "worker.enabled is read, and SMA-787 starts no worker");
+    let state = AppState {
+        db: db.clone(),
+        inboxes: Arc::new(PgInboxRepository::new(db.clone())),
+        ingress,
+    };
+    slot.install(app_router(state, None))?;
     Ok(())
 }
 

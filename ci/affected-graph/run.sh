@@ -317,7 +317,7 @@ run_suite() {
   # SMA-635: gateway-console-ts keys on the gateway's sources and upstreams (its playground project
   # runs the real binary), so it is a legitimate PROJECT-level dependent here too.
   run_case "service-info->services" "rs/crates/libs/paigasus-service-info/src/lib.rs" \
-    "paigasus-service-info-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
+    "paigasus-service-info-rs,paigasus-agent-host-rs,paigasus-iam-rs,paigasus-gateway-rs,gateway-console-ts"
   # paigasus-redis edit -> the lib + every service that opens Redis through it (SMA-726): IAM, and
   # the gateway's limit store (SMA-677), plus gateway-console-ts, whose playground project runs the
   # real gateway binary. One-directional: the lib has no in-tree dependency.

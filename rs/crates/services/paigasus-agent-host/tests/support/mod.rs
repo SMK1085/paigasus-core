@@ -169,5 +169,7 @@ pub async fn wait_for_status(child: &mut Child, port: u16, path: &str, want: u16
     }
 }
 
+pub mod fake_inbox;
 pub mod inbox;
 pub mod lease;
+pub mod stub_iam;

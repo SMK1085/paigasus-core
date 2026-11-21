@@ -27,6 +27,18 @@ pub enum ApiError {
     Forbidden,
     /// 503: IAM cannot be reached. The client can retry.
     IamUnavailable,
+    /// 415: the content type is not `application/cloudevents+json`.
+    UnsupportedContentType,
+    /// 413: the body is larger than `ingress.max_body_bytes`.
+    RequestTooLarge,
+    /// 400: the body cannot be read, or it is not JSON.
+    BadRequestBody,
+    /// 400: the body is JSON, and it is not a valid CloudEvent for this route.
+    InvalidRequestSchema,
+    /// 400: a path segment is not a UUID.
+    InvalidUuid,
+    /// 503: the database failed. The client can retry.
+    StoreUnavailable,
     /// 500: an unexpected fault. The detail stays in the logs.
     Internal,
 }
@@ -39,6 +51,12 @@ impl ApiError {
             ApiError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid-token", "the bearer credential is missing or not valid"),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "the caller may not write to this inbox"),
             ApiError::IamUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "iam-unavailable", "the identity service cannot be reached; retry later"),
+            ApiError::UnsupportedContentType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported-content-type", "the content type must be application/cloudevents+json"),
+            ApiError::RequestTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "request-too-large", "the request body is larger than the limit"),
+            ApiError::BadRequestBody => (StatusCode::BAD_REQUEST, "invalid-request-body", "the request body is not valid JSON"),
+            ApiError::InvalidRequestSchema => (StatusCode::BAD_REQUEST, "invalid-request-schema", "the request body is not a valid CloudEvent for this route"),
+            ApiError::InvalidUuid => (StatusCode::BAD_REQUEST, "invalid-uuid", "a path segment is not a valid UUID"),
+            ApiError::StoreUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "store-unavailable", "the store cannot be reached; retry later"),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal", "an internal error occurred"),
         }
     }
@@ -70,6 +88,12 @@ mod tests {
             (ApiError::InvalidToken, ErrorReason::InvalidToken),
             (ApiError::Forbidden, ErrorReason::Forbidden),
             (ApiError::IamUnavailable, ErrorReason::IamUnavailable),
+            (ApiError::UnsupportedContentType, ErrorReason::UnsupportedContentType),
+            (ApiError::RequestTooLarge, ErrorReason::RequestTooLarge),
+            (ApiError::BadRequestBody, ErrorReason::InvalidRequestBody),
+            (ApiError::InvalidRequestSchema, ErrorReason::InvalidRequestSchema),
+            (ApiError::InvalidUuid, ErrorReason::InvalidUuid),
+            (ApiError::StoreUnavailable, ErrorReason::StoreUnavailable),
             (ApiError::Internal, ErrorReason::Internal),
         ] {
             let (_status, code, _message) = error.parts();
@@ -79,7 +103,18 @@ mod tests {
 
     #[tokio::test]
     async fn an_api_error_renders_the_envelope() {
-        for error in [ApiError::InvalidToken, ApiError::Forbidden, ApiError::IamUnavailable, ApiError::Internal] {
+        for error in [
+            ApiError::InvalidToken,
+            ApiError::Forbidden,
+            ApiError::IamUnavailable,
+            ApiError::UnsupportedContentType,
+            ApiError::RequestTooLarge,
+            ApiError::BadRequestBody,
+            ApiError::InvalidRequestSchema,
+            ApiError::InvalidUuid,
+            ApiError::StoreUnavailable,
+            ApiError::Internal,
+        ] {
             let (status, code, message) = error.parts();
             let response = error.into_response();
             assert_eq!(response.status(), status);

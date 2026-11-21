@@ -56,6 +56,10 @@ tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
 tonic-types = { workspace = true }
 # The generated IAM clients and messages, and the `ErrorReason` registry of `http::error`.
 paigasus-proto = { workspace = true }
+# `adapters::http::ingress` parses and builds the CloudEvents envelope (spec §5.2).
+paigasus-cloudevents = { workspace = true }
+# `adapters::http::service_info` — the `GET /v1/service-info` body (spec §5.3).
+paigasus-service-info = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]
