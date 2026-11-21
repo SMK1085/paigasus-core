@@ -548,6 +548,6 @@ pub async fn a_guard_ignores_files_of_another_scope(store: &dyn MemoryStore) {
 /// The first path in guard order, then byte order, is the one reported.
 pub async fn guards_report_the_first_outsider_in_byte_order(store: &dyn MemoryStore) {
     let s = fresh_scope();
-    write(store, &s, &[("/b/2", "2"), ("/b/1", "1"), ("/a/9", "9")]).await;
-    assert_conflict(store.apply(&guarded(&s, vec![], &["/b", "/a"]), &caps()).await, "/a/9");
+    write(store, &s, &[("/b/2", "2"), ("/b/1", "1"), ("/a/9", "9"), ("/a/1", "1")]).await;
+    assert_conflict(store.apply(&guarded(&s, vec![], &["/b", "/a"]), &caps()).await, "/a/1");
 }
