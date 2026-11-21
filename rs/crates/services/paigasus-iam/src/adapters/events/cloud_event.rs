@@ -208,4 +208,60 @@ mod tests {
             }
         }
     }
+
+    /// SMA-787: the `paigasus-cloudevents` crate parses and builds these three files. This test
+    /// pins them to this encoder's bytes, so the two crates cannot drift apart.
+    #[test]
+    fn the_cloudevents_crate_fixtures_are_this_encoders_bytes() {
+        let u = Uuid::from_u128;
+        let at = |nanos: u32| Utc.with_ymd_and_hms(2026, 8, 7, 12, 30, 45).unwrap().with_nanosecond(nanos).unwrap();
+        let cases: [(&str, DomainEvent, &[u8]); 3] = [
+            (
+                "principal_created_micros",
+                DomainEvent {
+                    id: u(0x1234),
+                    event_type: EventType::PrincipalCreated,
+                    schema_version: 1,
+                    aggregate_prn: format!("prn:pgs:iam:::principal/{}", u(0xbb)),
+                    actor_prn: Some(format!("prn:pgs:iam:::principal/{}", u(0xaa))),
+                    occurred_at: at(123_456_000),
+                    payload: serde_json::json!({"kind": "user", "nested": {"a": 1}}),
+                    correlation_id: Some(u(9)),
+                },
+                include_bytes!("../../../../../libs/paigasus-cloudevents/tests/fixtures/iam/principal_created_micros.json"),
+            ),
+            (
+                "organization_created_trailing_zeros",
+                DomainEvent {
+                    id: u(0x2),
+                    event_type: EventType::OrganizationCreated,
+                    schema_version: 1,
+                    aggregate_prn: format!("prn:pgs:iam:::organization/{}", u(0x500)),
+                    actor_prn: None,
+                    occurred_at: at(100_000_000),
+                    payload: serde_json::json!({"slug": "acme"}),
+                    correlation_id: None,
+                },
+                include_bytes!("../../../../../libs/paigasus-cloudevents/tests/fixtures/iam/organization_created_trailing_zeros.json"),
+            ),
+            (
+                "principal_archived_zero_fraction",
+                DomainEvent {
+                    id: u(0x3),
+                    event_type: EventType::PrincipalArchived,
+                    schema_version: 1,
+                    aggregate_prn: String::new(),
+                    actor_prn: None,
+                    occurred_at: at(0),
+                    payload: serde_json::json!({}),
+                    correlation_id: None,
+                },
+                include_bytes!("../../../../../libs/paigasus-cloudevents/tests/fixtures/iam/principal_archived_zero_fraction.json"),
+            ),
+        ];
+        for (name, ev, expected) in cases {
+            let actual = serde_json::to_vec(&CloudEvent::from_domain_event(&ev, "urn:paigasus:iam")).unwrap();
+            assert_eq!(actual, expected, "fixture `{name}` differs; the encoder now writes: {}", String::from_utf8_lossy(&actual));
+        }
+    }
 }

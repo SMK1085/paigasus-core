@@ -387,4 +387,7 @@ enum ErrorReason {
   // "invalid-dpop-proof" — the DPoP proof is missing, malformed, or does not match the
   // request or the token.
   ERROR_REASON_INVALID_DPOP_PROOF = 909;
+  // In the shared range (900-999). Emitted by the agent host (SMA-787).
+  // "store-unavailable" — the service cannot reach its database. Retryable (503).
+  ERROR_REASON_STORE_UNAVAILABLE = 910;
 }

@@ -525,10 +525,12 @@ impl Default for OpenAiDefaults {
 }
 
 /// True when `grpc_addr`'s host is a loopback address (`127.0.0.0/8`, `localhost`, or an IPv6
-/// loopback such as `::1`). Deliberately a small hand-rolled parser rather than pulling in a
-/// `url` crate dependency for a single boot-time check: `grpc_addr` is `scheme://host[:port]`,
-/// optionally with a trailing path; strip the scheme, strip any path, then split the host from
-/// an optional port (bracketed for IPv6 literals).
+/// loopback such as `::1`).
+///
+/// The host comes from the URI authority, read with [`axum::http::Uri`]. A string split is not
+/// safe: it reads a loopback address from the path (`http://192.0.2.10/x/http://127.0.0.1`) or
+/// from the userinfo (`http://127.0.0.1@192.0.2.10/`), and the channel connects to neither. A
+/// value that is not a URI is not loopback (fail closed).
 ///
 /// The host is then classified by parsing it as a real IP and asking
 /// [`Ipv4Addr::is_loopback`]/[`Ipv6Addr::is_loopback`] — NOT a string prefix match. A prefix
@@ -540,15 +542,15 @@ impl Default for OpenAiDefaults {
 fn is_loopback_host(grpc_addr: &str) -> bool {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    let after_scheme = grpc_addr.split("://").last().unwrap_or(grpc_addr);
-    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        // IPv6 literal, e.g. "[::1]:9090" or "[::1]" -> "::1" (brackets stripped so the
-        // `Ipv6Addr` parse below succeeds).
-        rest.split(']').next().unwrap_or(rest)
-    } else {
-        host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
+    let Ok(uri) = grpc_addr.parse::<axum::http::Uri>() else {
+        return false;
     };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    // `Uri::host` keeps the brackets of an IPv6 literal ("[::1]"). Strip them, so the
+    // `Ipv6Addr` parse below succeeds.
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
 
     host == "localhost" || host.parse::<Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false) || host.parse::<Ipv6Addr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
@@ -1046,6 +1048,35 @@ mod tests {
         assert!(!is_loopback_host("https://127.0.0.1.attacker.example.com:9090"));
         assert!(!is_loopback_host("https://localhost.evil.com:9090"));
         assert!(!is_loopback_host("https://iam.internal.example.com:9090"));
+    }
+
+    // The host comes from the URI authority only. A loopback address in the PATH, after a
+    // second `://`, is not the host: the channel connects to the authority.
+    #[test]
+    fn is_loopback_host_reads_the_authority_not_a_later_scheme_in_the_path() {
+        assert!(!is_loopback_host("http://192.0.2.10:9090/path/http://127.0.0.1:9090"));
+        assert!(!is_loopback_host("http://iam.internal.example.com:9090/proxy://127.0.0.1:9090"));
+        assert!(!is_loopback_host("http://192.0.2.10:9090/http://[::1]:9090"));
+        assert!(!is_loopback_host("http://192.0.2.10/?next=http://localhost"));
+        // A loopback authority with a path is still loopback.
+        assert!(is_loopback_host("http://127.0.0.1:9090/path/http://192.0.2.10:9090"));
+    }
+
+    // A userinfo part is not the host: `127.0.0.1@` names a user, and the host is after the `@`.
+    #[test]
+    fn is_loopback_host_does_not_read_userinfo_as_the_host() {
+        assert!(!is_loopback_host("http://127.0.0.1@192.0.2.10/"));
+        assert!(!is_loopback_host("http://localhost:9090@192.0.2.10:9090"));
+        assert!(!is_loopback_host("http://[::1]@192.0.2.10:9090"));
+        assert!(!is_loopback_host("http://user:pass@iam.internal.example.com:9090"));
+    }
+
+    // A value with no parsable authority is not loopback (fail closed).
+    #[test]
+    fn is_loopback_host_fails_closed_on_a_value_that_is_not_a_uri() {
+        assert!(!is_loopback_host(""));
+        assert!(!is_loopback_host("not a uri"));
+        assert!(!is_loopback_host("/127.0.0.1:9090"));
     }
 
     #[test]

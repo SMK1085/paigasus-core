@@ -5,11 +5,14 @@
 //! `paigasus-kernel`.
 
 pub mod agent;
+pub mod claim;
 pub mod deferral;
 pub mod error;
 pub mod ids;
 pub mod inbox;
+pub mod lease;
 pub mod memory;
+pub mod mid_run;
 pub mod outbox;
 pub mod ports;
 pub mod render;
@@ -27,6 +30,8 @@ mod port_tests {
     fn every_port_is_object_safe_send_and_sync() {
         fn assert_port<T: ?Sized + Send + Sync>() {}
         assert_port::<dyn InboxRepository>();
+        assert_port::<dyn LeaseRepository>();
+        assert_port::<dyn ClaimRepository>();
         assert_port::<dyn TimerRepository>();
         assert_port::<dyn Scheduler>();
         assert_port::<dyn MemoryStore>();

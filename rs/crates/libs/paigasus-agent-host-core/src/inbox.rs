@@ -84,5 +84,20 @@ pub struct InboxEvent {
     pub attempts: u32,
     pub not_before: Timestamp,
     pub claimed_run: Option<RunId>,
+    /// The full CloudEvents envelope as JSON.
+    pub envelope: serde_json::Value,
+    /// The `data` member of the envelope, or `Null`.
     pub data: serde_json::Value,
+}
+
+/// An event to insert into an inbox. The store sets the status, the attempts and the times.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewInboxEvent {
+    pub id: EventId,
+    pub inbox: InboxId,
+    pub source: String,
+    pub ce_id: String,
+    pub ce_type: String,
+    pub thread: Option<ThreadId>,
+    pub envelope: serde_json::Value,
 }

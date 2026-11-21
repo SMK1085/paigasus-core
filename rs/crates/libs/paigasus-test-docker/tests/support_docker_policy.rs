@@ -3,7 +3,7 @@
 //! Docker-free tests for the crate's skip policy (SMA-538). Moved from `paigasus-iam`'s
 //! `tests/support_docker_policy.rs` by SMA-726; only the import paths changed.
 
-use paigasus_test_docker::{env_flag, is_daemon_unreachable, source_chain_is_permission_denied};
+use paigasus_test_docker::{ci_flag, env_flag, is_daemon_unreachable, source_chain_is_permission_denied};
 use std::ffi::OsStr;
 use std::io::{Error as IoError, ErrorKind};
 use testcontainers::bollard::errors::Error as BollardError;
@@ -23,6 +23,16 @@ fn env_flag_rejects_everything_else_including_zero_and_unset() {
     assert!(!env_flag(None), "unset must be off");
     for off in ["0", "", "no", "false", "maybe", "2", "on"] {
         assert!(!env_flag(Some(OsStr::new(off))), "{off:?} must parse as off");
+    }
+}
+
+// ---------------------------------------------------------------- ci_flag
+
+#[test]
+fn ci_flag_is_on_for_every_present_value_and_off_only_when_unset() {
+    assert!(!ci_flag(None), "unset must be off");
+    for v in ["true", "1", "", "false", "0", "no"] {
+        assert!(ci_flag(Some(OsStr::new(v))), "{v:?} is a present value, so it must be on");
     }
 }
 

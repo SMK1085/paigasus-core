@@ -4,6 +4,7 @@ use sea_orm_migration::prelude::*;
 
 mod m0001_create_inbox;
 mod m0002_create_memory;
+mod m0003_create_inbox_event_tables;
 
 /// The migration bookkeeping table. It differs from the default so that the agent host does not
 /// share state with another service on the same server.
@@ -14,7 +15,11 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m0001_create_inbox::Migration), Box::new(m0002_create_memory::Migration)]
+        vec![
+            Box::new(m0001_create_inbox::Migration),
+            Box::new(m0002_create_memory::Migration),
+            Box::new(m0003_create_inbox_event_tables::Migration),
+        ]
     }
 
     fn migration_table_name() -> DynIden {

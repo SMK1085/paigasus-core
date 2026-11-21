@@ -410,7 +410,9 @@ impl SystemPolicyReconciler for PgPolicyStore {
         let now = Utc::now();
 
         let outcome = match (&outcome, existing) {
-            (StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. }, _) => outcome,
+            // `OperatorAuthored` writes nothing: the row is an operator's policy, and the caller
+            // refuses to boot. Overwriting it would silently remove that policy.
+            (StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. } | StarterPolicyOutcome::OperatorAuthored, _) => outcome,
             (_, Some(row)) => {
                 converged_model(doc, row.created_at, now, revision).update(&txn).await.map_err(map_db_err)?;
                 outcome
@@ -437,7 +439,7 @@ impl SystemPolicyReconciler for PgPolicyStore {
                         // Re-classify against whoever won. This cannot recurse into the insert
                         // branch — the row provably exists now — so it terminates.
                         let re = classify_starter_policy(Some(stored_row(&winner)), doc, revision);
-                        if !matches!(re, StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. }) {
+                        if !matches!(re, StarterPolicyOutcome::Unchanged | StarterPolicyOutcome::StaleBinary { .. } | StarterPolicyOutcome::OperatorAuthored) {
                             converged_model(doc, winner.created_at, now, revision).update(&txn).await.map_err(map_db_err)?;
                         }
                         re
@@ -471,6 +473,29 @@ impl SystemPolicyReconciler for PgPolicyStore {
             .await
             .map_err(map_db_err)?;
         Ok(ids.into_iter().filter(|id| !known.contains(&id.as_str())).collect())
+    }
+
+    async fn operator_authored_starter_ids(&self, docs: &[PolicyDocument], revision: u32) -> Result<Vec<String>, AuthzError> {
+        // Only `system = false` rows can classify `OperatorAuthored`, so the filter keeps the
+        // read small. The DECISION stays with the pure classifier: this adapter does not restate
+        // the rule, so the pre-scan and `reconcile_system` cannot disagree about a row.
+        let ids: Vec<String> = docs.iter().map(|d| d.policy_id.clone()).collect();
+        let rows = policy::Entity::find()
+            .filter(policy::Column::PolicyId.is_in(ids))
+            .filter(policy::Column::System.eq(false))
+            .order_by_asc(policy::Column::PolicyId)
+            .all(&self.db)
+            .await
+            .map_err(map_db_err)?;
+        Ok(rows
+            .iter()
+            .filter(|row| {
+                docs.iter()
+                    .find(|d| d.policy_id == row.policy_id)
+                    .is_some_and(|doc| classify_starter_policy(Some(stored_row(row)), doc, revision) == StarterPolicyOutcome::OperatorAuthored)
+            })
+            .map(|row| row.policy_id.clone())
+            .collect())
     }
 
     async fn existing_policy_ids(&self) -> Result<Vec<String>, AuthzError> {

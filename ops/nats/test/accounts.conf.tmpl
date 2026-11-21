@@ -37,6 +37,13 @@ accounts {
         }
       },
       {
+        nkey: "{{AGENT_HOST_CONSUMER_NKEY}}"
+        permissions: {
+          publish:   { allow: [ "$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.agent-host-inbox", "$JS.API.CONSUMER.INFO.IAM_EVENTS.agent-host-inbox", "$JS.ACK.IAM_EVENTS.agent-host-inbox.>" ] }
+          subscribe: { allow: [ "_INBOX_AGH.>" ] }
+        }
+      },
+      {
         nkey: "{{PROVISIONER_NKEY}}"
         permissions: {
           publish:   { allow: [ "$JS.API.INFO", "$JS.API.STREAM.>", "$JS.API.CONSUMER.>" ] }

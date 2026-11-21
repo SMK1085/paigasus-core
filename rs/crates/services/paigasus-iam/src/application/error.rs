@@ -476,7 +476,9 @@ impl From<AuthzError> for TenancyError {
             AuthzError::Conflict(s) => Self::PolicyConflict(s),
             // SMA-676 D9: `RoleService::grant` consumes `DuplicateGrant`. Reaching this funnel
             // means another path let it through — a defect, so `Internal`, not a 409.
-            AuthzError::Evaluation(_) | AuthzError::Backend(_) | AuthzError::ResourceNotFound(_) | AuthzError::DuplicateGrant => Self::Internal,
+            // `StarterPolicyIdCollision` is a boot-only error (`reconcile_policies`). No request
+            // path raises it, so reaching this funnel is a defect, and it maps to `Internal`.
+            AuthzError::Evaluation(_) | AuthzError::Backend(_) | AuthzError::ResourceNotFound(_) | AuthzError::DuplicateGrant | AuthzError::StarterPolicyIdCollision(_) => Self::Internal,
         }
     }
 }
@@ -560,6 +562,7 @@ mod tests {
     #[test]
     fn a_duplicate_grant_that_escapes_the_grant_path_is_internal() {
         assert_eq!(TenancyError::from(AuthzError::DuplicateGrant), TenancyError::Internal);
+        assert_eq!(TenancyError::from(AuthzError::StarterPolicyIdCollision(vec!["agent_event_writer".to_string()])), TenancyError::Internal);
     }
 
     #[test]
