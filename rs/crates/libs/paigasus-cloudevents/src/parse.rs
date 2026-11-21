@@ -295,6 +295,18 @@ mod tests {
     }
 
     #[test]
+    fn dataschema_brackets_and_fragments_follow_the_uri_components() {
+        for bad in ["https://example.com/[schema]", "https://example.com/p?q=[1]", "https://example.com/p#[f]", "urn:x:a#b#c", "urn:x:[a]"] {
+            let r = parse_value(&with("dataschema", json!(bad)));
+            assert!(matches!(r, Err(ParseError::Schema(SchemaError::NotAbsoluteUri("dataschema")))), "{bad}: {r:?}");
+        }
+        for good in ["https://example.com/order.json", "https://[::1]:8443/s.json?v=1#f", "urn:paigasus:schema:order#v1"] {
+            let e = parse_value(&with("dataschema", json!(good))).unwrap_or_else(|r| panic!("{good}: {r:?}"));
+            assert_eq!(e.dataschema(), Some(good));
+        }
+    }
+
+    #[test]
     fn a_nul_in_data_is_refused_at_any_depth() {
         let nul = |data: Value| parse_value(&with("data", data));
         let refused = |r: Result<crate::CloudEvent, ParseError>| matches!(r, Err(ParseError::Schema(SchemaError::InvalidCharacter(ref a))) if a == "data");

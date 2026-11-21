@@ -4,8 +4,8 @@
 //! tonic fake IAM, with the worker off. 1000 POSTs at a concurrency of 16 must give a p99 under
 //! 50 ms. This proves the done-when "the handler p99 stays under 50 ms with the agent turned off".
 //!
-//! The 50 ms spec limit is checked on every local run. When the `CI` environment variable is set,
-//! the test checks a looser bound (`CI_P99_LIMIT`). The shared CI runner measured a p99 of 64 ms
+//! The 50 ms spec limit is checked on every local run. When the `CI` environment variable is set
+//! (to any value, by `paigasus_test_docker::in_ci`), the test checks a looser bound (`CI_P99_LIMIT`). The shared CI runner measured a p99 of 64 ms
 //! (p50 35 ms) on PR 518, so the looser bound still catches a regression of an order of magnitude.
 
 mod support;
@@ -29,22 +29,20 @@ const P99_LIMIT: Duration = Duration::from_millis(50);
 // local run.
 const CI_P99_LIMIT: Duration = Duration::from_millis(150);
 
-/// Picks the p99 limit. `ci` is the value of the `CI` environment variable.
-fn p99_limit(ci: Option<&str>) -> Duration {
-    match ci {
-        Some(v) if !v.is_empty() && v != "false" && v != "0" => CI_P99_LIMIT,
-        _ => P99_LIMIT,
-    }
+/// Picks the p99 limit. `in_ci` is `paigasus_test_docker::in_ci()`: `CI` is set, to any value.
+fn p99_limit(in_ci: bool) -> Duration {
+    if in_ci { CI_P99_LIMIT } else { P99_LIMIT }
 }
 
 #[test]
 fn p99_limit_is_the_spec_limit_unless_ci_is_set() {
-    assert_eq!(p99_limit(None), Duration::from_millis(50));
-    assert_eq!(p99_limit(Some("true")), Duration::from_millis(150));
-    assert_eq!(p99_limit(Some("1")), Duration::from_millis(150));
-    assert_eq!(p99_limit(Some("")), Duration::from_millis(50));
-    assert_eq!(p99_limit(Some("false")), Duration::from_millis(50));
-    assert_eq!(p99_limit(Some("0")), Duration::from_millis(50));
+    assert_eq!(p99_limit(false), Duration::from_millis(50));
+    assert_eq!(p99_limit(true), Duration::from_millis(150));
+    // The CI rule is presence-based (`ci_flag`), so `CI=false` and `CI=` also select the CI bound.
+    for v in ["true", "1", "", "false", "0"] {
+        assert_eq!(p99_limit(paigasus_test_docker::ci_flag(Some(std::ffi::OsStr::new(v)))), Duration::from_millis(150), "CI={v:?}");
+    }
+    assert_eq!(p99_limit(paigasus_test_docker::ci_flag(None)), Duration::from_millis(50));
 }
 
 fn event(id: &str) -> String {
@@ -138,8 +136,7 @@ async fn handler_p99_is_under_50_ms_with_the_worker_off() {
     let p50 = times[REQUESTS / 2];
     let p99 = times[REQUESTS * 99 / 100 - 1];
     let max = *times.last().expect("times");
-    let ci = std::env::var("CI").ok();
-    let limit = p99_limit(ci.as_deref());
+    let limit = p99_limit(paigasus_test_docker::in_ci());
     let which = if limit == P99_LIMIT { "spec" } else { "CI" };
     println!("ingress latency over {REQUESTS} requests at concurrency {CONCURRENCY}: p50={p50:?} p99={p99:?} max={max:?} (limit {limit:?}, {which})");
 

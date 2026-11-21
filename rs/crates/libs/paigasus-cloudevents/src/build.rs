@@ -217,7 +217,9 @@ mod tests {
     fn with_dataschema_needs_an_absolute_uri() {
         let e = event_at("2026-08-07T12:30:45Z");
         assert!(e.clone().with_dataschema("https://example.com/order.json").is_ok());
-        assert_eq!(e.with_dataschema("schemas/order.json").err(), Some(SchemaError::NotAbsoluteUri("dataschema")));
+        assert_eq!(e.clone().with_dataschema("schemas/order.json").err(), Some(SchemaError::NotAbsoluteUri("dataschema")));
+        assert_eq!(e.clone().with_dataschema("https://example.com/[schema]").err(), Some(SchemaError::NotAbsoluteUri("dataschema")));
+        assert!(e.with_dataschema("https://[::1]:8443/order.json").is_ok());
     }
 
     #[test]

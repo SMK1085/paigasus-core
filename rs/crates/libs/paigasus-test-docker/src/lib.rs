@@ -87,17 +87,35 @@ pub fn env_flag(raw: Option<&OsStr>) -> bool {
     matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
 }
 
+/// Whether `raw`, the raw value of the `CI` environment variable, means "in CI".
+///
+/// Presence-based: a platform sets `CI`, and any value means "in CI", the empty string, `false`
+/// and `0` included. This is the rule of [`skip_docker`], [`require_docker`] and
+/// [`start_or_skip`]. It takes the raw value so that a unit test needs no `std::env::set_var`.
+pub fn ci_flag(raw: Option<&OsStr>) -> bool {
+    raw.is_some()
+}
+
+/// Whether this process runs in CI, by the rule of [`ci_flag`].
+///
+/// This crate holds the only read of `CI` in the test code of the scanned crates.
+/// `repo:iam-docker-policy-single-site` fails if a suite reads `CI` itself. A suite that needs a
+/// CI-only value (for example a looser timing bound on a shared runner) calls this function.
+pub fn in_ci() -> bool {
+    ci_flag(std::env::var_os("CI").as_deref())
+}
+
 /// Whether the caller has explicitly accepted skipping the Docker-backed suites.
 ///
 /// `CI` outranks it: a stray `PAIGASUS_SKIP_DOCKER` in a workflow file must not be able to
 /// green a CI run that tested nothing.
 pub fn skip_docker() -> bool {
-    std::env::var_os("CI").is_none() && env_flag(std::env::var_os("PAIGASUS_SKIP_DOCKER").as_deref())
+    !in_ci() && env_flag(std::env::var_os("PAIGASUS_SKIP_DOCKER").as_deref())
 }
 
 /// Whether a missing daemon must be a hard failure rather than a skip. `CI` implies it.
 pub fn require_docker() -> bool {
-    std::env::var_os("CI").is_some() || env_flag(std::env::var_os("PAIGASUS_REQUIRE_DOCKER").as_deref())
+    in_ci() || env_flag(std::env::var_os("PAIGASUS_REQUIRE_DOCKER").as_deref())
 }
 
 /// Whether `e` or anything in its `source()` chain is an [`std::io::Error`] with
@@ -255,7 +273,7 @@ where
     match image.start().await {
         Ok(node) => Some(node),
         Err(e) => {
-            if std::env::var_os("CI").is_some() {
+            if in_ci() {
                 panic!("{what}: Docker is required in CI: {e}");
             }
             if skip_docker() {

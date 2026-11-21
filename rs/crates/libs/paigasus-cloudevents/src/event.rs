@@ -165,7 +165,26 @@ pub(crate) fn check_absolute_uri(name: &'static str, value: &str) -> Result<(), 
         }
         i += 1;
     }
-    Ok(())
+    if has_uri_components(rest) { Ok(()) } else { Err(err()) }
+}
+
+/// True when `rest` (the part after `scheme:`) uses `#`, `[` and `]` only where RFC 3986 allows
+/// them: one fragment with no second `#`, and the brackets of an IP literal only in the authority
+/// (`//` up to the next `/`). A bracket in the path, the query or the fragment is refused.
+fn has_uri_components(rest: &str) -> bool {
+    let (before_fragment, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    if fragment.contains(['#', '[', ']']) {
+        return false;
+    }
+    let (hier, query) = before_fragment.split_once('?').unwrap_or((before_fragment, ""));
+    if query.contains(['[', ']']) {
+        return false;
+    }
+    let path = match hier.strip_prefix("//") {
+        Some(authority_and_path) => authority_and_path.find('/').map_or("", |i| &authority_and_path[i..]),
+        None => hier,
+    };
+    !path.contains(['[', ']'])
 }
 
 /// Fail when a required text attribute is empty or too long.

@@ -236,12 +236,25 @@ async fn term_on_a_bad_body() {
 }
 
 /// A NUL in `data` is a malformed event: the consumer terminates it, and NATS never redelivers it.
+/// The event names the org of the stack in `subject`, so the tenancy skip (`names_org`) cannot
+/// hide a missing NUL check. The control (the same event with no NUL) is inserted.
 #[tokio::test]
 async fn term_on_a_nul_in_data() {
     let Some(s) = stack("term_on_a_nul_in_data", 0x500, &[FILTER]).await else { return };
     let (stop, task) = start_source(&s).await;
-    let body = br#"{"specversion":"1.0","id":"e1","source":"s","type":"iam.organization.created","data":{"k":{"v":"a\u0000b"}}}"#;
-    publish(&s.js, body.to_vec()).await;
+    let body = |id: &str, text: &str| {
+        serde_json::json!({
+            "specversion": "1.0",
+            "id": id,
+            "source": "s",
+            "type": "iam.organization.created",
+            "subject": format!("prn:pgs:iam:::organization/{}", u(0x500)),
+            "data": {"k": {"v": text}},
+        })
+        .to_string()
+        .into_bytes()
+    };
+    publish(&s.js, body("e1", "a\u{0}b")).await;
     all_acked(&s.js, Duration::from_secs(10)).await;
     // A nak would redeliver within the 3 s; a term never does.
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -249,6 +262,14 @@ async fn term_on_a_nul_in_data() {
     assert_eq!(info.num_ack_pending, 0);
     assert_eq!(info.num_redelivered, 0);
     assert_eq!(rows(&s.db).await, 0);
+    // The control: with no NUL, the same event reaches the inbox, so the skip did not end it.
+    publish(&s.js, body("e2", "ab")).await;
+    let db = s.db.clone();
+    wait_until(Duration::from_secs(10), "the control event is inserted", || {
+        let db = db.clone();
+        async move { rows(&db).await == 1 }
+    })
+    .await;
     let _ = stop.send(());
     task.await.expect("join").expect("run");
 }

@@ -114,14 +114,18 @@ impl LeaseKeeper {
 
     /// Claim a batch of events under the mutex. After the lease is lost, it gives `LeaseLost`
     /// with no store call. A claim that loses the lease or poisons the handle (a failed COMMIT,
-    /// spec §8.4) cancels the run at once. The original error is returned.
+    /// spec §8.4) cancels the run at once. The original error is returned. A caller that drops
+    /// this future while the store poisons the handle also cancels the run (`LoseIfPoisoned`).
     pub async fn claim(&self, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError> {
-        let mut guard = self.handle.lock().await;
-        let Some(handle) = guard.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
+        let mut guard = LoseIfPoisoned {
+            slot: self.handle.lock().await,
+            keeper: self,
+        };
+        let Some(handle) = guard.slot.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
             return Err(ClaimError::LeaseLost);
         };
         let result = self.claims.claim(handle, cfg).await;
-        if matches!(result, Err(ClaimError::LeaseLost)) || handle.is_poisoned() {
+        if matches!(result, Err(ClaimError::LeaseLost)) {
             self.lose();
         }
         result
@@ -129,14 +133,18 @@ impl LeaseKeeper {
 
     /// Complete a claim under the mutex. After the lease is lost, it gives `LeaseLost` with no
     /// store call. A completion that loses the lease or poisons the handle (a failed COMMIT,
-    /// spec §8.5) cancels the run at once. The original error is returned.
+    /// spec §8.5) cancels the run at once. The original error is returned. A caller that drops
+    /// this future while the store poisons the handle also cancels the run (`LoseIfPoisoned`).
     pub async fn complete(&self, claim: Claim) -> Result<Vec<EventId>, CompleteError> {
-        let mut guard = self.handle.lock().await;
-        let Some(handle) = guard.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
+        let mut guard = LoseIfPoisoned {
+            slot: self.handle.lock().await,
+            keeper: self,
+        };
+        let Some(handle) = guard.slot.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
             return Err(CompleteError::LeaseLost);
         };
         let result = self.claims.complete(handle, claim).await;
-        if matches!(result, Err(CompleteError::LeaseLost)) || handle.is_poisoned() {
+        if matches!(result, Err(CompleteError::LeaseLost)) {
             self.lose();
         }
         result
@@ -157,6 +165,25 @@ impl LeaseKeeper {
     fn lose(&self) {
         self.cancel.cancel();
         self.heartbeat.abort();
+    }
+}
+
+/// Holds the mutex of the handle for one claim or completion. When it drops with a poisoned
+/// handle, it cancels the run. It drops on every exit: a return, and also a caller that drops the
+/// claim or completion future during the COMMIT (spec §8.4, §8.5). In that case the store's
+/// `commit_or_poison` guard poisons the handle first, because the store future drops before this
+/// guard. A handle that is not poisoned (a retryable store error, or a drop before the COMMIT)
+/// does not cancel. `Drop::drop` runs before the fields drop, so the mutex is still held.
+struct LoseIfPoisoned<'a> {
+    slot: tokio::sync::MutexGuard<'a, Option<LeaseHandle>>,
+    keeper: &'a LeaseKeeper,
+}
+
+impl Drop for LoseIfPoisoned<'_> {
+    fn drop(&mut self) {
+        if self.slot.as_ref().is_some_and(LeaseHandle::is_poisoned) {
+            self.keeper.lose();
+        }
     }
 }
 
@@ -285,6 +312,18 @@ mod tests {
         Lost,
         /// Return a store error and leave the handle valid.
         StoreError,
+        /// Wait forever under a guard that poisons the handle when the call drops, as the
+        /// store's `commit_or_poison` does during a COMMIT.
+        HangThenPoisonOnDrop,
+    }
+
+    /// Poisons the handle on drop, as `commit_or_poison` does for a COMMIT that the caller drops.
+    struct PoisonOnDrop<'a>(&'a mut LeaseHandle);
+
+    impl Drop for PoisonOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.poison();
+        }
     }
 
     /// A fake of both ports. It records each heartbeat.
@@ -294,6 +333,8 @@ mod tests {
         claim_mode: ClaimMode,
         complete_lost: bool,
         complete_poisons: bool,
+        /// The completion waits forever and poisons the handle when the call drops.
+        complete_hangs: bool,
         heartbeat_panics: bool,
         heartbeats: AtomicUsize,
         claims: AtomicUsize,
@@ -310,6 +351,7 @@ mod tests {
                 claim_mode: ClaimMode::Rotate,
                 complete_lost: false,
                 complete_poisons: false,
+                complete_hangs: false,
                 heartbeat_panics: false,
                 heartbeats: AtomicUsize::new(0),
                 claims: AtomicUsize::new(0),
@@ -376,10 +418,18 @@ mod tests {
                 }
                 ClaimMode::Lost => Err(ClaimError::LeaseLost),
                 ClaimMode::StoreError => Err(ClaimError::Store("connection reset".into())),
+                ClaimMode::HangThenPoisonOnDrop => {
+                    let _guard = PoisonOnDrop(handle);
+                    std::future::pending().await
+                }
             }
         }
 
         async fn complete(&self, handle: &mut LeaseHandle, _claim: Claim) -> Result<Vec<EventId>, CompleteError> {
+            if self.complete_hangs {
+                let _guard = PoisonOnDrop(handle);
+                return std::future::pending().await;
+            }
             if self.complete_poisons {
                 handle.poison();
                 return Err(CompleteError::Store("commit failed".into()));
@@ -609,6 +659,46 @@ mod tests {
         assert!(matches!(keeper.complete(a_claim()).await, Err(CompleteError::Store(_))));
         assert!(keeper.cancellation().is_cancelled());
         assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
+    }
+
+    /// A caller drops a claim while the store poisons the handle (a COMMIT in flight). The keeper
+    /// cancels the run at once: the test keeps the keeper and does not advance time to a
+    /// heartbeat before it checks the token.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_dropped_while_it_poisons_cancels_the_keeper_at_once() {
+        let fake = Arc::new(Fake {
+            claim_mode: ClaimMode::HangThenPoisonOnDrop,
+            ..Fake::new()
+        });
+        let keeper = start(&fake);
+        let dropped = timeout(Duration::from_millis(100), keeper.claim(&cfg())).await;
+        assert!(dropped.is_err(), "the fake claim never ends, so the timeout drops it");
+        assert!(keeper.cancellation().is_cancelled());
+        assert_eq!(fake.heartbeats(), 0, "no heartbeat ran, so the keeper cancelled the run itself");
+        assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
+    }
+
+    /// The same for a completion that the caller drops during its COMMIT.
+    #[tokio::test(start_paused = true)]
+    async fn a_complete_dropped_while_it_poisons_cancels_the_keeper_at_once() {
+        let fake = Arc::new(Fake { complete_hangs: true, ..Fake::new() });
+        let keeper = start(&fake);
+        let dropped = timeout(Duration::from_millis(100), keeper.complete(a_claim())).await;
+        assert!(dropped.is_err(), "the fake completion never ends, so the timeout drops it");
+        assert!(keeper.cancellation().is_cancelled());
+        assert_eq!(fake.heartbeats(), 0, "no heartbeat ran, so the keeper cancelled the run itself");
+    }
+
+    /// A caller that drops a claim that leaves the handle valid does not cancel the run.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_dropped_with_a_valid_handle_does_not_cancel() {
+        let fake = Arc::new(Fake {
+            claim_mode: ClaimMode::Hold(Duration::from_secs(60)),
+            ..Fake::new()
+        });
+        let keeper = start(&fake);
+        assert!(timeout(Duration::from_millis(100), keeper.claim(&cfg())).await.is_err());
+        assert!(!keeper.cancellation().is_cancelled());
     }
 
     /// A store error that leaves the handle valid does not cancel.

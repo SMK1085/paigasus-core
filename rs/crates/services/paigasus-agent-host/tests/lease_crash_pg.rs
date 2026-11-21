@@ -91,6 +91,11 @@ async fn a_crashed_worker_is_taken_over(crash: Crash) {
     tokio::time::sleep(ttl + Duration::from_secs(1)).await;
     assert!(store_b.acquire(&inbox, "b", ttl).await.expect("B acquire").is_none(), "B took the lease while the keeper of A ran");
 
+    // The expiry of A's lease on the database clock, read just before the crash. A heartbeat
+    // after this read can only make the real expiry later, so the value is a lower bound. It is
+    // read before the crash, so a crash cleanup that shortens `expires_at` cannot lower it.
+    let a_expiry_us = expires_us(&db, INBOX).await;
+
     // The crash.
     match crash {
         Crash::Abort => {
@@ -103,9 +108,9 @@ async fn a_crashed_worker_is_taken_over(crash: Crash) {
         }
     }
 
-    // The expiry of A's lease on the database clock, read after the heartbeat stopped. A late
-    // heartbeat can only make the real expiry later, so this value is a lower bound.
-    let a_expiry_us = expires_us(&db, INBOX).await;
+    // The crash must not shorten the lease: the stored expiry after the crash is not earlier.
+    let a_expiry_after_crash_us = expires_us(&db, INBOX).await;
+    assert!(a_expiry_after_crash_us >= a_expiry_us, "the crash shortened A's lease by {} us", a_expiry_us - a_expiry_after_crash_us);
 
     // B polls until the lease of A expires on the database clock.
     let crashed = Instant::now();
