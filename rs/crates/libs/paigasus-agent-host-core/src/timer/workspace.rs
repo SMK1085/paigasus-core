@@ -847,6 +847,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_schedule_with_its_next_slot_beyond_the_largest_horizon_is_no_slot() {
+        // The largest horizon is 366 days, the window of the civil gap check. The next 29 February
+        // after 2028-03-01 is in 2032, so no slot is in the horizon and the schedule is refused.
+        let caps = TimerCaps {
+            max_horizon_days: 366,
+            ..TimerCaps::default()
+        };
+        let (mut ws, rig) = rig(caps);
+        at_time(&rig, "2028-03-01T00:00:00Z");
+        assert_eq!(
+            schedule_refusal(&mut ws, "0 0,12 29 2 *", "UTC").await,
+            TimerRefusal::NoSlot {
+                cron: "0 0,12 29 2 *".into(),
+                days: 366
+            }
+        );
+        assert_eq!(
+            schedule_refusal(&mut ws, "0 0,12 29 2 *", "UTC").await.to_string(),
+            "Error: \"0 0,12 29 2 *\" has no slot in the next 366 days."
+        );
+        assert!(ws.seal().is_empty());
+    }
+
+    #[tokio::test]
     async fn schedule_counts_against_cap_and_budget() {
         let caps = TimerCaps {
             max_active_per_inbox: 2,

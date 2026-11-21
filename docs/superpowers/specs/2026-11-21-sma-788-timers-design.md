@@ -438,7 +438,7 @@ pattern (defaults in `Config::figment()`, range checks in `validate()`):
 | `statement_timeout_ms` | `5000` | 100 to 60000 | `SET LOCAL statement_timeout` for each fire transaction. |
 | `min_schedule_interval_secs` | `900` | 60 to 86400 | The smallest allowed civil gap between two slots (§10.3). |
 | `max_active_per_inbox` | `50` | 1 to 1000 | The most active `agent` timers per inbox. |
-| `max_horizon_days` | `366` | 1 to 3650 | The latest allowed follow-up, and the window for the first slot of a schedule. |
+| `max_horizon_days` | `366` | 1 to 366 | The latest allowed follow-up, and the window for the first slot of a schedule. |
 | `max_fire_attempts` | `10` | 1 to 1000 | Failed fire attempts before a timer goes to `failed` (§11.1). |
 
 `enabled = false` stops only the loop. The tools still work, so timers wait until a replica with
@@ -529,7 +529,11 @@ The tool refuses, with a text that names the limit and the value:
   early exit is at the five-field floor of 60 s: a minimum of 60 s or less passes with no walk.
   For a larger minimum the walk runs until the first gap below the minimum, or until the window
   ends;
-- a schedule with no slot in the next `max_horizon_days`;
+- a schedule with no slot in the next `max_horizon_days`. The range of `max_horizon_days` ends at
+  366, the window of the civil gap check. So the check always sees every slot that can be the
+  first slot. A longer horizon would leave a gap: a slot after day 366 (for example `0 0,12 29 2 *`
+  with the next 29 February in two years) would be accepted with no gap check. The cap closes
+  this (D2). A test pins the refusal;
 - a create that makes the active `agent` timers more than `max_active_per_inbox`. The count is a
   fresh read of `active_agent_ids`, minus the ids of buffered cancels that are in that set, plus
   the buffered inserts. A buffered cancel of a timer that is no longer active is not subtracted;

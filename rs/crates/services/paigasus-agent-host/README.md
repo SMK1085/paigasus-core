@@ -48,7 +48,7 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `timers.statement_timeout_ms` | `AGENT_HOST_TIMERS__STATEMENT_TIMEOUT_MS` | `5000` | `SET LOCAL statement_timeout` of each fire transaction, in milliseconds. Range: 100 to 60000. |
 | `timers.min_schedule_interval_secs` | `AGENT_HOST_TIMERS__MIN_SCHEDULE_INTERVAL_SECS` | `900` | Smallest civil gap between two slots of a schedule. Range: 60 to 86400. |
 | `timers.max_active_per_inbox` | `AGENT_HOST_TIMERS__MAX_ACTIVE_PER_INBOX` | `50` | Most active `agent` timers of one inbox. Range: 1 to 1000. |
-| `timers.max_horizon_days` | `AGENT_HOST_TIMERS__MAX_HORIZON_DAYS` | `366` | Latest allowed follow-up, and the window for the first slot of a schedule. Range: 1 to 3650. |
+| `timers.max_horizon_days` | `AGENT_HOST_TIMERS__MAX_HORIZON_DAYS` | `366` | Latest allowed follow-up, and the window for the first slot of a schedule. Range: 1 to 366. |
 | `timers.max_fire_attempts` | `AGENT_HOST_TIMERS__MAX_FIRE_ATTEMPTS` | `10` | Failed fire attempts before a timer goes to `failed`. Range: 1 to 1000. |
 | `timers.min_follow_up_delay_secs` | `AGENT_HOST_TIMERS__MIN_FOLLOW_UP_DELAY_SECS` | `60` | Shortest follow-up, from the time of the tool call. Range: 1 to 86400. |
 | `timers.max_agent_timers_created_per_day` | `AGENT_HOST_TIMERS__MAX_AGENT_TIMERS_CREATED_PER_DAY` | `100` | Most `agent` timers that one inbox can create in a rolling 24 hours, in any status. Range: 1 to 10000. |

@@ -96,7 +96,9 @@ pub struct TimersConfig {
     pub min_schedule_interval_secs: u64,
     /// The most active `agent` timers of one inbox. Range 1 to 1000.
     pub max_active_per_inbox: u32,
-    /// The latest follow-up, and the window for the first slot of a schedule. Range 1 to 3650.
+    /// The latest follow-up, and the window for the first slot of a schedule. Range 1 to 366.
+    /// The cap is the window of the civil gap check (`CIVIL_GAP_WINDOW_DAYS`), so a slot that the
+    /// check does not see is never inside the horizon.
     pub max_horizon_days: u32,
     /// The failed fire attempts after which a timer goes to `failed`. Range 1 to 1000.
     pub max_fire_attempts: u32,
@@ -716,7 +718,7 @@ impl Config {
             ("statement_timeout_ms", t.statement_timeout_ms, 100, 60_000),
             ("min_schedule_interval_secs", t.min_schedule_interval_secs, 60, 86_400),
             ("max_active_per_inbox", u64::from(t.max_active_per_inbox), 1, 1000),
-            ("max_horizon_days", u64::from(t.max_horizon_days), 1, 3650),
+            ("max_horizon_days", u64::from(t.max_horizon_days), 1, 366),
             ("max_fire_attempts", u64::from(t.max_fire_attempts), 1, 1000),
             ("min_follow_up_delay_secs", t.min_follow_up_delay_secs, 1, 86_400),
             ("max_agent_timers_created_per_day", u64::from(t.max_agent_timers_created_per_day), 1, 10_000),
@@ -1065,8 +1067,8 @@ mod tests {
                 key: "timers.max_horizon_days",
                 set: |c, v| c.timers.max_horizon_days = u32::try_from(v).unwrap(),
                 min: 1,
-                max: 3650,
-                err: |v| timer_err("max_horizon_days", v, 1, 3650),
+                max: 366,
+                err: |v| timer_err("max_horizon_days", v, 1, 366),
             },
             RangeRow {
                 key: "timers.max_fire_attempts",
