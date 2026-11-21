@@ -77,8 +77,9 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
   gate has a negative control since SMA-637: it plants a change in a temporary copy of the git
   index and runs the whole gate as a child process, which must exit 1 (drift) and 2 (untracked).
   Its `deps` names one build per app by hand and nothing
-  asserts the list is complete, so a new app must add its own `<app>-ts:build` edge or `next
-  typegen` races that app's `.next`.
+  asserts the list is complete, so a new app must add its own `<app>-ts:build` edge. Since the
+  follow-up sweep after PR 516, `next typegen` runs in a scratch copy with its own `.next`, but on
+  drift the gate still replaces the app's `next-env.d.ts`.
 - `repo:next-public-free`'s `APP_CONFIG_FLOOR` is **2** since the second console zone landed,
   pinned as a whole line (`"APP_CONFIG_FLOOR=2"`) in `ci/affected-graph/ci_targets.py:1251`, so
   the constant in `ci/next-public/run.sh` and its pin move together or the gate reds. It is a

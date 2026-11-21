@@ -250,8 +250,9 @@ def _read_tracked(root: Path, path: str, read_text: Callable[[Path], str]) -> st
     """The text of the tracked file `path`: the file on disk, else its index blob (SMA-841).
 
     A tool can delete and write again a tracked file while the ban runs. `ci/next-env/run.sh`
-    removes each `next-env.d.ts` for the full run of `next typegen`, and `buf generate` with
-    `clean: true` removes its output directories. The file is then missing for some seconds, and
+    removed each `next-env.d.ts` for the full run of `next typegen` until the follow-up sweep after
+    PR 516; it now uses a scratch copy. The fallback still covers other writers: `buf generate`
+    with `clean: true` removes its output directories. The file is then missing for some seconds, and
     `moon ci` runs those tasks at the same time as this one. The index blob is the content that
     git records for the path, so the ban still scans the file and does not skip it. Only a path
     that is missing on disk AND has no regular-file blob in the index raises.
@@ -730,7 +731,7 @@ def _index_fallback_failures(read_utf8: Callable[[Path], str]) -> list[str]:
         def run(tracked, read_text=read_utf8):
             return ban_rows(root, tracked, read_text=read_text, binary=frozenset(), pinned={})
 
-        # A tracked file that a tool deleted (next-env.d.ts under `next typegen`) is scanned from the index.
+        # A tracked file that a tool deleted (for example a `buf generate` output) is scanned from the index.
         try:
             rows, reads = run(["ci/gen.sh"])
             if len(rows) != 1 or "ci/gen.sh:2" not in rows[0] or reads != {"ci/gen.sh"}:
