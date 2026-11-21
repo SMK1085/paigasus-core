@@ -599,7 +599,7 @@ UPSTREAM_INPUT_TASKS = ("build", "test", "lint")
 
 # Consumer -> upstream pairs deliberately declared in `fileGroups.upstreams` WITHOUT being in the
 # crate's Moon closure. A6 is strict-equality (SMA-429's default-deny model), so an intentional
-# over-approximation needs an entry here with a non-empty reason. Empty today.
+# over-approximation needs an entry here with a non-empty reason. One entry today (SMA-787).
 #
 # MIND THE KEY SHAPE: it is (moon id, upstream SOURCE DIR) — e.g.
 # ("paigasus-iam-rs", "rs/crates/libs/paigasus-kernel") — NOT the (moon id, moon id) shape
@@ -608,7 +608,18 @@ UPSTREAM_INPUT_TASKS = ("build", "test", "lint")
 # not by stripping a known suffix — an over-approximating entry can carry any suffix now, not just
 # `/src/**/*` or `/Cargo.toml`. A moon id never appears in a resolved path. A waiver written in the
 # neighbouring shape is silently inert.
-ALLOW_OVER_APPROXIMATION = {}
+ALLOW_OVER_APPROXIMATION = {
+    # SMA-787: `paigasus-iam`'s encoder test reads the three fixtures of `paigasus-cloudevents`
+    # with `include_bytes!`. IAM does not depend on that crate: the fixtures are test data only.
+    ("paigasus-iam-rs", "rs/crates/libs/paigasus-cloudevents"): (
+        "the cloud_event.rs test pins the paigasus-cloudevents IAM fixtures with include_bytes!"
+    ),
+    # SMA-787 Task 18: the agent host depends on `paigasus-cloudevents`, but its NATS consumer
+    # tests also read one IAM fixture of that crate (a `tests/` file, not `src/`) with `include_bytes!`.
+    ("paigasus-agent-host-rs", "rs/crates/libs/paigasus-cloudevents"): (
+        "the NATS consumer tests read the IAM fixture organization_created_trailing_zeros.json with include_bytes!"
+    ),
+}
 
 # A6's anti-vacuity floor, mirroring REQUIRED_FFI_TASKS. A6 DERIVES each crate's closure from
 # moon's `dependencies` key; a moon rename or JSON reshape would empty every closure and A6 would

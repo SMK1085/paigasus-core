@@ -8,8 +8,14 @@
 use async_trait::async_trait;
 
 use crate::agent::ResolvedAgent;
-use crate::ids::{InboxId, OutboxMessageId, TimerId};
-use crate::inbox::{Inbox, InboxEvent};
+use std::time::Duration;
+
+use uuid::Uuid;
+
+use crate::claim::{Claim, ClaimConfig};
+use crate::ids::{EventId, InboxId, OutboxMessageId, TimerId};
+use crate::inbox::{Inbox, NewInboxEvent};
+use crate::lease::{ClaimError, CompleteError, HeartbeatError, LeaseHandle};
 use crate::memory::{CapError, MemoryCaps, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use crate::outbox::OutboxMessage;
 use crate::run::{CommitError, Committed, RunHandle, RunOutcome};
@@ -30,23 +36,59 @@ pub enum RepositoryError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// The store added the event.
-    Inserted,
+    Inserted {
+        /// The ID of the new event.
+        id: EventId,
+    },
     /// An event with the same key exists. `payload_matches` tells if the payload is the same.
     Duplicate {
+        /// The ID of the stored event.
+        id: EventId,
         /// True when the stored payload equals the new payload.
         payload_matches: bool,
     },
 }
+
+/// The error of a lease or claim store call. The text is the cause.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("store error: {0}")]
+pub struct StoreError(pub String);
 
 /// The store of inboxes and their events. Owner: SMA-787.
 /// Used outside a run: by ingress and the console.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait InboxRepository: Send + Sync {
-    /// Read an inbox by its ID.
-    async fn get(&self, id: &InboxId) -> Result<Option<Inbox>, RepositoryError>;
+    /// Read an inbox by the UUID of its ID.
+    async fn get_by_uuid(&self, id: Uuid) -> Result<Option<Inbox>, RepositoryError>;
     /// Add an event to an inbox. A repeated key gives `Duplicate`.
-    async fn insert_event(&self, event: InboxEvent) -> Result<InsertOutcome, RepositoryError>;
+    async fn insert_event(&self, event: NewInboxEvent) -> Result<InsertOutcome, RepositoryError>;
+}
+
+/// The store of inbox leases. Owner: SMA-787.
+/// Provisional: the owner may change the methods, not the responsibility.
+#[async_trait]
+pub trait LeaseRepository: Send + Sync {
+    /// Acquire the lease of the next inbox that has work. Returns `None` when no inbox is free.
+    async fn acquire_next(&self, holder: &str, ttl: Duration) -> Result<Option<LeaseHandle>, StoreError>;
+    /// Acquire the lease of one inbox. Returns `None` when another holder has it.
+    async fn acquire(&self, inbox: &InboxId, holder: &str, ttl: Duration) -> Result<Option<LeaseHandle>, StoreError>;
+    /// Extend the lease. A poisoned handle gives `LeaseLost` with no SQL.
+    async fn heartbeat(&self, handle: &LeaseHandle, ttl: Duration) -> Result<(), HeartbeatError>;
+    /// Release the lease.
+    async fn release(&self, handle: LeaseHandle) -> Result<(), StoreError>;
+}
+
+/// The store of claims. Owner: SMA-787.
+/// `complete` is replaced by `RunCommitter` in SMA-790.
+/// Provisional: the owner may change the methods, not the responsibility.
+#[async_trait]
+pub trait ClaimRepository: Send + Sync {
+    /// Claim a batch of events. Returns `None` when there is nothing to claim.
+    async fn claim(&self, handle: &mut LeaseHandle, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError>;
+    /// Complete a claim. Returns the IDs of the events that it finished.
+    /// A poisoned handle gives `LeaseLost` with no SQL.
+    async fn complete(&self, handle: &mut LeaseHandle, claim: Claim) -> Result<Vec<EventId>, CompleteError>;
 }
 
 /// The store of timers. Owner: SMA-788.

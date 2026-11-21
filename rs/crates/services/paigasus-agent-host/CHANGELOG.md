@@ -9,3 +9,12 @@ A maintainer writes this file by hand. release-plz does not process this crate, 
 manifest sets `publish = false`.
 
 ## [Unreleased]
+
+### Added
+
+- The CloudEvents ingress `POST /v1/inboxes/{inbox}/events`. It is mounted only when `[iam]` is set.
+- The inbox tables `thread`, `inbox_lease`, `run`, `run_event` and `inbox_event`.
+- The inbox lease, the lease heartbeat and the claim of a batch of events.
+- The NATS JetStream source of the inbox, with the `[nats]` section and its channels.
+- The route `GET /v1/service-info`.
+- The config keys `worker`, `lease`, `claim`, `ingress`, `iam`, `mid_run` and `nats`.
