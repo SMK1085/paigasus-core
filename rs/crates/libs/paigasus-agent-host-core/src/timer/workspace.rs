@@ -6,10 +6,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use jiff::civil;
 use jiff::{SignedDuration, Timestamp};
 
 use super::text::refusal_text;
-use super::{Note, NoteError, Timer, TimerCaps, TimerChanges, TimerKind, TimerOrigin, TimerParts, TimerStatus, checked_round_up_to_second};
+use super::tool::TimerToolName;
+use super::{
+    CIVIL_GAP_WINDOW_DAYS, CronSchedule, CronScheduleError, CronSyntaxError, Note, NoteError, Timer, TimerCaps, TimerChanges, TimerKind, TimerOrigin, TimerParts, TimerStatus, WALK_BOUND,
+    checked_round_up_to_second,
+};
 use crate::ids::{InboxId, ThreadId, TimerId};
 use crate::ports::{IdSource, RepositoryError, RunClock, TimerRepository, TzResolver};
 
@@ -46,6 +51,17 @@ pub struct FollowUpSet {
     pub due: Timestamp,
     /// True when the due time is later than the life of the conversation.
     pub beyond_thread_ttl: bool,
+}
+
+/// A schedule that the workspace buffered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleSet {
+    /// The ID of the new timer.
+    pub id: TimerId,
+    /// The schedule.
+    pub schedule: CronSchedule,
+    /// The next three slots: the civil time in the zone of the schedule, and the instant.
+    pub next: Vec<(civil::DateTime, Timestamp)>,
 }
 
 /// An active timer for a list. `buffered` is true for a timer that this run made.
@@ -110,6 +126,41 @@ pub enum TimerRefusal {
         id: TimerId,
         /// The status of the timer.
         status: TimerStatus,
+    },
+    /// The cron text is not accepted.
+    Cron {
+        /// The cron text that the model gave.
+        cron: String,
+        /// The reason.
+        error: CronSyntaxError,
+    },
+    /// The time zone name is not known.
+    UnknownZone {
+        /// The name that the model gave.
+        name: String,
+    },
+    /// Two slots of the schedule are closer than the minimum.
+    IntervalTooShort {
+        /// The cron text.
+        cron: String,
+        /// The gap in seconds.
+        gap: u64,
+        /// The minimum in seconds.
+        min: u64,
+    },
+    /// The schedule has no slot in the horizon.
+    NoSlot {
+        /// The cron text.
+        cron: String,
+        /// The horizon in days.
+        days: u32,
+    },
+    /// The arguments of a tool call are not valid.
+    Arguments {
+        /// The tool.
+        tool: TimerToolName,
+        /// What is wrong.
+        detail: String,
     },
     /// The store failed.
     Store {
@@ -190,6 +241,11 @@ impl TimerWorkspace {
             inserts: std::mem::take(&mut self.inserts),
             cancels: std::mem::take(&mut self.cancels),
         }
+    }
+
+    /// The life of a conversation.
+    pub(super) fn thread_ttl(&self) -> Duration {
+        self.thread_ttl
     }
 
     fn check_open(&self) -> Result<(), TimerRefusal> {
@@ -282,6 +338,61 @@ impl TimerWorkspace {
         Ok(FollowUpSet { id, due, beyond_thread_ttl })
     }
 
+    /// Buffer a schedule. The checks run in this order: the cron text and the zone, the gap between
+    /// slots, the first slot inside the horizon, the note, the count cap, the budget. Any failure
+    /// of a walk is a `NoSlot` refusal.
+    pub async fn create_schedule(&mut self, cron: &str, tz: &str, note: &str) -> Result<ScheduleSet, TimerRefusal> {
+        self.check_open()?;
+        let now = self.deps.clock.now();
+        let schedule = CronSchedule::parse(cron, tz, &*self.deps.tz).map_err(|e| match e {
+            CronScheduleError::Syntax(error) => TimerRefusal::Cron { cron: cron.to_string(), error },
+            CronScheduleError::UnknownZone { name } => TimerRefusal::UnknownZone { name },
+        })?;
+        let no_slot = || TimerRefusal::NoSlot {
+            cron: cron.to_string(),
+            days: self.caps.max_horizon_days,
+        };
+        let from = schedule.time_zone().to_datetime(now);
+        if let Some(gap) = schedule.min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, self.caps.min_schedule_interval_secs).map_err(|_| no_slot())? {
+            return Err(TimerRefusal::IntervalTooShort {
+                cron: cron.to_string(),
+                gap,
+                min: self.caps.min_schedule_interval_secs,
+            });
+        }
+        let (first, first_at) = schedule.first_slot(now, WALK_BOUND).map_err(|_| no_slot())?;
+        let horizon = now
+            .checked_add(SignedDuration::from_secs(i64::from(self.caps.max_horizon_days) * SECS_PER_DAY))
+            .unwrap_or(Timestamp::MAX);
+        if first_at > horizon {
+            return Err(no_slot());
+        }
+        let note = Note::parse(note)?;
+        self.check_room_for_insert(now).await?;
+        let mut next = vec![(first.civil, first_at)];
+        let (mut slot, mut at) = (first, first_at);
+        for _ in 0..2 {
+            let (s, t) = schedule.next_after(slot, at, WALK_BOUND).map_err(|_| no_slot())?;
+            next.push((s.civil, t));
+            (slot, at) = (s, t);
+        }
+        let id = TimerId::from_uuid(self.deps.ids.new_uuid());
+        self.inserts.push(Timer::new(TimerParts {
+            id,
+            inbox: self.inbox.clone(),
+            kind: TimerKind::Schedule {
+                schedule: schedule.clone(),
+                next_slot: first,
+            },
+            thread: None,
+            note,
+            origin: TimerOrigin::Agent,
+            status: TimerStatus::Active,
+            next_fire_at: first_at,
+        }));
+        Ok(ScheduleSet { id, schedule, next })
+    }
+
     /// List the active timers of the agent: the stored ones without the buffered cancels, and the
     /// buffered inserts, ordered by the next firing.
     pub async fn list(&mut self) -> Result<Vec<ListedTimer>, TimerRefusal> {
@@ -327,8 +438,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::fake::{FakeClock, InMemoryTimerRepository, SeqIds};
-    use super::super::{BundledTzResolver, TimerView, follow_up_set_text, list_text};
+    use super::super::{BundledTzResolver, TimerToolName, TimerView, follow_up_set_text, list_text, run_tool, schedule_set_text};
     use super::*;
+    use serde_json::json;
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -612,6 +724,184 @@ mod tests {
         assert_eq!(ws.list().await, Err(TimerRefusal::Sealed));
         assert_eq!(ws.cancel("x").await, Err(TimerRefusal::Sealed));
         assert_eq!(TimerRefusal::Sealed.to_string(), "The run is ending. Timers are read-only now.");
+    }
+
+    fn at_time(rig: &Rig, t: &str) {
+        rig.clock.advance(ts(t).duration_since(rig.clock.now()));
+    }
+
+    async fn schedule_refusal(ws: &mut TimerWorkspace, cron: &str, tz: &str) -> TimerRefusal {
+        ws.create_schedule(cron, tz, "n").await.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn schedule_shows_three_slots() {
+        let (mut ws, rig) = rig(TimerCaps::default());
+        at_time(&rig, "2026-03-28T10:00:00Z");
+        let set = ws.create_schedule("0 9 * * *", "Europe/Berlin", "daily").await.unwrap();
+        let instants: Vec<Timestamp> = set.next.iter().map(|(_, t)| *t).collect();
+        assert_eq!(instants, vec![ts("2026-03-29T07:00:00Z"), ts("2026-03-30T07:00:00Z"), ts("2026-03-31T07:00:00Z")]);
+        let civils: Vec<civil::DateTime> = set.next.iter().map(|(c, _)| *c).collect();
+        assert_eq!(
+            civils,
+            vec![
+                civil::date(2026, 3, 29).at(9, 0, 0, 0),
+                civil::date(2026, 3, 30).at(9, 0, 0, 0),
+                civil::date(2026, 3, 31).at(9, 0, 0, 0)
+            ]
+        );
+        let text = schedule_set_text(&set);
+        assert!(text.contains("Europe/Berlin") && text.contains("UTC"), "{text}");
+        assert!(text.contains("- 2026-03-29 09:00 Europe/Berlin (2026-03-29 07:00 UTC)"), "{text}");
+        let changes = ws.seal();
+        let t = &changes.inserts[0];
+        assert_eq!(t.next_fire_at(), ts("2026-03-29T07:00:00Z"));
+        assert_eq!(t.thread(), None);
+        assert!(matches!(t.kind(), TimerKind::Schedule { .. }));
+    }
+
+    #[tokio::test]
+    async fn schedule_refusals() {
+        let (mut ws, r1) = rig(TimerCaps::default());
+        at_time(&r1, "2026-03-28T10:00:00Z");
+        let e = schedule_refusal(&mut ws, "0 9 L * *", "Europe/Berlin").await;
+        assert!(matches!(e, TimerRefusal::Cron { .. }));
+        assert!(e.to_string().contains('L'), "{e}");
+        assert_eq!(schedule_refusal(&mut ws, "0 9 * * *", "Mars/Olympus").await, TimerRefusal::UnknownZone { name: "Mars/Olympus".into() });
+        assert_eq!(
+            schedule_refusal(&mut ws, "*/14 * * * *", "Europe/Berlin").await,
+            TimerRefusal::IntervalTooShort {
+                cron: "*/14 * * * *".into(),
+                gap: 840,
+                min: 900
+            }
+        );
+        assert_eq!(schedule_refusal(&mut ws, "0 0 30 2 *", "UTC").await, TimerRefusal::NoSlot { cron: "0 0 30 2 *".into(), days: 366 });
+        assert_eq!(
+            schedule_refusal(&mut ws, "0 0 30 2 *", "UTC").await.to_string(),
+            "Error: \"0 0 30 2 *\" has no slot in the next 366 days."
+        );
+        assert!(ws.seal().is_empty());
+
+        let caps = TimerCaps {
+            min_schedule_interval_secs: 7200,
+            ..TimerCaps::default()
+        };
+        let (mut ws, r2) = rig(caps);
+        at_time(&r2, "2026-03-28T10:00:00Z");
+        ws.create_schedule("0 */2 * * *", "Europe/Berlin", "n").await.unwrap();
+        let caps = TimerCaps {
+            min_schedule_interval_secs: 86_400,
+            ..TimerCaps::default()
+        };
+        let (mut ws, r3) = rig(caps);
+        at_time(&r3, "2026-03-28T10:00:00Z");
+        ws.create_schedule("0 9 * * *", "Europe/Berlin", "n").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn schedule_beyond_the_horizon_is_no_slot() {
+        let caps = TimerCaps {
+            max_horizon_days: 30,
+            ..TimerCaps::default()
+        };
+        let (mut ws, _rig) = rig(caps);
+        // The next 1 January is more than 30 days after the clock (2026-06-01).
+        assert_eq!(schedule_refusal(&mut ws, "0 0 1 1 *", "UTC").await, TimerRefusal::NoSlot { cron: "0 0 1 1 *".into(), days: 30 });
+    }
+
+    #[tokio::test]
+    async fn schedule_counts_against_cap_and_budget() {
+        let caps = TimerCaps {
+            max_active_per_inbox: 2,
+            ..TimerCaps::default()
+        };
+        let (mut ws, store_rig) = rig(caps);
+        seed(&store_rig, inbox_x(), 0, TimerOrigin::Agent, TimerStatus::Active, old());
+        ws.create_schedule("0 9 * * *", "UTC", "a").await.unwrap();
+        assert_eq!(schedule_refusal(&mut ws, "0 9 * * *", "UTC").await, TimerRefusal::CountCap { after: 3, limit: 2 });
+        // A follow-up and a schedule share the same cap.
+        assert_eq!(ws.schedule_follow_up(FollowUpDue::InSeconds(120), "c", false).await, Err(TimerRefusal::CountCap { after: 3, limit: 2 }));
+
+        let caps = TimerCaps {
+            max_agent_timers_created_per_day: 2,
+            ..TimerCaps::default()
+        };
+        let (mut ws, _rig) = rig(caps);
+        ws.schedule_follow_up(FollowUpDue::InSeconds(120), "a", false).await.unwrap();
+        ws.create_schedule("0 9 * * *", "UTC", "b").await.unwrap();
+        assert_eq!(schedule_refusal(&mut ws, "0 9 * * *", "UTC").await, TimerRefusal::Budget { after: 3, limit: 2 });
+    }
+
+    #[tokio::test]
+    async fn at_forms() {
+        let (mut ws, _rig) = rig(TimerCaps::default());
+        for at in ["2026-11-22T09:00", "2026-11-22"] {
+            let reply = run_tool(&mut ws, TimerToolName::ScheduleFollowUp, json!({"at": at, "note": "n"})).await;
+            assert!(reply.refused, "{at}");
+            assert!(reply.text.starts_with("Error: at must be an RFC 3339 time with an offset"), "{}", reply.text);
+            assert!(reply.text.contains("RFC 3339") && reply.text.contains("with an offset"));
+        }
+        let reply = run_tool(&mut ws, TimerToolName::ScheduleFollowUp, json!({"at": "2026-11-22T09:00:00.25Z", "note": "n"})).await;
+        assert!(!reply.refused, "{}", reply.text);
+        assert_eq!(ws.seal().inserts[0].next_fire_at(), ts("2026-11-22T09:00:01Z"));
+    }
+
+    #[tokio::test]
+    async fn argument_types() {
+        let (mut ws, _rig) = rig(TimerCaps::default());
+        let f = TimerToolName::ScheduleFollowUp;
+        let cases = [
+            (f, json!({"at": "2026-11-22T09:00:00Z", "in_seconds": 60, "note": "n"})),
+            (f, json!({"note": "n"})),
+            (f, json!({"in_seconds": 60.5, "note": "n"})),
+            (f, json!({"in_seconds": "60", "note": "n"})),
+            (f, json!({"in_seconds": 60})),
+            (f, json!({"in_seconds": 60, "note": "n", "new_thread": "yes"})),
+            (f, json!({"at": 5, "note": "n"})),
+            (f, json!("not an object")),
+            (TimerToolName::CreateSchedule, json!({"cron": "0 9 * * *", "tz": "UTC"})),
+            (TimerToolName::CreateSchedule, json!({"cron": 5, "tz": "UTC", "note": "n"})),
+            (TimerToolName::CancelTimer, json!({"timer_id": 5})),
+            (TimerToolName::CancelTimer, json!({})),
+        ];
+        for (tool, args) in cases {
+            let reply = run_tool(&mut ws, tool, args.clone()).await;
+            assert!(reply.refused, "{args}");
+            assert!(reply.text.starts_with("Error:"), "{}", reply.text);
+            assert!(reply.text.contains(&format!("{} takes:", tool.as_str())), "{}", reply.text);
+            assert_eq!(reply.cause, None);
+        }
+        assert!(ws.seal().is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_tool_through_run_tool() {
+        let (mut ws, _rig) = rig(TimerCaps::default());
+        let set = run_tool(&mut ws, TimerToolName::ScheduleFollowUp, json!({"in_seconds": 120, "note": "n", "extra": 1})).await;
+        assert!(!set.refused && set.text.starts_with("Follow-up "), "{}", set.text);
+        let id = set.text.split_whitespace().nth(1).unwrap().to_string();
+        let sched = run_tool(&mut ws, TimerToolName::CreateSchedule, json!({"cron": "0 9 * * *", "tz": "Europe/Berlin", "note": "n"})).await;
+        assert!(!sched.refused && sched.text.starts_with("Schedule "), "{}", sched.text);
+        let list = run_tool(&mut ws, TimerToolName::ListTimers, json!({})).await;
+        assert!(!list.refused && list.text.lines().count() == 2, "{}", list.text);
+        let cancel = run_tool(&mut ws, TimerToolName::CancelTimer, json!({"timer_id": id})).await;
+        assert!(!cancel.refused && cancel.text.ends_with("is cancelled."), "{}", cancel.text);
+        assert_eq!(TimerToolName::ALL.map(TimerToolName::as_str), ["schedule_follow_up", "create_schedule", "list_timers", "cancel_timer"]);
+    }
+
+    #[tokio::test]
+    async fn run_tool_refusal_carries_the_store_cause() {
+        let deps = TimerDeps {
+            store: Arc::new(FailingStore),
+            tz: Arc::new(BundledTzResolver::new()),
+            ids: Arc::new(SeqIds::default()),
+            clock: Arc::new(FakeClock::new(start())),
+        };
+        let mut ws = TimerWorkspace::new(inbox_x(), thread(), TimerCaps::default(), Duration::from_secs(60), deps);
+        let reply = run_tool(&mut ws, TimerToolName::ListTimers, json!({})).await;
+        assert!(reply.refused && reply.cause.is_some_and(|c| c.contains("boom")));
+        assert!(!reply.text.contains("boom"));
     }
 
     struct FailingStore;

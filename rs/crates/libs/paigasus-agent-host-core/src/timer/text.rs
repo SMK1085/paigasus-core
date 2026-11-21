@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use super::workspace::{FollowUpSet, ListedTimer, TimerRefusal};
+use super::workspace::{FollowUpSet, ListedTimer, ScheduleSet, TimerRefusal};
 use super::{NOTE_MAX_CHARS, NoteError, TimerKind, format_fire_at};
 use crate::ids::TimerId;
 
@@ -21,6 +21,17 @@ pub fn follow_up_set_text(set: &FollowUpSet, thread_ttl: Duration) -> String {
             " The due time is more than {} hours from now. This conversation will be gone when the timer fires, and only the note will remain.",
             thread_ttl.as_secs() / 3600,
         ));
+    }
+    text
+}
+
+/// The text of a schedule that is set.
+#[must_use]
+pub fn schedule_set_text(set: &ScheduleSet) -> String {
+    let tz = set.schedule.tz_name();
+    let mut text = format!("Schedule {} is set: \"{}\" in {tz}. The next three slots:", set.id.uuid().as_hyphenated(), set.schedule.text());
+    for (local, utc) in &set.next {
+        text.push_str(&format!("\n- {} {tz} ({} UTC)", local.strftime("%Y-%m-%d %H:%M"), utc.strftime("%Y-%m-%d %H:%M")));
     }
     text
 }
@@ -82,6 +93,11 @@ pub(super) fn refusal_text(r: &TimerRefusal) -> String {
         TimerRefusal::NotActive { id, status } => {
             format!("Error: Timer {} is {}, so it cannot be cancelled.", id.uuid().as_hyphenated(), status.as_str())
         }
+        TimerRefusal::Cron { cron, error } => format!("Error: The cron expression \"{cron}\" is not accepted: {error}."),
+        TimerRefusal::UnknownZone { name } => format!("Error: \"{name}\" is not a known IANA time zone name, for example Europe/Berlin."),
+        TimerRefusal::IntervalTooShort { cron, gap, min } => format!("Error: Two slots of \"{cron}\" are {gap} seconds apart. The minimum is {min} seconds."),
+        TimerRefusal::NoSlot { cron, days } => format!("Error: \"{cron}\" has no slot in the next {days} days."),
+        TimerRefusal::Arguments { tool, detail } => format!("Error: {detail}. {} takes: {}.", tool.as_str(), tool.argument_summary()),
         TimerRefusal::Store { .. } => "The timer store is not available now. Try again later.".to_string(),
     }
 }

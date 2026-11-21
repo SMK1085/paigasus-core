@@ -12,15 +12,17 @@ mod dst_tests;
 pub mod fake;
 mod plan;
 mod text;
+mod tool;
 mod tz;
 mod workspace;
 
 pub use changes::{ApplyError, ApplyReport, CancelOutcome, TimerCaps, TimerChanges};
 pub use cron::{CIVIL_GAP_WINDOW_DAYS, CronSchedule, CronScheduleError, CronSyntaxError, Resolution, WALK_BOUND, WalkError};
 pub use plan::{FirePlan, Next, PlanError, plan_fire};
-pub use text::{cancelled_text, follow_up_set_text, list_text};
+pub use text::{cancelled_text, follow_up_set_text, list_text, schedule_set_text};
+pub use tool::{TimerToolName, TimerToolReply, run_tool};
 pub use tz::BundledTzResolver;
-pub use workspace::{FollowUpDue, FollowUpSet, ListedTimer, TimerDeps, TimerRefusal, TimerWorkspace};
+pub use workspace::{FollowUpDue, FollowUpSet, ListedTimer, ScheduleSet, TimerDeps, TimerRefusal, TimerWorkspace};
 
 use crate::ids::{InboxId, ThreadId, TimerId};
 
