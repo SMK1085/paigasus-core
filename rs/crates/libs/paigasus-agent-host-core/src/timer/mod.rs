@@ -6,12 +6,16 @@ use jiff::Timestamp;
 
 mod changes;
 mod cron;
+#[cfg(test)]
+mod dst_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
+mod plan;
 mod tz;
 
 pub use changes::{ApplyError, ApplyReport, CancelOutcome, TimerCaps, TimerChanges};
 pub use cron::{CIVIL_GAP_WINDOW_DAYS, CronSchedule, CronScheduleError, CronSyntaxError, Resolution, WALK_BOUND, WalkError};
+pub use plan::{FirePlan, Next, PlanError, plan_fire};
 pub use tz::BundledTzResolver;
 
 use crate::ids::{InboxId, ThreadId, TimerId};
