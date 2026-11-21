@@ -1190,6 +1190,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_blind_retry_after_a_conflict_passes() {
+        let (store, scope, mut ws) = committed_parts(&[("/tasks/a.md", "a")], MemoryCaps::default()).await;
+        run(&mut ws, json!({"command":"view","path":"/memories/tasks"})).await.unwrap();
+        other_writer(&store, &scope, "/tasks/b.md", "b").await;
+        let err = run(&mut ws, json!({"command":"delete","path":"/memories/tasks"})).await.unwrap_err();
+        assert!(err.starts_with("The file /memories/tasks/b.md changed outside this run."), "{err}");
+        // No view between the conflict and the retry.
+        run(&mut ws, json!({"command":"delete","path":"/memories/tasks"})).await.unwrap();
+        ws.commit().await.unwrap();
+        let mut fresh = fresh_ws(&store, &scope);
+        assert_eq!(content(&mut fresh, "/tasks/a.md").await, None);
+        assert_eq!(content(&mut fresh, "/tasks/b.md").await, None);
+        assert!(fresh.list(&MemoryDir::root()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_directory_round_trip_commits() {
         let (store, scope, mut ws) = committed_parts(&[("/a/x.md", "x"), ("/a/y.md", "y")], MemoryCaps::default()).await;
         run(&mut ws, rename_cmd("/memories/a", "/memories/b")).await.unwrap();
