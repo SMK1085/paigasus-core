@@ -2,7 +2,9 @@
 
 //! Versions and the change set of a run.
 
-use super::{MemoryPath, MemoryScope};
+use std::collections::BTreeSet;
+
+use super::{MemoryDir, MemoryPath, MemoryScope};
 
 /// An opaque version of a file. The adapter makes it. The core only compares versions for equality.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +133,26 @@ pub struct MemoryCommitSet {
     pub scope: MemoryScope,
     /// The changes.
     pub changes: MemoryChangeSet,
+    /// The directories that the run read or listed. A store checks each one at commit time.
+    pub guards: BTreeSet<MemoryDir>,
+}
+
+impl MemoryCommitSet {
+    /// A commit set with no guard.
+    #[must_use]
+    pub fn new(scope: MemoryScope, changes: MemoryChangeSet) -> Self {
+        MemoryCommitSet {
+            scope,
+            changes,
+            guards: BTreeSet::new(),
+        }
+    }
+
+    /// True when there is no change and no guard.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty() && self.guards.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +174,18 @@ mod tests {
     }
     fn del(path: &str, ver: &str) -> MemoryChange {
         MemoryChange::Delete { path: p(path), expected: v(ver) }
+    }
+
+    #[test]
+    fn a_commit_set_is_empty_only_with_no_change_and_no_guard() {
+        let scope = crate::memory::conformance::fresh_scope();
+        let mut set = MemoryCommitSet::new(scope.clone(), MemoryChangeSet::new());
+        assert!(set.is_empty());
+        set.guards.insert(MemoryDir::parse("/tasks").unwrap());
+        assert!(!set.is_empty());
+        let mut cs = MemoryChangeSet::new();
+        cs.record(put("/f", "one", Expected::Absent));
+        assert!(!MemoryCommitSet::new(scope, cs).is_empty());
     }
 
     #[test]

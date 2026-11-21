@@ -51,7 +51,7 @@ fn commit_set(scope: &MemoryScope, changes: Vec<MemoryChange>) -> MemoryCommitSe
     for c in changes {
         cs.record(c);
     }
-    MemoryCommitSet { scope: scope.clone(), changes: cs }
+    MemoryCommitSet::new(scope.clone(), cs)
 }
 
 fn scope_values(scope: &MemoryScope) -> Vec<Value> {

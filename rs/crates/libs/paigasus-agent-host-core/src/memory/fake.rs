@@ -160,7 +160,7 @@ mod tests {
             content: "a\0b".into(),
             expected: Expected::Absent,
         });
-        let set = MemoryCommitSet { scope: scope.clone(), changes };
+        let set = MemoryCommitSet::new(scope.clone(), changes);
         let err = fake.apply(&set, &MemoryCaps::default()).await.unwrap_err();
         assert!(matches!(err, MemoryApplyError::Store(_)), "{err:?}");
         assert_eq!(fake.get(&scope, &path).await.unwrap(), None);

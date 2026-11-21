@@ -345,10 +345,7 @@ impl MemoryWorkspace {
     /// Give the buffer to the commit and seal the workspace.
     pub fn take_changes(&mut self) -> MemoryCommitSet {
         self.sealed = true;
-        MemoryCommitSet {
-            scope: self.scope.clone(),
-            changes: std::mem::take(&mut self.changes),
-        }
+        MemoryCommitSet::new(self.scope.clone(), std::mem::take(&mut self.changes))
     }
 
     /// Seal the workspace and apply the buffer to the store.
@@ -464,7 +461,7 @@ mod tests {
             content: content.into(),
             expected,
         });
-        let set = MemoryCommitSet { scope: scope.clone(), changes };
+        let set = MemoryCommitSet::new(scope.clone(), changes);
         fake.apply(&set, &MemoryCaps::default()).await.unwrap();
     }
 
@@ -720,7 +717,7 @@ mod tests {
         let v = f.get(&s, &p("/d/x")).await.unwrap().unwrap().version;
         let mut changes = MemoryChangeSet::new();
         changes.record(MemoryChange::Delete { path: p("/d/x"), expected: v });
-        f.apply(&MemoryCommitSet { scope: s.clone(), changes }, &MemoryCaps::default()).await.unwrap();
+        f.apply(&MemoryCommitSet::new(s.clone(), changes), &MemoryCaps::default()).await.unwrap();
         assert_eq!(ws.read(&p("/d/x")).await.unwrap(), None);
         assert_eq!(ws.list(&dir).await.unwrap(), vec![]);
     }
@@ -772,7 +769,7 @@ mod tests {
         let v = f.get(&s, &p("/old")).await.unwrap().unwrap().version;
         let mut changes = MemoryChangeSet::new();
         changes.record(MemoryChange::Delete { path: p("/old"), expected: v });
-        f.apply(&MemoryCommitSet { scope: s.clone(), changes }, &MemoryCaps::default()).await.unwrap();
+        f.apply(&MemoryCommitSet::new(s.clone(), changes), &MemoryCaps::default()).await.unwrap();
         direct(&f, &s, "/new", "n").await;
         // The real result is 2 bytes, so the cap must not refuse the write.
         ws.write(&p("/new"), "ab".into()).await.unwrap();
