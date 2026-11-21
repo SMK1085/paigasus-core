@@ -11,7 +11,7 @@
 # Inputs are the same as `provision.sh`: OPERATOR, OUT_DIR, NATS_URL and PUSH. With PUSH unset, the
 # script makes the account, the users and the creds files and stops. With PUSH=1 it pushes the account
 # to the running broker and creates the stream and the bucket when they do not exist. It needs `nsc`,
-# and with PUSH=1 also the `nats` CLI.
+# and with PUSH=1 also the `nats` CLI and `jq`.
 #
 # The stream and bucket values come from `subjects.env`; edit them there, never here. The relay in
 # `paigasus-gateway` makes the same stream with the same values (P-20).
@@ -81,8 +81,7 @@ add_user() {
   local name="$1"; shift
   local -n pub_ref="$1"; shift
   local -n sub_ref="$1"; shift
-  local edit="${1:-}"; shift || true
-  local revoke=("$@")
+  local edit="${1:-}"
 
   local args=() s
   for s in "${pub_ref[@]}"; do args+=(--allow-pub "$s"); done
@@ -94,21 +93,12 @@ add_user() {
   # user that exists before SMA-821 gets the generation bucket subjects. `nsc edit user` adds and is idempotent.
   if [ "$edit" = "edit" ]; then
     nsc edit user --account "$GATEWAY_ACCOUNT" --name "$name" "${args[@]}"
-    # Removing a subject from the array does NOT revoke it on an existing user: `nsc edit user` only adds.
-    # So revoke each removed grant by name. `--rm` is idempotent: it exits 0 when the subject is absent
-    # (MEASURED with nsc 2.15.0 in `natsio/nats-box:0.20.2`).
-    for s in "${revoke[@]}"; do
-      nsc edit user --account "$GATEWAY_ACCOUNT" --name "$name" --rm "$s"
-    done
   fi
   nsc generate creds --account "$GATEWAY_ACCOUNT" --name "$name" > "$OUT_DIR/$name.creds"
   chmod 600 "$OUT_DIR/$name.creds"
 }
 
-# D20 (SMA-821): the publisher had `$JS.API.STREAM.CREATE.KV_…` in an earlier build. It could make the bucket
-# as a mirror of GATEWAY_DECISIONS and read every decision (MEASURED). Revoke it on an existing user.
-add_user gateway-decision-publisher   GW_DEC_PUBLISHER_PUB   GW_DEC_PUBLISHER_SUB edit \
-  '$JS.API.STREAM.CREATE.KV_'"$DECISIONS_GEN_BUCKET"
+add_user gateway-decision-publisher   GW_DEC_PUBLISHER_PUB   GW_DEC_PUBLISHER_SUB edit
 add_user gateway-decision-reader      GW_DEC_READER_PUB      GW_DEC_READER_SUB
 add_user gateway-decision-provisioner GW_DEC_PROVISIONER_PUB GW_DEC_PROVISIONER_SUB
 
@@ -124,7 +114,39 @@ nsc push --account "$GATEWAY_ACCOUNT"
 # The stream is made only when it is absent: `stream add` on an existing stream with other values
 # fails, and an edit of a live stream is an operator decision (RUNBOOK-nats.md).
 prov_creds="$OUT_DIR/gateway-decision-provisioner.creds"
-if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" stream info "$DECISIONS_STREAM_NAME" >/dev/null 2>&1; then
+
+prov_nats() {
+  nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" "$@"
+}
+
+# D20 (SMA-821): refuse an existing stream that is a mirror or has sources. Before provisioning, the publisher
+# can make `GATEWAY_DECISIONS` or the bucket stream with any config (`STREAM.CREATE.GATEWAY_DECISIONS`). A mirror
+# or a source stream would copy the data of the other stream. With a second argument, the subjects of the stream
+# must be exactly that list (comma separated, sorted). Needs `jq`. Prints the reason on stderr and returns 1.
+check_stream_shape() {
+  local name="$1" expected_subjects="${2:-}" info bad subjects
+  if ! info="$(prov_nats stream info "$name" --json)"; then
+    echo "cannot read the stream info of $name" >&2
+    return 1
+  fi
+  bad="$(printf '%s' "$info" | jq -r 'if .config.mirror != null then "a mirror" elif ((.config.sources // []) | length) > 0 then "sources" else "" end')"
+  if [ -n "$bad" ]; then
+    echo "REFUSED: the existing stream $name has $bad configured. This script makes neither. Check who made it," \
+         "delete it, and run the script again." >&2
+    return 1
+  fi
+  if [ -n "$expected_subjects" ]; then
+    subjects="$(printf '%s' "$info" | jq -r '(.config.subjects // []) | sort | join(",")')"
+    if [ "$subjects" != "$expected_subjects" ]; then
+      echo "REFUSED: the existing stream $name has the subjects '$subjects', not '$expected_subjects'." \
+           "Check who made it, delete it, and run the script again." >&2
+      return 1
+    fi
+  fi
+}
+
+if prov_nats stream info "$DECISIONS_STREAM_NAME" >/dev/null 2>&1; then
+  check_stream_shape "$DECISIONS_STREAM_NAME" "$DECISIONS_SUBJECTS"
   echo "stream $DECISIONS_STREAM_NAME already exists; left unchanged"
 else
   # This script sets no per-stream limit on the account. The relay also caps max_bytes at the account
@@ -152,6 +174,7 @@ fi
 # the image `natsio/nats-box:0.20.2` (nsc 2.15.0). `stream info KV_GATEWAY_DECISIONS_GEN` showed allow_direct
 # true, and the publisher put and read a key. The second run changed no grant of the publisher.
 if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" kv info "$DECISIONS_GEN_BUCKET" >/dev/null 2>&1; then
+  check_stream_shape "KV_$DECISIONS_GEN_BUCKET"
   echo "bucket $DECISIONS_GEN_BUCKET already exists; left unchanged"
 else
   gen_max_bytes="$(cli_bytes "$DECISIONS_GEN_MAX_BYTES")"
