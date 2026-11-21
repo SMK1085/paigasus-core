@@ -10,12 +10,13 @@ use figment::{Figment, error::Error as FigmentError};
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::memory::MemoryCaps;
 use paigasus_agent_host_core::mid_run::MidRunPolicy;
-use paigasus_agent_host_core::timer::TimerCaps;
+use paigasus_agent_host_core::timer::{TimerCaps, WALK_BOUND};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::adapters::nats::channels::filters_overlap;
 use crate::adapters::nats::{DURABLE_NAME, STREAM_NAME};
+use crate::adapters::persistence::scheduler::SchedulerSettings;
 use crate::application::lease_keeper::{KeeperTiming, KeeperTimingError};
 
 /// A connection URL that can hold a password. `Debug` and `Serialize` print a fixed placeholder.
@@ -127,6 +128,17 @@ impl TimersConfig {
     #[must_use]
     pub fn statement_timeout(&self) -> Duration {
         Duration::from_millis(self.statement_timeout_ms)
+    }
+
+    /// The settings of the scheduler. The back-off base is the poll interval.
+    #[must_use]
+    pub fn scheduler_settings(&self) -> SchedulerSettings {
+        SchedulerSettings {
+            statement_timeout: self.statement_timeout(),
+            max_fire_attempts: self.max_fire_attempts,
+            backoff_base: self.poll_interval(),
+            walk_bound: WALK_BOUND,
+        }
     }
 
     /// The smallest civil gap between two slots of a schedule.
@@ -891,6 +903,23 @@ mod tests {
             assert_eq!(cfg.timers.poll_interval_secs, 1);
             assert_eq!(cfg.timers.pass_limit, 100);
             assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn timers_to_scheduler_settings() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.timers.statement_timeout_ms = 1234;
+            cfg.timers.max_fire_attempts = 7;
+            cfg.timers.poll_interval_secs = 3;
+            let s = cfg.timers.scheduler_settings();
+            assert_eq!(s.statement_timeout, Duration::from_millis(1234));
+            assert_eq!(s.max_fire_attempts, 7);
+            assert_eq!(s.backoff_base, Duration::from_secs(3));
+            assert_eq!(s.walk_bound, WALK_BOUND);
             Ok(())
         });
     }

@@ -6,7 +6,7 @@
 use jiff::civil;
 use paigasus_agent_host_core::ids::{InboxId, ThreadId, TimerId};
 use paigasus_agent_host_core::ports::TzResolver;
-use paigasus_agent_host_core::timer::{CronSchedule, Note, Slot, Timer, TimerKind, TimerOrigin, TimerParts, TimerStatus, TimerView};
+use paigasus_agent_host_core::timer::{CronSchedule, CronScheduleError, Note, Slot, Timer, TimerKind, TimerOrigin, TimerParts, TimerStatus, TimerView};
 use sea_orm::QueryResult;
 use uuid::Uuid;
 
@@ -26,10 +26,15 @@ pub(crate) const TIMER_COLUMNS: &str = "t.id, t.inbox_id, t.kind, t.origin, t.st
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RowError {
     pub reason: String,
+    /// A fixed text for the `failure` column. It never holds the note or a database message.
+    pub category: &'static str,
 }
 
 fn bad(reason: impl Into<String>) -> RowError {
-    RowError { reason: reason.into() }
+    RowError {
+        reason: reason.into(),
+        category: "stored row not valid",
+    }
 }
 
 /// The text that a `$n::timestamp` parameter takes for a civil time.
@@ -62,7 +67,13 @@ pub(crate) fn row_to_view(row: &QueryResult, org: Uuid, tz: &dyn TzResolver) -> 
             let zone: String = col::<Option<String>>(row, "tz")?.ok_or_else(|| bad("a schedule row has no zone"))?;
             let slot: String = col::<Option<String>>(row, "next_slot")?.ok_or_else(|| bad("a schedule row has no slot"))?;
             let second: bool = col::<Option<bool>>(row, "next_slot_second")?.ok_or_else(|| bad("a schedule row has no slot flag"))?;
-            let schedule = CronSchedule::parse(&cron, &zone, tz).map_err(|e| bad(format!("the stored schedule is not valid: {e}")))?;
+            let schedule = CronSchedule::parse(&cron, &zone, tz).map_err(|e| RowError {
+                reason: format!("the stored schedule is not valid: {e}"),
+                category: match e {
+                    CronScheduleError::UnknownZone { .. } => "unknown time zone",
+                    CronScheduleError::Syntax(_) => "invalid cron",
+                },
+            })?;
             let civil = slot.parse::<civil::DateTime>().map_err(|e| bad(format!("the stored slot is not valid: {e}")))?;
             TimerKind::Schedule {
                 schedule,
