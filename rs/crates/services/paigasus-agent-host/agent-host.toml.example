@@ -12,7 +12,7 @@
 # lock_wait_secs = 120      # 1 to 3600
 
 # [worker]
-# enabled = true            # read and checked; no effect yet
+# enabled = true            # read and checked; no effect until SMA-790
 
 # [lease]
 # ttl_secs = 30             # 3 to 600, and at least 3 x heartbeat_interval_secs
@@ -27,6 +27,7 @@
 # max_body_bytes = 262144   # 1024 to 4194304
 
 # The HTTP event ingress is on only when this section is set.
+# The routes POST /v1/inboxes/{inbox}/events and GET /v1/service-info need it.
 # [iam]
 # grpc_addr = "https://iam.internal.example.com:9090"
 # tls = { mode = "tls" }    # optional: ca_cert_path (REPLACES the trust store), and
@@ -36,3 +37,21 @@
 
 # [mid_run]
 # policy = "queue"          # only "queue"; "fold" and "interrupt" are refused at boot
+
+# The NATS source is optional. Without this section, no NATS task starts.
+# First deployment: boot without this section, create the inbox, add the section, restart.
+# [nats]
+# url = "nats://nats.internal.example.com:4222"
+# creds_file = "/etc/agent-host/agent-host-consumer.creds"   # optional
+# ca_file = "/etc/agent-host/nats-ca.pem"                    # optional; CA bundle for TLS
+# stream = "IAM_EVENTS"            # must be "IAM_EVENTS"
+# durable = "agent-host-inbox"     # must be "agent-host-inbox"
+#
+# One table per channel; at least one is required. A channel maps one subject filter to one inbox.
+# The filters of two channels must not match the same subject.
+# The source must start with "urn:paigasus:agents:nats:" and must be unique.
+# The filters of the durable must equal the channel subjects, or boot stops.
+# [[nats.channels]]
+# subject = "iam.organization.>"
+# inbox = "00000000-0000-0000-0000-000000000000"   # the inbox UUID
+# source = "urn:paigasus:agents:nats:iam-org"

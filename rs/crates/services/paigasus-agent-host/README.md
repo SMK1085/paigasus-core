@@ -1,8 +1,8 @@
 # paigasus-agent-host
 
-The agent host service. This crate holds the configuration, the database migrations and the HTTP
-surface of the service. The surface serves `/healthz`, `/readyz` and `/metrics`. Any other path
-returns the 404 error envelope.
+The agent host service. This crate holds the configuration, the database migrations, the event
+inbox and the HTTP surface of the service. The surface serves `/healthz`, `/readyz` and `/metrics`.
+It also serves the event ingress when `[iam]` is set. Any other path returns the 404 error envelope.
 
 The agent host needs its own database. A separate schema in a shared database is not supported.
 
@@ -20,6 +20,122 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `metrics.enabled` | `AGENT_HOST_METRICS__ENABLED` | `true` | Serve `/metrics`. |
 | `metrics.addr` | `AGENT_HOST_METRICS__ADDR` | none | Separate metrics listener. Its port must differ from the port of `http_addr`. |
 | `migration.lock_wait_secs` | `AGENT_HOST_MIGRATION__LOCK_WAIT_SECS` | `120` | Seconds to wait for the migration lock. Range 1 to 3600. |
+| `worker.enabled` | `AGENT_HOST_WORKER__ENABLED` | `true` | The service reads and validates this value. It has no effect until SMA-790. |
+| `lease.ttl_secs` | `AGENT_HOST_LEASE__TTL_SECS` | `30` | Time to live of an inbox lease. Range 3 to 600, and at least 3 times `lease.heartbeat_interval_secs`. |
+| `lease.heartbeat_interval_secs` | `AGENT_HOST_LEASE__HEARTBEAT_INTERVAL_SECS` | `10` | Seconds between two lease heartbeats. Range 1 to 200. |
+| `claim.batch_limit` | `AGENT_HOST_CLAIM__BATCH_LIMIT` | `20` | Maximum number of events in one claim. Range 1 to 500. |
+| `claim.max_attempts` | `AGENT_HOST_CLAIM__MAX_ATTEMPTS` | `5` | Number of attempts after which an event is dead. Range 1 to 100. |
+| `claim.thread_ttl_secs` | `AGENT_HOST_CLAIM__THREAD_TTL_SECS` | `86400` | Time to live of a thread. Range 60 to 31536000. |
+| `ingress.max_body_bytes` | `AGENT_HOST_INGRESS__MAX_BODY_BYTES` | `262144` | Largest request body of the ingress. Range 1024 to 4194304. |
+| `iam.grpc_addr` | `AGENT_HOST_IAM__GRPC_ADDR` | none | Address of the IAM gRPC endpoint. Required when you set `[iam]`. |
+| `iam.tls` | `AGENT_HOST_IAM__TLS` | none (required in `[iam]`) | `{ mode = "tls" }` with the optional `ca_cert_path`, `client_cert_path` and `client_key_path`. Or `{ mode = "loopback_insecure" }` for a loopback `iam.grpc_addr` only. A `ca_cert_path` replaces the trust store. Set `client_cert_path` and `client_key_path` together. |
+| `iam.call_timeout_ms` | `AGENT_HOST_IAM__CALL_TIMEOUT_MS` | `2000` | Timeout of one IAM call. Range 100 to 30000. |
+| `mid_run.policy` | `AGENT_HOST_MID_RUN__POLICY` | `queue` | Only `queue` is valid. The service refuses `fold` and `interrupt` at boot. |
+| `nats.url` | `AGENT_HOST_NATS__URL` | none | NATS server URL. Required when you set `[nats]`. |
+| `nats.creds_file` | `AGENT_HOST_NATS__CREDS_FILE` | none | Credentials file of the `agent-host-consumer` identity. |
+| `nats.ca_file` | `AGENT_HOST_NATS__CA_FILE` | none | CA bundle for the NATS TLS link. |
+| `nats.stream` | `AGENT_HOST_NATS__STREAM` | none | Must be `IAM_EVENTS`. |
+| `nats.durable` | `AGENT_HOST_NATS__DURABLE` | none | Must be `agent-host-inbox`. |
+| `nats.channels` | none (TOML only) | none | List of `[[nats.channels]]` tables. At least one is required. See the NATS section. |
+
+The `[iam]` and `[nats]` sections are optional. A nested value that has no default, for example
+`iam.tls`, is easiest to set in the TOML file. `agent-host.toml.example` shows every key.
+
+## Event ingress
+
+SMA-787 adds the event inbox. A caller sends an event to an inbox, and the service stores it.
+The ingress routes are mounted only when `[iam]` is set. The ingress needs `[iam]`, because every
+request is authenticated through IAM.
+
+| Route | Meaning |
+|---|---|
+| `POST /v1/inboxes/{inbox}/events` | Store one CloudEvent in the inbox. `{inbox}` is the inbox UUID. |
+| `GET /v1/service-info` | Return the service descriptor. The slug is `agents`. |
+
+The `POST` route accepts only `application/cloudevents+json`. The service checks the request in
+this order:
+
+| Status | Code | Cause |
+|---|---|---|
+| 415 | `unsupported-content-type` | The content type is not `application/cloudevents+json`. |
+| 413 | `request-too-large` | The body is larger than `ingress.max_body_bytes`. |
+| 401 | `invalid-token` | The credential is missing, inactive or a DPoP credential. |
+| 503 | `iam-unavailable` | The service cannot reach IAM. |
+| 403 | `forbidden` | The inbox is unknown, or the caller has no right to write to it. |
+| 400 | `invalid-request-body` | The body is not valid JSON. |
+| 400 | `invalid-request-schema` | The body is not a valid CloudEvent, or its `type` starts with `agents.`. |
+| 503 | `store-unavailable` | A database error occurred. The caller can retry. |
+| 202 | none | The event is stored, or it is a duplicate. The body is `{"id": "<event uuid>"}`. |
+
+A duplicate returns the id of the stored row. A retry by the client gets the same body.
+A `Content-Length` larger than the limit gives 413 before the authentication. A chunked body that
+grows too large gives 413 after the authentication.
+
+The service sets these fields. It does not trust the caller for them. `source` becomes
+`urn:paigasus:agents:http:<principal PRN>`. `actorprn` becomes the PRN of the caller.
+The service keeps `threadid` only if the thread belongs to the inbox. Otherwise it drops the value,
+and the event starts a new thread.
+
+`GET /v1/service-info` uses the same authentication and has no authorisation check.
+
+### Authentication and authorisation
+
+The credential is `Authorization: Bearer <secret>`. The service tries `IntrospectApiKey` first and
+then `Introspect`. It does not use the `paigasus-org` header. The organization comes from the inbox.
+
+An API key must have the scope Root or the organization of the inbox. Then two cases apply:
+
+- The caller is the principal of the inbox. The caller is allowed. An OIDC user must also be a
+  member of the organization of the inbox.
+- The caller is another principal. The service asks IAM for `WriteInboxEvent` on the organization
+  of the inbox. The role `agent_event_writer` grants only this action.
+
+The service compares principals by UUID, not by string. The owner path does not run the IAM policy
+`forbid-archived-writes`. An owner in an archived organization can still write to the own inbox.
+
+## Storage
+
+Migrations after `m0001_create_inbox` add five tables: `thread`, `inbox_lease`, `run`, `run_event`
+and `inbox_event`. The unique key of `inbox_event` is (`inbox_id`, `source`, `ce_id`). It gives the
+deduplication. Composite foreign keys make the schema enforce that a thread, a run and an event
+belong to one inbox.
+
+`inbox_event.thread_id` has two states. Before the first claim, it is the thread that the ingress
+kept, or null. From the first claim, it is the thread of the run that claimed the event. The
+`threadid` that the caller sent stays in the `envelope` column.
+
+An inbox has one lease row. The service takes the lease, claims a batch of events, and renews the
+lease with a heartbeat. SMA-787 starts no worker. `worker.enabled` is read and validated only.
+SMA-790 adds the worker.
+
+## NATS source
+
+The `[nats]` section is optional. Without it, no NATS task starts. The service never creates a
+stream or a consumer. `ops/nats/provision.sh` creates the durable `agent-host-inbox` on the stream
+`IAM_EVENTS`. The service uses the identity `agent-host-consumer`.
+
+Each `[[nats.channels]]` table maps one subject filter to one inbox. It has these keys:
+`subject`, `inbox` (the inbox UUID) and `source`. The `source` must start with
+`urn:paigasus:agents:nats:`. The service refuses a section with no channel, two channels with the
+same `source`, and two channels whose filters can match the same subject.
+
+The service delivers an event only when the CloudEvents `subject` is the organization PRN of the
+inbox, or a PRN in that organization. The service acks and skips all other events. An event with no
+`subject` is skipped. The service drops `actorprn` and `threadid` of a NATS event.
+
+At boot, the service reads the durable and compares its `filter_subjects` with the channel
+subjects. If they differ, boot stops with a config error. After you change a channel subject,
+change the filters of the durable to match. See `ops/nats/README.md`.
+
+### First deployment
+
+The boot order is: migrations first, then the check of each configured inbox. If an inbox does not
+exist, boot stops with a config error. So do these steps in this order:
+
+1. Boot the service without the `[nats]` section.
+2. Create the inbox.
+3. Add the `[nats]` section and the channel with the inbox UUID.
+4. Restart the service.
 
 ## Migrations
 

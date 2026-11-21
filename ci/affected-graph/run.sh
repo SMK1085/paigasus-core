@@ -309,9 +309,9 @@ run_suite() {
   # kernel edit selects exactly one gateway-console-ts task, test-e2e.
   run_case "proto-derive->proto" "rs/crates/libs/paigasus-proto-derive/src/lib.rs" \
     "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-core-rs,paigasus-agent-host-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,gateway-console-ts"
-  # service-info edit -> the crate + both services that serve the descriptor (SMA-524). Guards the
+  # service-info edit -> the crate + the three services that serve the descriptor (the gateway, the IAM service and the agent host; SMA-524). Guards the
   # DOWNSTREAM direction, which no case covered before: paigasus-service-info was a graph LEAF, so an
-  # edit to ServiceInfoDto — the wire body both services return — retested nothing.
+  # edit to ServiceInfoDto — the wire body the three services return — retested nothing.
   # One-directional: paigasus-proto-rs is deliberately absent (a consumer edit must not rebuild the
   # contract crate), enforced implicitly by strict equality.
   # SMA-635: gateway-console-ts keys on the gateway's sources and upstreams (its playground project

@@ -43,7 +43,7 @@ sufficient:
 `provision.sh` is a two-pass script because minting an account's identities and getting a broker
 to recognize them are genuinely separate steps with a manual action in between:
 
-1. Run `NATS_URL=tls://<broker>:4222 ./provision.sh`. This mints the operator, account, and three
+1. Run `NATS_URL=tls://<broker>:4222 ./provision.sh`. This mints the operator, account, and four
    users (writing their `.creds` files to `$OUT_DIR`, default `./out`), then generates a resolver
    config stanza at `$OUT_DIR/resolver.conf` and stops — it does **not** yet create the stream or
    consumer, because the broker doesn't know about the account yet.
@@ -74,6 +74,13 @@ inbox_prefix     = "_INBOX_IAM_PUB"             # MUST match PUBLISHER_INBOX_PRE
 
 See `permissions.md` §6 for why `root_ca_bundle` replaces rather than extends the system trust
 store, and §7 for why `inbox_prefix` must match this account's grant exactly.
+
+## Changing the filters of an existing durable
+
+`nats consumer add` does not update the filters of a durable that exists. After you change a
+channel subject in the agent host config, change the filters of the durable `agent-host-inbox`
+yourself, for example with `nats consumer edit`. The agent host checks the filters at boot. Boot
+fails until the filters of the durable equal the configured channel subjects.
 
 ## Widening an existing user's grant
 
