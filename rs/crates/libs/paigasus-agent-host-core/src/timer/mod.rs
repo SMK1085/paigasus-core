@@ -11,7 +11,7 @@ pub mod fake;
 mod tz;
 
 pub use changes::{ApplyError, ApplyReport, CancelOutcome, TimerCaps, TimerChanges};
-pub use cron::{CronSchedule, CronScheduleError, CronSyntaxError, WalkError};
+pub use cron::{CIVIL_GAP_WINDOW_DAYS, CronSchedule, CronScheduleError, CronSyntaxError, Resolution, WALK_BOUND, WalkError};
 pub use tz::BundledTzResolver;
 
 use crate::ids::{InboxId, ThreadId, TimerId};

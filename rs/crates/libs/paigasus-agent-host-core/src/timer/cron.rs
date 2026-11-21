@@ -6,9 +6,18 @@
 use croner::Cron;
 use croner::parser::{CronParser, Seconds};
 use jiff::civil::DateTime;
-use jiff::tz::TimeZone;
+use jiff::tz::{AmbiguousOffset, TimeZone};
+use jiff::{SignedDuration, Span, Timestamp};
 
+use super::Slot;
 use crate::ports::{TzError, TzResolver};
+
+/// The most steps that one walk to the next time takes.
+pub const WALK_BOUND: u32 = 10_000;
+/// The number of days that the civil gap check covers.
+pub const CIVIL_GAP_WINDOW_DAYS: u32 = 366;
+/// A walk starts at most this many hours before `now`. An older slot is a long outage.
+const WALK_CLAMP_HOURS: i64 = 25;
 
 const FIELD_NAMES: [&str; 5] = ["minute", "hour", "day of month", "month", "day of week"];
 const MONTHS: [&str; 12] = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
@@ -49,6 +58,24 @@ pub enum WalkError {
     Cron(String),
     #[error("the time zone failed: {0}")]
     Tz(String),
+}
+
+/// The instants of a civil time in a zone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    /// The civil time has one instant. A time in a gap has the instant of the end of the gap.
+    Single(Timestamp),
+    /// The civil time occurs twice, because the clock goes back.
+    Fold {
+        /// The instant of the first occurrence.
+        first: Timestamp,
+        /// The instant of the second occurrence.
+        second: Timestamp,
+        /// The first civil time of the repeated period.
+        fold_start: DateTime,
+        /// The civil time after the repeated period.
+        fold_end: DateTime,
+    },
 }
 
 /// A parsed cron text with its time zone.
@@ -123,6 +150,145 @@ impl CronSchedule {
     /// `Cron` when the cron library finds no time.
     pub fn next_civil_after(&self, c: DateTime) -> Result<DateTime, WalkError> {
         self.cron.find_next_occurrence(&c, false).map_err(|e| WalkError::Cron(e.to_string()))
+    }
+
+    /// The first civil time at or after `c` that matches the schedule.
+    fn next_civil_at_or_after(&self, c: DateTime) -> Result<DateTime, WalkError> {
+        self.cron.find_next_occurrence(&c, true).map_err(|e| WalkError::Cron(e.to_string()))
+    }
+
+    /// The instants of the civil time `c` in the zone of the schedule.
+    ///
+    /// A time in a gap resolves to the first instant after the gap. A time in a fold resolves to
+    /// both occurrences.
+    ///
+    /// # Errors
+    /// `Tz` when the zone has no transition where one must be, or a conversion fails.
+    pub fn resolve(&self, c: DateTime) -> Result<Resolution, WalkError> {
+        let tz_err = |e: jiff::Error| WalkError::Tz(e.to_string());
+        let transition_after = |t: Timestamp| {
+            self.tz
+                .following(t)
+                .next()
+                .map(|tr| tr.timestamp())
+                .ok_or_else(|| WalkError::Tz("the zone has no transition after the time".to_string()))
+        };
+        match self.tz.to_ambiguous_timestamp(c).offset() {
+            AmbiguousOffset::Unambiguous { offset } => Ok(Resolution::Single(offset.to_timestamp(c).map_err(tz_err)?)),
+            AmbiguousOffset::Gap { after, .. } => Ok(Resolution::Single(transition_after(after.to_timestamp(c).map_err(tz_err)?)?)),
+            AmbiguousOffset::Fold { before, after } => {
+                let first = before.to_timestamp(c).map_err(tz_err)?;
+                let second = after.to_timestamp(c).map_err(tz_err)?;
+                let t = transition_after(first)?;
+                Ok(Resolution::Fold {
+                    first,
+                    second,
+                    fold_start: after.to_datetime(t),
+                    fold_end: before.to_datetime(t),
+                })
+            }
+        }
+    }
+
+    /// The instant of a slot. In a fold, `second` picks the occurrence.
+    ///
+    /// # Errors
+    /// The errors of `resolve`.
+    pub fn instant(&self, slot: Slot) -> Result<Timestamp, WalkError> {
+        Ok(match self.resolve(slot.civil)? {
+            Resolution::Single(t) => t,
+            Resolution::Fold { first, second, .. } => {
+                if slot.second {
+                    second
+                } else {
+                    first
+                }
+            }
+        })
+    }
+
+    /// The step from one slot to the next one. An interval pattern walks a repeated period in
+    /// instant order, so that every slot in it fires twice (the fold rule). A fixed-hour pattern
+    /// never sets `second`.
+    fn step(&self, cur: Slot) -> Result<Slot, WalkError> {
+        let n = self.next_civil_after(cur.civil)?;
+        if self.interval
+            && let Resolution::Fold { fold_start, fold_end, .. } = self.resolve(cur.civil)?
+        {
+            if cur.second {
+                return Ok(Slot { civil: n, second: n < fold_end });
+            }
+            if n < fold_end {
+                return Ok(Slot { civil: n, second: false });
+            }
+            let s = self.next_civil_at_or_after(fold_start)?;
+            return Ok(if s < fold_end { Slot { civil: s, second: true } } else { Slot { civil: n, second: false } });
+        }
+        Ok(Slot { civil: n, second: false })
+    }
+
+    /// The first slot after `fired` whose instant is after `now`, and that instant.
+    ///
+    /// The walk starts at most 25 hours before `now`, so a long outage costs few steps.
+    ///
+    /// # Errors
+    /// `BoundExceeded` when `bound` steps find no slot after `now`. The errors of `resolve`.
+    pub fn next_after(&self, fired: Slot, now: Timestamp, bound: u32) -> Result<(Slot, Timestamp), WalkError> {
+        let floor = self
+            .tz
+            .to_datetime(now)
+            .checked_sub(SignedDuration::from_hours(WALK_CLAMP_HOURS))
+            .map_err(|e| WalkError::Tz(e.to_string()))?;
+        let mut cur = if fired.civil < floor { Slot { civil: floor, second: false } } else { fired };
+        for _ in 0..bound {
+            let cand = self.step(cur)?;
+            let t = self.instant(cand)?;
+            if t > now {
+                return Ok((cand, t));
+            }
+            cur = cand;
+        }
+        Err(WalkError::BoundExceeded { bound })
+    }
+
+    /// The first slot after the time `created`, and its instant.
+    ///
+    /// # Errors
+    /// The errors of `next_after`.
+    pub fn first_slot(&self, created: Timestamp, bound: u32) -> Result<(Slot, Timestamp), WalkError> {
+        self.next_after(
+            Slot {
+                civil: self.tz.to_datetime(created),
+                second: false,
+            },
+            created,
+            bound,
+        )
+    }
+
+    /// The first gap in seconds between two consecutive civil slots in `[from, from + days)` that
+    /// is below `min_secs`, or `None`. The check uses civil times only and no zone.
+    ///
+    /// # Errors
+    /// `Cron` when the cron library finds no time. `Tz` when the end of the window is not valid.
+    pub fn min_civil_gap(&self, from: DateTime, days: u32, min_secs: u64) -> Result<Option<u64>, WalkError> {
+        let end = from.checked_add(Span::new().days(i64::from(days))).map_err(|e| WalkError::Tz(e.to_string()))?;
+        let mut prev: Option<DateTime> = None;
+        let mut cur = from;
+        loop {
+            let n = self.next_civil_after(cur)?;
+            if n >= end {
+                return Ok(None);
+            }
+            if let Some(p) = prev {
+                let gap = u64::try_from(p.duration_until(n).as_secs()).unwrap_or(0);
+                if gap < min_secs {
+                    return Ok(Some(gap));
+                }
+            }
+            prev = Some(n);
+            cur = n;
+        }
     }
 }
 
@@ -297,5 +463,150 @@ mod tests {
         let both = CronSyntaxError::BothDayFields.to_string();
         assert!(both.contains("day of month") && both.contains("day of week"));
         assert!(CronSyntaxError::Extension { field: "day of month", token: 'L' }.to_string().contains('L'));
+    }
+
+    fn sched(cron: &str, zone: &str) -> CronSchedule {
+        CronSchedule::parse(cron, zone, &BundledTzResolver::new()).unwrap()
+    }
+
+    fn ts(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    fn slot(c: &str, second: bool) -> Slot {
+        Slot { civil: civil(c), second }
+    }
+
+    #[test]
+    fn gap_resolves_to_the_end_of_the_gap() {
+        let s = sched("0 * * * *", "Europe/Berlin");
+        assert_eq!(s.resolve(civil("2026-03-29T02:30:00")), Ok(Resolution::Single(ts("2026-03-29T01:00:00Z"))));
+    }
+
+    #[test]
+    fn fold_resolves_both_occurrences() {
+        let s = sched("0 * * * *", "Europe/Berlin");
+        assert_eq!(
+            s.resolve(civil("2026-10-25T02:30:00")),
+            Ok(Resolution::Fold {
+                first: ts("2026-10-25T00:30:00Z"),
+                second: ts("2026-10-25T01:30:00Z"),
+                fold_start: civil("2026-10-25T02:00:00"),
+                fold_end: civil("2026-10-25T03:00:00"),
+            })
+        );
+        assert_eq!(s.instant(slot("2026-10-25T02:30:00", false)), Ok(ts("2026-10-25T00:30:00Z")));
+        assert_eq!(s.instant(slot("2026-10-25T02:30:00", true)), Ok(ts("2026-10-25T01:30:00Z")));
+    }
+
+    #[test]
+    fn hourly_fires_twice_in_the_berlin_repeated_hour() {
+        let s = sched("0 * * * *", "Europe/Berlin");
+        let mut cur = slot("2026-10-25T01:00:00", false);
+        let mut now = ts("2026-10-24T23:00:01Z");
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let (next, t) = s.next_after(cur, now, WALK_BOUND).unwrap();
+            got.push((next, t));
+            cur = next;
+            now = t + jiff::SignedDuration::from_secs(1);
+        }
+        assert_eq!(
+            got,
+            [
+                (slot("2026-10-25T02:00:00", false), ts("2026-10-25T00:00:00Z")),
+                (slot("2026-10-25T02:00:00", true), ts("2026-10-25T01:00:00Z")),
+                (slot("2026-10-25T03:00:00", false), ts("2026-10-25T02:00:00Z")),
+            ]
+        );
+    }
+
+    #[test]
+    fn quarter_hours_fire_eight_times_in_order() {
+        let s = sched("*/15 * * * *", "Europe/Berlin");
+        let mut cur = slot("2026-10-25T01:45:00", false);
+        let mut now = ts("2026-10-24T23:45:00Z");
+        let mut got = Vec::new();
+        for _ in 0..8 {
+            let (next, t) = s.next_after(cur, now, WALK_BOUND).unwrap();
+            got.push(t);
+            cur = next;
+            now = t;
+        }
+        let want = ["00:00", "00:15", "00:30", "00:45", "01:00", "01:15", "01:30", "01:45"].map(|h| ts(&format!("2026-10-25T{h}:00Z")));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn fixed_hour_fires_once_on_the_fall_day() {
+        let s = sched("30 1 * * *", "America/New_York");
+        let (a, ta) = s.next_after(slot("2026-10-31T01:30:00", false), ts("2026-10-31T05:31:00Z"), WALK_BOUND).unwrap();
+        assert_eq!((a, ta), (slot("2026-11-01T01:30:00", false), ts("2026-11-01T05:30:00Z")));
+        let (b, tb) = s.next_after(a, ta, WALK_BOUND).unwrap();
+        assert_eq!((b, tb), (slot("2026-11-02T01:30:00", false), ts("2026-11-02T06:30:00Z")));
+    }
+
+    #[test]
+    fn spring_gap_fires_once() {
+        let s = sched("0 * * * *", "Europe/Berlin");
+        let from = slot("2026-03-29T01:00:00", false);
+        let (a, ta) = s.next_after(from, ts("2026-03-29T00:00:01Z"), WALK_BOUND).unwrap();
+        assert_eq!((a, ta), (slot("2026-03-29T02:00:00", false), ts("2026-03-29T01:00:00Z")));
+        let (b, tb) = s.next_after(a, ts("2026-03-29T01:00:01Z"), WALK_BOUND).unwrap();
+        assert_eq!((b, tb), (slot("2026-03-29T04:00:00", false), ts("2026-03-29T02:00:00Z")));
+    }
+
+    #[test]
+    fn recovery_between_the_two_occurrences() {
+        let s = sched("0 * * * *", "Europe/Berlin");
+        let fired = slot("2026-10-25T02:00:00", false);
+        assert_eq!(
+            s.next_after(fired, ts("2026-10-25T00:30:00Z"), WALK_BOUND),
+            Ok((slot("2026-10-25T02:00:00", true), ts("2026-10-25T01:00:00Z")))
+        );
+        assert_eq!(
+            s.next_after(fired, ts("2026-10-25T01:30:00Z"), WALK_BOUND),
+            Ok((slot("2026-10-25T03:00:00", false), ts("2026-10-25T02:00:00Z")))
+        );
+    }
+
+    #[test]
+    fn recovery_at_the_second_0115_does_not_repeat_0130() {
+        let s = sched("30 1 * * *", "America/New_York");
+        let (next, _) = s.next_after(slot("2026-11-01T01:30:00", false), ts("2026-11-01T06:15:00Z"), WALK_BOUND).unwrap();
+        assert_eq!(next, slot("2026-11-02T01:30:00", false));
+    }
+
+    #[test]
+    fn first_slot_inside_the_second_pass() {
+        let s = sched("*/15 * * * *", "Europe/Berlin");
+        assert_eq!(
+            s.first_slot(ts("2026-10-25T01:20:00Z"), WALK_BOUND),
+            Ok((slot("2026-10-25T02:30:00", true), ts("2026-10-25T01:30:00Z")))
+        );
+    }
+
+    #[test]
+    fn a_long_outage_walk_is_clamped() {
+        let s = sched("*/15 * * * *", "Europe/Berlin");
+        let now = ts("2027-03-01T12:00:00Z");
+        let started = std::time::Instant::now();
+        let (next, t) = s.next_after(slot("2026-03-01T12:00:00", false), now, WALK_BOUND).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(t > now);
+        assert!(t <= now + jiff::SignedDuration::from_secs(900));
+        assert!(next.civil > civil("2027-02-28T00:00:00"));
+        assert_eq!(s.next_after(slot("2026-03-01T12:00:00", false), now, 1), Err(WalkError::BoundExceeded { bound: 1 }));
+    }
+
+    #[test]
+    fn civil_gap_check() {
+        let from = civil("2026-01-01T00:00:00");
+        let gap = |cron: &str, min: u64| sched(cron, "Europe/Berlin").min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, min);
+        assert_eq!(gap("0 */2 * * *", 7200), Ok(None));
+        assert_eq!(gap("0 9 * * *", 86_400), Ok(None));
+        assert_eq!(gap("*/15 * * * *", 900), Ok(None));
+        assert_eq!(gap("*/15 * * * *", 901), Ok(Some(900)));
+        assert_eq!(gap("* * * * *", 900), Ok(Some(60)));
     }
 }
