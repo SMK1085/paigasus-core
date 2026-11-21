@@ -142,9 +142,36 @@ filter = 'package(=paigasus-agent-host) and binary(docker_preflight)'
 retries = 1
 
 [[profile.default.overrides]]
+# SMA-787 §10.1: the lease property test. A failure must red at once: a retry runs new seeds and
+# can hide the failure. This block comes BEFORE the block below, because the first block that
+# matches and sets `retries` wins. It inherits `test-group` from the block below.
+filter = 'package(=paigasus-agent-host) and binary(lease_property_pg)'
+retries = 0
+
+[[profile.default.overrides]]
+# SMA-787 §10.2: the concurrent lease stress test. A race that reds one run must red the run: a
+# retry would report it FLAKY and pass. Same order rule as the block above.
+filter = 'package(=paigasus-agent-host) and binary(lease_stress_pg)'
+retries = 0
+
+[[profile.default.overrides]]
+# SMA-787 §10.4: the handler latency test measures a p99. Other suites running beside it load the
+# CPU and raise the tail (168 ms in a full-crate run, 27 to 29 ms alone). `num-test-threads` gives it
+# every test slot of the nextest process, also when `--test-threads` is larger than the CPU count:
+# no other test runs while it runs. It does not reserve the machine, so
+# other processes on the host can still add noise. The 50 ms limit stays.
+# `retries = 0`: a p99 test that fails once and passes on a retry would be reported FLAKY and pass.
+# That hides a real regression and the noise that the spec asks us to report. This block comes
+# BEFORE the SMA-786 block below, because the first matching block that sets `retries` wins.
+filter = 'package(=paigasus-agent-host) and binary(ingress_latency_pg)'
+threads-required = 'num-test-threads'
+retries = 0
+
+[[profile.default.overrides]]
 # SMA-786: the agent host's Postgres-backed binaries, named one by one so the crate's pure unit
-# tests keep retries = 0. Same retry budget and container cap as the gateway's suites.
-filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg))'
+# tests keep retries = 0. Same retry budget and container cap as the gateway's suites. SMA-789
+# adds the memory store binaries `memory_pg` and `memory_resume_pg`.
+filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg) or binary(inbox_repository_pg) or binary(lease_pg) or binary(claim_pg) or binary(complete_pg) or binary(keeper_pg) or binary(lease_property_pg) or binary(lease_stress_pg) or binary(lease_crash_pg) or binary(ingress_pg) or binary(ingress_latency_pg) or binary(nats_source) or binary(memory_pg) or binary(memory_resume_pg))'
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 

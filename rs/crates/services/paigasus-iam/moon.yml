@@ -73,6 +73,9 @@ tasks:
       - '/rs/tools/paigasus-policy-compiler/src/**/*'
       - '/rs/tools/paigasus-policy-compiler/Cargo.toml'
       - '/rs/tools/paigasus-policy-compiler/Cargo.lock'
+      # SMA-787 — `the_cloudevents_crate_fixtures_are_this_encoders_bytes` reads these files with
+      # `include_bytes!`. They belong to another project, so they are inputs here.
+      - '/rs/crates/libs/paigasus-cloudevents/tests/fixtures/**/*'
     # This task and the two console e2e tasks share one CI runner. This task runs about 520 s of
     # Docker-backed nextest suites, Keycloak e2e included. Overlap starves the browser, so React
     # never hydrates in the console e2e tasks (SMA-718). The mutex stops the three tasks from
@@ -100,5 +103,8 @@ tasks:
       - '/rs/tools/paigasus-policy-compiler/src/**/*'
       - '/rs/tools/paigasus-policy-compiler/Cargo.toml'
       - '/rs/tools/paigasus-policy-compiler/Cargo.lock'
+      # SMA-787 — `the_cloudevents_crate_fixtures_are_this_encoders_bytes` reads these files with
+      # `include_bytes!`. They belong to another project, so they are inputs here.
+      - '/rs/crates/libs/paigasus-cloudevents/tests/fixtures/**/*'
     options:
       cache: false

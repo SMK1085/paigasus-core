@@ -6,9 +6,13 @@ language: 'rust'
 
 dependsOn:
   - 'paigasus-agent-host-core-rs'
+  - 'paigasus-cloudevents-rs'
+  - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
+  - 'paigasus-nats-creds-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-proto-rs'
+  - 'paigasus-service-info-rs'
   - 'paigasus-test-docker-rs'
 
 # The transitive dependsOn closure's sources, consumed by build/test/lint via
@@ -17,16 +21,22 @@ fileGroups:
   upstreams:
     - '/rs/crates/libs/paigasus-agent-host-core/src/**/*'
     - '/rs/crates/libs/paigasus-agent-host-core/Cargo.toml'
+    - '/rs/crates/libs/paigasus-cloudevents/src/**/*'
+    - '/rs/crates/libs/paigasus-cloudevents/Cargo.toml'
     - '/rs/crates/libs/paigasus-kernel/src/**/*'
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-logging/src/**/*'
     - '/rs/crates/libs/paigasus-logging/Cargo.toml'
+    - '/rs/crates/libs/paigasus-nats-creds/src/**/*'
+    - '/rs/crates/libs/paigasus-nats-creds/Cargo.toml'
     - '/rs/crates/libs/paigasus-observability/src/**/*'
     - '/rs/crates/libs/paigasus-observability/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
     - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto/src/**/*'
     - '/rs/crates/libs/paigasus-proto/Cargo.toml'
+    - '/rs/crates/libs/paigasus-service-info/src/**/*'
+    - '/rs/crates/libs/paigasus-service-info/Cargo.toml'
     - '/rs/crates/libs/paigasus-test-docker/src/**/*'
     - '/rs/crates/libs/paigasus-test-docker/Cargo.toml'
 
@@ -35,6 +45,11 @@ tasks:
     deps: ['^:build']
   test:
     deps: ['^:build']
+    inputs:
+      # SMA-787 Task 17: a unit test pins the NATS constants to this file.
+      - '/ops/nats/subjects.env'
+      # SMA-787 Task 18: the NATS consumer tests read this IAM fixture with `include_bytes!`.
+      - '/rs/crates/libs/paigasus-cloudevents/tests/fixtures/iam/organization_created_trailing_zeros.json'
     # The Postgres tests start containers. They share a runner with the console e2e tasks.
     options:
       mutex: 'heavy-integration'

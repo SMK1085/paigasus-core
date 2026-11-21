@@ -16,17 +16,18 @@ refused by the broker, full stop. Every "✗" callout in this document is descri
 of that allow-list (what the identity in question therefore cannot do), not a literal deny rule
 written anywhere.
 
-## 1. The three users
+## 1. The four users
 
-The `PAIGASUS_IAM` account holds exactly three identities. All three subject lists live in
+The `PAIGASUS_IAM` account holds exactly four identities. All four subject lists live in
 `subjects.env` (`PUBLISHER_PUB`/`PUBLISHER_SUB`, `CONSUMER_PUB`/`CONSUMER_SUB`,
-`PROVISIONER_PUB`/`PROVISIONER_SUB`) — this table is a rendering of that file, not a second source
+`AGENT_HOST_CONSUMER_PUB`/`AGENT_HOST_CONSUMER_SUB`, `PROVISIONER_PUB`/`PROVISIONER_SUB`) — this table is a rendering of that file, not a second source
 of truth. If the two ever disagree, `subjects.env` is correct and this file is stale.
 
 | identity | deployed as | publish (allow) | subscribe (allow) |
 |---|---|---|---|
 | `iam-publisher` | `paigasus-iam`'s outbox relay (`PublisherConfig`, SMA-471) | `iam.>`, `$JS.API.STREAM.INFO.IAM_EVENTS`, `$JS.API.STREAM.CREATE.IAM_EVENTS` | `_INBOX_IAM_PUB.>` |
 | `gateway-consumer` | the AI Gateway's cache-invalidation client (SMA-492) | `$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.gateway-cache-invalidator`, `$JS.API.CONSUMER.INFO.IAM_EVENTS.gateway-cache-invalidator`, `$JS.ACK.IAM_EVENTS.gateway-cache-invalidator.>` | `_INBOX_GW.>`, `iam.policy.>` |
+| `agent-host-consumer` | the agent host's event inbox (SMA-787) | `$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.agent-host-inbox`, `$JS.API.CONSUMER.INFO.IAM_EVENTS.agent-host-inbox`, `$JS.ACK.IAM_EVENTS.agent-host-inbox.>` | `_INBOX_AGH.>` |
 | `iam-provisioner` | nobody — operator tooling only, see §9 | `$JS.API.INFO`, `$JS.API.STREAM.>`, `$JS.API.CONSUMER.>` | `_INBOX_PROV.>` |
 
 `iam-publisher` never subscribes to `iam.>` (it must not be able to read the graph it writes) and
@@ -35,6 +36,18 @@ deliberate — an existing stream is adopted as-is or boot fails, never silently
 durable's subject filter that narrows what `gateway-consumer` actually receives is not a
 permission at all — see §3. The one subject-level grant `gateway-consumer` holds is the core
 subscription on `iam.policy.>` (SMA-752) — see §3.1.
+
+`agent-host-consumer` (SMA-787 §9.2, §9.5) follows `gateway-consumer`. It is a pull consumer on
+the pre-provisioned durable `agent-host-inbox`, whose filter is `iam.organization.>`. It has its
+own inbox prefix `_INBOX_AGH`, so it cannot read the deliveries of `gateway-consumer`, and
+`gateway-consumer` cannot read its deliveries. It holds `CONSUMER.INFO` for its boot check. It
+holds no `STREAM.INFO`, no `CONSUMER.CREATE` or `UPDATE` in any form, no subscribe on `iam.>` and
+no publish on `iam.>`. The agent host never creates a stream or a consumer. The durable is
+created by `provision.sh` with `--pull`, `--ack explicit`, `--deliver new`, `--max-deliver=-1`
+and `--wait 30s`, and one `--filter` for each entry of `AGENT_HOST_FILTER_SUBJECTS`. As for
+`gateway-consumer`, the filter is binding only because no CREATE verb is granted. The tests are in
+`nats_permissions.rs` (`the_agent_host_consumer_*`,
+`neither_consumer_identity_can_subscribe_to_the_others_inbox`).
 
 ## 2. Why the publisher needs a `subscribe` grant
 
@@ -186,7 +199,8 @@ unset keeps the pre-SMA-493 behavior of trusting the system store.
 ## 7. The inbox-prefix coupling
 
 Every user above is granted `subscribe` on exactly one inbox prefix — `_INBOX_IAM_PUB.>` for
-`iam-publisher`, `_INBOX_GW.>` for `gateway-consumer`, `_INBOX_PROV.>` for `iam-provisioner` — and
+`iam-publisher`, `_INBOX_GW.>` for `gateway-consumer`, `_INBOX_AGH.>` for `agent-host-consumer`,
+`_INBOX_PROV.>` for `iam-provisioner` — and
 no other inbox (`gateway-consumer`'s only other subscribe grant is the event subject
 `iam.policy.>`, §3.1). That prefix is not decorative: it is what stops one client in the account from
 reading another client's JetStream acks or pull deliveries, both of which land on the requesting

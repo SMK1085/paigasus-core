@@ -53,6 +53,9 @@ const DURABLE: &str = "gateway-cache-invalidator";
 const PUBLISHER_INBOX: &str = "_INBOX_IAM_PUB";
 const CONSUMER_INBOX: &str = "_INBOX_GW";
 const PROVISIONER_INBOX: &str = "_INBOX_PROV";
+/// The agent host's own durable and inbox prefix (SMA-787 §9.2, `AGENT_HOST_*` in `subjects.env`).
+const AGENT_HOST_DURABLE: &str = "agent-host-inbox";
+const AGENT_HOST_INBOX: &str = "_INBOX_AGH";
 
 /// Repo root, from this crate's manifest dir: `rs/crates/services/paigasus-iam` → four levels up.
 fn repo_root() -> PathBuf {
@@ -91,6 +94,7 @@ struct Fixture {
     url: String,
     publisher: Identity,
     consumer: Identity,
+    agent_host: Identity,
     provisioner: Identity,
     gw_publisher: Identity,
     gw_reader: Identity,
@@ -108,6 +112,7 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
 
     let publisher = mint(dir.path(), "iam-publisher");
     let consumer = mint(dir.path(), "gateway-consumer");
+    let agent_host = mint(dir.path(), "agent-host-consumer");
     let provisioner = mint(dir.path(), "iam-provisioner");
     let gw_publisher = mint(dir.path(), "gateway-decision-publisher");
     let gw_reader = mint(dir.path(), "gateway-decision-reader");
@@ -123,6 +128,7 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         .replace("{{SYS_NKEY}}", &sys.public_key)
         .replace("{{PUBLISHER_NKEY}}", &publisher.public_key)
         .replace("{{CONSUMER_NKEY}}", &consumer.public_key)
+        .replace("{{AGENT_HOST_CONSUMER_NKEY}}", &agent_host.public_key)
         .replace("{{PROVISIONER_NKEY}}", &provisioner.public_key)
         .replace("{{GW_DEC_PUBLISHER_NKEY}}", &gw_publisher.public_key)
         .replace("{{GW_DEC_READER_NKEY}}", &gw_reader.public_key)
@@ -151,6 +157,7 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         url: format!("nats://127.0.0.1:{port}"),
         publisher,
         consumer,
+        agent_host,
         provisioner,
         gw_publisher,
         gw_reader,
@@ -317,6 +324,24 @@ async fn provision(fixture: &Fixture) {
         )
         .await
         .expect("the provisioner grant must cover consumer creation");
+
+    // The agent host's durable, as `provision.sh` makes it (SMA-787 §9.2): pull, explicit ack,
+    // deliver new, unlimited redelivery, 30 s ack wait, one filter per channel subject.
+    stream
+        .get_or_create_consumer(
+            AGENT_HOST_DURABLE,
+            jetstream::consumer::pull::Config {
+                durable_name: Some(AGENT_HOST_DURABLE.to_string()),
+                ack_policy: jetstream::consumer::AckPolicy::Explicit,
+                deliver_policy: jetstream::consumer::DeliverPolicy::New,
+                max_deliver: -1,
+                ack_wait: Duration::from_secs(30),
+                filter_subjects: vec!["iam.organization.>".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the provisioner grant must cover the agent host durable");
 }
 
 /// Sufficiency: the committed publisher grant must cover stream ensure plus a publish on every
@@ -619,6 +644,94 @@ async fn neither_service_identity_can_subscribe_to_the_others_inbox() {
     let _publisher_sub = publisher_client.subscribe("_INBOX_GW.>").await.expect("accepted locally, refused by the server");
     publisher_client.flush().await.expect("flush");
     expect_permissions_violation(&mut publisher_events, "_INBOX_GW.>").await;
+}
+
+/// SMA-787 §9.2: the agent host identity can do exactly what a pull consumer on a pre-provisioned
+/// durable needs: fetch, read `CONSUMER.INFO` (the boot check) and ack. The durable delivers only
+/// new messages, so the event is published after the durable exists.
+#[tokio::test]
+async fn the_agent_host_consumer_pulls_acks_and_reads_info_of_its_durable() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    provision(&fixture).await;
+
+    let publisher = NatsEventPublisher::connect(&cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX)).await.expect("connect publisher");
+    publisher.publish(&event(1, EventType::OrganizationCreated)).await.expect("publish an organization event");
+
+    let (client, mut events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+    let js = jetstream::new(client);
+    let mut consumer: jetstream::consumer::PullConsumer = js
+        .get_consumer_from_stream(AGENT_HOST_DURABLE, STREAM)
+        .await
+        .expect("the agent host grant must cover CONSUMER.INFO on its own durable");
+    let info = consumer.info().await.expect("consumer info");
+    assert_eq!(info.config.filter_subjects, vec!["iam.organization.>".to_string()]);
+    assert_eq!(info.config.max_deliver, -1);
+
+    let mut batch = consumer.fetch().max_messages(1).messages().await.expect("the agent host grant must cover MSG.NEXT");
+    let msg = tokio::time::timeout(Duration::from_secs(10), batch.next())
+        .await
+        .expect("an organization event must be delivered")
+        .expect("stream yields a message")
+        .expect("message is Ok");
+    assert_eq!(msg.subject.as_str(), "iam.organization.created");
+    msg.double_ack().await.expect("the agent host grant must cover $JS.ACK on its own durable");
+    let seen: Vec<String> = drain(&mut events).into_iter().filter(|e| e.to_lowercase().contains("violation")).collect();
+    assert!(seen.is_empty(), "no permission violation on the happy path: {seen:?}");
+}
+
+/// The agent host identity cannot create or update a consumer in any form, and cannot use the
+/// gateway durable. A CREATE verb would let it widen its own filter, so these denials make the
+/// pre-provisioned filter binding. It also has no `STREAM.INFO`: the boot check uses
+/// `CONSUMER.INFO` only.
+#[tokio::test]
+async fn the_agent_host_consumer_cannot_create_a_consumer_or_read_the_gateway_durable() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    provision(&fixture).await;
+    let (client, mut events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+
+    for subject in [
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.wide-open",
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS",
+        "$JS.API.CONSUMER.DURABLE.CREATE.IAM_EVENTS.wide-open",
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.agent-host-inbox",
+        "$JS.API.CONSUMER.DURABLE.CREATE.IAM_EVENTS.agent-host-inbox",
+        "$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.gateway-cache-invalidator",
+        "$JS.API.CONSUMER.INFO.IAM_EVENTS.gateway-cache-invalidator",
+        "$JS.API.STREAM.INFO.IAM_EVENTS",
+    ] {
+        expect_publish_denied(&client, &mut events, subject).await;
+    }
+}
+
+/// The agent host identity reads one filtered durable. It cannot subscribe to the event subjects or
+/// forge an event onto them.
+#[tokio::test]
+async fn the_agent_host_consumer_cannot_subscribe_to_or_forge_events() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+
+    let _sub = client.subscribe("iam.>").await.expect("accepted locally, refused by the server");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "iam.>").await;
+
+    expect_publish_denied(&client, &mut events, "iam.organization.created").await;
+}
+
+/// The two consumer identities have separate inbox prefixes. Neither can read the other's
+/// deliveries.
+#[tokio::test]
+async fn neither_consumer_identity_can_subscribe_to_the_others_inbox() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+
+    let (agent_client, mut agent_events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+    let _agent_sub = agent_client.subscribe("_INBOX_GW.>").await.expect("accepted locally, refused by the server");
+    agent_client.flush().await.expect("flush");
+    expect_permissions_violation(&mut agent_events, "_INBOX_GW.>").await;
+
+    let (gw_client, mut gw_events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+    let _gw_sub = gw_client.subscribe("_INBOX_AGH.>").await.expect("accepted locally, refused by the server");
+    gw_client.flush().await.expect("flush");
+    expect_permissions_violation(&mut gw_events, "_INBOX_AGH.>").await;
 }
 
 /// Mints a CA and a server certificate signed by it, with an IP SAN for 127.0.0.1 (the tests dial

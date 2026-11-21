@@ -3203,17 +3203,26 @@ name = "paigasus-agent-host"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "async-trait",
  "axum",
  "figment",
  "futures",
+ "jiff",
  "metrics",
+ "metrics-util",
  "paigasus-agent-host-core",
+ "paigasus-cloudevents",
  "paigasus-helikon",
+ "paigasus-kernel",
  "paigasus-logging",
+ "paigasus-nats-creds",
  "paigasus-observability",
  "paigasus-proto",
+ "paigasus-service-info",
  "paigasus-test-docker",
+ "proptest",
+ "rand 0.10.4",
  "reqwest",
  "rustls",
  "sea-orm",
@@ -3224,6 +3233,10 @@ dependencies = [
  "testcontainers-modules",
  "thiserror",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-types",
  "tower",
  "tracing",
  "uuid",
@@ -3240,6 +3253,16 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "paigasus-cloudevents"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "serde_json",
+ "thiserror",
  "uuid",
 ]
 
