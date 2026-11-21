@@ -73,6 +73,12 @@ pub struct MemoryWorkspace {
     /// and a later stage that touches a path of a group joins that whole group. A conflict drops
     /// every change of the group, so a staged move is never dropped by half.
     groups: BTreeMap<MemoryPath, u64>,
+    /// The armed directory guards, each with its group. A guard stays in its group when the
+    /// changes of the group merge away, and it drops with the group.
+    dir_guards: Vec<(MemoryDir, u64)>,
+    /// The paths of an early conflict that the run must see again. The next fresh listing that
+    /// holds such a path records it as a first sight and removes the mark.
+    resight: BTreeSet<MemoryPath>,
     next_group: u64,
     sealed: bool,
 }
@@ -90,6 +96,8 @@ impl MemoryWorkspace {
             listed: BTreeSet::new(),
             changes: MemoryChangeSet::new(),
             groups: BTreeMap::new(),
+            dir_guards: Vec::new(),
+            resight: BTreeSet::new(),
             next_group: 0,
             sealed: false,
         }
@@ -137,6 +145,7 @@ impl MemoryWorkspace {
         if listing_is_stale {
             self.drop_listings_of(path);
         }
+        self.resight.remove(path);
         self.known.insert(path.clone(), fetched);
         Ok(file.map(|f| f.content))
     }
@@ -215,8 +224,10 @@ impl MemoryWorkspace {
                 // A path with no `known` entry under a directory that the run listed before was
                 // absent at its first sight. That absence stays the baseline, so a write to the
                 // path is a conflict. The listing still shows the file to the model.
-                let first_sight_absent = !self.known.contains_key(&e.path) && self.listed.iter().any(|d| d.contains(&e.path));
+                // A path with a re-sight mark is a first sight again.
+                let first_sight_absent = !self.known.contains_key(&e.path) && !self.resight.contains(&e.path) && self.listed.iter().any(|d| d.contains(&e.path));
                 if !first_sight_absent {
+                    self.resight.remove(&e.path);
                     self.known.entry(e.path.clone()).or_insert_with(|| Known {
                         version: Some(e.version.clone()),
                         size: e.size_bytes,
@@ -245,6 +256,59 @@ impl MemoryWorkspace {
         Ok(merged.into_values().collect())
     }
 
+    /// List `dir` from the store again, with the rules of `list`. It does not use the cached rows.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) async fn list_fresh(&mut self, dir: &MemoryDir) -> Result<Vec<(MemoryPath, u64)>, WorkspaceError> {
+        self.listings.remove(dir.as_str());
+        self.list(dir).await
+    }
+
+    /// The early check of a directory. It lists `dir` in the store and compares each row with what
+    /// the run saw. A stored path that the run saw with another version, or saw as absent, is a
+    /// conflict. A path that the run saw as present and that the store no longer holds is a
+    /// conflict. A stored path that the run never saw, or that has a re-sight mark, becomes a first
+    /// sight. It returns the first conflict in byte order. Buffered changes do not count as store
+    /// state. When it passes, the fresh rows replace the cached rows of `dir`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) async fn check_dir(&mut self, dir: &MemoryDir) -> Result<(), WorkspaceError> {
+        let entries = self.store.list(&self.scope, dir).await?;
+        let stored: BTreeMap<MemoryPath, MemoryVersion> = entries.iter().map(|e| (e.path.clone(), e.version.clone())).collect();
+        let mut candidates: BTreeSet<&MemoryPath> = stored.keys().collect();
+        candidates.extend(self.known.iter().filter(|(p, k)| k.version.is_some() && dir.contains(p)).map(|(p, _)| p));
+        let mut first = None;
+        for path in candidates {
+            let conflict = match stored.get(path) {
+                Some(_) if self.resight.contains(path) => false,
+                Some(v) => match self.known.get(path) {
+                    Some(k) => k.version.as_ref() != Some(v),
+                    None => self.listed.iter().any(|d| d.contains(path)),
+                },
+                // Only a path that the run saw as present gets here.
+                None => true,
+            };
+            if conflict {
+                first = Some((path.clone(), stored.contains_key(path)));
+                break;
+            }
+        }
+        if let Some((path, in_store)) = first {
+            return Err(self.conflict(&path, in_store));
+        }
+        let mut rows = Vec::with_capacity(entries.len());
+        for e in entries {
+            self.resight.remove(&e.path);
+            self.known.entry(e.path.clone()).or_insert_with(|| Known {
+                version: Some(e.version.clone()),
+                size: e.size_bytes,
+                content: None,
+            });
+            rows.push((e.path, e.size_bytes));
+        }
+        self.listed.insert(dir.clone());
+        self.listings.insert(dir.as_str().to_string(), rows);
+        Ok(())
+    }
+
     /// True when the directory holds a file. The root is always a directory.
     pub async fn is_dir(&mut self, dir: &MemoryDir) -> Result<bool, WorkspaceError> {
         if dir.is_root() {
@@ -266,6 +330,13 @@ impl MemoryWorkspace {
     /// Buffer several writes and deletes as one change. Either all of them are buffered or none.
     /// The caps check the net change of the whole set once.
     pub async fn stage(&mut self, puts: Vec<(MemoryPath, String)>, removes: Vec<MemoryPath>) -> Result<(), WorkspaceError> {
+        self.stage_guarded(puts, removes, Vec::new()).await
+    }
+
+    /// Buffer several writes and deletes as one change, like `stage`, and arm directory guards in
+    /// the same group. At commit, the store refuses the set when it holds a path under a guard
+    /// that no change names.
+    pub async fn stage_guarded(&mut self, puts: Vec<(MemoryPath, String)>, removes: Vec<MemoryPath>, guards: Vec<MemoryDir>) -> Result<(), WorkspaceError> {
         if self.sealed {
             return Err(WorkspaceError::Sealed);
         }
@@ -305,17 +376,18 @@ impl MemoryWorkspace {
         let after = self.effective_usage(stored, &tentative);
         self.caps.check(before, after).map_err(WorkspaceError::Cap)?;
         self.changes = tentative;
-        self.join_group(&touched);
+        self.join_group(&touched, guards);
         Ok(())
     }
 
-    /// Put the touched paths, and every path of a group that one of them is in, into one new group.
-    /// A path that has no buffered change any more leaves its group.
-    fn join_group(&mut self, touched: &[MemoryPath]) {
+    /// Put the touched paths and the new guards, and every path and guard of a group that one of
+    /// the paths is in, into one new group. A path that has no buffered change any more leaves its
+    /// group. A guard does not leave its group.
+    fn join_group(&mut self, touched: &[MemoryPath], guards: Vec<MemoryDir>) {
         let group = self.next_group;
         self.next_group += 1;
         let joined: BTreeSet<u64> = touched.iter().filter_map(|p| self.groups.get(p).copied()).collect();
-        for g in self.groups.values_mut() {
+        for g in self.groups.values_mut().chain(self.dir_guards.iter_mut().map(|(_, g)| g)) {
             if joined.contains(g) {
                 *g = group;
             }
@@ -323,29 +395,35 @@ impl MemoryWorkspace {
         for path in touched {
             self.groups.insert(path.clone(), group);
         }
+        self.dir_guards.extend(guards.into_iter().map(|dir| (dir, group)));
         let changes = &self.changes;
         self.groups.retain(|p, _| changes.get(p).is_some());
     }
 
-    /// Remove the buffered change of `path` and of every other path in its group. It returns the
-    /// other paths whose changes it removed, in byte order.
-    fn drop_group_of(&mut self, path: &MemoryPath) -> Vec<MemoryPath> {
-        self.changes.remove(path);
-        let Some(group) = self.groups.remove(path) else {
-            return Vec::new();
-        };
-        let mates: Vec<MemoryPath> = self.groups.iter().filter(|(_, g)| **g == group).map(|(p, _)| p.clone()).collect();
-        for mate in &mates {
-            self.groups.remove(mate);
-            self.changes.remove(mate);
+    /// Remove every buffered change and every guard of the given groups. It returns the paths whose
+    /// changes it removed, in byte order.
+    fn drop_groups(&mut self, dropped: &BTreeSet<u64>) -> Vec<MemoryPath> {
+        let paths: Vec<MemoryPath> = self.groups.iter().filter(|(_, g)| dropped.contains(g)).map(|(p, _)| p.clone()).collect();
+        for path in &paths {
+            self.groups.remove(path);
+            self.changes.remove(path);
         }
-        mates
+        self.dir_guards.retain(|(_, g)| !dropped.contains(g));
+        paths
+    }
+
+    /// The armed guards, in byte order, with no duplicates.
+    #[cfg(test)]
+    pub(crate) fn armed_guards(&self) -> Vec<MemoryDir> {
+        self.dir_guards.iter().map(|(d, _)| d.clone()).collect::<BTreeSet<_>>().into_iter().collect()
     }
 
     /// Give the buffer to the commit and seal the workspace.
     pub fn take_changes(&mut self) -> MemoryCommitSet {
         self.sealed = true;
-        MemoryCommitSet::new(self.scope.clone(), std::mem::take(&mut self.changes))
+        let mut set = MemoryCommitSet::new(self.scope.clone(), std::mem::take(&mut self.changes));
+        set.guards = std::mem::take(&mut self.dir_guards).into_iter().map(|(d, _)| d).collect();
+        set
     }
 
     /// Seal the workspace and apply the buffer to the store.
@@ -360,8 +438,7 @@ impl MemoryWorkspace {
     /// The early conflict check. It reads the store version of `path` and compares it with the
     /// baseline. The first sight of a path becomes its baseline: a read, a listing that returns
     /// the path, or a listing of a directory that holds the path but does not return it (then the
-    /// baseline is "absent"). On a conflict, the cache entry and the cached listings of the path
-    /// are dropped, and so are the buffered changes of its group (see `groups`).
+    /// baseline is "absent"). A conflict goes through `conflict`.
     async fn baseline(&mut self, path: &MemoryPath) -> Result<Option<MemoryVersion>, WorkspaceError> {
         let fetched = self.store.get(&self.scope, path).await?;
         let fetched_version = fetched.as_ref().map(|f| f.version.clone());
@@ -371,12 +448,7 @@ impl MemoryWorkspace {
             None => None,
         };
         match seen {
-            Some(v) if v != fetched_version => {
-                self.known.remove(path);
-                let also = self.drop_group_of(path);
-                self.drop_listings_of(path);
-                Err(WorkspaceError::Conflict { path: path.clone(), also })
-            }
+            Some(v) if v != fetched_version => Err(self.conflict(path, fetched.is_some())),
             Some(v) => {
                 let known = self.known.entry(path.clone()).or_insert(Known {
                     version: None,
@@ -403,6 +475,28 @@ impl MemoryWorkspace {
                 Ok(fetched_version)
             }
         }
+    }
+
+    /// Handle an early conflict on `path`. `stored` is true when the store holds `path` now.
+    ///
+    /// 1. It drops the `known` entry of `path` and the cached listings that hold it.
+    /// 2. It drops the group of `path`.
+    /// 3. When the store holds `path`, it drops every group that has a guard that covers `path`.
+    ///    This also drops a group that holds only guards.
+    /// 4. It marks `path` for a re-sight, so the next fresh listing that holds it is a first sight.
+    /// 5. It returns the conflict. `also` holds the other dropped paths, in byte order.
+    fn conflict(&mut self, path: &MemoryPath, stored: bool) -> WorkspaceError {
+        self.known.remove(path);
+        self.drop_listings_of(path);
+        self.changes.remove(path);
+        let mut dropped: BTreeSet<u64> = self.groups.get(path).copied().into_iter().collect();
+        if stored {
+            dropped.extend(self.dir_guards.iter().filter(|(d, _)| d.covers(path)).map(|(_, g)| *g));
+        }
+        let mut also = self.drop_groups(&dropped);
+        also.retain(|p| p != path);
+        self.resight.insert(path.clone());
+        WorkspaceError::Conflict { path: path.clone(), also }
     }
 
     /// Drop the cached rows of every listing that holds `path`. The `listed` set stays.
@@ -838,5 +932,215 @@ mod tests {
         let (_f, _s, mut ws) = setup(MemoryCaps::default());
         ws.remove(&p("/nope")).await.unwrap();
         assert!(ws.take_changes().changes.is_empty());
+    }
+
+    fn d(s: &str) -> MemoryDir {
+        MemoryDir::parse(s).unwrap()
+    }
+
+    /// Delete a file directly in the fake, as another writer would.
+    async fn direct_delete(fake: &InMemoryMemoryStore, scope: &MemoryScope, path: &str) {
+        let v = fake.get(scope, &p(path)).await.unwrap().unwrap().version;
+        let mut changes = MemoryChangeSet::new();
+        changes.record(MemoryChange::Delete { path: p(path), expected: v });
+        fake.apply(&MemoryCommitSet::new(scope.clone(), changes), &MemoryCaps::default()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_guard_is_armed_and_reaches_the_commit_set() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.stage_guarded(vec![], vec![p("/tasks/a")], vec![d("/tasks")]).await.unwrap();
+        assert_eq!(ws.armed_guards(), vec![d("/tasks")]);
+        assert_eq!(ws.take_changes().guards, BTreeSet::from([d("/tasks")]));
+    }
+
+    #[tokio::test]
+    async fn a_conflict_in_a_group_drops_its_guard() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.stage_guarded(vec![], vec![p("/tasks/a")], vec![d("/tasks")]).await.unwrap();
+        direct(&f, &s, "/tasks/a", "changed").await;
+        assert!(matches!(ws.write(&p("/tasks/a"), "mine".into()).await, Err(WorkspaceError::Conflict { .. })));
+        assert!(ws.armed_guards().is_empty());
+        assert!(ws.take_changes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_later_stage_into_the_group_carries_the_guard() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.stage_guarded(vec![], vec![p("/tasks/a")], vec![d("/tasks")]).await.unwrap();
+        ws.write(&p("/tasks/a"), "again".into()).await.unwrap();
+        assert_eq!(ws.armed_guards(), vec![d("/tasks")]);
+        let set = ws.take_changes();
+        assert_eq!(set.guards, BTreeSet::from([d("/tasks")]));
+        assert_eq!(set.changes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_joined_guard_drops_with_its_group_when_the_path_is_gone() {
+        // The store no longer holds the path, so step 3 does not apply. Only the renumbered group
+        // (step 2) drops the guard.
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.stage_guarded(vec![], vec![p("/tasks/a")], vec![d("/tasks")]).await.unwrap();
+        ws.write(&p("/tasks/a"), "again".into()).await.unwrap();
+        direct_delete(&f, &s, "/tasks/a").await;
+        assert!(matches!(ws.write(&p("/tasks/a"), "more".into()).await, Err(WorkspaceError::Conflict { .. })));
+        assert!(ws.armed_guards().is_empty());
+        assert!(ws.take_changes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_early_conflict_under_a_guard_drops_the_guard_group() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.list(&d("/tasks")).await.unwrap();
+        ws.stage_guarded(vec![], vec![p("/tasks/a")], vec![d("/tasks")]).await.unwrap();
+        ws.write(&p("/tasks/n"), "n".into()).await.unwrap();
+        direct(&f, &s, "/tasks/n", "theirs").await;
+        let err = ws.write(&p("/tasks/n"), "more".into()).await.unwrap_err();
+        assert_eq!(
+            err,
+            WorkspaceError::Conflict {
+                path: p("/tasks/n"),
+                also: vec![p("/tasks/a")]
+            }
+        );
+        assert!(ws.armed_guards().is_empty());
+        let set = ws.take_changes();
+        assert!(set.is_empty(), "{set:?}");
+        f.apply(&set, &MemoryCaps::default()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_guard_only_group_drops_on_an_early_conflict_under_it() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        ws.list(&d("/t")).await.unwrap();
+        ws.write(&p("/t/x"), "x".into()).await.unwrap();
+        ws.stage_guarded(vec![], vec![p("/t/x")], vec![d("/t")]).await.unwrap();
+        // The remove cancels the buffered create, so the group holds only the guard.
+        assert!(ws.changes.is_empty());
+        assert_eq!(ws.armed_guards(), vec![d("/t")]);
+        direct(&f, &s, "/t/y", "theirs").await;
+        let err = ws.write(&p("/t/y"), "mine".into()).await.unwrap_err();
+        assert_eq!(err, WorkspaceError::Conflict { path: p("/t/y"), also: Vec::new() });
+        assert!(ws.armed_guards().is_empty());
+        assert!(ws.take_changes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_conflict_leaves_unrelated_guards() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/a/x", "x").await;
+        direct(&f, &s, "/b/y", "y").await;
+        ws.stage_guarded(vec![], vec![p("/a/x")], vec![d("/a")]).await.unwrap();
+        ws.stage_guarded(vec![], vec![p("/b/y")], vec![d("/b")]).await.unwrap();
+        direct(&f, &s, "/a/x", "changed").await;
+        assert!(matches!(ws.write(&p("/a/x"), "mine".into()).await, Err(WorkspaceError::Conflict { .. })));
+        assert_eq!(ws.armed_guards(), vec![d("/b")]);
+        let set = ws.take_changes();
+        assert_eq!(set.guards, BTreeSet::from([d("/b")]));
+        assert_eq!(set.changes.len(), 1);
+        assert!(set.changes.get(&p("/b/y")).is_some());
+    }
+
+    #[tokio::test]
+    async fn check_dir_conflicts_on_a_new_path_under_a_listed_dir() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.list(&d("/tasks")).await.unwrap();
+        direct(&f, &s, "/tasks/b", "b").await;
+        assert_eq!(
+            ws.check_dir(&d("/tasks")).await,
+            Err(WorkspaceError::Conflict {
+                path: p("/tasks/b"),
+                also: Vec::new()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn check_dir_conflicts_on_a_seen_path_that_is_gone() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.list(&d("/tasks")).await.unwrap();
+        direct_delete(&f, &s, "/tasks/a").await;
+        assert_eq!(
+            ws.check_dir(&d("/tasks")).await,
+            Err(WorkspaceError::Conflict {
+                path: p("/tasks/a"),
+                also: Vec::new()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn check_dir_records_a_never_seen_path_and_replaces_the_cache() {
+        // The stale cached row: the root listing makes /tasks/x absent at first sight, a later
+        // listing of /tasks caches its row, and then the file goes away.
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        assert_eq!(ws.list(&MemoryDir::root()).await.unwrap(), vec![]);
+        direct(&f, &s, "/tasks/x", "x").await;
+        assert_eq!(ws.list(&d("/tasks")).await.unwrap(), vec![(p("/tasks/x"), 1)]);
+        direct_delete(&f, &s, "/tasks/x").await;
+        ws.check_dir(&d("/tasks")).await.unwrap();
+        assert_eq!(ws.list(&d("/tasks")).await.unwrap(), vec![]);
+
+        // A path that the run never saw becomes a first sight with its stored version.
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/u/k", "k").await;
+        let v = f.get(&s, &p("/u/k")).await.unwrap().unwrap().version;
+        ws.check_dir(&d("/u")).await.unwrap();
+        assert_eq!(ws.list(&d("/u")).await.unwrap(), vec![(p("/u/k"), 1)]);
+        ws.write(&p("/u/k"), "mine".into()).await.unwrap();
+        assert_eq!(
+            ws.take_changes().changes.get(&p("/u/k")),
+            Some(&MemoryChange::Put {
+                path: p("/u/k"),
+                content: "mine".into(),
+                expected: Expected::Version(v)
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_sight_mark_lets_a_directory_view_end_the_loop() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.list(&d("/tasks")).await.unwrap();
+        direct(&f, &s, "/tasks/b", "b").await;
+        assert!(matches!(ws.check_dir(&d("/tasks")).await, Err(WorkspaceError::Conflict { .. })));
+        assert_eq!(ws.list(&d("/tasks")).await.unwrap(), vec![(p("/tasks/a"), 1), (p("/tasks/b"), 1)]);
+        ws.check_dir(&d("/tasks")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_re_sight_mark_is_used_once() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.list(&d("/tasks")).await.unwrap();
+        direct(&f, &s, "/tasks/b", "b").await;
+        assert!(matches!(ws.check_dir(&d("/tasks")).await, Err(WorkspaceError::Conflict { .. })));
+        ws.list(&d("/tasks")).await.unwrap();
+        ws.check_dir(&d("/tasks")).await.unwrap();
+        direct(&f, &s, "/tasks/b", "b2").await;
+        assert_eq!(
+            ws.check_dir(&d("/tasks")).await,
+            Err(WorkspaceError::Conflict {
+                path: p("/tasks/b"),
+                also: Vec::new()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn list_fresh_ignores_the_cache() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        assert_eq!(ws.list(&d("/done")).await.unwrap(), vec![]);
+        direct(&f, &s, "/done/z", "z").await;
+        assert_eq!(ws.list(&d("/done")).await.unwrap(), vec![]);
+        assert_eq!(ws.list_fresh(&d("/done")).await.unwrap(), vec![(p("/done/z"), 1)]);
     }
 }
