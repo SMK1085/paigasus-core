@@ -64,15 +64,16 @@ pub async fn run_scheduler_loop(scheduler: Arc<dyn Scheduler>, settings: LoopSet
             let started = Instant::now();
             let result = run_pass(&*scheduler, settings.pass_limit, &shutdown).await;
             metrics::histogram!(names::AGENT_HOST_SCHEDULER_PASS_DURATION_SECONDS).record(started.elapsed().as_secs_f64());
+            // Read the watch before the lag read: a shutdown must not wait for a database call.
+            if shutdown.has_changed().unwrap_or(true) {
+                return Ok(());
+            }
             match scheduler.due_lag().await {
                 Ok(lag) => metrics::gauge!(names::AGENT_HOST_SCHEDULER_LAG_SECONDS).set(lag.as_secs_f64()),
                 Err(error) => tracing::warn!(%error, "the scheduler could not read the lag"),
             }
             let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
             metrics::gauge!(names::AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS).set(now);
-            if shutdown.has_changed().unwrap_or(true) {
-                return Ok(());
-            }
             match result {
                 Ok(processed) if processed >= settings.pass_limit => {}
                 Ok(_) => break,
@@ -103,6 +104,8 @@ mod tests {
     struct Fake {
         script: Mutex<VecDeque<Result<usize, RepositoryError>>>,
         calls: Mutex<Vec<tokio::time::Instant>>,
+        /// The count of `due_lag` calls.
+        lag_reads: Mutex<usize>,
         /// Sent inside the call with this index (1-based).
         shutdown_at: Option<(usize, watch::Sender<()>)>,
     }
@@ -112,6 +115,7 @@ mod tests {
             Arc::new(Fake {
                 script: Mutex::new(script.into()),
                 calls: Mutex::new(Vec::new()),
+                lag_reads: Mutex::new(0),
                 shutdown_at: None,
             })
         }
@@ -137,6 +141,7 @@ mod tests {
             self.script.lock().unwrap().pop_front().unwrap_or(Ok(0))
         }
         async fn due_lag(&self) -> Result<Duration, RepositoryError> {
+            *self.lag_reads.lock().unwrap() += 1;
             Ok(Duration::from_secs(7))
         }
     }
@@ -191,11 +196,28 @@ mod tests {
         let fake = Arc::new(Fake {
             script: Mutex::new(VecDeque::from(vec![Ok(1), Ok(1), Ok(1), Ok(1)])),
             calls: Mutex::new(Vec::new()),
+            lag_reads: Mutex::new(0),
             shutdown_at: Some((2, tx)),
         });
         let n = run_pass(&*fake, 5, &rx).await.unwrap();
         assert_eq!(fake.count(), 2, "no third call after the shutdown");
         assert_eq!(n, 2, "both rows that were fired are counted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_during_a_pass_ends_the_loop_without_a_lag_read() {
+        let (tx, rx) = watch::channel(());
+        let fake = Arc::new(Fake {
+            script: Mutex::new(VecDeque::from(vec![Ok(1), Ok(1)])),
+            calls: Mutex::new(Vec::new()),
+            lag_reads: Mutex::new(0),
+            shutdown_at: Some((1, tx)),
+        });
+        let task = tokio::spawn(run_scheduler_loop(fake.clone(), settings(5), rx));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(task.await.unwrap().is_ok());
+        assert_eq!(fake.count(), 1, "the pass stops after the shutdown");
+        assert_eq!(*fake.lag_reads.lock().unwrap(), 0, "no lag read after a shutdown");
     }
 
     #[tokio::test(start_paused = true)]

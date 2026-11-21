@@ -228,7 +228,9 @@ when a timer fires, so a schedule that exists always fires.
 The tools collect their changes in a run buffer. `TimerWorkspace::seal()` gives the inserts and
 the cancels. `PgTimerStore::apply_in` writes them inside the run transaction. SMA-790 must call
 it after it takes the `inbox_lease` row lock with `FOR UPDATE`. That lock is the fence for a run
-that lost its lease. `apply_in` uses a savepoint, so an error leaves the caller transaction usable.
+that lost its lease. SMA-790 must compare the current lease token with the token of the run under
+that row lock, and roll back the run on a mismatch (ADR (b) step 1). `apply_in` checks only that
+the `inbox_lease` row exists. `apply_in` uses a savepoint, so an error leaves the caller transaction usable.
 
 | Result of `apply_in` | Recommended action for SMA-790 |
 |---|---|

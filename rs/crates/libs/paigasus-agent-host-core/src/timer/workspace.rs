@@ -959,7 +959,7 @@ mod tests {
         assert_eq!(
             reply.text,
             format!(
-                "Timer {} is marked to cancel. The cancel takes effect when this run ends. The timer can still fire before then.",
+                "Timer {} is marked to cancel. The cancel takes effect only if this run commits its timer changes. The timer can still fire before then.",
                 stored.uuid().as_hyphenated()
             )
         );

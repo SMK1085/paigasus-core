@@ -257,6 +257,15 @@ async fn timer_checks_hold() {
         "failure of 501 characters",
     );
     assert_check_violation(insert_timer(&db, 5016, &FOLLOW_UP, &[("status", "'paused'")]).await, "status paused");
+    for (n, col, lit) in [
+        (5017, "next_fire_at", "'-infinity'"),
+        (5018, "next_fire_at", "'infinity'"),
+        (5019, "last_fired_at", "'-infinity'"),
+        (5020, "last_fired_at", "'infinity'"),
+    ] {
+        assert_check_violation(insert_timer(&db, n, &FOLLOW_UP, &[(col, lit)]).await, &format!("{col} {lit}"));
+    }
+    insert_timer(&db, 5021, &FOLLOW_UP, &[("last_fired_at", "now()")]).await.expect("a finite last_fired_at");
 }
 
 #[tokio::test]

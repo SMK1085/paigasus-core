@@ -339,25 +339,30 @@ impl PgScheduler {
     /// The UPDATE matches only while `fire_attempts`, `fire_count` and `next_fire_at` still have the
     /// values that the fire read. A worker that fires the row resets `fire_attempts` to 0 and moves
     /// `next_fire_at`, so a stale back-off must not match it. The wait comes from the read
-    /// `fire_attempts`. No row means that another worker handled the row.
+    /// `fire_attempts`. The retry time comes from `clock_timestamp()` in the UPDATE, so it counts from
+    /// after the row lock and not from the start of the transaction (spec C1). No row means that
+    /// another worker handled the row.
     async fn back_off_in(&self, txn: &DatabaseTransaction, ctx: &Ctx, category: &str) -> Result<Option<String>, DbErr> {
         let ms = self.settings.statement_timeout.as_millis().max(1);
         txn.execute_unprepared(&format!("SET LOCAL statement_timeout = '{ms}ms'")).await?;
-        let now = db_now_in(txn).await?;
         let attempts = u32::try_from(ctx.attempts.saturating_add(1).max(1)).unwrap_or(u32::MAX);
-        let wait = backoff(self.settings.backoff_base, attempts);
-        let next = round_up_to_second(now).saturating_add(i64::try_from(wait.as_secs()).unwrap_or(i64::MAX));
+        let wait = i64::try_from(backoff(self.settings.backoff_base, attempts).as_secs()).unwrap_or(i64::MAX);
+        // Take the row lock first and wait on it here. An UPDATE that waits on a lock that only
+        // locks (no write) does not compute its new values again after the wait, so the clock in
+        // the UPDATE would still be the time before the wait. After this statement the UPDATE
+        // below runs with the lock held, and its `clock_timestamp()` is the time after the lock.
+        txn.query_one_raw(stmt("SELECT id FROM timer WHERE id = $1 FOR UPDATE", vec![ctx.id.into()])).await?;
         let row = txn
             .query_one_raw(stmt(
                 "UPDATE timer SET fire_attempts = fire_attempts + 1, updated_at = now(), \
                  status = CASE WHEN fire_attempts + 1 >= $3 THEN 'failed' ELSE status END, \
                  failure = CASE WHEN fire_attempts + 1 >= $3 THEN $4::text ELSE failure END, \
-                 next_fire_at = CASE WHEN fire_attempts + 1 >= $3 THEN next_fire_at ELSE to_timestamp($2::bigint) END \
+                 next_fire_at = CASE WHEN fire_attempts + 1 >= $3 THEN next_fire_at ELSE to_timestamp(ceil(EXTRACT(EPOCH FROM clock_timestamp()))::bigint + $2::bigint) END \
                  WHERE id = $1 AND status = 'active' AND fire_attempts = $5::bigint AND fire_count = $6::bigint \
                  AND (EXTRACT(EPOCH FROM next_fire_at) * 1000000)::bigint = $7::bigint RETURNING status",
                 vec![
                     ctx.id.into(),
-                    next.into(),
+                    wait.into(),
                     i64::from(self.settings.max_fire_attempts).into(),
                     failure_text(category).into(),
                     ctx.attempts.into(),
@@ -443,10 +448,6 @@ fn failure_text(category: &str) -> String {
     category.chars().filter(|c| !c.is_control()).take(500).collect()
 }
 
-fn round_up_to_second(t: Timestamp) -> i64 {
-    t.as_second() + i64::from(t.subsec_nanosecond() > 0)
-}
-
 /// The id, kind, origin, attempts and org of a locked row, read as plain columns.
 fn read_ctx(row: &QueryResult) -> Result<(Ctx, Uuid), DbErr> {
     let ctx = Ctx {
@@ -529,11 +530,5 @@ mod tests {
         let text = failure_text(&format!("a\nb\u{7}{}", "x".repeat(900)));
         assert_eq!(text.chars().count(), 500);
         assert!(!text.chars().any(char::is_control));
-    }
-
-    #[test]
-    fn a_time_is_rounded_up_to_the_second() {
-        assert_eq!(round_up_to_second(Timestamp::from_microsecond(1_500_000).expect("ts")), 2);
-        assert_eq!(round_up_to_second(Timestamp::from_microsecond(2_000_000).expect("ts")), 2);
     }
 }

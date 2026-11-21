@@ -831,7 +831,7 @@ From the second adversarial challenge (approve with changes), all folded in:
   insert; rounding up instead of truncation; a cron pre-check, because `croner` cannot refuse
   its extensions; R5 removed; the stored civil slot against a tzdb rule change; a backoff for a
   rolling deploy; the lag gauge after the pass, a last-pass gauge and a statement timeout;
-  `clock_timestamp()` for the budget bound; the lease-row lock inside `apply_in`; the port gaps;
+  `statement_timestamp()` for the budget bound; the lease-row lock inside `apply_in`; the port gaps;
   testable bound and crash tests; the timing-test isolation; retention for the budget window
   (NG5); the index in the SQL block; the cross-inbox cancel test.
 - Decided by Sven at the second GATE 1: S6 (Vixie cron behaviour in the repeated hour, §6.2 R3)

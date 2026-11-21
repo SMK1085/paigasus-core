@@ -127,13 +127,6 @@ async fn restart_fires_a_missed_daily_slot_once() {
     let stored_at = schedule.instant(Slot { civil: slot_civil, second: false }).expect("instant");
     let id = due_schedule(&env, &ib, "0 9 * * *", "Europe/Berlin", &civil_text(slot_civil), stored_at).await;
 
-    let today_nine = local_now.with().time(civil::time(9, 0, 0, 0)).build().expect("zoned");
-    let want_next = if today_nine.timestamp() > now {
-        today_nine
-    } else {
-        today_nine.checked_add(Span::new().days(1)).expect("zoned")
-    };
-
     let sched = scheduler(&env.db, settings());
     assert_eq!(sched.fire_due(10).await.expect("pass"), 1);
     let events = support::timer::timer_events(&env.db, ib.uuid).await;
@@ -142,11 +135,24 @@ async fn restart_fires_a_missed_daily_slot_once() {
     assert_eq!(events[0].source, SOURCE_AGENT);
     assert_eq!(events[0].ce_type, TIMER_FIRED_TYPE);
     assert_eq!(events[0].status, "pending");
+    // The planner's "now" is the `time` of the event. The next slot comes from that time, not from
+    // a sample that the test took before the pass.
+    let fired_now: Timestamp = events[0].envelope["time"].as_str().expect("event time").parse().expect("RFC 3339 time");
+    let fired_local = fired_now.to_zoned(berlin.clone());
+    let today_nine = fired_local.with().time(civil::time(9, 0, 0, 0)).build().expect("zoned");
+    let want_next = if today_nine.timestamp() > fired_now {
+        today_nine
+    } else {
+        today_nine.checked_add(Span::new().days(1)).expect("zoned")
+    };
     let state = support::timer::timer_state(&env.db, id).await;
     assert_eq!((state.status.as_str(), state.fire_count, state.fire_attempts), ("active", 1, 0));
     assert_eq!(state.next_fire_at_us, want_next.timestamp().as_microsecond());
     assert_eq!(state.next_slot.as_deref(), Some(civil_text(want_next.datetime()).as_str()));
-    assert_eq!(sched.fire_due(10).await.expect("pass"), 0);
+    // A second pass can fire the next slot if it came due between the passes, so the test does not
+    // assert an empty pass. The missed slot fires once only.
+    sched.fire_due(10).await.expect("pass");
+    assert_eq!(events_like(&env, &ib, &format!("timer:{id}:{}", format_fire_at(stored_at))).await, 1);
 }
 
 #[tokio::test]
@@ -393,6 +399,33 @@ async fn two_back_offs_from_the_same_read_count_one_attempt() {
 }
 
 #[tokio::test]
+async fn the_back_off_deadline_counts_from_after_the_row_lock() {
+    let Some(env) = env().await else {
+        eprintln!("skipping scheduler_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let id = due_follow_up(&env, &ib, 30).await;
+    let sched = scheduler(&env.db, settings());
+    let read = support::timer::timer_state(&env.db, id).await;
+    // Another transaction holds the row lock for 2 s. The back-off waits on it. Its deadline must
+    // count from the time after the lock, not from the start of its own transaction.
+    let holder = env.db.begin().await.expect("begin");
+    holder.execute_unprepared(&format!("SELECT 1 FROM timer WHERE id = '{id}' FOR UPDATE")).await.expect("lock");
+    let release = async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let before_commit = db_now(&env).await;
+        holder.commit().await.expect("commit");
+        before_commit
+    };
+    let (changed, before_commit) = tokio::join!(sched.back_off_after_read(id, 0, read.fire_count, read.next_fire_at_us, "test category"), release);
+    assert!(changed.expect("back-off"));
+    let state = support::timer::timer_state(&env.db, id).await;
+    let low = before_commit.as_microsecond() + 60_000_000;
+    assert!(state.next_fire_at_us >= low, "next_fire_at {} is before the lock release plus 60 s ({low})", state.next_fire_at_us);
+}
+
+#[tokio::test]
 async fn a_back_off_from_before_a_fire_changes_nothing() {
     let Some(env) = env().await else {
         eprintln!("skipping scheduler_pg: Docker unavailable");
@@ -566,10 +599,28 @@ async fn a_schedule_over_the_budget_still_fires() {
         return;
     };
     let ib = new_inbox(&env).await;
-    for _ in 0..5 {
-        let id = Uuid::new_v4();
-        support::timer::insert_follow_up_row(&env.db, ib.uuid, id, "agent", "now() + interval '1 day'", "later").await;
-    }
+    // The default budget is 100 agent timers in 24 hours (`max_agent_timers_created_per_day`). Seed
+    // 101 done rows, so the inbox is over that budget before the schedule fires.
+    const BUDGET: i64 = 100;
+    exec(
+        &env,
+        &format!(
+            "INSERT INTO timer (id, inbox_id, kind, origin, status, note, next_fire_at) \
+             SELECT gen_random_uuid(), '{}', 'follow_up', 'agent', 'done', 'old', now() - interval '1 hour' FROM generate_series(1, {})",
+            ib.uuid,
+            BUDGET + 1
+        ),
+    )
+    .await;
+    let created = support::scalar_i64(
+        &env.db,
+        &format!(
+            "SELECT count(*)::bigint AS n FROM timer WHERE inbox_id = '{}' AND origin = 'agent' AND created_at > now() - interval '24 hours'",
+            ib.uuid
+        ),
+    )
+    .await;
+    assert!(created > BUDGET, "the inbox is over the budget: {created} created, budget {BUDGET}");
     let now = db_now(&env).await;
     let at = Timestamp::from_second(now.as_second() - 3600).expect("ts");
     let slot = at.to_zoned(TimeZone::UTC).datetime();

@@ -5,7 +5,8 @@
 //! The composite foreign key `(thread_id, inbox_id)` makes the schema enforce that a timer
 //! targets a thread of its own inbox. The CHECK constraints keep a `schedule` row and a
 //! `follow_up` row in their two valid shapes. The note and the failure text have a length limit
-//! in characters.
+//! in characters. The two time columns must be finite: an `infinity` value would break the due
+//! query and the decode of a row.
 
 use sea_orm_migration::prelude::*;
 
@@ -37,7 +38,9 @@ const UP: [&str; 4] = [
         CHECK ((cron IS NULL) = (tz IS NULL)),
         CHECK ((cron IS NULL) = (next_slot IS NULL)),
         CHECK ((cron IS NULL) = (next_slot_second IS NULL)),
-        CHECK ((kind = 'schedule') = (cron IS NOT NULL))
+        CHECK ((kind = 'schedule') = (cron IS NOT NULL)),
+        CHECK (isfinite(next_fire_at)),
+        CHECK (last_fired_at IS NULL OR isfinite(last_fired_at))
     )",
     "CREATE INDEX timer_due ON timer (next_fire_at) WHERE status = 'active'",
     "CREATE INDEX timer_inbox_active ON timer (inbox_id) WHERE status = 'active'",

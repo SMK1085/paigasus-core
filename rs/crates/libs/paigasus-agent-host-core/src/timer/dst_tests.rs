@@ -135,19 +135,23 @@ fn daily_nine_fires_once_per_local_day() {
         let tz = tz_of(zone);
         for pace in [Pace::AfterEach(SignedDuration::from_secs(1)), Pace::Poll(SignedDuration::from_hours(5))] {
             let fires = simulate("0 9 * * *", zone, from, to, pace);
-            let first = local(&tz, fires[0]).date();
-            assert!(first == date("2026-01-01") || first == date("2026-01-02"), "{zone}: first fire on {first}");
-            let mut expected = first;
+            // The expected local dates come from the interval and the schedule, not from the fires.
+            let mut expected: Vec<Date> = Vec::new();
+            let mut day = date("2025-12-31");
+            while day <= date("2027-01-02") {
+                let at = day.at(9, 0, 0, 0).to_zoned(tz.clone()).unwrap().timestamp();
+                if at >= from && at < to {
+                    expected.push(day);
+                }
+                day = day.tomorrow().unwrap();
+            }
+            assert_eq!(expected.len(), 365, "{zone}: the interval holds 365 days");
+            let observed: Vec<Date> = fires.iter().map(|f| local(&tz, *f).date()).collect();
+            assert_eq!(observed, expected, "{zone}: the fire dates differ from the expected dates");
             for f in &fires {
                 let l = local(&tz, *f);
-                assert_eq!(l.date(), expected, "{zone}: a day has no fire or two fires near {f}");
                 assert_eq!((l.hour(), l.minute(), l.second()), (9, 0, 0), "{zone}: fire {f} is not at 09:00:00");
-                expected = expected.tomorrow().unwrap();
             }
-            let last = local(&tz, *fires.last().unwrap()).date();
-            assert!(last >= date("2026-12-30"), "{zone}: the last fire is on {last}");
-            let days = usize::try_from(first.until((jiff::Unit::Day, last)).unwrap().get_days()).unwrap() + 1;
-            assert_eq!(fires.len(), days, "{zone}: the count of fires is not the count of days");
         }
     }
 }
