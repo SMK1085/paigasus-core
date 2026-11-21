@@ -565,6 +565,12 @@ async fn test_js(url: &str) -> jetstream::Context {
     jetstream::new(async_nats::connect(url).await.expect("the assertion client connects"))
 }
 
+/// Make the generation bucket as the provisioner does (`ops/nats/provision-decisions.sh`). The relay never makes
+/// it (D20): its identity has no `STREAM.CREATE` grant on the bucket.
+async fn provision_bucket(url: &str) {
+    test_js(url).await.create_key_value(dl_js::gen_kv_config()).await.expect("the provisioner makes the bucket");
+}
+
 #[tokio::test]
 async fn n_records_give_n_messages_with_the_right_subjects_and_bytes() {
     let Some((node, redis_url)) = redis_7_4("decision_log_redis relay messages").await else {
@@ -824,6 +830,7 @@ async fn flushall_with_two_relays_counts_one_reset() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay flushall").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -876,6 +883,7 @@ async fn a_restart_with_no_loss_counts_nothing() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis restart no loss").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -904,6 +912,7 @@ async fn the_upgrade_from_sma_755_counts_nothing() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis upgrade").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -931,6 +940,7 @@ async fn the_backlog_gauge_updates_while_the_kv_step_hangs() {
     let Some((nats, nats_url)) = start_nats(None, "decision_log_redis gauge during kv hang").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -964,6 +974,7 @@ async fn a_shutdown_during_a_hung_kv_step_ends_in_time() {
     let Some((nats, nats_url)) = start_nats(None, "decision_log_redis shutdown during kv hang").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -998,6 +1009,7 @@ async fn a_production_drain_during_a_hung_kv_step_aborts_nothing_and_leaves_no_s
     let Some((nats, nats_url)) = start_nats(None, "decision_log_redis production drain during kv hang").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -1285,6 +1297,7 @@ async fn a_group_made_after_a_failed_first_create_counts_one_reset() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis relay recovery").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -1569,15 +1582,16 @@ async fn the_relay_sizes_the_stream_to_a_smaller_account_limit() {
 }
 
 #[tokio::test]
-async fn the_kv_adapter_makes_the_bucket_and_does_a_cas() {
+async fn the_kv_adapter_does_a_cas_on_the_provisioned_bucket() {
     let Some((_nats, url)) = start_nats(None, "decision_log_redis kv adapter").await else {
         return;
     };
+    provision_bucket(&url).await;
     let key = entry_key(KEY);
     let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, key.clone());
     assert!(kv.get().await.expect("get on a new bucket").is_none(), "no entry before the first create");
     let admin = test_js(&url).await;
-    let store = admin.get_key_value(dl_js::GEN_BUCKET).await.expect("the adapter made the bucket");
+    let store = admin.get_key_value(dl_js::GEN_BUCKET).await.expect("the provisioned bucket");
     let info = admin.get_stream(format!("KV_{}", dl_js::GEN_BUCKET)).await.expect("the bucket stream").cached_info().clone();
     assert_eq!(info.config.max_bytes, dl_js::GEN_MAX_BYTES);
     assert_eq!(info.config.max_messages_per_subject, 1, "history 1");
@@ -1601,6 +1615,7 @@ async fn the_kv_adapter_recovers_after_an_outage() {
     let Some((nats, url)) = start_nats(None, "decision_log_redis kv outage").await else {
         return;
     };
+    provision_bucket(&url).await;
     let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, entry_key(KEY));
     kv.get().await.expect("get while NATS is up");
     // A pause keeps the connection and the server state. A stop does not: a reconnecting client can still answer.
@@ -1612,18 +1627,56 @@ async fn the_kv_adapter_recovers_after_an_outage() {
 }
 
 #[tokio::test]
-async fn the_kv_adapter_makes_the_bucket_again_after_it_is_deleted() {
-    let Some((_nats, url)) = start_nats(None, "decision_log_redis kv adapter deleted bucket").await else {
+async fn a_deleted_bucket_counts_no_bucket_until_the_provisioner_makes_it_again() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis deleted bucket").await else {
         return;
     };
-    let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, entry_key(KEY));
-    kv.create(Bytes::from_static(b"a")).await.expect("create makes the bucket");
-    let admin = test_js(&url).await;
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis deleted bucket").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    provision_bucket(&nats_url).await;
+    let admin = test_js(&nats_url).await;
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
+    assert_eq!(check_errors(&snap, "no_bucket"), 0, "no check error while the bucket exists");
     admin.delete_stream(format!("KV_{}", dl_js::GEN_BUCKET)).await.expect("admin deletes the bucket stream");
-    let after_delete = kv.get().await;
-    assert!(after_delete.is_err(), "the cached handle fails on a deleted bucket: {after_delete:?}");
-    let again = kv.get().await.expect("the handle is made again and the bucket too");
-    assert!(again.is_none(), "the new bucket is empty");
+    wait_for("the KV step counts no_bucket", || async { check_errors(&snap, "no_bucket") > 0 }).await;
+    // A publish still goes through while the bucket is missing.
+    let published = snap.published();
+    xadd(&node, &event_with_org(1, ORG_A), 0).await;
+    wait_for("the event is published", || async { snap.published() == published + 1 && xlen(&node).await == 0 }).await;
+    provision_bucket(&nats_url).await;
+    wait_for("the KV step works again", || async { kv_record(&admin).await.is_some() }).await;
+    let counted = check_errors(&snap, "no_bucket");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(check_errors(&snap, "no_bucket"), counted, "no more no_bucket after the bucket is back");
+    relay.shut_down().await;
+}
+
+#[tokio::test]
+async fn a_relay_with_no_bucket_counts_no_bucket_and_publishes_every_event() {
+    let Some((node, redis_url)) = redis_7_4("decision_log_redis no bucket").await else {
+        return;
+    };
+    let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis no bucket").await else {
+        return;
+    };
+    let recorder = DebuggingRecorder::new();
+    let snap = Tally::new(recorder.snapshotter());
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let admin = test_js(&nats_url).await;
+    let relay = start_relay(&redis_url, &nats_url, "i1").await;
+    for seq in 1..=10 {
+        xadd(&node, &event_with_org(seq, ORG_A), 0).await;
+    }
+    wait_for("10 events are published and Redis is empty", || async { snap.published() == 10 && xlen(&node).await == 0 }).await;
+    wait_for("the KV step counts no_bucket", || async { check_errors(&snap, "no_bucket") > 0 }).await;
+    assert_eq!(snap.dropped("publish_rejected"), 0, "a missing bucket rejects no event");
+    assert!(admin.get_key_value(dl_js::GEN_BUCKET).await.is_err(), "the relay did not make the bucket");
+    relay.shut_down().await;
 }
 
 /// D9: a call that the step timeout cancels counts as a failure, so it leaves no cached handle.
@@ -1632,16 +1685,20 @@ async fn the_kv_adapter_makes_the_handle_again_after_a_cancelled_call() {
     let Some((nats, url)) = start_nats(None, "decision_log_redis kv adapter cancelled call").await else {
         return;
     };
+    provision_bucket(&url).await;
     let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, entry_key(KEY));
-    kv.create(Bytes::from_static(b"a")).await.expect("create makes the bucket");
+    kv.create(Bytes::from_static(b"a")).await.expect("create on the provisioned bucket");
     let admin = test_js(&url).await;
     admin.delete_stream(format!("KV_{}", dl_js::GEN_BUCKET)).await.expect("admin deletes the bucket stream");
     nats.pause().await.expect("pause NATS");
     let cancelled = tokio::time::timeout(Duration::from_millis(300), kv.get()).await;
     nats.unpause().await.expect("unpause NATS");
     assert!(cancelled.is_err(), "the get did not hang on a paused NATS: {cancelled:?}");
-    // A kept handle would fail here on the deleted bucket. A new handle makes the bucket again.
-    let again = kv.get().await.expect("the cancelled call left no handle, so the handle is made again");
+    // A kept handle would fail here with another error. A new handle gets the bucket, finds none, and reports it.
+    let missing = kv.get().await;
+    assert!(matches!(missing, Err(KvError::NoBucket)), "the cancelled call left no handle, so the get finds no bucket: {missing:?}");
+    provision_bucket(&url).await;
+    let again = kv.get().await.expect("the next get works after the provisioner made the bucket");
     assert!(again.is_none(), "the new bucket is empty");
 }
 
@@ -1836,6 +1893,7 @@ async fn a_fresh_relay_after_flushall_counts_one_reset_with_the_stored_sample() 
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis fresh relay after flushall").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -1864,6 +1922,7 @@ async fn a_restore_of_an_older_generation_counts_one_reset() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis restore older generation").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -1895,6 +1954,7 @@ async fn a_reset_during_a_nats_outage_counts_after_nats_returns() {
     let Some((nats, nats_url)) = start_nats(None, "decision_log_redis reset during nats outage").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -1989,6 +2049,7 @@ async fn an_xack_of_zero_and_a_group_made_by_another_relay_counts_one_reset() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis xack zero").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -2023,6 +2084,7 @@ async fn a_group_made_by_an_sma_755_relay_is_repaired_and_counts_one_reset() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis group by sma 755 relay").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -2053,6 +2115,7 @@ async fn a_return_to_an_older_state_of_the_same_generation_counts_one_loss() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis return to older state").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -2094,6 +2157,7 @@ async fn a_foreign_writer_counts_errors_and_no_reset() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis foreign writer").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -2101,7 +2165,7 @@ async fn a_foreign_writer_counts_errors_and_no_reset() {
     let admin = test_js(&nats_url).await;
     let relay = start_relay(&redis_url, &nats_url, "i1").await;
     wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
-    let store = admin.get_key_value(dl_js::GEN_BUCKET).await.expect("the relay made the bucket");
+    let store = admin.get_key_value(dl_js::GEN_BUCKET).await.expect("the provisioner made the bucket");
     let foreign = GenRecord {
         generation: new_id(),
         epoch: 1,
@@ -2138,6 +2202,7 @@ async fn a_redis_at_its_memory_limit_counts_a_redis_error_and_keeps_the_gauge() 
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis memory limit").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -2175,6 +2240,7 @@ async fn two_fresh_relays_on_a_first_deploy_count_nothing() {
     let Some((_nats, nats_url)) = start_nats(None, "decision_log_redis first deploy").await else {
         return;
     };
+    provision_bucket(&nats_url).await;
     let recorder = DebuggingRecorder::new();
     let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);

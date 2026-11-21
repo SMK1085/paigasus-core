@@ -208,8 +208,9 @@ pub fn stream_config(max_bytes: i64) -> jetstream::stream::Config {
     }
 }
 
-/// The config of the generation bucket. `provision-decisions.sh` makes the same bucket from `ops/nats/subjects.env`,
-/// and a unit test pins the two together. History is 1, because only the newest value of a key matters.
+/// The config of the generation bucket. Only `provision-decisions.sh` makes the bucket (D20), from
+/// `ops/nats/subjects.env`. The relay never makes it. A unit test pins this config to that file, and the
+/// integration tests use it to make the bucket as the provisioner. History is 1, because only the newest value of a key matters.
 #[must_use]
 pub fn gen_kv_config() -> jetstream::kv::Config {
     jetstream::kv::Config {

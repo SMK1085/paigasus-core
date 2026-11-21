@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The NATS KV adapter of the generation record (SMA-821 § 5.2). It implements the `GenKv` port on one key of
-//! the `GATEWAY_DECISIONS_GEN` bucket. async-nats 0.53 has no get-or-create for a bucket, so the adapter does
-//! get, then create when the stream is not found. It reads with the direct get (`Store::entry`) only. Each call
+//! the `GATEWAY_DECISIONS_GEN` bucket. The adapter only gets the bucket. It never makes it: the publisher identity
+//! has no `STREAM.CREATE` grant on it (D20), and only `provision-decisions.sh` makes the bucket. A bucket that is
+//! not found gives `KvError::NoBucket`, and the next call gets the bucket again. It reads with the direct get (`Store::entry`) only. Each call
 //! takes the cached store handle out, and puts it back only after a success or a `WrongRevision`. So after any
 //! other error, and after a call that the step timeout cancels, the next call makes the handle again (D9).
 
@@ -15,7 +16,7 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 
 use super::generation::{GenKv, KvEntry, KvError};
-use super::jetstream::{GEN_BUCKET, gen_kv_config};
+use super::jetstream::GEN_BUCKET;
 
 /// The generation KV entry of one Redis stream key, in the NATS bucket.
 pub struct NatsGenKv {
@@ -34,7 +35,7 @@ impl NatsGenKv {
         }
     }
 
-    /// Take the cached store out, or make a new one. A missing bucket is made with `gen_kv_config`. The cache stays
+    /// Take the cached store out, or get the bucket again. A missing bucket gives `NoBucket`. The cache stays
     /// empty until [`Self::finish`] puts the handle back, so a call that is dropped before it returns leaves no
     /// handle.
     async fn store(&self) -> Result<kv::Store, KvError> {
@@ -45,17 +46,7 @@ impl NatsGenKv {
         let store = match self.js.get_key_value(GEN_BUCKET).await {
             Ok(store) => store,
             Err(err) => match get_bucket_failure(&err) {
-                BucketFailure::NotFound => self.js.create_key_value(gen_kv_config()).await.map_err(|e| {
-                    // The account INFO call runs first. Its timeout comes wrapped as a JetStream error.
-                    let info_timed_out = std::error::Error::source(&e)
-                        .and_then(|s| s.downcast_ref::<jetstream::context::AccountError>())
-                        .is_some_and(|a| a.kind() == jetstream::context::AccountErrorKind::TimedOut);
-                    if info_timed_out || e.kind() == jetstream::context::CreateKeyValueErrorKind::TimedOut {
-                        KvError::Timeout
-                    } else {
-                        KvError::NoBucket
-                    }
-                })?,
+                BucketFailure::NotFound => return Err(KvError::NoBucket),
                 BucketFailure::Timeout => return Err(KvError::Timeout),
                 BucketFailure::Other => return Err(KvError::Other),
             },

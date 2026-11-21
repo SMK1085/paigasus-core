@@ -925,9 +925,14 @@ async fn the_decision_publisher_uses_the_generation_bucket() {
     let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
     let (client, _events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
     let js = jetstream::new(client);
-    // The calls of the relay, in its order: get the bucket, make it on a 404, read, create, update.
+    // The calls of the relay, in its order: get the bucket, read, create, update. The relay never makes the
+    // bucket (D20): the provisioner makes it, as `provision-decisions.sh` does.
     assert!(js.get_key_value("GATEWAY_DECISIONS_GEN").await.is_err(), "no bucket yet");
-    js.create_key_value(gw_gen_config()).await.expect("STREAM.CREATE.KV_… and $JS.API.INFO");
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    jetstream::new(pclient)
+        .create_key_value(gw_gen_config())
+        .await
+        .expect("the provisioner grant must cover the bucket create");
     let kv = js.get_key_value("GATEWAY_DECISIONS_GEN").await.expect("STREAM.INFO.KV_…");
     assert!(kv.entry("k1").await.expect("direct get of a missing key").is_none());
     let rev = kv.create("k1", "a".into()).await.expect("$KV.GATEWAY_DECISIONS_GEN.>");
@@ -951,6 +956,16 @@ async fn the_decision_publisher_cannot_reach_beyond_the_generation_bucket() {
     ] {
         expect_publish_denied(&client, &mut events, subject).await;
     }
+    // D20, MEASURED on a live broker: with this grant, the publisher made the bucket stream as a mirror of
+    // GATEWAY_DECISIONS and read every decision through the direct get of the bucket. The publisher has no
+    // STREAM.CREATE grant on the bucket, so the create request below must be refused.
+    let mirror = r#"{"name":"KV_GATEWAY_DECISIONS_GEN","mirror":{"name":"GATEWAY_DECISIONS"},"allow_direct":true,"mirror_direct":true}"#;
+    client
+        .publish("$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN", mirror.into())
+        .await
+        .expect("a denied publish is still accepted locally");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN").await;
 }
 
 #[tokio::test]
