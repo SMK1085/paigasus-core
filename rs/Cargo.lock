@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-gateway"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -3360,7 +3360,7 @@ dependencies = [
 
 [[package]]
 name = "paigasus-iam"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-nats",
