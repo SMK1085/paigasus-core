@@ -270,6 +270,10 @@ pub enum ConfigError {
     NatsChannelsOverlap { a: String, b: String },
     #[error("nats.channels: the source \"{0}\" must start with \"urn:paigasus:agents:nats:\"")]
     NatsSourcePrefix(String),
+    #[error("nats.channels: the source \"{0}\" has nothing after \"urn:paigasus:agents:nats:\"")]
+    NatsSourceEmpty(String),
+    #[error("nats.channels: a source has {0} characters; the limit is {1}")]
+    NatsSourceTooLong(usize, usize),
     #[error("nats.channels: the source \"{0}\" is used by two channels")]
     NatsDuplicateSource(String),
     #[error("nats: the section needs at least one channel")]
@@ -345,6 +349,14 @@ fn validate_nats_channels(channels: &[ChannelConfig]) -> Result<(), ConfigError>
     for (i, a) in channels.iter().enumerate() {
         if !a.source.starts_with(NATS_SOURCE_PREFIX) {
             return Err(ConfigError::NatsSourcePrefix(a.source.clone()));
+        }
+        if a.source.len() == NATS_SOURCE_PREFIX.len() {
+            return Err(ConfigError::NatsSourceEmpty(a.source.clone()));
+        }
+        // The CloudEvents `source` is a URI. A longer one makes the consumer refuse every event.
+        let chars = a.source.chars().count();
+        if chars > paigasus_cloudevents::URI_MAX_CHARS {
+            return Err(ConfigError::NatsSourceTooLong(chars, paigasus_cloudevents::URI_MAX_CHARS));
         }
         for b in &channels[i + 1..] {
             if a.source == b.source {
@@ -841,6 +853,30 @@ mod tests {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
             let cfg = with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:http:a")]);
             assert_eq!(cfg.validate(), Err(ConfigError::NatsSourcePrefix("urn:paigasus:agents:http:a".to_string())));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_source_that_is_only_the_prefix_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:nats:")]);
+            assert_eq!(cfg.validate(), Err(ConfigError::NatsSourceEmpty("urn:paigasus:agents:nats:".to_string())));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_source_over_the_uri_limit_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let max = paigasus_cloudevents::URI_MAX_CHARS;
+            let at_limit = format!("{NATS_SOURCE_PREFIX}{}", "a".repeat(max - NATS_SOURCE_PREFIX.len()));
+            assert_eq!(at_limit.chars().count(), max);
+            assert_eq!(with_channels(vec![channel("iam.>", 1, &at_limit)]).validate(), Ok(()));
+            let over = format!("{at_limit}a");
+            assert_eq!(with_channels(vec![channel("iam.>", 1, &over)]).validate(), Err(ConfigError::NatsSourceTooLong(max + 1, max)));
             Ok(())
         });
     }

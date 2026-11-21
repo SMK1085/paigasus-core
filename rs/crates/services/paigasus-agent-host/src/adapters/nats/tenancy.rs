@@ -15,8 +15,12 @@ pub fn names_org(subject_attr: Option<&str>, org: Uuid) -> bool {
     let Ok(prn) = Prn::parse(subject) else {
         return false;
     };
-    let is_org_prn = prn.service() == "iam" && prn.resource_type() == "organization" && prn.resource_id() == org;
-    is_org_prn || prn.org() == Some(org)
+    // An organization PRN names its own org by the resource id and has no org segment. One with an
+    // org segment is no org PRN of this org, whatever the segment says, so rule 2 does not see it.
+    if prn.service() == "iam" && prn.resource_type() == "organization" {
+        return prn.org().is_none() && prn.resource_id() == org;
+    }
+    prn.org() == Some(org)
 }
 
 #[cfg(test)]
@@ -58,6 +62,16 @@ mod tests {
         assert!(!names_org(Some(&org_prn(u(0x600))), u(ORG)));
         assert!(!names_org(Some(&org_prn_upper(u(0x600))), u(ORG)));
         assert!(!names_org(Some(&format!("prn:pgs:iam::{}:team/{x}", u(0x600))), u(ORG)));
+    }
+
+    #[test]
+    fn an_org_prn_with_an_org_segment_is_checked_by_the_segment_only() {
+        let (a, b) = (u(ORG), u(0x600));
+        // The segment names another org, the resource id names the inbox org.
+        assert!(!names_org(Some(&format!("prn:pgs:iam::{b}:organization/{a}")), a));
+        // The segment names the inbox org, the resource id names another org.
+        assert!(!names_org(Some(&format!("prn:pgs:iam::{a}:organization/{b}")), b));
+        assert!(!names_org(Some(&format!("prn:pgs:iam::{a}:organization/{b}")), a));
     }
 
     #[test]
