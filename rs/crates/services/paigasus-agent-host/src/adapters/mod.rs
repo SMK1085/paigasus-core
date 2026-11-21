@@ -3,4 +3,5 @@
 pub mod boot;
 pub mod helikon;
 pub mod http;
+pub mod memory_commit;
 pub mod persistence;
