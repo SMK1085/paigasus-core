@@ -256,3 +256,17 @@ mod tests {
         }
     }
 }
+
+/// The time zone name is not in the time zone database.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TzError {
+    #[error("the time zone {name} is not known")]
+    Unknown { name: String },
+}
+
+/// Resolves an IANA time zone name. Timer code gets every zone through this port. It never reads
+/// the global time zone database of `jiff` (spec section 5.1).
+pub trait TzResolver: Send + Sync {
+    /// Return the zone of `name`, or `TzError::Unknown`.
+    fn resolve(&self, name: &str) -> Result<jiff::tz::TimeZone, TzError>;
+}
