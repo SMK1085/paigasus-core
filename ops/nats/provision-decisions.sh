@@ -73,9 +73,7 @@ cli_bytes() {
   echo "${n}B"
 }
 # Assignments, not inline `$(…)` in the arguments: under `set -e` only an assignment stops the script on a failure.
-stream_max_bytes="$(cli_bytes "$DECISIONS_MAX_BYTES")"
-stream_max_msg_size="$(cli_bytes "$DECISIONS_MAX_MSG_SIZE")"
-gen_max_bytes="$(cli_bytes "$DECISIONS_GEN_MAX_BYTES")"
+# Each value is converted in the branch that uses it, so a value that the CLI cannot take stops only that branch.
 
 # --- 2. Users ----------------------------------------------------------------------------------
 add_user() {
@@ -120,6 +118,8 @@ if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVI
 else
   # This script sets no per-stream limit on the account. The relay also caps max_bytes at the account
   # storage_max_stream_bytes. If an operator adds a per-stream limit, apply the same cap here.
+  stream_max_bytes="$(cli_bytes "$DECISIONS_MAX_BYTES")"
+  stream_max_msg_size="$(cli_bytes "$DECISIONS_MAX_MSG_SIZE")"
   nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" \
     stream add "$DECISIONS_STREAM_NAME" \
     --subjects "$DECISIONS_SUBJECTS" \
@@ -143,6 +143,7 @@ fi
 if nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" kv info "$DECISIONS_GEN_BUCKET" >/dev/null 2>&1; then
   echo "bucket $DECISIONS_GEN_BUCKET already exists; left unchanged"
 else
+  gen_max_bytes="$(cli_bytes "$DECISIONS_GEN_MAX_BYTES")"
   nats --server "$NATS_URL" --creds "$prov_creds" --inbox-prefix "$GW_DEC_PROVISIONER_INBOX_PREFIX" \
     kv add "$DECISIONS_GEN_BUCKET" \
     --history 1 \
