@@ -5,16 +5,20 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use paigasus_agent_host::adapters::persistence::Migrator;
 use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
 use paigasus_agent_host_core::memory::conformance::{self, fresh_scope};
-use paigasus_agent_host_core::memory::{Expected, MemoryCaps, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryPath, MemoryScope, MemoryVersion};
+use paigasus_agent_host_core::memory::{
+    Expected, MemoryCaps, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion, MemoryWorkspace, execute, parse_command,
+};
 use paigasus_agent_host_core::ports::{MemoryApplyError, MemoryStore, MemoryUsage};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait, Value};
 use sea_orm_migration::MigratorTrait;
+use serde_json::json;
 use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres;
 
@@ -51,7 +55,7 @@ fn commit_set(scope: &MemoryScope, changes: Vec<MemoryChange>) -> MemoryCommitSe
     for c in changes {
         cs.record(c);
     }
-    MemoryCommitSet { scope: scope.clone(), changes: cs }
+    MemoryCommitSet::new(scope.clone(), cs)
 }
 
 fn scope_values(scope: &MemoryScope) -> Vec<Value> {
@@ -165,10 +169,10 @@ async fn apply_in_rolls_back_with_the_caller() {
     assert_eq!(fresh.usage(&s).await.expect("usage"), MemoryUsage::default());
 }
 
-/// A change set with no change takes no scope row and no lock: a run with no memory change does
-/// not wait for a console write of the same scope.
+/// A set with no change and no guard takes no scope row and no lock: a run with no memory change
+/// does not wait for a console write of the same scope.
 #[tokio::test]
-async fn an_empty_change_set_takes_no_scope_row_and_no_lock() {
+async fn a_set_with_no_change_and_no_guard_takes_no_scope_row_and_no_lock() {
     let Some((_node, _url, db)) = migrated().await else {
         eprintln!("skipping memory_pg: Docker unavailable");
         return;
@@ -205,6 +209,60 @@ async fn an_empty_change_set_takes_no_scope_row_and_no_lock() {
         .expect("an empty apply does not wait for the lock")
         .expect("apply");
     b.commit().await.expect("commit B");
+}
+
+/// A set with a guard and no change is applied: it takes the scope row and the lock.
+#[tokio::test]
+async fn a_guard_only_set_takes_the_scope_lock() {
+    let Some((_node, _url, db)) = migrated().await else {
+        eprintln!("skipping memory_pg: Docker unavailable");
+        return;
+    };
+    let store = PgMemoryStore::new(db.clone());
+    let s = fresh_scope();
+    let mut guarded = commit_set(&s, vec![]);
+    guarded.guards.insert(MemoryDir::parse("/tasks").expect("a valid dir"));
+    store.apply(&guarded, &MemoryCaps::default()).await.expect("a guard on an empty scope passes");
+    let rows = db
+        .query_one_raw(stmt(
+            "SELECT count(*)::int AS n FROM memory_scope WHERE org_id = $1 AND agent_id = $2 AND principal_id = $3",
+            scope_values(&s),
+        ))
+        .await
+        .expect("count")
+        .expect("row");
+    assert_eq!(rows.try_get::<i32>("", "n").expect("n"), 1);
+}
+
+/// A directory rename conflicts when another writer adds a file under the directory after the
+/// model viewed it.
+#[tokio::test]
+async fn a_directory_rename_conflicts_on_a_file_added_before_the_commit() {
+    let Some((_node, _url, db)) = migrated().await else {
+        eprintln!("skipping memory_pg: Docker unavailable");
+        return;
+    };
+    let store = Arc::new(PgMemoryStore::new(db));
+    let s = fresh_scope();
+    store.apply(&commit_set(&s, vec![put_new("/tasks/a.md", "a")]), &MemoryCaps::default()).await.expect("seed");
+    let mut ws = MemoryWorkspace::new(store.clone(), s.clone(), MemoryCaps::default());
+    execute(&mut ws, parse_command(json!({"command": "view", "path": "/memories/tasks"})).expect("parse"))
+        .await
+        .expect("view");
+    execute(
+        &mut ws,
+        parse_command(json!({"command": "rename", "old_path": "/memories/tasks", "new_path": "/memories/done"})).expect("parse"),
+    )
+    .await
+    .expect("rename");
+    store.apply(&commit_set(&s, vec![put_new("/tasks/b.md", "b")]), &MemoryCaps::default()).await.expect("direct write");
+    match ws.commit().await {
+        Err(MemoryApplyError::Conflict { path }) => assert_eq!(path.as_str(), "/tasks/b.md"),
+        other => panic!("expected a conflict at /tasks/b.md, got {other:?}"),
+    }
+    assert!(store.get(&s, &p("/tasks/a.md")).await.expect("get").is_some());
+    assert!(store.get(&s, &p("/tasks/b.md")).await.expect("get").is_some());
+    assert!(store.get(&s, &p("/done/a.md")).await.expect("get").is_none());
 }
 
 /// A conflict in `apply_in` rolls back to its savepoint. The caller's transaction stays usable,

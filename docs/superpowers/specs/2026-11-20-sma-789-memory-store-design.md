@@ -170,8 +170,16 @@ pub trait MemoryStore: Send + Sync {
 - `MemoryEntry { path: MemoryPath, size_bytes: u64, version: MemoryVersion }`. `list` returns every
   file under `dir`, at any depth, in **byte order** of the path.
 - `MemoryUsage { files: u64, bytes: u64 }`.
-- `MemoryCommitSet { scope: MemoryScope, changes: MemoryChangeSet }`. The scope travels with the
-  changes, so no caller can apply a change set to the wrong scope.
+- `MemoryCommitSet { scope: MemoryScope, changes: MemoryChangeSet, guards: BTreeSet<MemoryDir> }`.
+  The scope travels with the changes, so no caller can apply a change set to the wrong scope. A
+  guard is a directory that the run renamed or deleted. `is_empty()` is true only when the set has
+  no change and no guard.
+- **The guard rule (SMA-843).** `apply` refuses with `Conflict { path }` when, before the changes,
+  the store holds a path that a guard covers and that no change of the set names. A guard covers
+  the directory path as a file path and every path under it. The guards are taken in byte
+  order. Inside one guard, the paths are taken in byte order. `path` is the first such path in
+  that order. Every adapter reports the same path. The rule does not depend on the time of the
+  check. Full text: [SMA-843 spec](./2026-11-21-sma-843-memory-dir-guard-design.md).
 - `MemoryApplyError::{Conflict { path }, CapExceeded(CapError), Partial { applied: usize, failed_at:
   MemoryPath, cause: Box<MemoryApplyError> }, Store(String)}`. `Partial` exists only on S3.
 - `MemoryStoreError::Store(String)`.
@@ -204,8 +212,25 @@ a read cache and a `MemoryChangeSet`.
   are gone. The changes that one command stages form a group, and a later write to a path of a
   group joins that group. A conflict drops the whole group, so a staged `rename` is never dropped
   by half, and the text then names the other paths whose changes are gone too. This puts the normal
-  conflict case in front of the model. A conflict at commit time
-  then needs a write in the short window between the last tool call and the commit.
+  conflict case in front of the model.
+- **Guards in a group (SMA-843).** A `delete` or a `rename` of a directory stages the guards of the
+  command with its changes. A guard belongs to the group of the command. A later stage that joins
+  the group renumbers its guards. A guard whose changes merged away still guards. `take_changes`
+  copies the guards into the commit set. A guard is armed from the command until the commit, for
+  every path under the directory. So a file that another writer adds under the directory in that
+  time is a conflict at the commit. The early check below puts the usual case in front of the model.
+- **The conflict steps (SMA-843).** A conflict on a path P drops the group of P. It also drops
+  every group that has a guard that covers P, also a guard-only group, when the store holds P. It
+  then marks P as "re-sight". The next fresh listing of a directory that holds P records P as a
+  first sight, so a `view` of the directory lets the retry pass. The mark ends after that listing.
+  A retry of the directory command with no `view` also passes, because the listing of that command
+  records P as a first sight.
+- **The early check: `check_dir` (SMA-843).** `delete` and `rename` of a directory first list the
+  source in the store. A stored path that the run saw with another version, or saw as absent, is a
+  conflict. A path that the run saw as present and that the store no longer holds is a conflict.
+  A path that the run never saw becomes a first sight. When the check passes, the fresh rows
+  replace the cached listing. `rename` also lists the destination fresh. A file at the destination
+  gives "already exists", and this is not a write conflict.
 - **Write: content rules.** Content with U+0000 is refused (Postgres `text` cannot hold it). The
   file cap and the store caps are checked at write time with `MemoryCaps::check` (§6.7), against the
   stored usage plus the net delta of the buffer. An overwrite or a delete subtracts the old size.
@@ -316,11 +341,19 @@ CREATE TABLE memory_file (
 - `usage` reads the `memory_scope` row: O(1).
 - **`apply` and the scope lock.** One transaction. First `INSERT … ON CONFLICT DO NOTHING` the scope
   row, then `SELECT … FOR UPDATE` it. This row lock serializes the two writers of a scope (a run
-  commit and the console) and gives `MemoryCaps::check` its `before` value. Then each change:
-  - `Put { Absent }`: `INSERT … ON CONFLICT DO NOTHING`. Zero rows is `Conflict`.
-  - `Put { Version(v) }`: `UPDATE … SET content = $c, version = nextval(…), updated_at = now()
-    WHERE … AND version = v`. Zero rows is `Conflict`.
-  - `Delete { Version(v) }`: `DELETE … WHERE … AND version = v`. Zero rows is `Conflict`.
+  commit and the console) and gives `MemoryCaps::check` its `before` value. The steps run in this
+  order: the lock, the guards, the changes, the caps.
+  - **The guard step (SMA-843).** It runs right after the scope row lock and before the first
+    change. For each guard, it reads the paths with `path = $dir OR path LIKE $prefix`, with every
+    scope column bound, in byte order. A path that no change names is a `Conflict`. So a guard
+    conflict wins over every cap refusal.
+  - **The empty set (SMA-843).** A set with no change and no guard takes no scope row and no lock.
+    A set with a guard and no change takes the scope row and the lock.
+  - Then each change:
+    - `Put { Absent }`: `INSERT … ON CONFLICT DO NOTHING`. Zero rows is `Conflict`.
+    - `Put { Version(v) }`: `UPDATE … SET content = $c, version = nextval(…), updated_at = now()
+      WHERE … AND version = v`. Zero rows is `Conflict`.
+    - `Delete { Version(v) }`: `DELETE … WHERE … AND version = v`. Zero rows is `Conflict`.
   - Then the new counts go to the scope row, and `MemoryCaps::check(before, after)` runs.
   - On every error path the transaction is rolled back explicitly (`migration_lock.rs` records that
     the `Drop` of a `DatabaseTransaction` can panic).
@@ -367,6 +400,9 @@ to SMA-829, and it is the reason the port has `Partial` and the commit path has 
   `Delete`, so a partial failure can leave a duplicate file but never loses one. It stops at the
   first error and returns `Partial { applied, failed_at, cause }`. A discarded run can leave its
   memory writes. That is accepted, and Postgres is the default.
+- **The guard rule on S3 (SMA-843).** S3 cannot make the guard rule atomic. The adapter checks the
+  rule before its first write, as best effort. A writer can add a file between that check and the
+  writes. The adapter passes the sequential conformance tests. SMA-829 documents the race.
 - `usage` lists the scope (O(files)). The S3 cap check is **best-effort**: two writers can pass it at
   the same time.
 - Config: `memory.backend = "postgres" | "s3"` (default `postgres`). For S3: bucket, endpoint,
@@ -453,8 +489,13 @@ not available now. Try again later.") and keeps the cause for the log.
 
 ### 6.12 The commit contract for SMA-790
 
-A commit-time `Conflict` or `CapExceeded` can still happen (a write in the short window of §6.5).
-The model is no longer running, so the text cannot reach it. The contract:
+A commit-time `Conflict` or `CapExceeded` can still happen (a write after the last command, or a
+guard conflict of §6.4). The model is no longer running, so the text cannot reach it. The contract:
+
+- **A guard-only set is applied (SMA-843).** The commit path calls `apply_in` (Postgres) or
+  `apply` (S3) for every commit set where `is_empty()` is false. This includes a set with guards and
+  no change. A guard conflict is a
+  `Conflict`, and the outcome rules below apply to it.
 
 - **Postgres** (`MemoryCommit::InTransaction`): `RunCommitter` calls `apply_in` inside the run
   transaction, after the lease check (ADR (b) step 1). On `Ok`, the memory changes commit with the
@@ -499,6 +540,11 @@ behind a `test-support` feature, turned on from `[dev-dependencies]` only (the
 - The merge table of §6.3, one test per row.
 - The read model: a second `view` returns the cached version; an early conflict refuses, clears the
   path and the next `view` shows the new file.
+- **The directory guard (SMA-843):** the conformance checks of the guard rule (a file added under
+  the source or the destination, segment and wildcard matching, a guard-only set, the cap order,
+  scope isolation, the first path in byte order). The workspace and command tests for guard groups,
+  the conflict steps, `check_dir` and the re-sight mark. A mutation table proves that each test
+  fails when its code is removed.
 - The file/directory invariant: both `create` clashes, and `rename` into a clash.
 - `rename` that would make a 9-segment or 257-byte path: refused, nothing changed.
 - `MemoryCaps::check`: over and growing is refused; over and shrinking passes; at the limit passes.

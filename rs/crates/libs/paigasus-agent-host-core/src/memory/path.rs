@@ -115,6 +115,13 @@ impl MemoryDir {
         self.is_root() || path.0.strip_prefix(self.0.as_str()).is_some_and(|rest| rest.starts_with('/'))
     }
 
+    /// True when the path is the directory path itself or is under this directory. The root
+    /// covers every path.
+    #[must_use]
+    pub fn covers(&self, path: &MemoryPath) -> bool {
+        self.contains(path) || path.0 == self.0
+    }
+
     /// True when the other directory is this directory or is under it at any depth.
     #[must_use]
     pub fn contains_dir(&self, other: &MemoryDir) -> bool {
@@ -368,6 +375,20 @@ mod tests {
         assert!(a.contains_dir(&MemoryDir::parse("/a/b").unwrap()));
         assert!(!a.contains_dir(&MemoryDir::parse("/ab").unwrap()));
         assert!(MemoryDir::root().contains_dir(&a));
+    }
+
+    #[test]
+    fn a_dir_covers_itself_and_the_paths_under_it() {
+        let tasks = MemoryDir::parse("/tasks").unwrap();
+        for yes in ["/tasks/a/b.md", "/tasks/x"] {
+            assert!(tasks.covers(&MemoryPath::parse(yes).unwrap()), "{yes}");
+        }
+        for no in ["/tasks.md", "/tasks-old/x", "/task"] {
+            assert!(!tasks.covers(&MemoryPath::parse(no).unwrap()), "{no}");
+        }
+        // The directory path itself, read as a file path.
+        assert!(tasks.covers(&MemoryPath::parse("/tasks").unwrap()));
+        assert!(MemoryDir::root().covers(&MemoryPath::parse("/x").unwrap()));
     }
 
     #[test]
