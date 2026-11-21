@@ -1034,6 +1034,9 @@ async fn a_production_drain_during_a_hung_kv_step_aborts_nothing_and_leaves_no_s
     wait_for_a_hung_kv_step(&snap).await;
     tasks.drain(runtime::DECISION_LOG_DRAIN_BUDGET).await;
     assert!(!logs.text().contains("did not stop in time and was aborted"), "the relay outlived the drain budget: {}", logs.text());
+    // `drain` logs a task panic and returns normally, so a relay that panicked after its KV cleanup would pass the
+    // line above. Check for the panic diagnostic too.
+    assert!(!logs.text().contains("ended with a panic"), "the relay panicked during the drain: {}", logs.text());
     // The same epoch check as above: a step that outlived the relay would run `detect` after NATS comes back.
     let before = redis_cli(&node, &["GET", &epoch_key(KEY)]).await;
     nats.unpause().await.expect("unpause NATS");
@@ -2103,9 +2106,11 @@ async fn a_group_made_by_an_sma_755_relay_is_repaired_and_counts_one_reset() {
     // One script: the old relay's group is made at once, so the relay never reads NOGROUP.
     let lua = "redis.call('DEL', KEYS[1], KEYS[2], KEYS[3]) return redis.call('XGROUP', 'CREATE', KEYS[1], 'relay', '0', 'MKSTREAM')";
     eval(&node, lua, &[KEY.to_owned(), gen_key(KEY), epoch_key(KEY)]).await;
-    // Within one KV step (a tick is 200 ms) the detection script sets the generation key again.
-    let repaired = tokio::time::timeout(Duration::from_secs(3), wait_for("the generation key is set again", || async { !gen_value(&node).await.is_empty() })).await;
-    assert!(repaired.is_ok(), "the generation key was not set within one KV step");
+    // One KV step that began before the script can still end after it. So the second record change after the script
+    // is the end of the first step that saw the old group, and the detection script must have set the key by then.
+    // `wait_for_kv_steps` has its own 30 s limit, so the test cannot hang.
+    wait_for_kv_steps(&admin, 2).await;
+    assert!(!gen_value(&node).await.is_empty(), "the first KV step that saw the old group did not set the generation key");
     wait_for("one reset", || async { resets(&snap) >= 1 }).await;
     wait_for_kv_steps(&admin, 3).await;
     assert_eq!(resets(&snap), 1, "the repaired generation counts one reset");
@@ -2183,14 +2188,14 @@ async fn a_foreign_writer_counts_errors_and_no_reset() {
     };
     // The relay writes too, so a write with a stale revision is refused. Read the revision, write, and retry.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
+    let foreign_revision = loop {
         let entry = store.entry(entry_key(KEY)).await.expect("read the entry").expect("the entry exists");
-        if store.update(entry_key(KEY), foreign.to_bytes(), entry.revision).await.is_ok() {
-            break;
+        if let Ok(revision) = store.update(entry_key(KEY), foreign.to_bytes(), entry.revision).await {
+            break revision;
         }
         assert!(tokio::time::Instant::now() < deadline, "the foreign write never stuck within 5 s");
         tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    };
     wait_for("three foreign writer errors", || async { check_errors(&snap, "foreign_writer") >= 3 }).await;
     assert_eq!(resets(&snap), 0, "a foreign writer is an error and no reset");
     assert!(logs.text().contains("another writer set"), "the error log names the foreign writer: {}", logs.text());
@@ -2199,6 +2204,9 @@ async fn a_foreign_writer_counts_errors_and_no_reset() {
         foreign.generation,
         "the relay writes nothing over a foreign entry"
     );
+    // A rewrite with the same bytes keeps the generation, but it moves the revision.
+    let entry = store.entry(entry_key(KEY)).await.expect("read the entry").expect("the entry exists");
+    assert_eq!(entry.revision, foreign_revision, "the relay did not write the foreign entry again");
     relay.shut_down().await;
 }
 
