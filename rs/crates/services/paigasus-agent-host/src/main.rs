@@ -5,7 +5,9 @@
 //! 1. load and validate the configuration, 2. start logging, 3. install the metrics recorder,
 //! 4. connect to the database, 5. bind the HTTP listener (and the metrics listener), 6. serve the
 //!    boot router, 7. start the Prometheus upkeep task, 8. migrate under the advisory lock,
-//! 9. install the application router in the boot slot, 10. wait for a shutdown signal and drain.
+//! 9. when `[nats]` is set, check each channel inbox and the durable (spec §9.1), 10. install the
+//!    application router in the boot slot, 11. start the NATS source, 12. wait for a shutdown
+//!    signal and drain.
 //!
 //! The binary connects to the database first and binds second, as `paigasus-iam` does. A replica
 //! that migrates, or that waits for the lock, is then present and not ready, and not absent.
@@ -16,9 +18,11 @@ use std::time::Duration;
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
 use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
 use paigasus_agent_host::adapters::iam::IamClient;
+use paigasus_agent_host::adapters::nats::consumer::{NatsSource, bind_channels, connect_and_check};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
 use paigasus_agent_host::config::Config;
+use paigasus_agent_host_core::ports::InboxRepository;
 use paigasus_observability::names;
 use sea_orm::Database;
 use tokio::task::JoinSet;
@@ -142,21 +146,32 @@ async fn serve() -> anyhow::Result<()> {
 
     // One signal registration for the whole life of the process. A second registration can lose a
     // signal that arrives in the gap between the two.
-    let outcome: anyhow::Result<()> = tokio::select! {
+    let outcome: anyhow::Result<Option<NatsTask>> = tokio::select! {
         r = boot(&db, &config, &slot) => r,
         () = &mut shutdown => {
             tracing::info!("shutdown signal received during boot");
             interrupted = true;
-            Ok(())
+            Ok(None)
         }
     };
-    if outcome.is_err() || interrupted {
-        if let Err(e) = &outcome {
-            tracing::error!(error = %e, "boot failed after the listener was bound; draining");
+    let nats = match outcome {
+        Ok(nats) if !interrupted => nats,
+        Ok(_) => {
+            let _ = tx.send(());
+            drain(&mut servers).await;
+            return Ok(());
         }
-        let _ = tx.send(());
-        drain(&mut servers).await;
-        return outcome;
+        Err(e) => {
+            tracing::error!(error = %e, "boot failed after the listener was bound; draining");
+            let _ = tx.send(());
+            drain(&mut servers).await;
+            return Err(e);
+        }
+    };
+    if let Some(NatsTask { source, inboxes }) = nats {
+        let rx = rx.clone();
+        servers.spawn(async move { source.run(inboxes, rx).await });
+        tracing::info!("the NATS source started");
     }
 
     tracing::info!(%config.http_addr, "paigasus-agent-host started");
@@ -187,9 +202,16 @@ async fn serve() -> anyhow::Result<()> {
     early_error.map_or(Ok(()), Err)
 }
 
-/// Everything between the bind and ready: the migration and the install of the application
-/// router. It returns an error and does not use `?` out of `serve`, so that `serve` always drains.
-async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot) -> anyhow::Result<()> {
+/// The checked NATS source, and the repository it inserts into. `serve` spawns it.
+struct NatsTask {
+    source: NatsSource,
+    inboxes: Arc<dyn InboxRepository>,
+}
+
+/// Everything between the bind and ready: the migration, the NATS boot checks and the install of
+/// the application router. It returns an error and does not use `?` out of `serve`, so that
+/// `serve` always drains.
+async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot) -> anyhow::Result<Option<NatsTask>> {
     let migration = migrate_under_lock(db, config.migration.lock_wait()).await?;
     tracing::info!(
         waited = ?migration.waited,
@@ -197,6 +219,23 @@ async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot
         migrations_applied = migration.migrations_applied,
         "database migrations complete"
     );
+    let inboxes: Arc<dyn InboxRepository> = Arc::new(PgInboxRepository::new(db.clone()));
+    // Spec §9.1: after the migrations, each channel inbox must exist and the durable filters must
+    // be the channel subjects. Each failure is a config error and stops the boot.
+    let nats = match &config.nats {
+        Some(nats) => {
+            let channels = bind_channels(nats, &*inboxes).await?;
+            let source = connect_and_check(nats, &channels).await?;
+            Some(NatsTask {
+                source,
+                inboxes: Arc::clone(&inboxes),
+            })
+        }
+        None => {
+            tracing::info!("no [nats] section is set; the NATS source is off");
+            None
+        }
+    };
     let ingress = match &config.iam {
         Some(iam) => Some(Arc::new(Ingress {
             iam: Arc::new(IamClient::connect(iam)?),
@@ -208,13 +247,9 @@ async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot
         }
     };
     tracing::info!(worker_enabled = config.worker.enabled, "worker.enabled is read, and SMA-787 starts no worker");
-    let state = AppState {
-        db: db.clone(),
-        inboxes: Arc::new(PgInboxRepository::new(db.clone())),
-        ingress,
-    };
+    let state = AppState { db: db.clone(), inboxes, ingress };
     slot.install(app_router(state, None))?;
-    Ok(())
+    Ok(nats)
 }
 
 /// Wait for the server tasks, at most [`DRAIN_TIMEOUT`]. A task that ignores the shutdown watch
@@ -276,4 +311,16 @@ fn describe_agent_host_metrics() {
     );
     describe_counter!(names::AGENT_HOST_CLAIMS_TOTAL, "Committed claims of inbox events. Each claim opens one run.");
     describe_counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL, "Inbox events moved to dead after the maximum number of attempts.");
+    describe_counter!(
+        names::AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL,
+        "NATS messages ended with term because the body is not a valid CloudEvent."
+    );
+    describe_counter!(
+        names::AGENT_HOST_NATS_MESSAGES_TENANCY_SKIPPED_TOTAL,
+        "NATS messages acked and skipped because the event does not name the inbox org."
+    );
+    describe_counter!(
+        names::AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL,
+        "NATS messages on a subject that no channel maps. Each one is nacked with the maximum delay."
+    );
 }

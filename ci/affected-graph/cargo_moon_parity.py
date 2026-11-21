@@ -614,6 +614,11 @@ ALLOW_OVER_APPROXIMATION = {
     ("paigasus-iam-rs", "rs/crates/libs/paigasus-cloudevents"): (
         "the cloud_event.rs test pins the paigasus-cloudevents IAM fixtures with include_bytes!"
     ),
+    # SMA-787 Task 18: the agent host depends on `paigasus-cloudevents`, but its NATS consumer
+    # tests also read one IAM fixture of that crate (a `tests/` file, not `src/`) with `include_bytes!`.
+    ("paigasus-agent-host-rs", "rs/crates/libs/paigasus-cloudevents"): (
+        "the NATS consumer tests read the IAM fixture organization_created_trailing_zeros.json with include_bytes!"
+    ),
 }
 
 # A6's anti-vacuity floor, mirroring REQUIRED_FFI_TASKS. A6 DERIVES each crate's closure from

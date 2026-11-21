@@ -60,6 +60,14 @@ paigasus-proto = { workspace = true }
 paigasus-cloudevents = { workspace = true }
 # `adapters::http::service_info` — the `GET /v1/service-info` body (spec §5.3).
 paigasus-service-info = { workspace = true }
+# `adapters::nats::consumer` — the JetStream pull consumer of the inbox (spec §9). The workspace
+# line selects the ring provider (no aws-lc-rs).
+async-nats = { workspace = true }
+# The same creds callback as the gateway and IAM (SMA-493 D8): it re-reads the creds file on every
+# connect attempt. `{ workspace = true }`, so `moon.yml` hand-declares the `dependsOn` edge.
+paigasus-nats-creds = { workspace = true }
+# `adapters::nats::consumer` reads the message stream of the pull consumer.
+futures = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]
@@ -67,15 +75,13 @@ figment = { workspace = true, features = ["test"] }
 # The Postgres tests. `paigasus-test-docker` owns the Docker-skip policy.
 paigasus-test-docker = { workspace = true }
 testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["postgres"] }
+testcontainers-modules = { version = "0.15", features = ["postgres", "nats"] }
 reqwest = { workspace = true }
 # reqwest 0.13 uses `rustls-no-provider` (SMA-809). A test installs the `ring` CryptoProvider
 # before it builds a `Client`, or reqwest panics.
 rustls = { workspace = true }
 # `tests/support/fake_iam.rs` — the fake IAM gRPC server listens through a `TcpListenerStream`.
 tokio-stream = { workspace = true, features = ["net"] }
-# The test model of `adapters::helikon` names the `BoxStream` type of the core `Model` trait.
-futures = { workspace = true }
 # The tests of `application::lease_keeper` run on paused time.
 tokio = { workspace = true, features = ["test-util"] }
 # The counter tests of `application::ingest` read a local `DebuggingRecorder`.

@@ -115,6 +115,13 @@ pub const AGENT_HOST_LEASE_LOST_TOTAL: &str = "agent_host_lease_lost_total";
 pub const AGENT_HOST_CLAIMS_TOTAL: &str = "agent_host_claims_total";
 /// Inbox events that a claim moved to `dead` (spec §8.4.1).
 pub const AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL: &str = "agent_host_inbox_events_dead_total";
+// Agent host NATS source (spec §9.3).
+/// NATS messages ended with `term` because the body does not parse.
+pub const AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL: &str = "agent_host_nats_messages_terminated_total";
+/// NATS messages acked and skipped because the event does not name the inbox org (spec §9.4).
+pub const AGENT_HOST_NATS_MESSAGES_TENANCY_SKIPPED_TOTAL: &str = "agent_host_nats_messages_tenancy_skipped_total";
+/// NATS messages on a subject that no channel maps. Each one is a boot-check gap.
+pub const AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL: &str = "agent_host_nats_messages_unmapped_total";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -361,6 +368,9 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_LEASE_LOST_TOTAL,
     AGENT_HOST_CLAIMS_TOTAL,
     AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL,
+    AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL,
+    AGENT_HOST_NATS_MESSAGES_TENANCY_SKIPPED_TOTAL,
+    AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,

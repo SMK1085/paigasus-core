@@ -9,6 +9,7 @@ dependsOn:
   - 'paigasus-cloudevents-rs'
   - 'paigasus-kernel-rs'
   - 'paigasus-logging-rs'
+  - 'paigasus-nats-creds-rs'
   - 'paigasus-observability-rs'
   - 'paigasus-proto-rs'
   - 'paigasus-service-info-rs'
@@ -26,6 +27,8 @@ fileGroups:
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-logging/src/**/*'
     - '/rs/crates/libs/paigasus-logging/Cargo.toml'
+    - '/rs/crates/libs/paigasus-nats-creds/src/**/*'
+    - '/rs/crates/libs/paigasus-nats-creds/Cargo.toml'
     - '/rs/crates/libs/paigasus-observability/src/**/*'
     - '/rs/crates/libs/paigasus-observability/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
@@ -45,6 +48,8 @@ tasks:
     inputs:
       # SMA-787 Task 17: a unit test pins the NATS constants to this file.
       - '/ops/nats/subjects.env'
+      # SMA-787 Task 18: the NATS consumer tests read this IAM fixture with `include_bytes!`.
+      - '/rs/crates/libs/paigasus-cloudevents/tests/fixtures/iam/organization_created_trailing_zeros.json'
     # The Postgres tests start containers. They share a runner with the console e2e tasks.
     options:
       mutex: 'heavy-integration'

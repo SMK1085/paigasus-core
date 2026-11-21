@@ -3203,6 +3203,7 @@ name = "paigasus-agent-host"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "async-trait",
  "axum",
  "figment",
@@ -3215,6 +3216,7 @@ dependencies = [
  "paigasus-helikon",
  "paigasus-kernel",
  "paigasus-logging",
+ "paigasus-nats-creds",
  "paigasus-observability",
  "paigasus-proto",
  "paigasus-service-info",

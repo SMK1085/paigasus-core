@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::adapters::nats::channels::filters_overlap;
+use crate::adapters::nats::{DURABLE_NAME, STREAM_NAME};
 use crate::application::lease_keeper::{KeeperTiming, KeeperTimingError};
 
 /// A connection URL that can hold a password. `Debug` and `Serialize` print a fixed placeholder.
@@ -273,6 +274,10 @@ pub enum ConfigError {
     NatsDuplicateSource(String),
     #[error("nats: the section needs at least one channel")]
     NatsNoChannel,
+    #[error("nats.durable must be \"agent-host-inbox\" (got \"{0}\"): the NATS identity grants only that durable")]
+    NatsDurableName(String),
+    #[error("nats.stream must be \"IAM_EVENTS\" (got \"{0}\"): the NATS identity grants only that stream")]
+    NatsStreamName(String),
 }
 
 /// The defaults. `database_url` has none: it is required. `iam` has none: no `[iam]` section
@@ -439,6 +444,12 @@ impl Config {
             return Err(ConfigError::MidRunPolicyNotSupported(self.mid_run.policy));
         }
         if let Some(nats) = &self.nats {
+            if nats.durable != DURABLE_NAME {
+                return Err(ConfigError::NatsDurableName(nats.durable.clone()));
+            }
+            if nats.stream != STREAM_NAME {
+                return Err(ConfigError::NatsStreamName(nats.stream.clone()));
+            }
             validate_nats_channels(&nats.channels)?;
         }
         Ok(())
@@ -840,6 +851,21 @@ mod tests {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
             let cfg = with_channels(vec![channel("a.>", 1, "urn:paigasus:agents:nats:x"), channel("b.>", 2, "urn:paigasus:agents:nats:x")]);
             assert_eq!(cfg.validate(), Err(ConfigError::NatsDuplicateSource("urn:paigasus:agents:nats:x".to_string())));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn another_durable_or_stream_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:nats:a")]);
+            assert_eq!(cfg.validate(), Ok(()));
+            cfg.nats.as_mut().expect("nats").durable = "other".to_string();
+            assert_eq!(cfg.validate(), Err(ConfigError::NatsDurableName("other".to_string())));
+            let mut cfg = with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:nats:a")]);
+            cfg.nats.as_mut().expect("nats").stream = "OTHER".to_string();
+            assert_eq!(cfg.validate(), Err(ConfigError::NatsStreamName("OTHER".to_string())));
             Ok(())
         });
     }
