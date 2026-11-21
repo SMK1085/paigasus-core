@@ -361,6 +361,9 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     // The random overlaps depend on timing. The sequential phase adds one on every run.
     let random_overlap = overlap;
     let overlap = overlap + sequential_overlap(&url, &db).await;
+    // The complete of the sequential phase is a stale complete too, so the stale floor does not
+    // depend on the LCG either.
+    let stale = stale + 1;
     eprintln!("lease_stress_pg: seed {seed}: overlaps {overlap} ({random_overlap} random, 1 sequential)");
 
     // Coverage: the run did contend.
