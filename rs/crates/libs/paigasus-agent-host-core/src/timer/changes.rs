@@ -69,13 +69,13 @@ pub struct ApplyReport {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ApplyError {
     /// A timer belongs to another inbox.
-    #[error("timer {id:?} belongs to another inbox")]
+    #[error("timer {} belongs to another inbox", id.uuid())]
     InboxMismatch {
         /// The timer.
         id: TimerId,
     },
     /// An insert is not valid.
-    #[error("timer {id:?} is not a valid insert")]
+    #[error("timer {} is not a valid insert", id.uuid())]
     InvalidInsert {
         /// The timer.
         id: TimerId,

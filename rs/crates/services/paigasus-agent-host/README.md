@@ -184,8 +184,8 @@ once) or `schedule` (a cron pattern in an IANA time zone). A timer has an origin
 ### The scheduler loop
 
 The scheduler loop runs when `timers.enabled` is `true`. It starts after boot, and the existing
-drain stops it. Each pass reads the due rows with `FOR UPDATE SKIP LOCKED`. The database clock
-decides what is due. Each row has its own transaction, which inserts the event into the inbox and
+drain stops it. Each pass reads the due rows with `FOR UPDATE OF t SKIP LOCKED`, one row for each
+transaction. The database clock decides what is due. Each row has its own transaction, which inserts the event into the inbox and
 updates the timer. Several replicas can run the loop. When a pass processes `timers.pass_limit`
 rows, the next pass starts at once.
 
@@ -207,6 +207,8 @@ The tools refuse a request in these cases. The refusal is text for the model:
 - A follow-up is not in the future, is sooner than `timers.min_follow_up_delay_secs`, or is later
   than `timers.max_horizon_days`.
 - A cron text is invalid, or a schedule has a civil gap below `timers.min_schedule_interval_secs`.
+- A time zone is not a known IANA zone.
+- A schedule has no slot in `timers.max_horizon_days`.
 - A create makes more than `timers.max_active_per_inbox` active `agent` timers.
 - A create is over the creation budget.
 - A note is longer than 1000 characters, or holds a NUL.

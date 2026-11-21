@@ -370,16 +370,22 @@ impl Scheduler for PgScheduler {
     }
 
     async fn due_lag(&self) -> Result<Duration, RepositoryError> {
-        let row = self
-            .db
+        // The read runs in a short transaction with the statement timeout of the fire path, so a
+        // stalled database cannot hold the loop (and the shutdown) until the drain timeout.
+        let store_err = |e: DbErr| RepositoryError::Store(e.to_string());
+        let txn = self.db.begin().await.map_err(store_err)?;
+        let ms = self.settings.statement_timeout.as_millis().max(1);
+        txn.execute_unprepared(&format!("SET LOCAL statement_timeout = '{ms}ms'")).await.map_err(store_err)?;
+        let row = txn
             .query_one_raw(stmt(
                 "SELECT COALESCE((EXTRACT(EPOCH FROM (now() - min(next_fire_at))) * 1000000)::bigint, 0) AS n \
                  FROM timer WHERE status = 'active' AND next_fire_at <= now()",
                 vec![],
             ))
             .await
-            .map_err(|e| RepositoryError::Store(e.to_string()))?
+            .map_err(store_err)?
             .ok_or_else(|| RepositoryError::Store("the lag query returned no row".to_string()))?;
+        txn.commit().await.map_err(store_err)?;
         let us: i64 = row.try_get("", "n").map_err(|e| RepositoryError::Store(e.to_string()))?;
         Ok(Duration::from_micros(u64::try_from(us).unwrap_or(0)))
     }

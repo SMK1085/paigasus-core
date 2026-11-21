@@ -61,8 +61,9 @@ impl PgTimerStore {
         match apply_body(&savepoint, inbox, caps, changes).await {
             Ok(report) => {
                 savepoint.commit().await.map_err(store_err)?;
-                // Count and log after the release: a refused apply rolls the run back, and the
-                // next attempt would count the same cancel again.
+                // Count and log after the savepoint release. This does not prevent a double count:
+                // the caller's run transaction can still roll back later, and the next attempt
+                // counts the same cancel again.
                 for (id, outcome) in &report.cancels {
                     if *outcome == CancelOutcome::NotActive {
                         tracing::info!(timer_id = %id.uuid(), "a timer cancel found the timer not active");
@@ -78,8 +79,20 @@ impl PgTimerStore {
         }
     }
 
-    fn views(&self, inbox: &InboxId, rows: &[sea_orm::QueryResult]) -> Result<Vec<TimerView>, RepositoryError> {
-        rows.iter().map(|r| row_to_view(r, inbox.org(), self.tz.as_ref()).map_err(row_err)).collect()
+    /// Decode the rows of a list read. A row that does not decode is skipped, so that one bad row
+    /// (for example a zone that this build does not know) does not block the whole list. The warn
+    /// log holds the timer ID and the reason, never the note.
+    fn list_views(&self, inbox: &InboxId, rows: &[sea_orm::QueryResult]) -> Vec<TimerView> {
+        rows.iter()
+            .filter_map(|r| match row_to_view(r, inbox.org(), self.tz.as_ref()) {
+                Ok(view) => Some(view),
+                Err(e) => {
+                    let id: Option<uuid::Uuid> = r.try_get("", "id").ok();
+                    tracing::warn!(timer_id = ?id, category = e.category, "a timer row does not decode and is skipped");
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -94,7 +107,7 @@ impl TimerRepository for PgTimerStore {
             ))
             .await
             .map_err(repo_err)?;
-        self.views(inbox, &rows)
+        Ok(self.list_views(inbox, &rows))
     }
 
     async fn get(&self, inbox: &InboxId, id: TimerId) -> Result<Option<TimerView>, RepositoryError> {
@@ -106,7 +119,7 @@ impl TimerRepository for PgTimerStore {
             ))
             .await
             .map_err(repo_err)?;
-        Ok(self.views(inbox, &rows)?.into_iter().next())
+        rows.first().map(|r| row_to_view(r, inbox.org(), self.tz.as_ref()).map_err(row_err)).transpose()
     }
 
     async fn active_agent_ids(&self, inbox: &InboxId) -> Result<Vec<TimerId>, RepositoryError> {

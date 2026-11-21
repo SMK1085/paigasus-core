@@ -157,8 +157,8 @@ async fn the_fake_repository_scopes_by_inbox() {
 fn apply_error_display_pins_the_text() {
     let id = TimerId::from_uuid(u(1));
     let cases = [
-        (ApplyError::InboxMismatch { id }, format!("timer {id:?} belongs to another inbox")),
-        (ApplyError::InvalidInsert { id }, format!("timer {id:?} is not a valid insert")),
+        (ApplyError::InboxMismatch { id }, format!("timer {} belongs to another inbox", id.uuid())),
+        (ApplyError::InvalidInsert { id }, format!("timer {} is not a valid insert", id.uuid())),
         (
             ApplyError::CapExceeded { before: 49, after: 51, limit: 50 },
             "active timer limit exceeded: 49 before, 51 after, limit 50".to_string(),

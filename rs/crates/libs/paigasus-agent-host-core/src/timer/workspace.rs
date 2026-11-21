@@ -418,7 +418,21 @@ impl TimerWorkspace {
             self.inserts.remove(pos);
             return Ok(id);
         }
-        let view = self.deps.store.get(&self.inbox, id).await?.ok_or_else(unknown)?;
+        let view = match self.deps.store.get(&self.inbox, id).await {
+            Ok(view) => view.ok_or_else(unknown)?,
+            Err(read_err) => {
+                // A row that does not decode makes `get` fail. The agent must still be able to
+                // cancel such an active timer, so the cancel works from the active agent IDs.
+                let active = self.deps.store.active_agent_ids(&self.inbox).await.map_err(|_| read_err.clone())?;
+                if !active.contains(&id) {
+                    return Err(read_err.into());
+                }
+                if !self.cancels.iter().any(|(c, _)| *c == id) {
+                    self.cancels.push((id, TimerOrigin::Agent));
+                }
+                return Ok(id);
+            }
+        };
         if view.timer.origin() != TimerOrigin::Agent {
             return Err(unknown());
         }
@@ -947,6 +961,44 @@ mod tests {
         async fn count_agent_created_since(&self, _: &InboxId, _: Timestamp) -> Result<u32, RepositoryError> {
             Err(RepositoryError::Store("boom".into()))
         }
+    }
+
+    /// A store whose `get` fails (a row that does not decode) while the active IDs read works.
+    struct UndecodableStore {
+        active: Vec<TimerId>,
+    }
+
+    #[async_trait]
+    impl TimerRepository for UndecodableStore {
+        async fn list_active(&self, _: &InboxId, _: TimerOrigin) -> Result<Vec<TimerView>, RepositoryError> {
+            Ok(Vec::new())
+        }
+        async fn get(&self, _: &InboxId, _: TimerId) -> Result<Option<TimerView>, RepositoryError> {
+            Err(RepositoryError::Store("the row does not decode".into()))
+        }
+        async fn active_agent_ids(&self, _: &InboxId) -> Result<Vec<TimerId>, RepositoryError> {
+            Ok(self.active.clone())
+        }
+        async fn count_agent_created_since(&self, _: &InboxId, _: Timestamp) -> Result<u32, RepositoryError> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_works_for_an_active_timer_whose_row_does_not_decode() {
+        let known = TimerId::from_uuid(Uuid::from_u128(0xabc));
+        let deps = TimerDeps {
+            store: Arc::new(UndecodableStore { active: vec![known] }),
+            tz: Arc::new(BundledTzResolver::new()),
+            ids: Arc::new(SeqIds::default()),
+            clock: Arc::new(FakeClock::new(start())),
+        };
+        let mut ws = TimerWorkspace::new(inbox_x(), thread(), TimerCaps::default(), Duration::from_secs(60), deps);
+        assert_eq!(ws.cancel(&known.uuid().to_string()).await, Ok(known));
+        let other = Uuid::from_u128(0xdef).to_string();
+        let r = ws.cancel(&other).await;
+        assert!(matches!(r, Err(TimerRefusal::Store { .. })), "{r:?}");
+        assert_eq!(ws.seal().cancels, vec![(known, TimerOrigin::Agent)]);
     }
 
     #[tokio::test]

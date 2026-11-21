@@ -34,6 +34,8 @@ pub enum CronSyntaxError {
     UnknownAlias { alias: String },
     #[error("the `{token}` extension in the {field} field is not supported")]
     Extension { field: &'static str, token: char },
+    #[error("the name {name} is a {kind} name and does not belong in the {field} field")]
+    MisplacedName { name: String, kind: &'static str, field: &'static str },
     #[error("the `+` prefix of the day of week field is not supported")]
     PlusPrefix,
     #[error("the day of month and the day of week are both set; set one of them to *")]
@@ -275,9 +277,9 @@ impl CronSchedule {
     /// `Cron` when the cron library finds no time. `Tz` when the end of the window is not valid.
     pub fn min_civil_gap(&self, from: DateTime, days: u32, min_secs: u64) -> Result<Option<u64>, WalkError> {
         if min_secs <= FIELD_FLOOR_SECS {
-            // A five-field pattern has no gap below 60 s, so no gap can be below the minimum. This
-            // exit is the whole fix: the walk below runs only for a minimum above 60 s, and it stops
-            // at the first gap below the minimum.
+            // A five-field pattern has no gap below 60 s, so no gap can be below the minimum. The
+            // walk below runs only for a minimum above 60 s, and it stops at the first gap below
+            // the minimum.
             return Ok(None);
         }
         let end = from.checked_add(Span::new().days(i64::from(days))).map_err(|e| WalkError::Tz(e.to_string()))?;
@@ -321,6 +323,8 @@ fn normalize(text: &str) -> Result<String, CronSyntaxError> {
         return Err(CronSyntaxError::FieldCount { found: fields.len() });
     }
     let mut out: Vec<String> = fields.iter().map(|f| (*f).to_string()).collect();
+    misplaced_name(&out[3], &WEEKDAYS, "weekday", FIELD_NAMES[3])?;
+    misplaced_name(&out[4], &MONTHS, "month", FIELD_NAMES[4])?;
     out[3] = replace_names(&out[3], &MONTHS, 1);
     out[4] = replace_names(&out[4], &WEEKDAYS, 0);
     for (i, field) in out.iter().enumerate() {
@@ -341,6 +345,18 @@ fn normalize(text: &str) -> Result<String, CronSyntaxError> {
         return Err(CronSyntaxError::BothDayFields);
     }
     Ok(out.join(" "))
+}
+
+/// Refuse a field that holds a name of the other kind, for example a weekday name in the month
+/// field. `names` are the names that do not belong in the field.
+fn misplaced_name(field: &str, names: &[&str], kind: &'static str, field_name: &'static str) -> Result<(), CronSyntaxError> {
+    for run in field.split(|c: char| !c.is_ascii_alphabetic()).filter(|r| !r.is_empty()) {
+        let upper = run.to_ascii_uppercase();
+        if names.contains(&upper.as_str()) {
+            return Err(CronSyntaxError::MisplacedName { name: upper, kind, field: field_name });
+        }
+    }
+    Ok(())
 }
 
 /// Replace each run of letters that is a name in `names` with its number (`first` is the number
@@ -445,6 +461,38 @@ mod tests {
         assert_eq!(syntax("0 9 * * 5#2"), CronSyntaxError::Extension { field: "day of week", token: '#' });
         assert_eq!(syntax("0 9 ? * *"), CronSyntaxError::Extension { field: "day of month", token: '?' });
         assert_eq!(syntax("0 9 * * +MON"), CronSyntaxError::PlusPrefix);
+        assert_eq!(
+            syntax("0 9 * WED *"),
+            CronSyntaxError::MisplacedName {
+                name: "WED".into(),
+                kind: "weekday",
+                field: "month"
+            }
+        );
+        assert_eq!(
+            syntax("0 9 * 1,fri *"),
+            CronSyntaxError::MisplacedName {
+                name: "FRI".into(),
+                kind: "weekday",
+                field: "month"
+            }
+        );
+        assert_eq!(
+            syntax("0 9 * * JAN"),
+            CronSyntaxError::MisplacedName {
+                name: "JAN".into(),
+                kind: "month",
+                field: "day of week"
+            }
+        );
+        assert_eq!(
+            syntax("0 9 * * mon-DEC"),
+            CronSyntaxError::MisplacedName {
+                name: "DEC".into(),
+                kind: "month",
+                field: "day of week"
+            }
+        );
         assert_eq!(syntax("0 9 1 * MON"), CronSyntaxError::BothDayFields);
         assert_eq!(syntax("0 9 */2 * MON"), CronSyntaxError::BothDayFields);
         assert_eq!(syntax("@reboot"), CronSyntaxError::UnknownAlias { alias: "@reboot".into() });
@@ -471,6 +519,15 @@ mod tests {
         let both = CronSyntaxError::BothDayFields.to_string();
         assert!(both.contains("day of month") && both.contains("day of week"));
         assert!(CronSyntaxError::Extension { field: "day of month", token: 'L' }.to_string().contains('L'));
+        assert_eq!(
+            CronSyntaxError::MisplacedName {
+                name: "WED".into(),
+                kind: "weekday",
+                field: "month"
+            }
+            .to_string(),
+            "the name WED is a weekday name and does not belong in the month field"
+        );
     }
 
     fn sched(cron: &str, zone: &str) -> CronSchedule {

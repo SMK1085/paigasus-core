@@ -174,6 +174,29 @@ async fn store_reads_are_scoped_to_the_inbox() {
 }
 
 #[tokio::test]
+async fn a_row_that_does_not_decode_does_not_block_the_list_and_can_be_cancelled() {
+    let Some(env) = env().await else {
+        eprintln!("skipping timer_store_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let (good, bad) = (Uuid::new_v4(), Uuid::new_v4());
+    support::timer::insert_follow_up_row(&env.db, ib.uuid, good, "agent", "date_trunc('second', now() + interval '1 hour')", "good").await;
+    support::timer::insert_schedule_row(&env.db, ib.uuid, bad, "*/15 * * * *", "Mars/Olympus", "2030-01-01T09:00:00", "now() + interval '2 hours'").await;
+    env.db.execute_unprepared(&format!("UPDATE timer SET note = 'x' WHERE id = '{bad}'")).await.expect("note");
+
+    let listed = env.store.list_active(&ib.id, TimerOrigin::Agent).await.expect("list skips the bad row");
+    assert_eq!(listed.iter().map(|v| v.timer.id().uuid()).collect::<Vec<_>>(), [good]);
+    assert!(env.store.get(&ib.id, TimerId::from_uuid(bad)).await.is_err(), "get cannot decode the bad row");
+    let ids: Vec<Uuid> = env.store.active_agent_ids(&ib.id).await.expect("ids").iter().map(|i| i.uuid()).collect();
+    assert!(ids.contains(&bad), "the bad row is still an active agent timer");
+
+    let report = apply(&env, &ib, &TimerCaps::default(), cancel(bad, TimerOrigin::Agent)).await.expect("apply");
+    assert_eq!(report.cancels, vec![(TimerId::from_uuid(bad), CancelOutcome::Cancelled)]);
+    assert_eq!(count(&env, &ib, "AND status = 'cancelled'").await, 1);
+}
+
+#[tokio::test]
 async fn apply_in_refuses_an_insert_for_another_inbox() {
     let Some(env) = env().await else {
         eprintln!("skipping timer_store_pg: Docker unavailable");

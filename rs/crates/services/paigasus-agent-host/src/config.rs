@@ -150,18 +150,6 @@ impl TimersConfig {
             walk_bound: WALK_BOUND,
         }
     }
-
-    /// The smallest civil gap between two slots of a schedule.
-    #[must_use]
-    pub fn min_schedule_interval(&self) -> Duration {
-        Duration::from_secs(self.min_schedule_interval_secs)
-    }
-
-    /// The shortest follow-up delay.
-    #[must_use]
-    pub fn min_follow_up_delay(&self) -> Duration {
-        Duration::from_secs(self.min_follow_up_delay_secs)
-    }
 }
 
 /// The agent memory store.
@@ -895,8 +883,8 @@ mod tests {
             assert_eq!(t.max_agent_timers_created_per_day, 100);
             assert_eq!(t.poll_interval(), Duration::from_secs(5));
             assert_eq!(t.statement_timeout(), Duration::from_millis(5000));
-            assert_eq!(t.min_schedule_interval(), Duration::from_secs(900));
-            assert_eq!(t.min_follow_up_delay(), Duration::from_secs(60));
+            assert_eq!(t.min_schedule_interval_secs, 900);
+            assert_eq!(t.min_follow_up_delay_secs, 60);
             assert_eq!(cfg.validate(), Ok(()));
             Ok(())
         });
