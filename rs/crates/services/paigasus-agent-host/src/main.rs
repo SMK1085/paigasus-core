@@ -242,4 +242,9 @@ fn describe_agent_host_metrics() {
     );
     describe_histogram!(names::AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS, "Agent host HTTP request latency in seconds.");
     describe_gauge!(names::AGENT_HOST_HTTP_INFLIGHT_REQUESTS, "Requests currently being handled on the agent host HTTP router.");
+    // The name is provisional until SMA-798 moves it to `names::`.
+    describe_counter!(
+        "agent_host_memory_refusals_total",
+        "Memory tool commands that the agent host refused, labeled by kind (conflict, cap, path, sealed, store)."
+    );
 }
