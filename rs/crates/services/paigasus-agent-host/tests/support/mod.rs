@@ -16,28 +16,67 @@ use testcontainers::ContainerAsync;
 use testcontainers::ImageExt;
 use testcontainers_modules::postgres::Postgres;
 
-/// How long a fresh Postgres container has to accept connections.
-const PG_READY_BUDGET: Duration = Duration::from_secs(60);
+/// How long a fresh Postgres container has to accept connections (as in `paigasus-test-docker`).
+const PG_READY_BUDGET: Duration = Duration::from_secs(90);
 
-/// Starts an empty Postgres container. It runs no migration. It returns once the server accepts
-/// a connection, because the image logs "ready" twice and the first log line comes before a
-/// restart of the server.
+/// How many times the container start is tried in all. A start that hits the ready budget under
+/// load is tried again with a new container.
+const PG_START_ATTEMPTS: usize = 3;
+
+/// Run `attempt` until it gives `Ok`, at most `attempts` times. `Err` is a start error that may
+/// pass on the next try. The last error is the answer when every try fails. `Ok(None)` (Docker
+/// skipped) ends at once. The closure only starts a container, so no seed runs twice.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
-pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, String)> {
-    let node = paigasus_test_docker::start_or_skip(Postgres::default().with_tag("16-alpine"), "start_raw_postgres").await?;
+pub async fn retry_start<T, F, Fut>(attempts: usize, mut attempt: F) -> Result<Option<T>, String>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<T>, String>>,
+{
+    let mut last = String::new();
+    for n in 1..=attempts {
+        match attempt(n).await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                eprintln!("container start, try {n} of {attempts}, failed: {e}");
+                last = e;
+            }
+        }
+    }
+    Err(last)
+}
+
+/// One start of an empty Postgres container. `Err` means the server did not accept a connection
+/// in the ready budget. The container is dropped then.
+async fn try_start_raw_postgres() -> Result<Option<(ContainerAsync<Postgres>, String)>, String> {
+    let Some(node) = paigasus_test_docker::start_or_skip(Postgres::default().with_tag("16-alpine"), "start_raw_postgres").await else {
+        return Ok(None);
+    };
     let port = paigasus_test_docker::mapped_port(&node, 5432, "postgres").await;
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let deadline = std::time::Instant::now() + PG_READY_BUDGET;
     loop {
         match Database::connect(url.clone()).await {
-            Ok(_) => break,
+            Ok(_) => return Ok(Some((node, url))),
             Err(e) => {
-                assert!(std::time::Instant::now() < deadline, "postgres did not accept connections within {PG_READY_BUDGET:?}: {e}");
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!("postgres did not accept connections within {PG_READY_BUDGET:?}: {e}"));
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
-    Some((node, url))
+}
+
+/// Starts an empty Postgres container. It runs no migration. It returns once the server accepts
+/// a connection, because the image logs "ready" twice and the first log line comes before a
+/// restart of the server. A start that does not get ready is tried again with a new container,
+/// at most `PG_START_ATTEMPTS` times in all. The caller seeds only after this returns.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn start_raw_postgres() -> Option<(ContainerAsync<Postgres>, String)> {
+    match retry_start(PG_START_ATTEMPTS, |_| try_start_raw_postgres()).await {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    }
 }
 
 /// A multi-connection pool on the database.
