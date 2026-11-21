@@ -85,7 +85,10 @@ pub struct IamClient {
 impl IamClient {
     /// Build the channel from the config. The channel connects on the first call, so an IAM that
     /// is down does not stop the boot. The TLS material is read now, so a bad certificate fails at
-    /// boot. Each call has the timeout `call_timeout_ms`. Call it inside a Tokio runtime.
+    /// boot. `call_timeout_ms` bounds three steps one by one: the TCP connect (of the first
+    /// connection and of each reconnect), the TLS handshake, and each call on an open connection.
+    /// So a call that must connect first can take up to three times `call_timeout_ms`. Call it
+    /// inside a Tokio runtime.
     pub fn connect(cfg: &IamClientConfig) -> Result<IamClient, IamError> {
         let channel = build_channel(cfg)?;
         Ok(IamClient {
@@ -160,7 +163,12 @@ fn self_authorize_request(caller: &CallerCredential, principal_prn: &str, action
 /// the TLS connector in `tls_config`, so bad TLS material fails here.
 fn build_channel(cfg: &IamClientConfig) -> Result<Channel, IamError> {
     let endpoint = Channel::from_shared(cfg.grpc_addr.clone()).map_err(|e| IamError::Connect(format!("invalid iam.grpc_addr {:?}: {e}", cfg.grpc_addr)))?;
-    let endpoint = endpoint.timeout(Duration::from_millis(cfg.call_timeout_ms));
+    // `timeout` starts only when a call starts on a ready connection. It does not bound the
+    // connect, which the channel makes before that. So `connect_timeout` bounds the TCP connect:
+    // without it, a black-holed IAM address holds each request for the TCP connect timeout of the
+    // OS (about 75 s on macOS, about 2 min on Linux) before the 503.
+    let call_timeout = Duration::from_millis(cfg.call_timeout_ms);
+    let endpoint = endpoint.connect_timeout(call_timeout).timeout(call_timeout);
 
     let endpoint = match &cfg.tls {
         // `Config::validate` proved that the host is a loopback host. Plain h2c, no TLS.
@@ -170,7 +178,7 @@ fn build_channel(cfg: &IamClientConfig) -> Result<Channel, IamError> {
             client_cert_path,
             client_key_path,
         } => {
-            let tls = build_tls_config(ca_cert_path, client_cert_path, client_key_path)?;
+            let tls = build_tls_config(ca_cert_path, client_cert_path, client_key_path, call_timeout)?;
             endpoint.tls_config(tls).map_err(|e| IamError::Connect(format!("invalid IAM TLS config: {e}")))?
         }
     };
@@ -185,7 +193,9 @@ fn build_channel(cfg: &IamClientConfig) -> Result<Channel, IamError> {
 ///
 /// mTLS: the client identity needs both the certificate and the key. Only one of the two is a
 /// [`IamError::Connect`]. The pair is checked before any file is read.
-fn build_tls_config(ca_cert_path: &Option<String>, client_cert_path: &Option<String>, client_key_path: &Option<String>) -> Result<ClientTlsConfig, IamError> {
+///
+/// `handshake_timeout` bounds the TLS handshake.
+fn build_tls_config(ca_cert_path: &Option<String>, client_cert_path: &Option<String>, client_key_path: &Option<String>, handshake_timeout: Duration) -> Result<ClientTlsConfig, IamError> {
     let identity = match (client_cert_path, client_key_path) {
         (Some(cert_path), Some(key_path)) => {
             let cert = std::fs::read(cert_path).map_err(|e| IamError::Connect(format!("failed to read iam.tls client_cert_path {cert_path:?}: {e}")))?;
@@ -214,7 +224,9 @@ fn build_tls_config(ca_cert_path: &Option<String>, client_cert_path: &Option<Str
         tls = tls.identity(identity);
     }
 
-    Ok(tls)
+    // `connect_timeout` bounds the TCP connect only. This bounds the TLS handshake, so a server
+    // that accepts TCP and then sends nothing cannot hold a request.
+    Ok(tls.timeout(handshake_timeout))
 }
 
 #[cfg(test)]
@@ -348,6 +360,114 @@ mod tests {
     async fn connect_fails_for_an_invalid_address() {
         let err = IamClient::connect(&cfg("not a uri", IamTlsConfig::LoopbackInsecure)).expect_err("an invalid URI must be rejected");
         assert!(matches!(err, IamError::Connect(_)), "expected IamError::Connect, got {err:?}");
+    }
+
+    // ---- the time bounds of one call (spec §6.2: IAM unreachable gives a fast 503) --------------
+
+    /// `call_timeout_ms` in the bound tests. It is far below the TCP connect timeout of the OS.
+    const SHORT_MS: u64 = 200;
+    /// The time a bounded call may take: three steps of 200 ms, with a large margin.
+    const BUDGET: Duration = Duration::from_secs(2);
+
+    /// A TCP address whose connect hangs. The guards keep the listener and its queue alive.
+    struct HangingTarget {
+        addr: std::net::SocketAddr,
+        _listener: Option<tokio::net::TcpListener>,
+        _queued: Vec<std::net::TcpStream>,
+    }
+
+    /// Linux drops the SYN of a connect when the accept queue of a listener is full, so the
+    /// connect hangs. This needs no network. (macOS answers a full queue with a reset instead.)
+    #[cfg(target_os = "linux")]
+    fn hanging_tcp_target() -> HangingTarget {
+        let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+        socket.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let listener = socket.listen(0).expect("listen");
+        let addr = listener.local_addr().expect("addr");
+        // Fill the accept queue. Nothing accepts, so the first connect that hangs marks it full.
+        let mut queued = Vec::new();
+        for _ in 0..16 {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                Ok(stream) => queued.push(stream),
+                Err(_) => break,
+            }
+        }
+        HangingTarget {
+            addr,
+            _listener: Some(listener),
+            _queued: queued,
+        }
+    }
+
+    /// Other hosts: TEST-NET-1 (RFC 5737). It is never routed, so with a network the SYN gets
+    /// no answer and the connect hangs.
+    #[cfg(not(target_os = "linux"))]
+    fn hanging_tcp_target() -> HangingTarget {
+        HangingTarget {
+            addr: "192.0.2.1:1".parse().unwrap(),
+            _listener: None,
+            _queued: Vec::new(),
+        }
+    }
+
+    /// A local listener that accepts each connection and then sends nothing.
+    async fn silent_server() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        addr
+    }
+
+    /// Run one IAM call with `call_timeout_ms = SHORT_MS` and a 2 s budget. It must end in time,
+    /// and with an error.
+    async fn bounded_call(mut cfg: IamClientConfig) -> tonic::Code {
+        cfg.call_timeout_ms = SHORT_MS;
+        let client = IamClient::connect(&cfg).expect("lazy connect");
+        let outcome = tokio::time::timeout(BUDGET, client.introspect_api_key("tok")).await;
+        let result = outcome.unwrap_or_else(|_| panic!("the IAM call to {} did not end within {BUDGET:?}", cfg.grpc_addr));
+        match result {
+            Err(IamError::Rpc(status)) => status.code(),
+            other => panic!("expected an IAM Rpc error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_call_timeout_bounds_a_tcp_connect_that_hangs() {
+        let target = hanging_tcp_target();
+        // Precondition: a plain TCP connect to the target hangs on this host. Without it, this
+        // test would pass with no bound at all.
+        let probe = tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(target.addr)).await;
+        assert!(
+            probe.is_err(),
+            "precondition failed: a TCP connect to {} does not hang on this host ({probe:?}); the test cannot prove the bound here",
+            target.addr
+        );
+        let code = bounded_call(cfg(&format!("http://{}", target.addr), IamTlsConfig::LoopbackInsecure)).await;
+        assert!(matches!(code, tonic::Code::Unavailable | tonic::Code::DeadlineExceeded), "{code:?}");
+    }
+
+    #[tokio::test]
+    async fn the_call_timeout_bounds_a_tls_handshake_that_hangs() {
+        let addr = silent_server().await;
+        let tls = IamTlsConfig::Tls {
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+        };
+        let code = bounded_call(cfg(&format!("https://{addr}"), tls)).await;
+        assert!(matches!(code, tonic::Code::Unavailable | tonic::Code::DeadlineExceeded), "{code:?}");
+    }
+
+    #[tokio::test]
+    async fn the_call_timeout_bounds_a_silent_h2c_server() {
+        let addr = silent_server().await;
+        let code = bounded_call(cfg(&format!("http://{addr}"), IamTlsConfig::LoopbackInsecure)).await;
+        assert!(matches!(code, tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled), "{code:?}");
     }
 
     #[test]
