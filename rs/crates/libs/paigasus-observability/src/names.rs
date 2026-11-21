@@ -89,15 +89,21 @@ pub const GATEWAY_DECISION_LOG_DROPPED_TOTAL: &str = "gateway_decision_log_dropp
 pub const GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL: &str = "gateway_decision_log_task_restarts_total";
 /// Events with a JetStream PubAck (the relay).
 pub const GATEWAY_DECISION_LOG_PUBLISHED_TOTAL: &str = "gateway_decision_log_published_total";
-/// Redis losses that the relay detected (`NOGROUP`, then the group was made again). One per incident.
+/// Losses of entries of the Redis decision stream that the relays detected: a lost stream, or a return to an
+/// older state (SMA-821). One per incident over all relays.
 pub const GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL: &str = "gateway_decision_log_redis_resets_total";
-/// An estimate of the events in the Redis losses (the last `XLEN` sample of the relay). It can undercount (writes
-/// after the sample) or overcount (publishes after the sample).
+/// An estimate of the events in the Redis losses. The estimate is the last stored `XLEN` sample. It can undercount
+/// (writes after the sample) or overcount (publishes after the sample).
 pub const GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL: &str = "gateway_decision_log_lost_estimate_total";
 /// Seconds from the publish of an event to its PubAck.
 pub const GATEWAY_DECISION_LOG_PUBLISH_SECONDS: &str = "gateway_decision_log_publish_seconds";
 /// `XLEN` of the decision stream, sampled every 15 s by the relay.
 pub const GATEWAY_DECISION_LOG_BACKLOG: &str = "gateway_decision_log_backlog";
+/// Failed Redis reset checks of the relay against the NATS KV bucket `GATEWAY_DECISIONS_GEN`; `kind` = `timeout` |
+/// `permission` | `no_bucket` | `redis` | `foreign_writer` | `other` (SMA-821).
+pub const GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL: &str = "gateway_decision_log_generation_check_errors_total";
+/// Unix time in seconds of the last Redis reset that a relay of this pod detected (SMA-821). The gauge is not primed.
+pub const GATEWAY_DECISION_LOG_LAST_RESET_TIMESTAMP_SECONDS: &str = "gateway_decision_log_last_reset_timestamp_seconds";
 // Agent host HTTP
 pub const AGENT_HOST_HTTP_REQUESTS_TOTAL: &str = "agent_host_http_requests_total";
 pub const AGENT_HOST_HTTP_REQUEST_DURATION_SECONDS: &str = "agent_host_http_request_duration_seconds";
@@ -410,6 +416,8 @@ pub const ALL: &[&str] = &[
     GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
     GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
     GATEWAY_DECISION_LOG_BACKLOG,
+    GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL,
+    GATEWAY_DECISION_LOG_LAST_RESET_TIMESTAMP_SECONDS,
     IAM_HTTP_REQUESTS_TOTAL,
     IAM_HTTP_REQUEST_DURATION_SECONDS,
     IAM_HTTP_INFLIGHT_REQUESTS,
@@ -523,6 +531,8 @@ mod tests {
             GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
             GATEWAY_DECISION_LOG_PUBLISH_SECONDS,
             GATEWAY_DECISION_LOG_BACKLOG,
+            GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL,
+            GATEWAY_DECISION_LOG_LAST_RESET_TIMESTAMP_SECONDS,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

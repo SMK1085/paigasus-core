@@ -288,7 +288,7 @@ three identities are in `subjects.env` (`GW_DEC_*`). This table renders that fil
 
 | identity | deployed as | publish (allow) | subscribe (allow) |
 |---|---|---|---|
-| `gateway-decision-publisher` | the gateway decision relay | `gateway.decision.>`, `$JS.API.INFO`, `$JS.API.STREAM.INFO.GATEWAY_DECISIONS`, `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` | `_INBOX_GW_DEC.>` |
+| `gateway-decision-publisher` | the gateway decision relay | `gateway.decision.>`, `$JS.API.INFO`, `$JS.API.STREAM.INFO.GATEWAY_DECISIONS`, `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS`, `$JS.API.STREAM.INFO.KV_GATEWAY_DECISIONS_GEN`, `$JS.API.DIRECT.GET.KV_GATEWAY_DECISIONS_GEN.>`, `$KV.GATEWAY_DECISIONS_GEN.>` | `_INBOX_GW_DEC.>` |
 | `gateway-decision-reader` | the export CLI of an operator; never the gateway | `$JS.API.CONSUMER.CREATE.GATEWAY_DECISIONS`, `…CREATE.GATEWAY_DECISIONS.>`, `$JS.API.CONSUMER.DELETE.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.MSG.NEXT.GATEWAY_DECISIONS.*`, `$JS.API.CONSUMER.INFO.GATEWAY_DECISIONS.*` | `_INBOX_GW_RD.>` |
 | `gateway-decision-provisioner` | nobody; operator tooling only | `$JS.API.INFO`, `$JS.API.STREAM.>` | `_INBOX_GW_PROV.>` |
 
@@ -312,3 +312,44 @@ three identities are in `subjects.env` (`GW_DEC_*`). This table renders that fil
   Without this grant, a NATS reconnect during an export makes the export fail.
 - `provision-decisions.sh` passes `--inbox-prefix _INBOX_GW_PROV` to the `nats` CLI. The provisioner may
   subscribe only to that prefix, so the default `_INBOX` reply subscription would be refused.
+
+### 11.1 The generation bucket `GATEWAY_DECISIONS_GEN` (SMA-821)
+
+- The three KV grants of the publisher exist for the reset record of the decision log (SMA-821). They touch
+  only the bucket `GATEWAY_DECISIONS_GEN`, which is the stream `KV_GATEWAY_DECISIONS_GEN`. Each grant was
+  measured (leave-one-out): with any one of the three removed, `the_decision_publisher_uses_the_generation_bucket`
+  fails at the call that needs it (`STREAM.INFO.KV_…` at get, the direct get at `entry`, `$KV.…` at
+  `create`/`update`).
+- The publisher has NO `$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN` grant (D20). Only
+  `provision-decisions.sh` makes the bucket. MEASURED on a live broker: while the bucket does not exist,
+  that grant lets the publisher make the stream `KV_GATEWAY_DECISIONS_GEN` as a mirror (or with `sources`)
+  of `GATEWAY_DECISIONS`, with `allow_direct`. The publisher then reads every decision with its direct get
+  grant. `the_decision_publisher_cannot_reach_beyond_the_generation_bucket` refuses this create. Without the
+  bucket, the relay reports the check error kind `no_bucket`, and publishes still work.
+- A known limit: `$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` (from SMA-755) has a similar shape. Before
+  provisioning, the publisher can make `GATEWAY_DECISIONS` with any config: a short `max_age`, a small
+  `max_bytes`, a mirror config, or the subjects `$KV.GATEWAY_DECISIONS_GEN.>`, so that the `kv add` of the
+  provisioner fails. A mirror of the generation bucket is not a read path for decisions: the bucket holds
+  only generation records, and the publisher has no read grant on `GATEWAY_DECISIONS`. So this stays a known
+  limit. `provision-decisions.sh` refuses an existing `GATEWAY_DECISIONS` that has a mirror or sources
+  config, or subjects that are not exactly `gateway.decision.>`. It also refuses an existing bucket stream
+  with a mirror or sources config. Once both streams exist, the account cap of 2 streams refuses any further
+  create.
+- The publisher has no right on `GATEWAY_DECISIONS` itself: no read, delete or purge. The direct get is
+  limited to the bucket (`$JS.API.DIRECT.GET.KV_GATEWAY_DECISIONS_GEN.>`), and it is the only read path.
+  `the_decision_publisher_cannot_reach_beyond_the_generation_bucket` proves the refusals.
+- The account allows 2 streams. `GATEWAY_DECISIONS` and `KV_GATEWAY_DECISIONS_GEN` use both. A third stream
+  needs a higher `--js-streams` in `provision-decisions.sh`.
+- `provision-decisions.sh` makes the bucket with `nats kv add --history 1 --storage file --replicas 1
+  --max-bucket-size <DECISIONS_GEN_MAX_BYTES>`. It also fails when the 10 % of the account disk that the
+  stream leaves free cannot hold the bucket. The smallest disk is then about 10 MiB.
+- `nsc add user` fails for a user that exists, so an existing `gateway-decision-publisher` would keep its old
+  grants. The script runs `nsc edit user` for this user only. `nsc edit user` only adds grants. The grant
+  `$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN` never shipped in a merged build, so no deployed publisher
+  has it. The new creds file holds the new grants.
+- Upgrade order: first the new grants, the new creds and the bucket (run `provision-decisions.sh` with
+  `PUSH=1`), then the new gateway binary with the new creds. The bucket must exist before the deploy: the
+  relay does not make it.
+- Deployment rule: two gateway deployments with their own Redis, or with another Redis DB index, must not
+  share one NATS account AND one Redis prefix. The default prefix `paigasus:gateway` collides. Give each
+  deployment its own NATS account or its own Redis prefix.
