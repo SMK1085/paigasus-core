@@ -3,16 +3,16 @@
 //! The relay task (SMA-755 § 5.7, § 5.8). It reads the Redis stream with a consumer group and publishes the
 //! ORIGINAL bytes of each entry to JetStream. It decodes an entry only to read `org_id` and `decision_id`.
 //! After the PubAcks it runs `XACK` and `XDEL` in one `MULTI`. It claims the entries of a dead instance with
-//! `XAUTOCLAIM`, prunes old consumers, and counts a Redis loss (`NOGROUP`). A sampler reads `XLEN` every 15 s.
+//! `XAUTOCLAIM`, and prunes old consumers. It does not count on `NOGROUP`: it makes the group again, and a new
+//! generation with it. A sampler reads `XLEN` every 15 s, sets the backlog gauge, and runs the generation check
+//! (SMA-821): one single-flight KV step with a timeout, which never blocks the relay or the sampler.
 //!
 //! Logs name error kinds and classes only. They never hold an event, a payload or the URL.
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::LazyLock;
-use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_nats::jetstream::{self, message::PublishMessage};
 use bytes::Bytes;
@@ -26,7 +26,10 @@ use redis::streams::{StreamAutoClaimReply, StreamInfoConsumersReply, StreamReadR
 use tokio::sync::{Mutex, watch};
 use tokio::time::Instant;
 
-use super::jetstream::{MAX_BYTES, PublishClass, STREAM, api_error_of, classify, max_bytes_for_account, stream_config, subject_for, violation_since};
+use super::gen_kv::NatsGenKv;
+use super::gen_redis;
+use super::generation::{Generation, LocalTuple, entry_key, new_id};
+use super::jetstream::{MAX_BYTES, PublishClass, STREAM, Violations, api_error_of, classify, max_bytes_for_account, stream_config, subject_for, violation_since};
 use super::redis_conn::RedisSlot;
 use super::supervised::run_supervised;
 use super::{DropReason, count_dropped};
@@ -39,18 +42,6 @@ const IN_FLIGHT: usize = 32;
 const CLAIM_PAGES: usize = 16;
 /// The server error code of a publish that `Nats-Expected-Stream` refused: another stream holds the subject.
 const STREAM_NOT_MATCH: u64 = 10060;
-/// `XLEN` of the stream, and 1 when the stream has the consumer group `ARGV[1]` (else 0), in one atomic step.
-const SAMPLE_SCRIPT: &str = "local n = redis.call('XLEN', KEYS[1]) \
-     if redis.call('EXISTS', KEYS[1]) == 0 then return {n, 0} end \
-     for _, g in ipairs(redis.call('XINFO', 'GROUPS', KEYS[1])) do \
-       for i = 1, #g, 2 do \
-         if g[i] == 'name' and g[i + 1] == ARGV[1] then return {n, 1} end \
-       end \
-     end \
-     return {n, 0}";
-/// The sampler script, made once. `Script::new` hashes the text, so the 15 s loop does not do it again.
-static SAMPLE: LazyLock<redis::Script> = LazyLock::new(|| redis::Script::new(SAMPLE_SCRIPT));
-
 /// What the relay needs to know about the stream and about its own timing. `new` gives the production values.
 #[derive(Debug, Clone)]
 pub struct RelaySettings {
@@ -76,6 +67,8 @@ pub struct RelaySettings {
     pub backoff_start: Duration,
     /// The largest backoff (30 s).
     pub backoff_max: Duration,
+    /// The time limit of one KV step of the generation check (5 s).
+    pub kv_timeout: Duration,
 }
 
 impl RelaySettings {
@@ -93,6 +86,7 @@ impl RelaySettings {
             idle_sleep: Duration::from_millis(200),
             backoff_start: Duration::from_secs(1),
             backoff_max: Duration::from_secs(30),
+            kv_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -124,10 +118,6 @@ enum Outcome {
 struct Inner {
     carry: Vec<Entry>,
     group_ready: bool,
-    /// Set when `NOGROUP` was seen and the group is not made again yet. It holds the last `XLEN` sample from that
-    /// moment (the sampler may overwrite the shared sample with 0 while Redis is empty). The group creation that
-    /// ends the recovery counts the Redis reset.
-    recovering: Option<Option<u64>>,
     stream_ready: bool,
     backoff: Duration,
     next_claim: Instant,
@@ -138,9 +128,13 @@ struct State {
     slot: RedisSlot,
     js: jetstream::Context,
     s: RelaySettings,
-    violations: Arc<AtomicU64>,
-    /// The last `XLEN` sample of the stream while it had the consumer group. `None` until the first one.
-    sample: StdMutex<Option<u64>>,
+    violations: Violations,
+    /// The generation check of this relay (SMA-821).
+    generation: Generation,
+    /// The KV entry of the generation record.
+    kv: NatsGenKv,
+    /// A KV step runs. The sampler starts a new one only when this is false (single flight).
+    kv_in_flight: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -230,71 +224,19 @@ fn entries_of(reply: Option<StreamReadReply>) -> Vec<Entry> {
 }
 
 impl State {
-    fn last_sample(&self) -> Option<u64> {
-        *self.sample.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn set_sample(&self, v: Option<u64>) {
-        *self.sample.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = v;
-    }
-
     async fn backoff(&self, inner: &mut Inner, shutdown: &mut watch::Receiver<()>) {
         let wait = inner.backoff;
         inner.backoff = (inner.backoff * 2).min(self.s.backoff_max);
         nap(wait, shutdown).await;
     }
 
-    /// `XGROUP CREATE <key> <group> 0 MKSTREAM`. `Ok(true)` when this call made the group, `Ok(false)` on `BUSYGROUP`.
-    async fn create_group(&self, conn: &mut paigasus_redis::RedisHandle) -> Result<bool, redis::RedisError> {
-        match redis::cmd("XGROUP")
-            .arg("CREATE")
-            .arg(&self.s.key)
-            .arg(self.s.group)
-            .arg("0")
-            .arg("MKSTREAM")
-            .query_async::<()>(conn)
-            .await
-        {
-            Ok(()) => Ok(true),
-            Err(err) if is_code(&err, "BUSYGROUP") => Ok(false),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Count one Redis reset and add the lost estimate (the last `XLEN` sample). The sample is not a bound: writes
-    /// after it make it undercount, and publishes after it make it overcount.
-    fn count_reset(&self, sample: Option<u64>) {
-        counter!(names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL).increment(1);
-        match sample {
-            Some(n) => {
-                counter!(names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL).increment(n);
-                tracing::error!(lost_estimate = n, "Redis lost the decision stream; the lost events are an estimate (it can undercount or overcount)");
-            }
-            None => tracing::error!("Redis lost the decision stream; the number of lost events is unknown (no XLEN sample)"),
-        }
-        // The new stream is empty.
-        self.set_sample(Some(0));
-    }
-
-    /// `NOGROUP`: Redis lost the stream and the group (§ 5.8). Only the relay whose `XGROUP CREATE` answers `OK`
-    /// counts the incident.
+    /// `NOGROUP`: Redis lost the stream and the group (§ 5.8). The relay makes the group again, and a new
+    /// generation with it. It counts nothing: the sampler's generation check counts the loss (SMA-821).
     async fn handle_nogroup(&self, conn: &mut paigasus_redis::RedisHandle, inner: &mut Inner) {
-        match self.create_group(conn).await {
-            Ok(true) => {
-                inner.group_ready = true;
-                inner.recovering = None;
-                self.count_reset(self.last_sample());
-            }
-            Ok(false) => {
-                inner.group_ready = true;
-                inner.recovering = None;
-            }
+        match gen_redis::ensure_group(conn, &self.s.key, self.s.group, &new_id()).await {
+            Ok(_) => inner.group_ready = true,
             Err(err) => {
                 inner.group_ready = false;
-                // Keep the sample of the FIRST failure: a later create in the start arm counts the reset.
-                if inner.recovering.is_none() {
-                    inner.recovering = Some(self.last_sample());
-                }
                 tracing::warn!(kind = ?err.kind(), "the relay cannot make the consumer group again");
             }
         }
@@ -412,7 +354,7 @@ impl State {
         if !event.decision_id.is_empty() {
             msg = msg.message_id(&event.decision_id);
         }
-        let generation = self.violations.load(Ordering::SeqCst);
+        let generation = self.violations.publish.load(Ordering::SeqCst);
         tracing::debug!(concurrent, "the relay publishes an entry");
         let started = Instant::now();
         let result = match self.js.send_publish(subject, msg).await {
@@ -424,7 +366,7 @@ impl State {
                 histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS).record(started.elapsed().as_secs_f64());
                 Outcome::Published
             }
-            Err(err) => match classify(err.kind(), api_error_of(&err), violation_since(&self.violations, generation), concurrent) {
+            Err(err) => match classify(err.kind(), api_error_of(&err), violation_since(&self.violations.publish, generation), concurrent) {
                 PublishClass::Ambiguous => Outcome::Ambiguous,
                 PublishClass::Permanent(class) => {
                     let code = api_error_of(&err).map(|a| a.code);
@@ -496,16 +438,8 @@ impl State {
         };
         let mut conn = handle.clone();
         if !inner.group_ready {
-            match self.create_group(&mut conn).await {
-                Ok(created) => {
-                    inner.group_ready = true;
-                    // A group made after a failed recovery is the end of the incident: count it once.
-                    if let Some(sample) = inner.recovering.take()
-                        && created
-                    {
-                        self.count_reset(sample);
-                    }
-                }
+            match gen_redis::ensure_group(&mut conn, &self.s.key, self.s.group, &new_id()).await {
+                Ok(_) => inner.group_ready = true,
                 Err(err) => {
                     tracing::warn!(kind = ?err.kind(), "the relay cannot make the consumer group");
                     self.backoff(&mut inner, &mut shutdown).await;
@@ -515,7 +449,8 @@ impl State {
         }
         // While a carried batch waits for NATS, this block does not run: no `XAUTOCLAIM`, no `XREADGROUP`. So the
         // loss of the Redis stream (`NOGROUP`) is found only when the carry is empty. During a NATS outage the
-        // carry stays full, so a `FLUSHALL` is counted (reset, lost estimate, alert) when the relay can publish again.
+        // carry stays full, so the relay makes the group again only when it can publish again. The generation check
+        // of the sampler counts the loss, and it does not wait for the relay.
         if inner.carry.is_empty() {
             let now = Instant::now();
             if now >= inner.next_prune {
@@ -639,47 +574,105 @@ impl State {
         }
     }
 
-    async fn sampler(&self, mut shutdown: watch::Receiver<()>) {
+    /// The gauge, the local record and the single-flight KV step, each tick. The gauge is set first and from a
+    /// read-only script, so a KV outage or a full Redis never stops it. The KV step runs in its own task.
+    async fn sampler(self: Arc<Self>, mut shutdown: watch::Receiver<()>, budget: Duration) {
+        let mut step: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             if let Some(handle) = self.slot.get() {
                 let mut conn = handle.clone();
-                if let Ok((n, has_group)) = SAMPLE.key(&self.s.key).arg(self.s.group).invoke_async::<(u64, u64)>(&mut conn).await {
-                    // A stream without the group is a stream after a Redis loss that no relay has found yet. Its
-                    // length is not the lost backlog, so the sample of the stream before the loss stays.
-                    if has_group == 1 {
-                        self.set_sample(Some(n));
-                    }
+                if let Ok(sample) = gen_redis::sample(&mut conn, &self.s.key, self.s.group).await {
                     #[allow(clippy::cast_precision_loss)]
-                    gauge!(names::GATEWAY_DECISION_LOG_BACKLOG).set(n as f64);
+                    gauge!(names::GATEWAY_DECISION_LOG_BACKLOG).set(sample.xlen as f64);
+                    if sample.has_group
+                        && let (Some(generation), Some(epoch)) = (sample.generation, sample.epoch)
+                    {
+                        let sampled_at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                        self.generation.observe(LocalTuple {
+                            generation,
+                            epoch: Some(epoch),
+                            sample: sample.xlen,
+                            sampled_at,
+                        });
+                    }
+                }
+                if self.kv_in_flight.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    let this = Arc::clone(&self);
+                    // The guard exists before the spawn, so an abort before the first poll still clears the flag.
+                    let guard = InFlight(Arc::clone(&this));
+                    step = Some(tokio::spawn(async move {
+                        let _guard = guard;
+                        let (key, group) = (this.s.key.clone(), this.s.group);
+                        this.generation
+                            .step(
+                                &this.kv,
+                                move || async move { gen_redis::detect(&mut conn, &key, group, &new_id()).await },
+                                &this.violations.kv,
+                                this.s.kv_timeout,
+                            )
+                            .await;
+                    }));
                 }
             }
             tokio::select! {
                 () = tokio::time::sleep(self.s.sample_every) => {}
-                _ = shutdown.changed() => return,
+                _ = shutdown.changed() => {
+                    // Wait for the step, so that a counting write that was already sent is counted by this relay.
+                    // Wait at most [`step_shutdown_wait`], which fits inside the drain budget of the gateway. Then
+                    // abort the step and await it, so that no step outlives the relay. The claim is stored before
+                    // the write await, so an aborted counting write is an ambiguous write: the write can be in the
+                    // KV, and this relay stops before its next KV get. That is the limit of spec § 5.5 ("a relay
+                    // that made an ambiguous counting write and stops before its next KV get loses that count").
+                    if let Some(mut task) = step
+                        && tokio::time::timeout(step_shutdown_wait(&self.s, budget), &mut task).await.is_err()
+                    {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                    return;
+                }
             }
         }
     }
 }
 
+/// How long the sampler waits for an in-flight KV step after the shutdown signal, before it aborts the step.
+/// It is never longer than the shutdown `budget` of [`run_relay`], so the relay ends inside the drain time that
+/// the gateway gives it (`runtime::DecisionLogTasks::drain`). A step ends by itself within `kv_timeout`.
+#[must_use]
+pub fn step_shutdown_wait(s: &RelaySettings, budget: Duration) -> Duration {
+    budget.min(s.kv_timeout)
+}
+
+/// Clears `kv_in_flight` when the KV step task ends, also when it is aborted.
+struct InFlight(Arc<State>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.kv_in_flight.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Run the relay until the shutdown signal. The batch in flight gets `budget` after the signal. The entries
 /// that are not acked stay in Redis for the next instance.
-pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Arc<AtomicU64>, shutdown: watch::Receiver<()>, budget: Duration) {
+pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings, violations: Violations, shutdown: watch::Receiver<()>, budget: Duration) {
     let now = Instant::now();
     let state = Arc::new(State {
         slot,
-        js,
         inner: Mutex::new(Inner {
             carry: Vec::new(),
             group_ready: false,
             stream_ready: false,
-            recovering: None,
             backoff: s.backoff_start,
             next_claim: now + s.claim_every,
             next_prune: now + s.prune_every,
         }),
+        generation: Generation::new(),
+        kv: NatsGenKv::new(js.clone(), entry_key(&s.key)),
+        kv_in_flight: AtomicBool::new(false),
+        js,
         s,
         violations,
-        sample: StdMutex::new(None),
     });
     let relay_state = Arc::clone(&state);
     let relay_shutdown = shutdown.clone();
@@ -699,7 +692,7 @@ pub async fn run_relay(slot: RedisSlot, js: jetstream::Context, s: RelaySettings
             }
         }
     });
-    let sampler = state.sampler(shutdown);
+    let sampler = Arc::clone(&state).sampler(shutdown, budget);
     tokio::join!(relay, sampler);
 }
 

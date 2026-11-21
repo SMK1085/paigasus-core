@@ -12,7 +12,6 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use metrics::counter;
@@ -125,13 +124,23 @@ pub struct DecisionLogTasks {
     connector: JoinHandle<()>,
 }
 
+/// The time that [`DecisionLogTasks::drain`] adds to the budget before it aborts a task.
+pub const DECISION_LOG_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
 impl DecisionLogTasks {
+    /// The tasks and the sender of their shutdown watch. Each task must hold a receiver of `shutdown`.
+    #[must_use]
+    pub fn new(shutdown: watch::Sender<()>, writer: JoinHandle<()>, relay: JoinHandle<()>, connector: JoinHandle<()>) -> Self {
+        Self { shutdown, writer, relay, connector }
+    }
+
     /// Send the shutdown signal, then wait for the three tasks. The writer and the relay drain for at most
-    /// `budget` themselves. A task that is still running `budget` plus a grace time after the signal is aborted.
+    /// `budget` themselves. A task that is still running `budget` plus [`DECISION_LOG_DRAIN_GRACE`] after the
+    /// signal is aborted.
     pub async fn drain(self, budget: Duration) {
         let Self { shutdown, writer, relay, connector } = self;
         let _ = shutdown.send(());
-        let grace = budget + Duration::from_millis(500);
+        let grace = budget + DECISION_LOG_DRAIN_GRACE;
         tokio::join!(wait_task("writer", writer, grace), wait_task("relay", relay, grace), wait_task("connector", connector, grace));
     }
 }
@@ -174,8 +183,8 @@ pub async fn build_decision_log(config: &GatewayConfig, clock: Arc<dyn Clock>, e
     }
     let redis_url = dl.redis_url.clone().ok_or_else(|| anyhow::anyhow!("decision_log.enabled = true requires decision_log.redis_url"))?;
     let nats = dl.nats.as_ref().ok_or_else(|| anyhow::anyhow!("decision_log.enabled = true requires [decision_log.nats]"))?;
-    let violations = Arc::new(AtomicU64::new(0));
-    let js = jetstream::connect(nats, Arc::clone(&violations)).await?;
+    let violations = jetstream::Violations::default();
+    let js = jetstream::connect(nats, violations.clone()).await?;
     let (log, queue) = RedisDecisionLog::new(dl.queue_capacity);
     let recorder = Arc::new(DecisionRecorder::new(Arc::new(log), clock, entropy, dl.digest_key()));
     prime_decision_log_metrics();
@@ -205,7 +214,7 @@ pub async fn build_decision_log(config: &GatewayConfig, clock: Arc<dyn Clock>, e
     tracing::info!("the decision log is on (SMA-755): tool decisions go to a Redis stream and from there to JetStream");
     Ok(DecisionLogRuntime {
         recorder,
-        tasks: Some(DecisionLogTasks { shutdown, writer, relay, connector }),
+        tasks: Some(DecisionLogTasks::new(shutdown, writer, relay, connector)),
     })
 }
 
@@ -569,6 +578,21 @@ mod tool_policy_tests {
 mod tests {
     use super::*;
     use std::future::{pending, ready};
+
+    /// I1 (SMA-821): with the production values, the relay's wait for an in-flight KV step after the shutdown
+    /// signal fits inside the time that `DecisionLogTasks::drain` gives the relay task. A wait of `kv_timeout`
+    /// (5 s) would not fit, and drain would abort the relay while the step runs on.
+    #[test]
+    fn the_relay_step_wait_fits_inside_the_drain_time() {
+        let s = RelaySettings::new("k".to_owned(), "c".to_owned());
+        let wait = crate::adapters::decision_log::relay::step_shutdown_wait(&s, DECISION_LOG_DRAIN_BUDGET);
+        assert!(
+            wait < DECISION_LOG_DRAIN_BUDGET + DECISION_LOG_DRAIN_GRACE,
+            "the relay waits {wait:?} for a KV step, and drain aborts it after {:?}",
+            DECISION_LOG_DRAIN_BUDGET + DECISION_LOG_DRAIN_GRACE
+        );
+        assert!(wait <= DECISION_LOG_DRAIN_BUDGET, "the step wait is above the relay's own budget");
+    }
 
     /// Spawn a task that returns `Ok(())` only once the shutdown broadcast fires.
     fn spawn_until_shutdown(servers: &mut JoinSet<anyhow::Result<()>>, mut rx: watch::Receiver<()>) {

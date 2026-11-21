@@ -110,8 +110,9 @@ sha2 = "0.11"
 hmac = "0.13"
 rand = { workspace = true }
 # SMA-752 § 6.3.5: the core NATS subscription on `iam.policy.>` that invalidates the tool-policy
-# cache. The workspace line selects the ring provider (no aws-lc-rs).
-async-nats = { workspace = true }
+# cache. The workspace line selects the ring provider (no aws-lc-rs). The `kv` feature is for the generation
+# bucket of the decision log (SMA-821).
+async-nats = { workspace = true, features = ["kv"] }
 # The same creds callback that IAM uses (SMA-493 D8): it re-reads the creds file on every connect
 # attempt, so a rotation is picked up on the next reconnect. `{ workspace = true }`, so `moon.yml`
 # hand-declares the `dependsOn` edge.
