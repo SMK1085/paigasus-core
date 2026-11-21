@@ -238,9 +238,33 @@ async fn a_boot_with_timers_off_fires_nothing() {
         return;
     };
     let db = support::connect(&url).await;
-    let (mut child, port) = support::spawn_service_with(&url, &[("AGENT_HOST_TIMERS__POLL_INTERVAL_SECS", "1".to_string()), ("AGENT_HOST_TIMERS__ENABLED", "false".to_string())]);
+    let (mut child, port) = support::spawn_service_with(
+        &url,
+        &[
+            ("AGENT_HOST_TIMERS__POLL_INTERVAL_SECS", "1".to_string()),
+            ("AGENT_HOST_TIMERS__ENABLED", "false".to_string()),
+            // Keep the log short: the harness keeps only its first 16 KiB, and the SQL logs fill it.
+            ("RUST_LOG", "paigasus_agent_host=info,warn".to_string()),
+        ],
+    );
     support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
 
+    // The control that does not depend on the database: the boot built no scheduler task. `serve`
+    // logs "the scheduler loop started" where it spawns the task, before it logs "started". So
+    // once "started" is in the log, the absence of the first line is final.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !child.tail().contains("paigasus-agent-host started") {
+        assert!(std::time::Instant::now() < deadline, "the service did not log that it started; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let log = child.tail();
+    assert!(
+        log.contains("timers.enabled is false; the scheduler loop is off"),
+        "boot must report that the scheduler is off; log:\n{log}"
+    );
+    assert!(!log.contains("the scheduler loop started"), "a disabled boot must build no scheduler task; log:\n{log}");
+
+    // The second control: a due row fires no event.
     let inbox = insert_due_follow_up(&db).await;
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert!(
