@@ -142,10 +142,14 @@ decision.
 - Add the `jiff` feature `tzdb-bundle-always`. Do not try to turn `tzdb-zoneinfo` off (C8).
 - Timer code never uses `jiff`'s global database (`jiff::tz::db()`, `Timestamp::in_tz`,
   `Zoned::now`, and similar). A `TzResolver` port gives a `TimeZone` for a name. Its adapter uses
-  an explicit `TimeZoneDatabase::bundled()` handle. `CronSchedule::parse` and `next_after` take
-  the resolved `TimeZone`.
+  an explicit `TimeZoneDatabase::bundled()` handle. `CronSchedule::parse` takes the
+  `&dyn TzResolver` and resolves the zone itself. `next_after` uses the zone that `parse` stored.
 - So every host (the Mac, CI and the container) uses the same pinned tzdb, and a tzdb update is a
   visible dependency bump of `jiff-tzdb`.
+- Measured: the image smoke (`ci/images/run.sh`, `smoke agent-host`) seeds a due `0 9 * * *`
+  schedule in `Europe/Berlin`. It checks that the agent host resolves the zone and fires. After
+  one poll interval it checks that exactly one event exists. That exact check is skipped from
+  08:58 to 09:01 Berlin time, when a second fire is correct.
 - The required check is a unit test: `TimeZoneDatabase::bundled().get("Europe/Berlin")` succeeds.
   It fails without the feature on every host. The image smoke test (`build + smoke`) resolves
   `Europe/Berlin` in the container as a second control.
@@ -310,8 +314,10 @@ CREATE INDEX timer_inbox_agent_created ON timer (inbox_id, created_at) WHERE ori
 - Two existing tests count migration steps back from the newest: `tests/schema_pg.rs:164`
   (`down(Some(1))` for m0003) and `tests/memory_pg.rs:346` (`down(Some(2))` for m0002). Both
   become one step larger.
-- Rollback note for the PR: a binary built before m0004 probably refuses to start on a database
-  that has m0004 applied. The builder measures this and states the result in the PR.
+- Rollback, measured: a binary built before m0004 refuses to start on a database that has m0004
+  applied. The migration run fails with `Migration file of version '<version>' is missing, this
+  migration has been applied but its file is missing`. The test used a foreign version row, not a
+  real old binary. State this result in the PR.
 
 ### 7.2 A transactional inbox insert
 
@@ -469,7 +475,7 @@ neither, give a refusal text.
 |---|---|---|---|
 | `schedule_follow_up` | `at` (RFC 3339 with offset) or `in_seconds`, exactly one; `note`; `new_thread` (bool, default false) | `Write` | The new timer id and the due time in UTC |
 | `create_schedule` | `cron`, `tz`, `note` | `Write` | The new timer id and the next three slots, in the zone and in UTC |
-| `list_timers` | none | `Read` | The active `agent` timers of the inbox: stored, plus buffered inserts, minus buffered cancels |
+| `list_timers` | none | `ReadOnly` (`ToolEffect::ReadOnly`) | The active `agent` timers of the inbox: stored, plus buffered inserts, minus buffered cancels |
 | `cancel_timer` | `timer_id` | `Write` | Confirmation, or a refusal |
 
 - A follow-up gets the run's thread. With `new_thread: true` it gets no thread. A schedule gets
@@ -499,7 +505,10 @@ The tool refuses, with a text that names the limit and the value:
   `min_schedule_interval_secs`. The walk measures gaps on the civil slot sequence, before the
   DST resolution, so a DST change does not make a normal schedule fail. The actual gap between
   two fires can differ from the civil gap by up to one DST step. The walk covers the next 366
-  days and stops at the first gap below the minimum, so an every-minute pattern fails at once;
+  days and stops at the first gap below the minimum, so an every-minute pattern fails at once.
+  Measured: an every-minute pattern first took 1.24 s in a debug build. So the walk has an early
+  exit at the five-field floor of 60 s. A minimum of 60 s or less passes with no walk. The walk
+  also stops when the smallest gap seen equals 60 s, because no five-field gap is smaller;
 - a schedule with no slot in the next `max_horizon_days`;
 - a create that makes the active `agent` timers more than `max_active_per_inbox`. The count is a
   fresh read of `active_agent_ids`, minus the ids of buffered cancels that are in that set, plus
@@ -579,8 +588,8 @@ The event is a full CloudEvents structured envelope, built with `paigasus-cloude
 - `time` = the transaction's `now`. It is the actual fire time.
 - `threadid` = the timer's thread, if it has one. The SMA-787 insert drops a thread that is not
   in the inbox, and the event then starts a fresh thread.
-- `schemaversion` and `actorprn` follow the SMA-787 rules for host-made events. The builder reads
-  them from SMA-787 and the ADR (e), and states the choice in the plan.
+- `datacontenttype` = `application/json`. `schemaversion` = `1`, as an integer extension. The
+  envelope has no `actorprn` and no `subject`.
 - `data` = the proto3 JSON of a new `agents/v1` message (C9):
 
   ```proto
@@ -597,7 +606,8 @@ The event is a full CloudEvents structured envelope, built with `paigasus-cloude
   ```
 
   The JSON names are `timerId`, `fireAt` and so on. There is no `firedAt`: the envelope `time`
-  holds it (rule 4). The builder follows the enum rules of `agents.proto`.
+  holds it (rule 4). The builder follows the enum rules of `agents.proto`. The Rust side checks `data` against the
+  `TimerFired` descriptor in `FILE_DESCRIPTOR_SET`.
 - The inbox event `id` is a new UUID v7 (the existing id adapter).
 - Tests pin both `source` strings, the `type`, the `id` text, and parse the built event back
   into `TimerFired`.
@@ -700,7 +710,8 @@ The database clock cannot be moved, so the DST and outage proof is in the pure l
   - A recovery at the second 01:15 of a fall-back day does not fire the 01:30 slot again (R4).
 - **Outage across a DST change, pure.** A daily 09:00 Berlin schedule with a stored slot three
   days before the spring change, and `now` one hour after the change. Assert one fire,
-  `fire_at` = the stored slot, the event id text, and the next slot 09:00 CEST on the next day.
+  `fire_at` = the stored slot, the event id text, and the next slot 09:00 CEST on the same local day as `now`
+  (2026-03-29).
 - **tzdb rule change, pure.** Two `TzResolver` fakes with different rules for one zone. The walk
   from the stored civil slot gives no extra fire.
 - **Restart, Postgres.** A daily schedule whose stored slot is in the past. One pass gives exactly
@@ -818,5 +829,4 @@ From the second adversarial challenge (approve with changes), all folded in:
 - The module layout inside the two crates.
 - The production `bound` of the walk in §6.2.
 - The exact backoff curve in §11.1.
-- `schemaversion` and `actorprn` for the timer event, from the SMA-787 rules (§11.2).
 - How the crash test stops a pass between the insert and the commit (§14.1).
