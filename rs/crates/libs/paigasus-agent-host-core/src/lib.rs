@@ -9,8 +9,10 @@ pub mod deferral;
 pub mod error;
 pub mod ids;
 pub mod inbox;
+pub mod memory;
 pub mod outbox;
 pub mod ports;
+pub mod render;
 pub mod run;
 pub mod timer;
 
