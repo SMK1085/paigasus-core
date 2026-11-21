@@ -160,14 +160,21 @@ check_app() {
     if [ "$crc" -eq 0 ] || ! cmp -s "$FILE" "$COMMITTED"; then
       diff -u --label "working-tree $FILE" --label "generated $FILE" "$FILE" "$GEN/next-env.d.ts" || true
     fi
-    INSTALL_TMP="$(mktemp "$APP/.next-env.d.ts.XXXXXX")" || { INSTALL_TMP=""; echo "next-env gate: mktemp failed in $APP." >&2; return 2; }
-    # mktemp makes the file with mode 0600. `cp -p` first gives it the real file's mode, and the
-    # second `cp` then writes the generated content into it.
-    if ! cp -p "$FILE" "$INSTALL_TMP" || ! cp "$GEN/next-env.d.ts" "$INSTALL_TMP" || ! mv -f "$INSTALL_TMP" "$FILE"; then
-      echo "next-env gate: could not install the regenerated $FILE." >&2
-      return 2
+    # The negative control sets NEXT_ENV_NO_INSTALL=1 for its children. A child must not repair
+    # the working tree: it would consume a working-tree-only drift, and the real run after the
+    # control would then pass (CodeRabbit, PR 521).
+    if [ "${NEXT_ENV_NO_INSTALL-}" = 1 ]; then
+      echo "next-env gate: NEXT_ENV_NO_INSTALL=1, so $FILE stays as it is." >&2
+    else
+      INSTALL_TMP="$(mktemp "$APP/.next-env.d.ts.XXXXXX")" || { INSTALL_TMP=""; echo "next-env gate: mktemp failed in $APP." >&2; return 2; }
+      # mktemp makes the file with mode 0600. `cp -p` first gives it the real file's mode, and the
+      # second `cp` then writes the generated content into it.
+      if ! cp -p "$FILE" "$INSTALL_TMP" || ! cp "$GEN/next-env.d.ts" "$INSTALL_TMP" || ! mv -f "$INSTALL_TMP" "$FILE"; then
+        echo "next-env gate: could not install the regenerated $FILE." >&2
+        return 2
+      fi
+      INSTALL_TMP=""
     fi
-    INSTALL_TMP=""
   fi
 
   echo "" >&2
@@ -303,6 +310,15 @@ assert_no_leftover() {
   done
 }
 
+# The content hash and mode of every app's working-tree next-env.d.ts, one line per app.
+worktree_files() {
+  local a h
+  for a in "${apps[@]}"; do
+    h="$(git hash-object --no-filters -- "$a/next-env.d.ts")" || negctl_infra "git hash-object failed for $a/next-env.d.ts"
+    printf '%s %s %s\n' "$a" "$h" "$(ls -l "$a/next-env.d.ts" | cut -c1-10)"
+  done
+}
+
 negative_control() {
   local real_index idx_drift idx_untracked out_drift out_untracked
   local a f blob staged rc_drift rc_untracked n_marker fails fails_row
@@ -326,6 +342,9 @@ negative_control() {
   real_index="$(git rev-parse --git-path index)" || negctl_infra "git rev-parse --git-path index failed"
   [ -f "$real_index" ] || negctl_infra "the real index '$real_index' does not exist"
   real_index_entries > "$NEGCTL_TMP/index-before"
+  worktree_files > "$NEGCTL_TMP/worktree-before"
+  # The children must not write the working tree (see check_app). The post-condition below checks it.
+  export NEXT_ENV_NO_INSTALL=1
   mkdir "$NEGCTL_TMP/child-tmp" || negctl_infra "cannot make $NEGCTL_TMP/child-tmp"
   fails=0
 
@@ -409,6 +428,8 @@ negative_control() {
   # Post-condition: the real index entries did not change.
   real_index_entries > "$NEGCTL_TMP/index-after"
   cmp -s "$NEGCTL_TMP/index-before" "$NEGCTL_TMP/index-after" || negctl_infra "the real index entries for next-env.d.ts changed during the control"
+  worktree_files > "$NEGCTL_TMP/worktree-after"
+  cmp -s "$NEGCTL_TMP/worktree-before" "$NEGCTL_TMP/worktree-after" || negctl_infra "the working-tree next-env.d.ts files changed during the control"
 
   if [ "$fails" -ne 0 ]; then
     echo "next-env-drift negative control: $fails check(s) failed" >&2

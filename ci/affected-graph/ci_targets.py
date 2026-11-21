@@ -1649,6 +1649,11 @@ NEXT_ENV_SH_CALL_SITES = (
     'if ! grep -qF -- "\'$a/next-env.d.ts\' exists but is NOT tracked by git" "$out_untracked"; then',
     # The real-index post-condition and the failure guard.
     'cmp -s "$NEGCTL_TMP/index-before" "$NEGCTL_TMP/index-after" || negctl_infra "the real index entries for next-env.d.ts changed during the control"',
+    'cmp -s "$NEGCTL_TMP/worktree-before" "$NEGCTL_TMP/worktree-after" || negctl_infra "the working-tree next-env.d.ts files changed during the control"',
+    # The children must not repair the working tree (CodeRabbit, PR 521): the export in the
+    # control and the guard around the install in check_app.
+    'export NEXT_ENV_NO_INSTALL=1',
+    'if [ "${NEXT_ENV_NO_INSTALL-}" = 1 ]; then',
     'if [ "$fails" -ne 0 ]; then',
     # The real run: the drift assertion in check_app, and real_run's aggregation and exit. The
     # assertion is the committed-blob read, the diff of the committed copy with the generated
