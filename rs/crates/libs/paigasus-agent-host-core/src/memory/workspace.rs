@@ -191,6 +191,7 @@ impl MemoryWorkspace {
         match file {
             Some(_) if listed_absent => Ok(true),
             Some(f) => {
+                self.resight.remove(path);
                 self.known.insert(
                     path.clone(),
                     Known {
@@ -202,6 +203,7 @@ impl MemoryWorkspace {
                 Ok(true)
             }
             None => {
+                self.resight.remove(path);
                 self.known.insert(
                     path.clone(),
                     Known {
@@ -266,8 +268,8 @@ impl MemoryWorkspace {
     /// The early check of a directory. It lists `dir` in the store and compares each row with what
     /// the run saw. A stored path that the run saw with another version, or saw as absent, is a
     /// conflict. A path that the run saw as present and that the store no longer holds is a
-    /// conflict. A stored path that the run never saw, or that has a re-sight mark, becomes a first
-    /// sight. It returns the first conflict in byte order. Buffered changes do not count as store
+    /// conflict. A stored path that the run never saw, or that has a re-sight mark and no `known`
+    /// entry, becomes a first sight. It returns the first conflict in byte order. Buffered changes do not count as store
     /// state. When it passes, the fresh rows replace the cached rows of `dir`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) async fn check_dir(&mut self, dir: &MemoryDir) -> Result<(), WorkspaceError> {
@@ -278,10 +280,11 @@ impl MemoryWorkspace {
         let mut first = None;
         for path in candidates {
             let conflict = match stored.get(path) {
-                Some(_) if self.resight.contains(path) => false,
+                // A `known` entry is always compared. The re-sight mark only lifts the absence that
+                // a covering listing implies.
                 Some(v) => match self.known.get(path) {
                     Some(k) => k.version.as_ref() != Some(v),
-                    None => self.listed.iter().any(|d| d.contains(path)),
+                    None => !self.resight.contains(path) && self.listed.iter().any(|d| d.contains(path)),
                 },
                 // Only a path that the run saw as present gets here.
                 None => true,
@@ -450,6 +453,8 @@ impl MemoryWorkspace {
         match seen {
             Some(v) if v != fetched_version => Err(self.conflict(path, fetched.is_some())),
             Some(v) => {
+                // A new `known` entry is a new baseline, so the re-sight mark is used up.
+                self.resight.remove(path);
                 let known = self.known.entry(path.clone()).or_insert(Known {
                     version: None,
                     size: 0,
@@ -464,6 +469,7 @@ impl MemoryWorkspace {
                 Ok(v)
             }
             None => {
+                self.resight.remove(path);
                 self.known.insert(
                     path.clone(),
                     Known {
@@ -1130,6 +1136,44 @@ mod tests {
             ws.check_dir(&d("/tasks")).await,
             Err(WorkspaceError::Conflict {
                 path: p("/tasks/b"),
+                also: Vec::new()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_sight_mark_keeps_the_version_check_of_a_later_baseline() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "v1").await;
+        ws.read(&p("/tasks/a")).await.unwrap();
+        direct(&f, &s, "/tasks/a", "v2").await;
+        assert!(matches!(ws.write(&p("/tasks/a"), "mine".into()).await, Err(WorkspaceError::Conflict { .. })));
+        // The second write is a plain first sight of v2.
+        ws.write(&p("/tasks/a"), "mine".into()).await.unwrap();
+        direct(&f, &s, "/tasks/a", "v3").await;
+        assert_eq!(
+            ws.check_dir(&d("/tasks")).await,
+            Err(WorkspaceError::Conflict {
+                path: p("/tasks/a"),
+                also: Vec::new()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_sight_mark_keeps_the_check_of_a_later_absent_baseline() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "v1").await;
+        ws.read(&p("/tasks/a")).await.unwrap();
+        direct_delete(&f, &s, "/tasks/a").await;
+        assert!(matches!(ws.write(&p("/tasks/a"), "mine".into()).await, Err(WorkspaceError::Conflict { .. })));
+        // The second write is a plain first sight of the absent path.
+        ws.write(&p("/tasks/a"), "mine".into()).await.unwrap();
+        direct(&f, &s, "/tasks/a", "theirs").await;
+        assert_eq!(
+            ws.check_dir(&d("/tasks")).await,
+            Err(WorkspaceError::Conflict {
+                path: p("/tasks/a"),
                 also: Vec::new()
             })
         );
