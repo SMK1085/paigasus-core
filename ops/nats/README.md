@@ -16,7 +16,7 @@ only the mechanics of using the directory; `permissions.md` covers the *why*.
 |---|---|
 | `subjects.env` | The single source of truth for every subject/inbox-prefix grant. `provision.sh` and `check-subjects.sh` both source it — edit grants here, nowhere else. |
 | `provision-decisions.sh` | Idempotent. Mints the `PAIGASUS_GATEWAY` account, its three decision-log users and creds, and (with `PUSH=1`) the `GATEWAY_DECISIONS` stream. `provision.sh` calls it for a new environment. |
-| `provision.sh` | Mints the IAM account, its three users, the `.creds` files, the stream, and the durable consumer against a real broker. At the end it calls `provision-decisions.sh` for the `PAIGASUS_GATEWAY` account. Run once per environment, by hand. |
+| `provision.sh` | Mints the IAM account, its four users, the `.creds` files, the stream, and the durable consumers against a real broker. At the end it calls `provision-decisions.sh` for the `PAIGASUS_GATEWAY` account. Run once per environment, by hand. |
 | `check-subjects.sh` | CI gate: asserts `test/accounts.conf.tmpl` grants *exactly* the subjects declared in `subjects.env`, in both directions. Keeps the artifact that is tested from drifting away from the artifact that is deployed. |
 | `permissions.md` | The design rationale behind every grant — read this before editing `subjects.env`. |
 | `test/accounts.conf.tmpl` | A static-nkey mirror of the production account, for a `nats-server` fixture in integration tests. `{{SYS_NKEY}}`, `{{PUBLISHER_NKEY}}`, `{{CONSUMER_NKEY}}`, `{{PROVISIONER_NKEY}}`, `{{GW_DEC_PUBLISHER_NKEY}}`, `{{GW_DEC_READER_NKEY}}` and `{{GW_DEC_PROVISIONER_NKEY}}` are rendered at test time with freshly minted public keys — never committed key material. |
@@ -28,7 +28,7 @@ only the mechanics of using the directory; `permissions.md` covers the *why*.
 Provisioning a real environment needs **three** separate tools — no single one of them is
 sufficient:
 
-- **`nsc`** — mints the operator, the `PAIGASUS_IAM` account, its three users, and their `.creds`
+- **`nsc`** — mints the operator, the `PAIGASUS_IAM` account, its four users, and their `.creds`
   files (JWT + nkey seed). This is account/identity management; it never talks to a running
   broker.
 - **`nats`** (the CLI) — creates the `IAM_EVENTS` stream and the `gateway-cache-invalidator`
@@ -51,9 +51,12 @@ to recognize them are genuinely separate steps with a manual action in between:
 3. **Restart** the broker so it picks up the resolver config.
 4. Re-run with `PUSH=1`: `PUSH=1 NATS_URL=tls://<broker>:4222 ./provision.sh`. This pushes the
    account JWT to the now-listening broker (`nsc push`) and then, against that live broker,
-   creates the `IAM_EVENTS` stream and the `gateway-cache-invalidator` durable consumer.
+   creates the `IAM_EVENTS` stream and the `gateway-cache-invalidator` and `agent-host-inbox`
+   durable consumers.
 
-Deploy `iam-publisher.creds` with `paigasus-iam` and `gateway-consumer.creds` with the gateway.
+Deploy `iam-publisher.creds` with `paigasus-iam`, `gateway-consumer.creds` with the gateway and
+`agent-host-consumer.creds` with the agent host. The same run creates the durable `agent-host-inbox`
+(filter `iam.organization.>`, SMA-787); the agent host never creates a consumer itself.
 **Never** ship `iam-provisioner.creds` in a deployment — see `permissions.md` §9 for why it is an
 operator artifact, not a service credential.
 
@@ -90,7 +93,7 @@ nsc edit user --account PAIGASUS_IAM --name <user> --allow-pub '<subject>'
 nsc generate creds --account PAIGASUS_IAM --name <user> > <path-to-deploy>.creds
 ```
 
-`<user>` is one of `iam-publisher` / `gateway-consumer` / `iam-provisioner`; `<subject>` is exactly
+`<user>` is one of `iam-publisher` / `gateway-consumer` / `agent-host-consumer` / `iam-provisioner`; `<subject>` is exactly
 what you added to that user's `*_PUB`/`*_SUB` array in `subjects.env` (keep the file and `nsc`'s
 local state in sync by hand — editing one does not update the other).
 
