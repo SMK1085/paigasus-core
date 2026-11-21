@@ -203,11 +203,18 @@ pub struct Timer {
     next_fire_at: Timestamp,
 }
 
-/// Round a time up to a whole second.
+/// Round a time up to a whole second. A time in the last second before `Timestamp::MAX` has no
+/// whole-second value in range, so it gives `None`.
+#[must_use]
+pub fn checked_round_up_to_second(t: Timestamp) -> Option<Timestamp> {
+    t.round(jiff::TimestampRound::new().smallest(jiff::Unit::Second).mode(jiff::RoundMode::Ceil)).ok()
+}
+
+/// Round a time up to a whole second. Use it only for a time that code made, never for a time
+/// that the model gave: use `checked_round_up_to_second` for that.
 #[must_use]
 pub fn round_up_to_second(t: Timestamp) -> Timestamp {
-    t.round(jiff::TimestampRound::new().smallest(jiff::Unit::Second).mode(jiff::RoundMode::Ceil))
-        .expect("rounding a timestamp up to a second stays in range")
+    checked_round_up_to_second(t).expect("rounding a timestamp up to a second stays in range")
 }
 
 /// Format a firing time as `2026-03-29T01:00:00Z`.

@@ -9,7 +9,7 @@ use std::time::Duration;
 use jiff::{SignedDuration, Timestamp};
 
 use super::text::refusal_text;
-use super::{Note, NoteError, Timer, TimerCaps, TimerChanges, TimerKind, TimerOrigin, TimerParts, TimerStatus, round_up_to_second};
+use super::{Note, NoteError, Timer, TimerCaps, TimerChanges, TimerKind, TimerOrigin, TimerParts, TimerStatus, checked_round_up_to_second};
 use crate::ids::{InboxId, ThreadId, TimerId};
 use crate::ports::{IdSource, RepositoryError, RunClock, TimerRepository, TzResolver};
 
@@ -241,7 +241,12 @@ impl TimerWorkspace {
                 }
             },
         };
-        let due = round_up_to_second(raw);
+        let Some(due) = checked_round_up_to_second(raw) else {
+            return Err(TimerRefusal::TooLate {
+                days: raw.duration_since(now).as_secs() / SECS_PER_DAY,
+                max: self.caps.max_horizon_days,
+            });
+        };
         if due <= now {
             return Err(TimerRefusal::NotInFuture { due, now });
         }
@@ -446,6 +451,15 @@ mod tests {
             Err(TimerRefusal::TooLate { max: 366, .. })
         ));
         assert!(matches!(ws.schedule_follow_up(FollowUpDue::InSeconds(i64::MIN), "n", false).await, Err(TimerRefusal::NotInFuture { now: n, .. }) if n == now));
+        // The last second before the maximum cannot be rounded up. It is a refusal, not a panic.
+        assert!(matches!(
+            ws.schedule_follow_up(FollowUpDue::At(Timestamp::MAX), "n", false).await,
+            Err(TimerRefusal::TooLate { max: 366, .. })
+        ));
+        assert!(matches!(
+            ws.schedule_follow_up(FollowUpDue::At(Timestamp::MAX - SignedDuration::from_millis(500)), "n", false).await,
+            Err(TimerRefusal::TooLate { max: 366, .. })
+        ));
         assert!(ws.seal().is_empty());
     }
 
