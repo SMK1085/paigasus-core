@@ -15,10 +15,19 @@
 # reported the file clean and it took `--force` to surface. Hence this gate keys on the
 # lockfile (see moon.yml), which is what actually drives this file's content.
 #
-# WHY DELETE-THEN-REGENERATE — diffing a file that nothing rewrote is a vacuous assertion:
-# if a future Next stops emitting next-env.d.ts, a naive `typegen && git diff` would pass
-# forever while guarding nothing. Removing it first makes the gate self-proving — an absent
-# file is a loud failure, not a silent pass.
+# WHY REGENERATE IN A SCRATCH COPY — diffing a file that nothing rewrote is a vacuous assertion.
+# If a future Next stops emitting next-env.d.ts, a naive `typegen && git diff` passes forever and
+# guards nothing. So typegen must start from an ABSENT file. Next 16.4.6 `writeAppTypeDeclarations`
+# skips the write when the content is equal, and it keeps the line ending of an existing file. An
+# absent file is a loud failure, not a silent pass.
+#
+# The gate does NOT remove the real file. It copies the app's files, without next-env.d.ts, into a
+# scratch directory and runs typegen there. The old gate removed the tracked file in place until
+# the follow-up sweep after PR 516. While the file was absent, concurrent moon tasks saw a tracked
+# file missing. That broke repo:affected-smoke on PR 515, and PR 516 added an index fallback to
+# ci/affected-graph/python_env_ban.py. The gate then compares the generated file with the
+# committed blob and with the working-tree file. On drift it replaces the working-tree file with
+# one atomic `mv`. No path removes or truncates the real file.
 #
 # THE NEGATIVE CONTROL (SMA-637) — `--negative-control` proves that this gate can still go red.
 # It copies the real git index to a temporary file and changes the copy for every app: row N1
@@ -36,25 +45,25 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 cd "$(git rev-parse --show-toplevel)"
 
-# If typegen dies before writing a file, restore it rather than leaving the tree broken. A
-# DRIFTING file is deliberately left in place: it is the corrected content, ready to commit.
-#
-# RESTORE FROM A BACKUP, NEVER FROM THE INDEX. `git checkout -- "$f"` restores the INDEX copy,
-# which silently discards any UNSTAGED working-tree content the file had before `rm`. That is a
-# reachable data loss, not a hypothetical: this gate's own drift path leaves a regenerated
-# next-env.d.ts unstaged, so a second run whose typegen failed would have destroyed it.
-RESTORE_FILES=()
-restore_if_absent() {
-  local f
-  for f in "${RESTORE_FILES[@]:-}"; do
-    [ -n "$f" ] || continue
-    if [ ! -f "$f" ] && [ -f "$f.next-env-bak" ]; then
-      mv -f "$f.next-env-bak" "$f"
-    fi
-    rm -f "$f.next-env-bak"
-  done
+# One scratch directory per run, made on the first use. The EXIT trap removes it, and it removes
+# an install temp file that a failed `mv` left behind. Nothing here touches the real file.
+GEN_TMP=""
+INSTALL_TMP=""
+cleanup_gen() {
+  if [ -n "$INSTALL_TMP" ]; then
+    rm -f "$INSTALL_TMP"
+  fi
+  if [ -n "$GEN_TMP" ]; then
+    rm -rf "$GEN_TMP"
+  fi
 }
-trap restore_if_absent EXIT
+trap cleanup_gen EXIT
+
+make_gen_tmp() {
+  [ -z "$GEN_TMP" ] || return 0
+  GEN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/next-env-gen.XXXXXX")" || { GEN_TMP=""; return 1; }
+  GEN_TMP="$(cd "$GEN_TMP" && pwd -P)" || return 1
+}
 
 check_app() {
   local APP="$1"
@@ -75,40 +84,102 @@ check_app() {
     return 2
   fi
 
-  # Back up BEFORE removing; the EXIT trap restores from this copy, not from the index.
-  if ! cp "$FILE" "$FILE.next-env-bak"; then
-    echo "next-env gate: could not back up $FILE before regenerating it." >&2
+  if ! make_gen_tmp; then
+    echo "next-env gate: could not make a scratch directory for typegen." >&2
     return 2
   fi
-  rm -f "$FILE"
-  RESTORE_FILES+=("$FILE")
+  local GEN="$GEN_TMP/$(basename "$APP")"
+  local LIST="$GEN_TMP/$(basename "$APP").files"
+  local COMMITTED="$GEN_TMP/$(basename "$APP").committed"
+  local f rel
+
+  # The scratch copy: every tracked or untracked, not ignored file of the app, except
+  # next-env.d.ts. The list goes to a file first, so that a failed `git ls-files` is seen.
+  if ! git ls-files -z -co --exclude-standard -- "$APP" > "$LIST"; then
+    echo "next-env gate: git ls-files failed for $APP." >&2
+    return 2
+  fi
+  mkdir -p "$GEN" || return 2
+  while IFS= read -r -d '' f; do
+    [ "$f" != "$FILE" ] || continue
+    # Copy regular files only. A symlink or a deleted tracked path is skipped.
+    if [ ! -f "$f" ] || [ -L "$f" ]; then
+      continue
+    fi
+    rel="${f#"$APP"/}"
+    if ! mkdir -p "$GEN/$(dirname "$rel")" || ! cp "$f" "$GEN/$rel"; then
+      echo "next-env gate: could not copy $f into the scratch directory." >&2
+      return 2
+    fi
+  done < "$LIST"
+  if [ -e "$GEN/next-env.d.ts" ]; then
+    echo "next-env gate: the scratch copy of $APP already holds next-env.d.ts." >&2
+    return 2
+  fi
+  if ! ln -s "$PWD/$APP/node_modules" "$GEN/node_modules"; then
+    echo "next-env gate: could not link $APP/node_modules into the scratch directory." >&2
+    return 2
+  fi
 
   # `next typegen` regenerates route/page/layout types without a full production build
-  # (~1.5s vs ~5s). It writes into "$APP"/.next/, which is why moon.yml orders this task after
-  # iam-console-ts:build rather than letting the two race on that directory.
-  if ! pnpm --dir "$APP" exec next typegen >/dev/null 2>&1; then
+  # (~1.5s vs ~5s). It writes into the scratch copy's .next/, not into "$APP"/.next/.
+  if ! pnpm --dir "$APP" exec next typegen "$GEN" >/dev/null 2>&1; then
     echo "next-env gate: 'next typegen' failed in $APP." >&2
-    pnpm --dir "$APP" exec next typegen >&2 || true
+    pnpm --dir "$APP" exec next typegen "$GEN" >&2 || true
     return 2
   fi
 
   # Control: typegen must actually have produced the file. Without this the gate would go quietly
   # vacuous the day Next changes how this file is emitted.
-  if [ ! -f "$FILE" ]; then
+  if [ ! -f "$GEN/next-env.d.ts" ]; then
     echo "next-env gate: 'next typegen' completed but did not emit $FILE." >&2
     echo "  Next no longer generates this file the same way, so this gate is guarding nothing." >&2
     return 2
   fi
 
-  if ! git diff --exit-code -- "$FILE"; then
-    echo "" >&2
-    echo "next-env gate: the committed $FILE does not match what Next generates." >&2
-    echo "  The regenerated file has been left in your working tree — commit it." >&2
-    return 1
+  # The committed copy is the index blob. The negative control plants its rows there.
+  if ! git cat-file blob ":$FILE" > "$COMMITTED"; then
+    echo "next-env gate: git cat-file blob :$FILE failed." >&2
+    return 2
+  fi
+  local crc=0
+  diff -u --label "committed $FILE" --label "generated $FILE" "$COMMITTED" "$GEN/next-env.d.ts" || crc=$?
+  if [ "$crc" -gt 1 ]; then
+    echo "next-env gate: diff failed (rc $crc) on the committed $FILE." >&2
+    return 2
+  fi
+  if [ "$crc" -eq 0 ] && cmp -s "$FILE" "$GEN/next-env.d.ts"; then
+    echo "next-env gate: $FILE matches 'next typegen' output."
+    return 0
   fi
 
-  echo "next-env gate: $FILE matches 'next typegen' output."
-  return 0
+  # Drift. If the working-tree file differs from the generated file, show the diff (unless it is
+  # the committed diff again) and install the generated file atomically: copy it to a temp file in
+  # the same directory, then `mv -f` it over the real file.
+  if ! cmp -s "$FILE" "$GEN/next-env.d.ts"; then
+    if [ "$crc" -eq 0 ] || ! cmp -s "$FILE" "$COMMITTED"; then
+      diff -u --label "working-tree $FILE" --label "generated $FILE" "$FILE" "$GEN/next-env.d.ts" || true
+    fi
+    INSTALL_TMP="$(mktemp "$APP/.next-env.d.ts.XXXXXX")" || { INSTALL_TMP=""; echo "next-env gate: mktemp failed in $APP." >&2; return 2; }
+    # mktemp makes the file with mode 0600. `cp -p` first gives it the real file's mode, and the
+    # second `cp` then writes the generated content into it.
+    if ! cp -p "$FILE" "$INSTALL_TMP" || ! cp "$GEN/next-env.d.ts" "$INSTALL_TMP" || ! mv -f "$INSTALL_TMP" "$FILE"; then
+      echo "next-env gate: could not install the regenerated $FILE." >&2
+      return 2
+    fi
+    INSTALL_TMP=""
+  fi
+
+  echo "" >&2
+  if [ "$crc" -eq 1 ]; then
+    echo "next-env gate: the committed $FILE does not match what Next generates." >&2
+    echo "  The regenerated file is left in your working tree. Commit it." >&2
+  else
+    echo "next-env gate: the working-tree $FILE does not match what Next generates." >&2
+    echo "  The committed file matches. Only the working-tree file drifted." >&2
+    echo "  The regenerated file is left in your working tree. It equals the committed file." >&2
+  fi
+  return 1
 }
 
 # SMA-512: this gate checked ONE hardcoded app until a second console zone landed, and it would
@@ -192,12 +263,12 @@ real_run() {
 NEGCTL_TMP=""
 
 # One EXIT handler in negctl mode: it removes the temporary files, then does what the check-mode
-# handler does. It REPLACES `trap restore_if_absent EXIT`, so it must call restore_if_absent itself.
+# handler does. It REPLACES `trap cleanup_gen EXIT`, so it must call cleanup_gen itself.
 negctl_cleanup() {
   if [ -n "$NEGCTL_TMP" ]; then
     rm -rf "$NEGCTL_TMP"
   fi
-  restore_if_absent
+  cleanup_gen
 }
 
 negctl_infra() {
@@ -213,13 +284,22 @@ real_index_entries() {
   done
 }
 
-# The child has its own EXIT trap, which restores its backups. Prove that it did.
-assert_no_backup() {
-  local a
-  for a in "${apps[@]}"; do
-    if [ -e "$a/next-env.d.ts.next-env-bak" ]; then
-      negctl_infra "[$1] the child left $a/next-env.d.ts.next-env-bak behind"
+# The child has its own EXIT trap, which removes its scratch directory and any install temp file.
+# The child runs with TMPDIR set to "$NEGCTL_TMP/child-tmp", so its scratch directory is there.
+# Prove that the trap removed both.
+assert_no_leftover() {
+  local a left
+  for left in "$NEGCTL_TMP"/child-tmp/next-env-gen.*; do
+    if [ -e "$left" ]; then
+      negctl_infra "[$1] the child left the scratch directory $left behind"
     fi
+  done
+  for a in "${apps[@]}"; do
+    for left in "$a"/.next-env.d.ts.*; do
+      if [ -e "$left" ]; then
+        negctl_infra "[$1] the child left the install temp file $left behind"
+      fi
+    done
   done
 }
 
@@ -246,6 +326,7 @@ negative_control() {
   real_index="$(git rev-parse --git-path index)" || negctl_infra "git rev-parse --git-path index failed"
   [ -f "$real_index" ] || negctl_infra "the real index '$real_index' does not exist"
   real_index_entries > "$NEGCTL_TMP/index-before"
+  mkdir "$NEGCTL_TMP/child-tmp" || negctl_infra "cannot make $NEGCTL_TMP/child-tmp"
   fails=0
 
   # ---- N1 drift: the staged blob of every app gets one extra last line. ----
@@ -263,8 +344,8 @@ negative_control() {
     GIT_INDEX_FILE="$idx_drift" git update-index --cacheinfo "100644,$blob,$f" || negctl_infra "[N1] git update-index --cacheinfo failed for $f"
   done
   rc_drift=0
-  GIT_INDEX_FILE="$idx_drift" "$BASH" "$SELF" >"$out_drift" 2>&1 || rc_drift=$?
-  assert_no_backup N1
+  GIT_INDEX_FILE="$idx_drift" TMPDIR="$NEGCTL_TMP/child-tmp" "$BASH" "$SELF" >"$out_drift" 2>&1 || rc_drift=$?
+  assert_no_leftover N1
   # An infrastructure failure must never be reported as drift (see real_run).
   if [ "$rc_drift" -eq 2 ]; then
     echo "INFRA [N1] child exited 2 (infrastructure), expected 1" >&2
@@ -306,8 +387,8 @@ negative_control() {
     fi
   done
   rc_untracked=0
-  GIT_INDEX_FILE="$idx_untracked" "$BASH" "$SELF" >"$out_untracked" 2>&1 || rc_untracked=$?
-  assert_no_backup N2
+  GIT_INDEX_FILE="$idx_untracked" TMPDIR="$NEGCTL_TMP/child-tmp" "$BASH" "$SELF" >"$out_untracked" 2>&1 || rc_untracked=$?
+  assert_no_leftover N2
   fails_row="$fails"
   if [ "$rc_untracked" -ne 2 ]; then
     echo "FAIL [N2] expected rc 2, got $rc_untracked" >&2

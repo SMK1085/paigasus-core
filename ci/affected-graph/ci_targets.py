@@ -1636,7 +1636,7 @@ NEXT_ENV_SH_CALL_SITES = (
     # The control: the refusal of a caller's index (Sven, 2026-10-01).
     'if [ "${GIT_INDEX_FILE+set}" = set ]; then',
     # N1: the child run, the infrastructure arm, the rc guard and the literal checks.
-    'GIT_INDEX_FILE="$idx_drift" "$BASH" "$SELF" >"$out_drift" 2>&1 || rc_drift=$?',
+    'GIT_INDEX_FILE="$idx_drift" TMPDIR="$NEGCTL_TMP/child-tmp" "$BASH" "$SELF" >"$out_drift" 2>&1 || rc_drift=$?',
     'if [ "$rc_drift" -eq 2 ]; then',
     'echo "INFRA [N1] child exited 2 (infrastructure), expected 1" >&2',
     'if [ "$rc_drift" -ne 1 ]; then',
@@ -1644,14 +1644,20 @@ NEXT_ENV_SH_CALL_SITES = (
     'if [ "$n_marker" != "${#apps[@]}" ]; then',
     'if ! grep -qF -- "the committed $a/next-env.d.ts does not match what Next generates" "$out_drift"; then',
     # N2: the child run, the rc guard and the literal check.
-    'GIT_INDEX_FILE="$idx_untracked" "$BASH" "$SELF" >"$out_untracked" 2>&1 || rc_untracked=$?',
+    'GIT_INDEX_FILE="$idx_untracked" TMPDIR="$NEGCTL_TMP/child-tmp" "$BASH" "$SELF" >"$out_untracked" 2>&1 || rc_untracked=$?',
     'if [ "$rc_untracked" -ne 2 ]; then',
     'if ! grep -qF -- "\'$a/next-env.d.ts\' exists but is NOT tracked by git" "$out_untracked"; then',
     # The real-index post-condition and the failure guard.
     'cmp -s "$NEGCTL_TMP/index-before" "$NEGCTL_TMP/index-after" || negctl_infra "the real index entries for next-env.d.ts changed during the control"',
     'if [ "$fails" -ne 0 ]; then',
-    # The real run: the drift assertion in check_app, and real_run's aggregation and exit.
-    'if ! git diff --exit-code -- "$FILE"; then',
+    # The real run: the drift assertion in check_app, and real_run's aggregation and exit. The
+    # assertion is the committed-blob read, the diff of the committed copy with the generated
+    # file, its rc guard, the pass guard and the committed-drift arm.
+    'if ! git cat-file blob ":$FILE" > "$COMMITTED"; then',
+    'diff -u --label "committed $FILE" --label "generated $FILE" "$COMMITTED" "$GEN/next-env.d.ts" || crc=$?',
+    'if [ "$crc" -gt 1 ]; then',
+    'if [ "$crc" -eq 0 ] && cmp -s "$FILE" "$GEN/next-env.d.ts"; then',
+    'if [ "$crc" -eq 1 ]; then',
     'check_app "$APP" || ec=$?',
     'if [ "$ec" -gt "$rc" ]; then',
     'rc="$ec"',
@@ -4431,9 +4437,9 @@ def collect_findings(tasks, t_targets, raw_tasks, scripts, ci_yml, doc_targets, 
          "    A row prefixed `ci/next-env/run.sh:` means one of the pinned lines of that gate is\n"
          "    gone: the flag parse or a dispatch arm, a line of the negative control (a child\n"
          "    run, an rc guard, a literal check, the GIT_INDEX_FILE refusal, the real-index\n"
-         "    check or the failure guard), or a line of the real run (the git diff assertion,\n"
-         "    the aggregation or the final exit). The control can then pass while it proves\n"
-         "    nothing, or the real run can exit 0 on drift.\n"
+         "    check or the failure guard), or a line of the real run (the committed-blob\n"
+         "    diff and its guards, the aggregation or the final exit). The control can then\n"
+         "    pass while it proves nothing, or the real run can exit 0 on drift.\n"
          "    A row prefixed `ci/wasm-lockstep/run.sh:` means one of the pinned lines of that\n"
          "    gate is gone: the flag parse or a dispatch arm, the HEAD lock read, the 3 -> 1\n"
          "    mapping, a checker run or its rc aggregation, the real refusal of the control or\n"
