@@ -49,10 +49,17 @@ pub struct GenRecord {
 }
 
 impl GenRecord {
-    /// Parse a KV value. A value that does not parse gives `None` (the same as a missing entry).
+    /// Parse a KV value. A value that does not parse gives `None` (the same as a missing entry). Only a JSON
+    /// object is a record, and its claim is an object or null: serde also reads a struct from a positional array,
+    /// and the relay never writes one.
     #[must_use]
     pub fn parse(bytes: &[u8]) -> Option<GenRecord> {
-        serde_json::from_slice(bytes).ok()
+        let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+        let claim_ok = value.get("claim").is_none_or(|c| c.is_object() || c.is_null());
+        if !value.is_object() || !claim_ok {
+            return None;
+        }
+        serde_json::from_value(value).ok()
     }
 
     #[must_use]
@@ -704,6 +711,9 @@ mod tests {
         assert_eq!(GenRecord::parse(b"not json"), None);
         assert_eq!(GenRecord::parse(b"{}"), None);
         assert_eq!(GenRecord::parse(b""), None);
+        assert_eq!(GenRecord::parse(br#"["other",1,5,0,null]"#), None, "a positional array is not a record");
+        let array_claim = br#"{"generation":"R","epoch":3,"sample":4,"sampled_at":5,"claim":["n",null]}"#;
+        assert_eq!(GenRecord::parse(array_claim), None, "a positional claim is not a claim");
     }
 
     #[test]

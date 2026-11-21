@@ -785,6 +785,16 @@ fn check_errors(snap: &Tally, kind: &str) -> u64 {
     snap.get("gateway_decision_log_generation_check_errors_total", &[("kind", kind)])
 }
 
+/// Call after a NATS pause. Wait until a KV step fails on its `kv_timeout`: this proves that a step hung on a
+/// KV request. The single-flight flag is then clear, so the next 200 ms tick starts a new step, and that step
+/// hangs for a full `kv_timeout`. The wait of 400 ms puts the caller inside that window, with a KV request in
+/// flight.
+async fn wait_for_a_hung_kv_step(snap: &Tally) {
+    let before = check_errors(snap, "timeout");
+    wait_for("a KV step timed out on the paused NATS", || async { check_errors(snap, "timeout") > before }).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+}
+
 #[tokio::test]
 async fn flushall_with_two_relays_counts_one_reset() {
     let Some((node, redis_url)) = redis_7_4("decision_log_redis relay flushall").await else {
@@ -934,17 +944,16 @@ async fn a_shutdown_during_a_hung_kv_step_ends_in_time() {
         return;
     };
     let recorder = DebuggingRecorder::new();
-    let _snap = Tally::new(recorder.snapshotter());
+    let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
     let admin = test_js(&nats_url).await;
     let v = dl_js::Violations::default();
-    // The KV timeout is longer than the 300 ms wait, so the step is still in flight when NATS comes back.
     let mut s = fast("i1");
     s.kv_timeout = Duration::from_secs(3);
     let relay = Relay::start(connected_slot(&redis_url).await, relay_js(&nats_url, v.clone()).await, s, v);
     wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
     nats.pause().await.expect("pause NATS");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_a_hung_kv_step(&snap).await;
     // The drain budget is 2 s and `kv_timeout` is 3 s.
     let ended = tokio::time::timeout(Duration::from_secs(2 + 3 + 2), relay.shut_down()).await;
     assert!(ended.is_ok(), "the relay did not end within the budget plus the KV timeout");
@@ -969,7 +978,7 @@ async fn a_production_drain_during_a_hung_kv_step_aborts_nothing_and_leaves_no_s
         return;
     };
     let recorder = DebuggingRecorder::new();
-    let _snap = Tally::new(recorder.snapshotter());
+    let snap = Tally::new(recorder.snapshotter());
     let _local = metrics::set_default_local_recorder(&recorder);
     let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
     let admin = test_js(&nats_url).await;
@@ -989,8 +998,7 @@ async fn a_production_drain_during_a_hung_kv_step_aborts_nothing_and_leaves_no_s
     let tasks = runtime::DecisionLogTasks::new(stop, tokio::spawn(async {}), relay, tokio::spawn(async {}));
     wait_for("the first KV record", || async { kv_record(&admin).await.is_some() }).await;
     nats.pause().await.expect("pause NATS");
-    // A step starts within one 200 ms tick and hangs on its KV get.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_a_hung_kv_step(&snap).await;
     tasks.drain(runtime::DECISION_LOG_DRAIN_BUDGET).await;
     assert!(!logs.text().contains("did not stop in time and was aborted"), "the relay outlived the drain budget: {}", logs.text());
     // The same epoch check as above: a step that outlived the relay would run `detect` after NATS comes back.
@@ -1596,6 +1604,25 @@ async fn the_kv_adapter_makes_the_bucket_again_after_it_is_deleted() {
     assert!(again.is_none(), "the new bucket is empty");
 }
 
+/// D9: a call that the step timeout cancels counts as a failure, so it leaves no cached handle.
+#[tokio::test]
+async fn the_kv_adapter_makes_the_handle_again_after_a_cancelled_call() {
+    let Some((nats, url)) = start_nats(None, "decision_log_redis kv adapter cancelled call").await else {
+        return;
+    };
+    let kv = NatsGenKv::new(relay_js(&url, dl_js::Violations::default()).await, entry_key(KEY));
+    kv.create(Bytes::from_static(b"a")).await.expect("create makes the bucket");
+    let admin = test_js(&url).await;
+    admin.delete_stream(format!("KV_{}", dl_js::GEN_BUCKET)).await.expect("admin deletes the bucket stream");
+    nats.pause().await.expect("pause NATS");
+    let cancelled = tokio::time::timeout(Duration::from_millis(300), kv.get()).await;
+    nats.unpause().await.expect("unpause NATS");
+    assert!(cancelled.is_err(), "the get did not hang on a paused NATS: {cancelled:?}");
+    // A kept handle would fail here on the deleted bucket. A new handle makes the bucket again.
+    let again = kv.get().await.expect("the cancelled call left no handle, so the handle is made again");
+    assert!(again.is_none(), "the new bucket is empty");
+}
+
 // ---- The generation record Redis scripts (SMA-821 Task 7) ----
 
 async fn script_conn(url: &str) -> paigasus_redis::RedisHandle {
@@ -1828,6 +1855,12 @@ async fn a_restore_of_an_older_generation_counts_one_reset() {
     wait_for_kv_steps(&admin, 3).await;
     assert_eq!(resets(&snap), 1, "a changed generation counts one reset");
     assert_eq!(kv_record(&admin).await.expect("a record").generation, new, "the KV record holds the new generation, not {old}");
+    // Spec T5: a restore to the generation that Redis held before. It counts one more reset.
+    redis_cli(&node, &["SET", &gen_key(KEY), &old]).await;
+    wait_for("a second reset", || async { resets(&snap) >= 2 }).await;
+    wait_for_kv_steps(&admin, 3).await;
+    assert_eq!(resets(&snap), 2, "a restore of the older generation counts exactly one more reset");
+    assert_eq!(kv_record(&admin).await.expect("a record").generation, old, "the KV record holds the restored generation");
     relay.shut_down().await;
 }
 
@@ -2011,6 +2044,9 @@ async fn a_return_to_an_older_state_of_the_same_generation_counts_one_loss() {
     let keys = [KEY.to_owned(), gen_key(KEY), epoch_key(KEY), "side:stream".to_owned(), "side:gen".to_owned(), "side:epoch".to_owned()];
     eval(&node, "for i = 1, 3 do redis.call('SET', KEYS[i + 3], redis.call('DUMP', KEYS[i])) end return 1", &keys).await;
     let generation = gen_value(&node).await;
+    // An entry after the snapshot: the restore removes it, and the KV holds the larger sample before the restore.
+    xadd(&node, &event_with_org(3, ORG_A), 0).await;
+    wait_for("the KV record holds the sample 3", || async { kv_record(&admin).await.is_some_and(|r| r.sample == Some(3)) }).await;
     wait_for_kv_steps(&admin, 3).await;
     eval(
         &node,
@@ -2021,9 +2057,9 @@ async fn a_return_to_an_older_state_of_the_same_generation_counts_one_loss() {
     wait_for("one reset", || async { resets(&snap) >= 1 }).await;
     wait_for_kv_steps(&admin, 3).await;
     assert_eq!(resets(&snap), 1, "a return to an older state counts one loss");
-    assert_eq!(lost(&snap), 2, "the estimate is the KV sample");
+    assert_eq!(lost(&snap), 3, "the estimate is the KV sample from before the restore");
     assert_eq!(gen_value(&node).await, generation, "the generation is unchanged");
-    assert_eq!(xlen(&node).await, 2, "the stream is the restored one");
+    assert_eq!(xlen(&node).await, 2, "the stream is the restored one: the entry after the snapshot is gone");
     assert!(redis_cli(&node, &["XINFO", "GROUPS", KEY]).await.contains("relay"), "the relay group still exists after the restore");
     relay.shut_down().await;
 }

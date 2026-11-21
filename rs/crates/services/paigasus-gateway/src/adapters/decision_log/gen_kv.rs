@@ -2,9 +2,9 @@
 
 //! The NATS KV adapter of the generation record (SMA-821 § 5.2). It implements the `GenKv` port on one key of
 //! the `GATEWAY_DECISIONS_GEN` bucket. async-nats 0.53 has no get-or-create for a bucket, so the adapter does
-//! get, then create when the stream is not found. It reads with the direct get (`Store::entry`) only. It drops
-//! the cached store handle after every error except `WrongRevision`, so the next call makes the handle again
-//! (D9).
+//! get, then create when the stream is not found. It reads with the direct get (`Store::entry`) only. Each call
+//! takes the cached store handle out, and puts it back only after a success or a `WrongRevision`. So after any
+//! other error, and after a call that the step timeout cancels, the next call makes the handle again (D9).
 
 use async_nats::jetstream::{
     self, ErrorCode,
@@ -34,11 +34,13 @@ impl NatsGenKv {
         }
     }
 
-    /// The cached store, or a new one. A missing bucket is made with `gen_kv_config`.
+    /// Take the cached store out, or make a new one. A missing bucket is made with `gen_kv_config`. The cache stays
+    /// empty until [`Self::finish`] puts the handle back, so a call that is dropped before it returns leaves no
+    /// handle.
     async fn store(&self) -> Result<kv::Store, KvError> {
         let mut guard = self.store.lock().await;
-        if let Some(store) = guard.as_ref() {
-            return Ok(store.clone());
+        if let Some(store) = guard.take() {
+            return Ok(store);
         }
         let store = match self.js.get_key_value(GEN_BUCKET).await {
             Ok(store) => store,
@@ -58,16 +60,15 @@ impl NatsGenKv {
                 BucketFailure::Other => return Err(KvError::Other),
             },
         };
-        *guard = Some(store.clone());
         Ok(store)
     }
 
-    /// Drop the cached store after an error that is not a lost compare-and-set.
-    async fn after(&self, error: KvError) -> KvError {
-        if error != KvError::WrongRevision {
-            *self.store.lock().await = None;
+    /// Put the store back after a success or a lost compare-and-set. After any other error it stays out.
+    async fn finish<T>(&self, store: kv::Store, result: Result<T, KvError>) -> Result<T, KvError> {
+        if matches!(result, Ok(_) | Err(KvError::WrongRevision)) {
+            *self.store.lock().await = Some(store);
         }
-        error
+        result
     }
 }
 
@@ -78,7 +79,7 @@ enum BucketFailure {
 }
 
 /// Classify a `get_key_value` error from the `GetStreamError` source: JetStream code 10059 is "not found", a
-/// request error is a timeout.
+/// request that timed out is a timeout. Any other request error (for example no responders) is `Other`.
 fn get_bucket_failure(err: &KeyValueError) -> BucketFailure {
     if err.kind() != jetstream::context::KeyValueErrorKind::GetBucket {
         return BucketFailure::Other;
@@ -88,7 +89,13 @@ fn get_bucket_failure(err: &KeyValueError) -> BucketFailure {
     };
     match source.kind() {
         GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND => BucketFailure::NotFound,
-        GetStreamErrorKind::Request => BucketFailure::Timeout,
+        GetStreamErrorKind::Request
+            if std::error::Error::source(source)
+                .and_then(|s| s.downcast_ref::<jetstream::context::RequestError>())
+                .is_some_and(|r| r.kind() == jetstream::context::RequestErrorKind::TimedOut) =>
+        {
+            BucketFailure::Timeout
+        }
         _ => BucketFailure::Other,
     }
 }
@@ -96,41 +103,34 @@ fn get_bucket_failure(err: &KeyValueError) -> BucketFailure {
 impl GenKv for NatsGenKv {
     async fn get(&self) -> Result<Option<KvEntry>, KvError> {
         let store = self.store().await?;
-        match store.entry(self.entry_key.clone()).await {
+        let result = match store.entry(self.entry_key.clone()).await {
             Ok(entry) => Ok(entry.map(|e| KvEntry {
                 value: e.value,
                 revision: e.revision,
                 live: e.operation == kv::Operation::Put,
             })),
-            Err(e) => Err(self.after(if e.kind() == kv::EntryErrorKind::TimedOut { KvError::Timeout } else { KvError::Other }).await),
-        }
+            Err(e) => Err(if e.kind() == kv::EntryErrorKind::TimedOut { KvError::Timeout } else { KvError::Other }),
+        };
+        self.finish(store, result).await
     }
 
     async fn create(&self, value: Bytes) -> Result<u64, KvError> {
         let store = self.store().await?;
-        match store.create(&self.entry_key, value).await {
-            Ok(revision) => Ok(revision),
-            Err(e) => Err(self
-                .after(match e.kind() {
-                    kv::CreateErrorKind::AlreadyExists => KvError::WrongRevision,
-                    kv::CreateErrorKind::Publish => KvError::Timeout,
-                    _ => KvError::Other,
-                })
-                .await),
-        }
+        let result = store.create(&self.entry_key, value).await.map_err(|e| match e.kind() {
+            kv::CreateErrorKind::AlreadyExists => KvError::WrongRevision,
+            kv::CreateErrorKind::Publish => KvError::Timeout,
+            _ => KvError::Other,
+        });
+        self.finish(store, result).await
     }
 
     async fn update(&self, value: Bytes, revision: u64) -> Result<u64, KvError> {
         let store = self.store().await?;
-        match store.update(&self.entry_key, value, revision).await {
-            Ok(revision) => Ok(revision),
-            Err(e) => Err(self
-                .after(match e.kind() {
-                    kv::UpdateErrorKind::WrongLastRevision => KvError::WrongRevision,
-                    kv::UpdateErrorKind::TimedOut => KvError::Timeout,
-                    _ => KvError::Other,
-                })
-                .await),
-        }
+        let result = store.update(&self.entry_key, value, revision).await.map_err(|e| match e.kind() {
+            kv::UpdateErrorKind::WrongLastRevision => KvError::WrongRevision,
+            kv::UpdateErrorKind::TimedOut => KvError::Timeout,
+            _ => KvError::Other,
+        });
+        self.finish(store, result).await
     }
 }
