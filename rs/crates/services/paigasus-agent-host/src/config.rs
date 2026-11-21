@@ -10,7 +10,9 @@ use figment::{Figment, error::Error as FigmentError};
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::mid_run::MidRunPolicy;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
+use crate::adapters::nats::channels::filters_overlap;
 use crate::application::lease_keeper::{KeeperTiming, KeeperTimingError};
 
 /// A connection URL that can hold a password. `Debug` and `Serialize` print a fixed placeholder.
@@ -67,7 +69,37 @@ pub struct Config {
     #[serde(default)]
     pub iam: Option<IamClientConfig>,
     pub mid_run: MidRunConfig,
+    /// The NATS source (spec §9.1). No `[nats]` section means no NATS task.
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
 }
+
+/// The NATS source (spec §9.1).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct NatsConfig {
+    pub url: RedactedUrl,
+    /// The credentials file of the `agent-host-consumer` identity.
+    #[serde(default)]
+    pub creds_file: Option<String>,
+    /// A CA bundle for the NATS TLS link.
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    pub stream: String,
+    pub durable: String,
+    pub channels: Vec<ChannelConfig>,
+}
+
+/// One channel: one subject filter that feeds exactly one inbox (spec §9.1).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ChannelConfig {
+    pub subject: String,
+    pub inbox: Uuid,
+    /// The CloudEvents `source` of the events of this channel. It starts with `urn:paigasus:agents:nats:`.
+    pub source: String,
+}
+
+/// The required prefix of a channel `source`.
+const NATS_SOURCE_PREFIX: &str = "urn:paigasus:agents:nats:";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MetricsConfig {
@@ -233,6 +265,14 @@ pub enum ConfigError {
     IamLoopbackInsecureNotLoopback,
     #[error("mid_run.policy = \"{}\" is not supported: it needs the Helikon turn-boundary change (ADR (h)); use \"queue\"", policy_name(.0))]
     MidRunPolicyNotSupported(MidRunPolicy),
+    #[error("nats.channels: the filters \"{a}\" and \"{b}\" can match the same subject")]
+    NatsChannelsOverlap { a: String, b: String },
+    #[error("nats.channels: the source \"{0}\" must start with \"urn:paigasus:agents:nats:\"")]
+    NatsSourcePrefix(String),
+    #[error("nats.channels: the source \"{0}\" is used by two channels")]
+    NatsDuplicateSource(String),
+    #[error("nats: the section needs at least one channel")]
+    NatsNoChannel,
 }
 
 /// The defaults. `database_url` has none: it is required. `iam` has none: no `[iam]` section
@@ -290,6 +330,30 @@ fn is_loopback_host(grpc_addr: &str) -> bool {
     };
 
     host == "localhost" || host.parse::<Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false) || host.parse::<Ipv6Addr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+}
+
+/// The channel rules of spec §9.1.
+fn validate_nats_channels(channels: &[ChannelConfig]) -> Result<(), ConfigError> {
+    if channels.is_empty() {
+        return Err(ConfigError::NatsNoChannel);
+    }
+    for (i, a) in channels.iter().enumerate() {
+        if !a.source.starts_with(NATS_SOURCE_PREFIX) {
+            return Err(ConfigError::NatsSourcePrefix(a.source.clone()));
+        }
+        for b in &channels[i + 1..] {
+            if a.source == b.source {
+                return Err(ConfigError::NatsDuplicateSource(a.source.clone()));
+            }
+            if filters_overlap(&a.subject, &b.subject) {
+                return Err(ConfigError::NatsChannelsOverlap {
+                    a: a.subject.clone(),
+                    b: b.subject.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Config {
@@ -373,6 +437,9 @@ impl Config {
         }
         if self.mid_run.policy != MidRunPolicy::Queue {
             return Err(ConfigError::MidRunPolicyNotSupported(self.mid_run.policy));
+        }
+        if let Some(nats) = &self.nats {
+            validate_nats_channels(&nats.channels)?;
         }
         Ok(())
     }
@@ -710,5 +777,107 @@ mod tests {
         assert!(is_loopback_host("http://[::1]:9090"));
         // A bare host with no scheme and no port.
         assert!(is_loopback_host("127.0.0.1"));
+    }
+
+    fn channel(subject: &str, n: u128, source: &str) -> ChannelConfig {
+        ChannelConfig {
+            subject: subject.to_string(),
+            inbox: Uuid::from_u128(n),
+            source: source.to_string(),
+        }
+    }
+
+    fn with_channels(channels: Vec<ChannelConfig>) -> Config {
+        let mut cfg = with_url();
+        cfg.nats = Some(NatsConfig {
+            url: RedactedUrl("nats://localhost:4222".to_string()),
+            creds_file: None,
+            ca_file: None,
+            stream: "IAM_EVENTS".to_string(),
+            durable: "agent-host-inbox".to_string(),
+            channels,
+        });
+        cfg
+    }
+
+    #[test]
+    fn two_overlapping_channels_are_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_channels(vec![
+                channel("iam.>", 1, "urn:paigasus:agents:nats:a"),
+                channel("iam.organization.created", 2, "urn:paigasus:agents:nats:b"),
+            ]);
+            assert_eq!(
+                cfg.validate(),
+                Err(ConfigError::NatsChannelsOverlap {
+                    a: "iam.>".to_string(),
+                    b: "iam.organization.created".to_string()
+                })
+            );
+            let ok = with_channels(vec![
+                channel("iam.organization.>", 1, "urn:paigasus:agents:nats:a"),
+                channel("iam.principal.>", 2, "urn:paigasus:agents:nats:b"),
+            ]);
+            assert_eq!(ok.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_source_without_the_nats_prefix_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:http:a")]);
+            assert_eq!(cfg.validate(), Err(ConfigError::NatsSourcePrefix("urn:paigasus:agents:http:a".to_string())));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn two_channels_with_one_source_are_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_channels(vec![channel("a.>", 1, "urn:paigasus:agents:nats:x"), channel("b.>", 2, "urn:paigasus:agents:nats:x")]);
+            assert_eq!(cfg.validate(), Err(ConfigError::NatsDuplicateSource("urn:paigasus:agents:nats:x".to_string())));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_nats_section_without_a_channel_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            assert_eq!(with_channels(vec![]).validate(), Err(ConfigError::NatsNoChannel));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_nats_section_is_optional() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_url();
+            assert!(cfg.nats.is_none());
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_nats_section_is_read_from_toml() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "agent-host.toml",
+                "[nats]\nurl = \"nats://h:4222\"\nstream = \"IAM_EVENTS\"\ndurable = \"agent-host-inbox\"\n\n[[nats.channels]]\nsubject = \"iam.organization.>\"\ninbox = \"00000000-0000-0000-0000-000000000001\"\nsource = \"urn:paigasus:agents:nats:iam-org\"\n",
+            )?;
+            let cfg = Config::load()?;
+            let nats = cfg.nats.as_ref().expect("nats");
+            assert_eq!(nats.channels.len(), 1);
+            assert_eq!(nats.channels[0].inbox, Uuid::from_u128(1));
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
     }
 }

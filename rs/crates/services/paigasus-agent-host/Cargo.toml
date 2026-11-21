@@ -44,7 +44,7 @@ paigasus-helikon = { version = "=0.6.12", default-features = false, features = [
 tokio-util = { workspace = true }
 paigasus-agent-host-core = { workspace = true }
 # `adapters::persistence` and `application::ingest` — ids and microsecond timestamps.
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
 jiff = { workspace = true }
 # `adapters::id` — the kernel mints a UUIDv7 from the host clock and `rand` entropy.
 paigasus-kernel = { workspace = true }

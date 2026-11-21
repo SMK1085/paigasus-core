@@ -5,4 +5,5 @@ pub mod helikon;
 pub mod http;
 pub mod iam;
 pub mod id;
+pub mod nats;
 pub mod persistence;

@@ -42,6 +42,9 @@ tasks:
     deps: ['^:build']
   test:
     deps: ['^:build']
+    inputs:
+      # SMA-787 Task 17: a unit test pins the NATS constants to this file.
+      - '/ops/nats/subjects.env'
     # The Postgres tests start containers. They share a runner with the console e2e tasks.
     options:
       mutex: 'heavy-integration'
