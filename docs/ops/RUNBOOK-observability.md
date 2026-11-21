@@ -1913,8 +1913,9 @@ minutes after the checks pass again. Read `gateway_decision_log_generation_check
 
 - `permission`: the publisher creds do not have the KV grants. Run `PUSH=1 ops/nats/provision-decisions.sh`
   again and deploy the new creds to the gateway. Without `PUSH=1` the script does not push the account.
-- `no_bucket`: the bucket does not exist and the relay cannot make it. Make it with
-  `PUSH=1 ops/nats/provision-decisions.sh`. Check the limit of 2 streams for the account: the stream
+- `no_bucket`: the bucket does not exist. The relay never makes it. Either nobody provisioned the bucket, or
+  somebody deleted it. Make it with `PUSH=1 ops/nats/provision-decisions.sh`. The relay finds the bucket at
+  its next KV step. Publishes work while the bucket is missing, but reset detection is stopped. Check the limit of 2 streams for the account: the stream
   `GATEWAY_DECISIONS` and the stream `KV_GATEWAY_DECISIONS_GEN` use both.
 - `timeout`: a NATS call did not answer in time. Check the NATS health.
 - `redis`: the Redis call of the check failed. Check the Redis memory and the Redis ACL.
@@ -1927,13 +1928,16 @@ minutes after the checks pass again. Read `gateway_decision_log_generation_check
 - `other`: read the gateway logs.
 
 **Upgrade order.** First run `PUSH=1 ops/nats/provision-decisions.sh` (the new grants, the new creds and
-the bucket). Then deploy the new gateway binary with the new creds. A new binary with old creds fails with
-`permission` and counts no reset.
+the bucket). Then deploy the new gateway binary with the new creds. This order is now required for reset
+detection: the relay does not make the bucket. Without the bucket, the relay reports `no_bucket` and counts
+no reset, and publishes still work. A new binary with old creds fails with `permission` and counts no reset.
 
 #### Limits of the reset check
 
 - NATS loses the KV entry (a lost bucket, a new NATS account). The next KV step writes a new entry and
   counts nothing. A Redis loss in the same window is not counted.
+- After a bucket deletion, reset detection stops until an operator runs `PUSH=1 ops/nats/provision-decisions.sh`
+  again. The alert `GatewayDecisionLogGenerationCheckFailing` fires with `kind="no_bucket"`.
 - A return of Redis to a state that is newer than the last successful KV write is missed. Example: the last
   KV write stored epoch 10, Redis saved a snapshot with epoch 10 later, and Redis restarted from that
   snapshot. In normal operation the window is about 15 s. During a NATS outage the window lasts for the

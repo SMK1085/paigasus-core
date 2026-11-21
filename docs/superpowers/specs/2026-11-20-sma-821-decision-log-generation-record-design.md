@@ -138,10 +138,11 @@ Anti-goals (a failure even if the count works):
 - The value, as JSON: `{"generation": "<id>", "epoch": <u64>, "sample": <u64 or null>,
   "sampled_at": <unix ms>, "claim": <null or {"nonce": "<id>", "lost": <u64 or null>}>}`.
 - A value that does not parse, and a KV delete or purge marker, are the same as a missing entry.
-- async-nats 0.53 has no get-or-create for KV. The relay calls `get_key_value` first, and calls
-  `create_key_value` only when the bucket is not found. A bucket that `nats kv add` made has a
-  different config, so a create on it fails with 10058. The relay reads with a direct get only.
-- `provision-decisions.sh` also makes the bucket with `PUSH=1`, beside `GATEWAY_DECISIONS`. The
+- **The relay gets the bucket. It never makes it (D20).** The relay calls `get_key_value` and nothing
+  else for the bucket. A bucket that is not found gives `kind="no_bucket"`. The relay does not cache this
+  failure: each KV step gets the bucket again, so the step works as soon as an operator makes the bucket.
+  The relay reads with a direct get only. The relay also has no `create_key_value` code.
+- `provision-decisions.sh` is the only way to make the bucket. It makes it with `PUSH=1`, beside `GATEWAY_DECISIONS`. The
   account allows 2 streams (`--js-streams 2`, `provision-decisions.sh:50`). `GATEWAY_DECISIONS` and
   `KV_GATEWAY_DECISIONS_GEN` use both. A third stream needs a higher limit. The spec and
   `permissions.md` state this.
@@ -299,7 +300,7 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
   KV step increases the epoch. Nothing is counted.
 - **The first deploy of this change.** Redis has the group and no generation key or epoch key, and
   the KV has no entry. The detection script writes a generation with `NX` and sets the epoch to 1.
-  The KV step creates the entry. Nothing is counted.
+  The KV step creates the entry in the provisioned bucket (D20). Nothing is counted.
 - **A mixed fleet during the rolling deploy.** An SMA-755 relay can make the group after a loss and
   write no generation key. A new relay's detection script repairs the key with a new id, finds
   `R != K`, and counts the reset. The old relay counts it too, by its own `NOGROUP` path. So during
@@ -314,6 +315,15 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
 
 - NATS loses the KV entry (a lost bucket, a new NATS account). The next KV step writes a new entry
   and counts nothing. A Redis loss in the same window is not counted.
+- **After a bucket deletion, reset detection stops until an operator runs `provision-decisions.sh`
+  again (D20).** The relay does not make the bucket. Each KV step counts `kind="no_bucket"`, and
+  `GatewayDecisionLogGenerationCheckFailing` fires. Publishes, acks, writes and the backlog gauge are
+  not affected.
+- **`$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` (from SMA-755) has the same shape.** While
+  `GATEWAY_DECISIONS` does not exist, the publisher can make it as a mirror of the generation bucket.
+  That bucket holds only generation records, so this stays a known limit.
+- **Once both streams exist, the account cap `max_streams` 2 refuses any further create.** This was
+  the only control in the live-broker measurement of D20, and it is a cap, not a name check.
 - Somebody deletes only the generation key or only the epoch key. The relay counts a false reset or
   a false loss. The runbook already requires `maxmemory-policy noeviction`, so an eviction does not
   cause this. An operator `XSETID` or `RESTORE … REPLACE` on the stream key alone keeps both keys,
@@ -344,23 +354,32 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
 
 ### 5.6 NATS permissions
 
-The publisher needs grants for the KV bucket. The exact subjects depend on what async-nats 0.53
-sends. The builder measures them against a live server and adds only those. The expected set is:
+The publisher needs three grants for the KV bucket. The builder measured them against a live server.
+The set is:
 
-- `$JS.API.STREAM.INFO.KV_GATEWAY_DECISIONS_GEN` and `$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN`
-  (get or create the bucket).
+- `$JS.API.STREAM.INFO.KV_GATEWAY_DECISIONS_GEN` (get the bucket).
 - A get of one entry: `$JS.API.DIRECT.GET.KV_GATEWAY_DECISIONS_GEN.>` (direct get).
 - `$KV.GATEWAY_DECISIONS_GEN.>` to put, create and update.
 
 The direct get is the only read path (`allow_direct = true`). There is no `STREAM.MSG.GET`
 alternative.
 
+**No `STREAM.CREATE` of the bucket (D20).** MEASURED on a live broker (`nats:2.10.14`): while the
+bucket does not exist, `$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN` lets the publisher make
+that stream as a mirror (or with `sources`) of `GATEWAY_DECISIONS`, with `allow_direct`. The
+publisher then reads every decision with `$JS.API.DIRECT.GET.KV_GATEWAY_DECISIONS_GEN.>`. So the
+publisher has no `STREAM.CREATE` grant for the bucket, and only `provision-decisions.sh` makes it.
+The negative permission test refuses the mirror create. With the real bucket in place, the same
+create fails with 10027 (`max_streams` 2).
+
 These grants touch only the new bucket. They give no read, delete or purge right on
 `GATEWAY_DECISIONS`. `ops/nats/permissions.md` states the change and the reason.
 
 **Existing users.** `provision-decisions.sh:64` runs `nsc add user … || echo "already exists"`, so a
 second run does not change the grants of an existing user. The script gets an `nsc edit user` step
-that sets the publisher grants on an existing user. The runbook states the order of the upgrade:
+that sets the publisher grants on an existing user. `nsc edit user` only adds grants, so the script
+also revokes `$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN` with `nsc edit user --rm`. The flag exits
+0 when the grant is absent. The runbook states the order of the upgrade:
 the new grants and the bucket first, then the new gateway binary. A gateway without the grants
 still relays (the two violation counters of §5.2), and the new error counter and its alert show the missing
 grant.
@@ -417,6 +436,16 @@ T5, T8, T9, T13 and T15.
 - T15. The foreign writer: write a KV entry with another generation while this relay's Redis
   generation does not change. Expect `kind="foreign_writer"` > 0 and 0 resets.
 
+- T16 (D20). A deleted bucket. A relay runs with a provisioned bucket. An admin deletes the bucket stream.
+  Expect `kind="no_bucket"` > 0 and publishes that still go through. Then an admin makes the bucket again.
+  Expect the KV step to work again and no more `no_bucket`.
+- T17 (D20). A relay with no bucket counts `kind="no_bucket"`, publishes every event, and does not
+  make the bucket.
+- Every integration test that needs the bucket makes it first as the provisioner. T1 to T15 use the same
+  helper, so the "first deploy" test (two fresh relays) starts with a provisioned bucket.
+- The negative permission test has an eighth denial (D20): the publisher's mirror create of
+  `KV_GATEWAY_DECISIONS_GEN` is refused. It was shown to fail when the grant is added back.
+
 Each new assertion must be shown to fail when the feature is removed (delete the counting branch of
 `decide` and see T1, T5, T8 and T13 go red). The permission change must pass
 `repo:nats-permissions`.
@@ -452,7 +481,7 @@ Each new assertion must be shown to fail when the feature is removed (delete the
 | Id | Decision | Who |
 |---|---|---|
 | D1 | A NATS KV bucket holds the record (approach 1). | Sven, 2026-11-20 |
-| D2 | The publisher permission set grows by the KV grants of §5.6. | Sven, 2026-11-20 |
+| D2 | The publisher permission set grows by three KV grants (§5.6). D20 removes the fourth, `STREAM.CREATE` of the bucket. | Sven, 2026-11-20 |
 | D3 | Detection moves into the sampler. `NOGROUP` only makes the group again; it no longer counts. | my call, Sven agreed |
 | D4 | The KV entry holds the last sample, so a fresh relay can give the estimate. | my call, Sven agreed |
 | D5 | A new generation on every group creation (overwrite); `NX` on `BUSYGROUP`. | my call |
@@ -470,3 +499,4 @@ Each new assertion must be shown to fail when the feature is removed (delete the
 | D17 | The KV step order is KV get, one Redis detection script, then CAS. This replaces the re-read rules of D8. | my call, after the challenge (round 2) |
 | D18 | A `foreign_writer` detector for the deployment rule of D15. | my call, after the challenge (round 2) |
 | D19 | The bucket has `max_bytes` = 1 MiB. | my call, after the challenge (round 2) |
+| D20 | The publisher has no `STREAM.CREATE` on the bucket. Only `provision-decisions.sh` makes it. Reason: a measured mirror read path of `GATEWAY_DECISIONS`. | Sven (after a live-broker measurement) |

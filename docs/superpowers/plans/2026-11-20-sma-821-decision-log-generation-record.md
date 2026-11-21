@@ -190,6 +190,9 @@ git commit -m "feat(rs): add the decision log generation check metrics and alert
 
 ### Task 2: NATS grants and the bucket, measured
 
+> **Note (after the plan): D20 changed the bucket create.** The publisher has no `STREAM.CREATE` grant on the bucket, and the relay only gets the bucket. Only `provision-decisions.sh` makes it. The code below that makes the bucket in the relay or grants `STREAM.CREATE.KV_…` is out of date. See spec D20.
+
+
 **Files:**
 - Modify: `ops/nats/subjects.env` (the decision-log block and `GW_DEC_PUBLISHER_PUB`)
 - Modify: `ops/nats/test/accounts.conf.tmpl:57-61`
@@ -647,6 +650,9 @@ git commit -m "feat(rs): add the decision log KV step with a claim nonce (SMA-82
 ---
 
 ### Task 6: The NATS KV adapter
+
+> **Note (after the plan): D20 changed the bucket create.** The publisher has no `STREAM.CREATE` grant on the bucket, and the relay only gets the bucket. Only `provision-decisions.sh` makes it. The code below that makes the bucket in the relay or grants `STREAM.CREATE.KV_…` is out of date. See spec D20.
+
 
 **Files:**
 - Create: `rs/crates/services/paigasus-gateway/src/adapters/decision_log/gen_kv.rs`
