@@ -53,6 +53,12 @@ fn set(scope: &MemoryScope, changes: Vec<MemoryChange>) -> MemoryCommitSet {
     MemoryCommitSet::new(scope.clone(), cs)
 }
 
+fn guarded(scope: &MemoryScope, changes: Vec<MemoryChange>, guards: &[&str]) -> MemoryCommitSet {
+    let mut cs = set(scope, changes);
+    cs.guards = guards.iter().map(|g| dir(g)).collect();
+    cs
+}
+
 fn put_new(path: &str, content: &str) -> MemoryChange {
     MemoryChange::Put {
         path: p(path),
@@ -119,6 +125,15 @@ pub async fn run_all(store: &dyn MemoryStore) {
     usage_tracks_overwrite_delete_and_recreate(store).await;
     store_bytes_cap_refuses_growth_and_allows_shrinking(store).await;
     sizes_are_utf8_bytes_and_limits_are_inclusive(store).await;
+    dir_rename_conflicts_on_a_file_added_under_the_source(store).await;
+    dir_delete_conflicts_on_a_file_added_under_the_dir(store).await;
+    dir_rename_conflicts_on_a_file_added_under_the_destination(store).await;
+    a_guard_allows_the_paths_that_the_set_names(store).await;
+    a_guard_matches_segments_and_literal_wildcards(store).await;
+    a_guard_only_set_is_checked(store).await;
+    a_guard_conflict_wins_over_a_cap_refusal(store).await;
+    a_guard_ignores_files_of_another_scope(store).await;
+    guards_report_the_first_outsider_in_byte_order(store).await;
 }
 
 /// Check that scope `a` and scope `b` do not see or change each other.
@@ -423,4 +438,116 @@ pub async fn delete_scope_leaves_others(store: &dyn MemoryStore) {
     assert!(store.get(&a, &p("/f")).await.unwrap().is_none());
     assert_eq!(store.usage(&a).await.unwrap(), MemoryUsage::default());
     assert_eq!(store.get(&b, &p("/f")).await.unwrap().unwrap().content, "b");
+}
+
+/// The listing and the content of the files in `paths`, to compare before and after a refusal.
+async fn snapshot(store: &dyn MemoryStore, s: &MemoryScope, paths: &[&str]) -> (Vec<String>, Vec<Option<String>>) {
+    let mut contents = Vec::new();
+    for path in paths {
+        contents.push(store.get(s, &p(path)).await.unwrap().map(|f| f.content));
+    }
+    (listed(store, s, "/").await, contents)
+}
+
+/// A rename set is refused when a file appears under the source directory after the read.
+pub async fn dir_rename_conflicts_on_a_file_added_under_the_source(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    write(store, &s, &[("/tasks/a.md", "a")]).await;
+    let v = version_of(store, &s, "/tasks/a.md").await;
+    let rename = guarded(&s, vec![put_new("/done/a.md", "a"), del("/tasks/a.md", &v)], &["/tasks", "/done"]);
+    write(store, &s, &[("/tasks/b.md", "b")]).await;
+    let paths = ["/tasks/a.md", "/tasks/b.md", "/done/a.md"];
+    let before = snapshot(store, &s, &paths).await;
+    assert_conflict(store.apply(&rename, &caps()).await, "/tasks/b.md");
+    assert_eq!(snapshot(store, &s, &paths).await, before);
+}
+
+/// A delete set is refused when a file appears under the directory after the read.
+pub async fn dir_delete_conflicts_on_a_file_added_under_the_dir(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    write(store, &s, &[("/tasks/a.md", "a")]).await;
+    let v = version_of(store, &s, "/tasks/a.md").await;
+    let delete = guarded(&s, vec![del("/tasks/a.md", &v)], &["/tasks"]);
+    write(store, &s, &[("/tasks/b.md", "b")]).await;
+    let paths = ["/tasks/a.md", "/tasks/b.md"];
+    let before = snapshot(store, &s, &paths).await;
+    assert_conflict(store.apply(&delete, &caps()).await, "/tasks/b.md");
+    assert_eq!(snapshot(store, &s, &paths).await, before);
+}
+
+/// A rename set is refused when a file appears under the destination, or at the destination path.
+pub async fn dir_rename_conflicts_on_a_file_added_under_the_destination(store: &dyn MemoryStore) {
+    for (added, expected) in [("/done/z.md", "/done/z.md"), ("/done", "/done")] {
+        let s = fresh_scope();
+        write(store, &s, &[("/tasks/a.md", "a")]).await;
+        let v = version_of(store, &s, "/tasks/a.md").await;
+        let rename = guarded(&s, vec![put_new("/done/a.md", "a"), del("/tasks/a.md", &v)], &["/tasks", "/done"]);
+        write(store, &s, &[(added, "z")]).await;
+        let paths = ["/tasks/a.md", "/done/a.md", added];
+        let before = snapshot(store, &s, &paths).await;
+        assert_conflict(store.apply(&rename, &caps()).await, expected);
+        assert_eq!(snapshot(store, &s, &paths).await, before);
+    }
+}
+
+/// A guard allows every path that the set names. It refuses a path that the set does not name.
+pub async fn a_guard_allows_the_paths_that_the_set_names(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    write(store, &s, &[("/tasks/a.md", "a")]).await;
+    let v = version_of(store, &s, "/tasks/a.md").await;
+    let ok = guarded(&s, vec![del("/tasks/a.md", &v), put_new("/tasks/new.md", "n")], &["/tasks"]);
+    store.apply(&ok, &caps()).await.expect("the set names every path under the guard");
+    assert_eq!(listed(store, &s, "/tasks").await, vec!["/tasks/new.md".to_string()]);
+
+    let s2 = fresh_scope();
+    write(store, &s2, &[("/tasks/a.md", "a"), ("/tasks/sub/q.md", "q")]).await;
+    let v = version_of(store, &s2, "/tasks/a.md").await;
+    let outsider = guarded(&s2, vec![del("/tasks/a.md", &v), put_new("/tasks/new.md", "n")], &["/tasks"]);
+    assert_conflict(store.apply(&outsider, &caps()).await, "/tasks/sub/q.md");
+}
+
+/// A guard matches whole path segments. `_` and `%` in a guard are literal.
+pub async fn a_guard_matches_segments_and_literal_wildcards(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    write(store, &s, &[("/tasks-old/x", "1"), ("/tasks.md", "2"), ("/axb/f", "3")]).await;
+    store.apply(&guarded(&s, vec![], &["/tasks", "/a_b"]), &caps()).await.expect("no path is under the guards");
+}
+
+/// A set with a guard and no change is still checked.
+pub async fn a_guard_only_set_is_checked(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    let only = guarded(&s, vec![], &["/t"]);
+    store.apply(&only, &caps()).await.expect("the scope is empty");
+    write(store, &s, &[("/t/y", "y")]).await;
+    assert_conflict(store.apply(&only, &caps()).await, "/t/y");
+}
+
+/// A guard conflict is reported before a cap refusal.
+pub async fn a_guard_conflict_wins_over_a_cap_refusal(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    write(store, &s, &[("/tasks/b.md", "b")]).await;
+    let tight = MemoryCaps {
+        max_store_bytes: 1,
+        ..MemoryCaps::default()
+    };
+    let result = store.apply(&guarded(&s, vec![put_new("/big", "12345")], &["/tasks"]), &tight).await;
+    assert_conflict(result, "/tasks/b.md");
+}
+
+/// A guard looks at its own scope only.
+pub async fn a_guard_ignores_files_of_another_scope(store: &dyn MemoryStore) {
+    let a = fresh_scope();
+    let b = fresh_scope();
+    write(store, &b, &[("/tasks/b.md", "b")]).await;
+    let only = guarded(&a, vec![], &["/tasks"]);
+    store.apply(&only, &caps()).await.expect("the file is in another scope");
+    write(store, &a, &[("/tasks/b.md", "b")]).await;
+    assert_conflict(store.apply(&only, &caps()).await, "/tasks/b.md");
+}
+
+/// The first path in guard order, then byte order, is the one reported.
+pub async fn guards_report_the_first_outsider_in_byte_order(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    write(store, &s, &[("/b/2", "2"), ("/b/1", "1"), ("/a/9", "9")]).await;
+    assert_conflict(store.apply(&guarded(&s, vec![], &["/b", "/a"]), &caps()).await, "/a/9");
 }
