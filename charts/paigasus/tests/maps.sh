@@ -24,6 +24,11 @@ ec=0
 # no-argument run would abort before the first row. bash 5.x does not. Some gates in
 # this repo run under 3.2.
 
+# Each reader below takes ALL of stdin before it parses. yaml.safe_load_all() on the stream reads
+# lazily, so a `break` at the first match could exit before printf wrote the whole render. printf
+# then dies of SIGPIPE (141), and pipefail plus `set -e` end the script with no message. MEASURED
+# on a host whose pipe holds 512 bytes; a 64 KiB pipe hides it until the render grows past it.
+
 keys() {  # keys() <json>
   printf '%s' "$1" | python3 -c 'import json,sys;print(" ".join(sorted(json.load(sys.stdin))))'
 }
@@ -36,12 +41,12 @@ check() {
   fi
   zones="$(printf '%s' "$out" | python3 -c '
 import sys,yaml
-for d in yaml.safe_load_all(sys.stdin):
+for d in yaml.safe_load_all(sys.stdin.read()):
     if d and d.get("kind")=="ConfigMap" and d["metadata"]["name"].endswith("-zonemap"):
         print(d["data"]["PAIGASUS_ZONES"]); break')"
   services="$(printf '%s' "$out" | python3 -c '
 import sys,yaml
-for d in yaml.safe_load_all(sys.stdin):
+for d in yaml.safe_load_all(sys.stdin.read()):
     if d and d.get("kind")=="ConfigMap" and d["metadata"]["name"].endswith("-zonemap"):
         print(d["data"]["PAIGASUS_SERVICES"]); break')"
   for pair in "zones:$zones" "services:$services"; do
