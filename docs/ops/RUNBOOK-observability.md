@@ -1937,7 +1937,8 @@ no reset, and publishes still work. A new binary with old creds fails with `perm
 - NATS loses the KV entry (a lost bucket, a new NATS account). The next KV step writes a new entry and
   counts nothing. A Redis loss in the same window is not counted.
 - After a bucket deletion, reset detection stops until an operator runs `PUSH=1 ops/nats/provision-decisions.sh`
-  again. The alert `GatewayDecisionLogGenerationCheckFailing` fires with `kind="no_bucket"`.
+  again. The first KV step after the deletion uses the cached handle, so it counts `kind="other"`. Later
+  steps count `kind="no_bucket"`. The alert `GatewayDecisionLogGenerationCheckFailing` fires.
 - A return of Redis to a state that is newer than the last successful KV write is missed. Example: the last
   KV write stored epoch 10, Redis saved a snapshot with epoch 10 later, and Redis restarted from that
   snapshot. In normal operation the window is about 15 s. During a NATS outage the window lasts for the

@@ -316,12 +316,18 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
 - NATS loses the KV entry (a lost bucket, a new NATS account). The next KV step writes a new entry
   and counts nothing. A Redis loss in the same window is not counted.
 - **After a bucket deletion, reset detection stops until an operator runs `provision-decisions.sh`
-  again (D20).** The relay does not make the bucket. Each KV step counts `kind="no_bucket"`, and
-  `GatewayDecisionLogGenerationCheckFailing` fires. Publishes, acks, writes and the backlog gauge are
+  again (D20).** The relay does not make the bucket. The first KV step after the deletion uses the cached
+  handle, so its `entry` call fails and counts `kind="other"`. Later steps count `kind="no_bucket"`. The
+  alert `GatewayDecisionLogGenerationCheckFailing` fires. Publishes, acks, writes and the backlog gauge are
   not affected.
-- **`$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` (from SMA-755) has the same shape.** While
-  `GATEWAY_DECISIONS` does not exist, the publisher can make it as a mirror of the generation bucket.
-  That bucket holds only generation records, so this stays a known limit.
+- **`$JS.API.STREAM.CREATE.GATEWAY_DECISIONS` (from SMA-755) has a similar shape.** Before provisioning,
+  the publisher can make `GATEWAY_DECISIONS` with any config: a short `max_age`, a small `max_bytes`, a
+  mirror config, or the subjects `$KV.GATEWAY_DECISIONS_GEN.>`, so that the `kv add` of the provisioner
+  fails. A mirror of the generation bucket is not a read path for decisions: the bucket holds only
+  generation records, and the publisher has no read grant on `GATEWAY_DECISIONS`. So this stays a known
+  limit. `provision-decisions.sh` refuses an existing `GATEWAY_DECISIONS` that has a mirror or sources
+  config, or subjects that are not exactly `gateway.decision.>`. It also refuses an existing bucket stream
+  with a mirror or sources config.
 - **Once both streams exist, the account cap `max_streams` 2 refuses any further create.** This was
   the only control in the live-broker measurement of D20, and it is a cap, not a name check.
 - Somebody deletes only the generation key or only the epoch key. The relay counts a false reset or
@@ -377,9 +383,9 @@ These grants touch only the new bucket. They give no read, delete or purge right
 
 **Existing users.** `provision-decisions.sh:64` runs `nsc add user … || echo "already exists"`, so a
 second run does not change the grants of an existing user. The script gets an `nsc edit user` step
-that sets the publisher grants on an existing user. `nsc edit user` only adds grants, so the script
-also revokes `$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN` with `nsc edit user --rm`. The flag exits
-0 when the grant is absent. The runbook states the order of the upgrade:
+that sets the publisher grants on an existing user. The grant
+`$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN` never shipped in a merged build, so no deployed publisher
+has it. The runbook states the order of the upgrade:
 the new grants and the bucket first, then the new gateway binary. A gateway without the grants
 still relays (the two violation counters of §5.2), and the new error counter and its alert show the missing
 grant.
