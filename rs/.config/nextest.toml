@@ -155,9 +155,16 @@ filter = 'package(=paigasus-agent-host) and binary(lease_stress_pg)'
 retries = 0
 
 [[profile.default.overrides]]
+# SMA-787 §10.4: the handler latency test measures a p99. Other suites running beside it load the
+# CPU and raise the tail (168 ms in a full-crate run, 27 to 29 ms alone). `num-cpus` gives it the
+# whole machine while it runs. The 50 ms limit stays.
+filter = 'package(=paigasus-agent-host) and binary(ingress_latency_pg)'
+threads-required = 'num-cpus'
+
+[[profile.default.overrides]]
 # SMA-786: the agent host's Postgres-backed binaries, named one by one so the crate's pure unit
 # tests keep retries = 0. Same retry budget and container cap as the gateway's suites.
-filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg) or binary(inbox_repository_pg) or binary(lease_pg) or binary(claim_pg) or binary(complete_pg) or binary(keeper_pg) or binary(lease_property_pg) or binary(lease_stress_pg) or binary(lease_crash_pg) or binary(ingress_pg))'
+filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg) or binary(inbox_repository_pg) or binary(lease_pg) or binary(claim_pg) or binary(complete_pg) or binary(keeper_pg) or binary(lease_property_pg) or binary(lease_stress_pg) or binary(lease_crash_pg) or binary(ingress_pg) or binary(ingress_latency_pg))'
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 

@@ -72,6 +72,8 @@ reqwest = { workspace = true }
 # reqwest 0.13 uses `rustls-no-provider` (SMA-809). A test installs the `ring` CryptoProvider
 # before it builds a `Client`, or reqwest panics.
 rustls = { workspace = true }
+# `tests/support/fake_iam.rs` — the fake IAM gRPC server listens through a `TcpListenerStream`.
+tokio-stream = { workspace = true, features = ["net"] }
 # The test model of `adapters::helikon` names the `BoxStream` type of the core `Model` trait.
 futures = { workspace = true }
 # The tests of `application::lease_keeper` run on paused time.

@@ -123,15 +123,21 @@ impl Child {
 /// Starts the built service on a free port. The lock wait is 60 seconds.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub fn spawn_service(url: &str) -> (Child, u16) {
+    spawn_service_with(url, &[])
+}
+
+/// Like [`spawn_service`], with extra environment variables for the child.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub fn spawn_service_with(url: &str, extra_env: &[(&str, String)]) -> (Child, u16) {
     let port = free_port();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_paigasus-agent-host"))
-        .env("AGENT_HOST_DATABASE_URL", url)
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_paigasus-agent-host"));
+    cmd.env("AGENT_HOST_DATABASE_URL", url)
         .env("AGENT_HOST_HTTP_ADDR", format!("127.0.0.1:{port}"))
-        .env("AGENT_HOST_MIGRATION__LOCK_WAIT_SECS", "60")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn paigasus-agent-host");
+        .env("AGENT_HOST_MIGRATION__LOCK_WAIT_SECS", "60");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("spawn paigasus-agent-host");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let log = Arc::new(Mutex::new(String::new()));
@@ -169,6 +175,7 @@ pub async fn wait_for_status(child: &mut Child, port: u16, path: &str, want: u16
     }
 }
 
+pub mod fake_iam;
 pub mod fake_inbox;
 pub mod inbox;
 pub mod lease;
