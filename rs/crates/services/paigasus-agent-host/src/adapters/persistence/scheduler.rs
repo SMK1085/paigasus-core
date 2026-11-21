@@ -36,6 +36,9 @@ compile_error!("paigasus-agent-host needs panic = \"unwind\": the scheduler catc
 /// The longest back-off of a bad row.
 const BACKOFF_CAP: Duration = Duration::from_secs(3600);
 
+/// The time that the client waits after the statement timeout before it gives up on the lag read.
+const DUE_LAG_MARGIN: Duration = Duration::from_secs(2);
+
 /// The settings of the scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerSettings {
@@ -129,6 +132,10 @@ struct Ctx {
     kind: String,
     origin: String,
     attempts: i64,
+    /// `fire_count` at the read. A fire by another worker changes it.
+    fire_count: i64,
+    /// `next_fire_at` at the read, in epoch microseconds. A fire or a back-off changes it.
+    next_fire_us: i64,
 }
 
 /// A failure, with the row when the row is known.
@@ -305,13 +312,13 @@ impl PgScheduler {
         }
     }
 
-    /// Back off one row from the `fire_attempts` value that a fire read. It returns `false` when
-    /// the row changed since that read, so no second attempt is counted. It exists for the test of
-    /// that race.
+    /// Back off one row from the `fire_attempts`, `fire_count` and `next_fire_at` values that a fire
+    /// read. It returns `false` when the row changed since that read, so no second attempt is
+    /// counted. It exists for the test of that race.
     ///
     /// # Errors
     /// A database error.
-    pub async fn back_off_after_read(&self, id: Uuid, attempts_read: i64, category: &str) -> Result<bool, RepositoryError> {
+    pub async fn back_off_after_read(&self, id: Uuid, attempts_read: i64, fire_count_read: i64, next_fire_us_read: i64, category: &str) -> Result<bool, RepositoryError> {
         let row = self
             .db
             .query_one_raw(stmt("SELECT kind, origin FROM timer WHERE id = $1", vec![id.into()]))
@@ -323,12 +330,16 @@ impl PgScheduler {
             kind: row.try_get("", "kind").map_err(|e| transient(&e.to_string()))?,
             origin: row.try_get("", "origin").map_err(|e| transient(&e.to_string()))?,
             attempts: attempts_read,
+            fire_count: fire_count_read,
+            next_fire_us: next_fire_us_read,
         };
         self.back_off(&ctx, category).await
     }
 
-    /// The UPDATE matches only while `fire_attempts` still has the value that the fire read. The
-    /// wait comes from that same value. No row means that another worker handled the row.
+    /// The UPDATE matches only while `fire_attempts`, `fire_count` and `next_fire_at` still have the
+    /// values that the fire read. A worker that fires the row resets `fire_attempts` to 0 and moves
+    /// `next_fire_at`, so a stale back-off must not match it. The wait comes from the read
+    /// `fire_attempts`. No row means that another worker handled the row.
     async fn back_off_in(&self, txn: &DatabaseTransaction, ctx: &Ctx, category: &str) -> Result<Option<String>, DbErr> {
         let ms = self.settings.statement_timeout.as_millis().max(1);
         txn.execute_unprepared(&format!("SET LOCAL statement_timeout = '{ms}ms'")).await?;
@@ -342,13 +353,16 @@ impl PgScheduler {
                  status = CASE WHEN fire_attempts + 1 >= $3 THEN 'failed' ELSE status END, \
                  failure = CASE WHEN fire_attempts + 1 >= $3 THEN $4::text ELSE failure END, \
                  next_fire_at = CASE WHEN fire_attempts + 1 >= $3 THEN next_fire_at ELSE to_timestamp($2::bigint) END \
-                 WHERE id = $1 AND status = 'active' AND fire_attempts = $5::bigint RETURNING status",
+                 WHERE id = $1 AND status = 'active' AND fire_attempts = $5::bigint AND fire_count = $6::bigint \
+                 AND (EXTRACT(EPOCH FROM next_fire_at) * 1000000)::bigint = $7::bigint RETURNING status",
                 vec![
                     ctx.id.into(),
                     next.into(),
                     i64::from(self.settings.max_fire_attempts).into(),
                     failure_text(category).into(),
                     ctx.attempts.into(),
+                    ctx.fire_count.into(),
+                    ctx.next_fire_us.into(),
                 ],
             ))
             .await?;
@@ -370,22 +384,41 @@ impl Scheduler for PgScheduler {
     }
 
     async fn due_lag(&self) -> Result<Duration, RepositoryError> {
-        // The read runs in a short transaction with the statement timeout of the fire path, so a
-        // stalled database cannot hold the loop (and the shutdown) until the drain timeout.
+        // The read runs in a short transaction with the statement timeout of the fire path. The
+        // statement timeout is a server-side limit and does not bound a stalled connection, so
+        // every step also has a client-side deadline. A stalled database cannot hold the loop (and
+        // the shutdown) until the drain timeout. The transaction stays outside each timed step, so
+        // a timeout ends in an explicit rollback and never in a drop of an open transaction.
+        let limit = self.settings.statement_timeout + DUE_LAG_MARGIN;
+        let deadline = tokio::time::Instant::now() + limit;
+        let timed_out = || RepositoryError::Store(format!("the lag read took longer than {} ms", limit.as_millis()));
         let store_err = |e: DbErr| RepositoryError::Store(e.to_string());
-        let txn = self.db.begin().await.map_err(store_err)?;
+        let txn = tokio::time::timeout_at(deadline, self.db.begin()).await.map_err(|_| timed_out())?.map_err(store_err)?;
         let ms = self.settings.statement_timeout.as_millis().max(1);
-        txn.execute_unprepared(&format!("SET LOCAL statement_timeout = '{ms}ms'")).await.map_err(store_err)?;
-        let row = txn
-            .query_one_raw(stmt(
+        let read = tokio::time::timeout_at(deadline, async {
+            txn.execute_unprepared(&format!("SET LOCAL statement_timeout = '{ms}ms'")).await?;
+            txn.query_one_raw(stmt(
                 "SELECT COALESCE((EXTRACT(EPOCH FROM (now() - min(next_fire_at))) * 1000000)::bigint, 0) AS n \
                  FROM timer WHERE status = 'active' AND next_fire_at <= now()",
                 vec![],
             ))
             .await
-            .map_err(store_err)?
-            .ok_or_else(|| RepositoryError::Store("the lag query returned no row".to_string()))?;
-        txn.commit().await.map_err(store_err)?;
+        })
+        .await;
+        let row = match read {
+            Ok(Ok(Some(row))) => row,
+            other => {
+                let error = match other {
+                    Ok(Ok(_)) => RepositoryError::Store("the lag query returned no row".to_string()),
+                    Ok(Err(e)) => store_err(e),
+                    Err(_) => timed_out(),
+                };
+                // The rollback has the same deadline plus the margin. Its error does not change the answer.
+                let _ = tokio::time::timeout(DUE_LAG_MARGIN, txn.rollback()).await;
+                return Err(error);
+            }
+        };
+        tokio::time::timeout_at(deadline, txn.commit()).await.map_err(|_| timed_out())?.map_err(store_err)?;
         let us: i64 = row.try_get("", "n").map_err(|e| RepositoryError::Store(e.to_string()))?;
         Ok(Duration::from_micros(u64::try_from(us).unwrap_or(0)))
     }
@@ -421,6 +454,8 @@ fn read_ctx(row: &QueryResult) -> Result<(Ctx, Uuid), DbErr> {
         kind: row.try_get("", "kind")?,
         origin: row.try_get("", "origin")?,
         attempts: row.try_get("", "fire_attempts")?,
+        fire_count: row.try_get("", "fire_count")?,
+        next_fire_us: row.try_get("", "next_fire_us")?,
     };
     Ok((ctx, row.try_get("", "org_id")?))
 }

@@ -297,6 +297,10 @@ impl TimerWorkspace {
                 }
             },
         };
+        // Compare the raw time first. Rounding up a time that is not after `now` could put it after `now`.
+        if raw <= now {
+            return Err(TimerRefusal::NotInFuture { due: raw, now });
+        }
         let Some(due) = checked_round_up_to_second(raw) else {
             return Err(TimerRefusal::TooLate {
                 days: raw.duration_since(now).as_secs() / SECS_PER_DAY,
@@ -406,6 +410,13 @@ impl TimerWorkspace {
         out.extend(self.inserts.iter().cloned().map(|timer| ListedTimer { timer, buffered: true }));
         out.sort_by_key(|l| l.timer.next_fire_at());
         Ok(out)
+    }
+
+    /// True when the run buffered a cancel of the stored timer `id`. A timer that this run created
+    /// and cancelled is not stored, so it has no buffered cancel.
+    #[must_use]
+    pub(super) fn has_buffered_cancel(&self, id: TimerId) -> bool {
+        self.cancels.iter().any(|(c, _)| *c == id)
     }
 
     /// Cancel a timer of the agent. A text that is not an ID, a timer of another inbox, an unknown
@@ -543,6 +554,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_due_time_that_is_not_after_now_is_not_in_the_future_before_rounding() {
+        let (mut ws, rig) = rig(TimerCaps::default());
+        rig.clock.advance(SignedDuration::from_millis(500));
+        let now = start() + SignedDuration::from_millis(500);
+        assert_eq!(ws.schedule_follow_up(FollowUpDue::InSeconds(0), "n", false).await, Err(TimerRefusal::NotInFuture { due: now, now }));
+    }
+
+    #[tokio::test]
     async fn follow_up_limits() {
         let caps = TimerCaps {
             min_follow_up_delay_secs: 60,
@@ -620,13 +639,13 @@ mod tests {
         let far = ws.schedule_follow_up(FollowUpDue::InSeconds(2 * 86_400), "n", false).await.unwrap();
         assert!(far.beyond_thread_ttl);
         let text = follow_up_set_text(&far, ttl);
-        assert!(text.contains("will be gone"), "{text}");
+        assert!(text.contains("may be gone"), "{text}");
         assert!(text.contains("more than 24 hours"), "{text}");
         let near = ws.schedule_follow_up(FollowUpDue::InSeconds(3600), "n", false).await.unwrap();
         assert!(!near.beyond_thread_ttl);
         let text = follow_up_set_text(&near, ttl);
         assert!(text.contains("the note must hold"), "{text}");
-        assert!(!text.contains("will be gone"), "{text}");
+        assert!(!text.contains("may be gone"), "{text}");
         assert!(text.starts_with("Follow-up 00000000-0000-0000-0000-000000001001 is set for 2026-06-01T01:00:00Z (UTC)."), "{text}");
     }
 
@@ -929,6 +948,25 @@ mod tests {
         let cancel = run_tool(&mut ws, TimerToolName::CancelTimer, json!({"timer_id": id})).await;
         assert!(!cancel.refused && cancel.text.ends_with("is cancelled."), "{}", cancel.text);
         assert_eq!(TimerToolName::ALL.map(TimerToolName::as_str), ["schedule_follow_up", "create_schedule", "list_timers", "cancel_timer"]);
+    }
+
+    #[tokio::test]
+    async fn cancel_text_depends_on_where_the_timer_is() {
+        let (mut ws, rig) = rig(TimerCaps::default());
+        let stored = seed(&rig, inbox_x(), 0, TimerOrigin::Agent, TimerStatus::Active, old());
+        let reply = run_tool(&mut ws, TimerToolName::CancelTimer, json!({"timer_id": stored.uuid().to_string()})).await;
+        assert!(!reply.refused);
+        assert_eq!(
+            reply.text,
+            format!(
+                "Timer {} is marked to cancel. The cancel takes effect when this run ends. The timer can still fire before then.",
+                stored.uuid().as_hyphenated()
+            )
+        );
+        let set = run_tool(&mut ws, TimerToolName::ScheduleFollowUp, json!({"in_seconds": 120, "note": "n"})).await;
+        let id = set.text.split_whitespace().nth(1).unwrap().to_string();
+        let reply = run_tool(&mut ws, TimerToolName::CancelTimer, json!({"timer_id": id})).await;
+        assert_eq!(reply.text, format!("Timer {id} is cancelled."));
     }
 
     #[tokio::test]

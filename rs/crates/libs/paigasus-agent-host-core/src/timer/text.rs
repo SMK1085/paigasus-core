@@ -18,7 +18,7 @@ pub fn follow_up_set_text(set: &FollowUpSet, thread_ttl: Duration) -> String {
     );
     if set.beyond_thread_ttl {
         text.push_str(&format!(
-            " The due time is more than {} hours from now. This conversation will be gone when the timer fires, and only the note will remain.",
+            " The due time is more than {} hours from now. This conversation may be gone when the timer fires, and only the note may remain.",
             thread_ttl.as_secs() / 3600,
         ));
     }
@@ -62,10 +62,18 @@ fn list_line(listed: &ListedTimer) -> String {
     line
 }
 
-/// The text of a cancelled timer.
+/// The text of a cancelled timer. `stored` is true when the timer is in the store. The cancel of a
+/// stored timer is buffered, so it takes effect when the run ends and the timer can fire before.
 #[must_use]
-pub fn cancelled_text(id: TimerId) -> String {
-    format!("Timer {} is cancelled.", id.uuid().as_hyphenated())
+pub fn cancelled_text(id: TimerId, stored: bool) -> String {
+    if stored {
+        format!(
+            "Timer {} is marked to cancel. The cancel takes effect when this run ends. The timer can still fire before then.",
+            id.uuid().as_hyphenated()
+        )
+    } else {
+        format!("Timer {} is cancelled.", id.uuid().as_hyphenated())
+    }
 }
 
 /// The text of a refusal.

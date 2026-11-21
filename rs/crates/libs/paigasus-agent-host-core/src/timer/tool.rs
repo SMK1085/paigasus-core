@@ -112,7 +112,8 @@ async fn run(ws: &mut TimerWorkspace, tool: TimerToolName, args: &Value) -> Resu
         TimerToolName::ListTimers => Ok(list_text(&ws.list().await?)),
         TimerToolName::CancelTimer => {
             let id = text_arg("timer_id")?;
-            Ok(cancelled_text(ws.cancel(id).await?))
+            let cancelled = ws.cancel(id).await?;
+            Ok(cancelled_text(cancelled, ws.has_buffered_cancel(cancelled)))
         }
     }
 }

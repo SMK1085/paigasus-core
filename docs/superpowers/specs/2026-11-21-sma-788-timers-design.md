@@ -363,12 +363,14 @@ The adapter exposes `PgTimerStore::apply_in(txn: &DatabaseTransaction, inbox: &I
   its lease cannot write timers. `apply_in` also takes
   `SELECT 1 FROM inbox_lease WHERE inbox_id = $1 FOR UPDATE` itself. In the run commit the lock
   is already held, so this costs nothing. It protects a future caller that forgets the lock. It
-  never locks the `inbox` row.
+  never locks the `inbox` row. When that `SELECT` returns no row, the inbox has no lease row. This
+  is a bug, so `apply_in` fails with `ApplyError::LeaseMissing` and writes nothing.
 - **Thread rows.** The thread row of a run already exists: SMA-787 inserts it at claim
   (`lease_store/claim.rs`). So the composite thread foreign key holds.
 - **Savepoint.** It opens a savepoint. On an error it rolls back to the savepoint and leaves the
   caller's transaction usable.
 - **Checks.**
+  - A missing `inbox_lease` row is `ApplyError::LeaseMissing`, a bug (see the first item above).
   - An insert whose inbox is not `inbox`, or whose status is not `Active`, is
     `ApplyError::InboxMismatch` or `ApplyError::InvalidInsert`. Both are bugs, never model
     behaviour.
@@ -380,7 +382,9 @@ The adapter exposes `PgTimerStore::apply_in(txn: &DatabaseTransaction, inbox: &I
     **and** larger than before, as `MemoryCaps::check` does: `ApplyError::CapExceeded { before,
     after, limit }`.
   - **The budget.** Only when the change set has at least one `agent` insert, it counts `agent`
-    rows with `created_at > clock_timestamp() - interval '24 hours'` plus the inserts. Over
+    rows with `created_at > statement_timestamp() - interval '24 hours'` plus the inserts. The
+    insert sets `created_at = statement_timestamp()` explicitly, so a timer counts for the full 24
+    hours. The default `now()` is the start of the outer transaction. Over
     `max_agent_timers_created_per_day` is `ApplyError::BudgetExceeded { created, limit }`. A run
     with no insert is never refused for the budget.
 - **Cancel outcomes.** `ApplyReport` holds, for each cancel, `Cancelled` or `NotActive` (the
@@ -394,8 +398,9 @@ The adapter exposes `PgTimerStore::apply_in(txn: &DatabaseTransaction, inbox: &I
 |---|---|---|
 | `Ok(report)` | Commit the run. | — |
 | `CapExceeded`, `BudgetExceeded` | Roll back the whole run as transient, and let the next attempt run. | The same rule as SMA-789 §6.12. The next attempt reads fresh state, and the tool check gives the model the refusal text. The early tool checks keep this rare. |
-| `InboxMismatch`, `InvalidInsert` | Log at `error`, and roll back the whole run. | A bug. A silent commit would hide it. |
+| `InboxMismatch`, `InvalidInsert`, `LeaseMissing` | Log at `error`, and roll back the whole run. | A bug. A silent commit would hide it. |
 | A database error | Roll back the whole run and retry it. | Transient. |
+| A database error that names a failed savepoint rollback | Roll back the whole run. Do not use the transaction again. | The state of the transaction is unknown. |
 
 **Run outcomes.** Timer changes commit only with a run outcome that finishes its claimed events
 (`completed`, `deferred`, `stopped`). They never commit with `failed`. This differs from SMA-789
@@ -448,7 +453,9 @@ wake is a model run. Sven chose a creation budget:
 
 The schedule load stays bounded by §9.1: at most `max_active_per_inbox` schedules, each at most
 once per `min_schedule_interval_secs`. With the defaults that is 4800 wakes per day per inbox in
-the worst case. An operator lowers the two values to lower that bound.
+the worst case. An operator lowers the two values to lower that bound. The bound depends on
+`min_schedule_interval_secs`: when an operator lowers it, the bound rises (50 schedules at 60 s
+is 72000 fires a day). An operator must change the two values together.
 
 ## 10. The agent tools
 
@@ -562,6 +569,11 @@ For each row, one transaction:
   `status = 'failed'` and `failure = <reason>` instead. The reason has at most 500 characters,
   no control characters, and never the note. A metric is counted and a warning is logged with the
   timer id. The pass goes on with the next row (AG6).
+  The back-off UPDATE matches the row only while `status = 'active'` and `fire_attempts`,
+  `fire_count` and `next_fire_at` still have the values that the fire read. Another replica can
+  fire the row between the read and the back-off. That fire resets `fire_attempts` to 0 and moves
+  `next_fire_at`, so a stale back-off must not match it. No row matched means that another worker
+  handled the row, and `fire_due` still counts it as processed.
 - **Transient errors.** Every other database error (for example a statement timeout, a deadlock
   `40P01` or a lost connection). The row stays as it is. The pass stops and the loop counts the
   error (AG8). The next pass retries.

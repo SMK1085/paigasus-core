@@ -286,7 +286,8 @@ impl CronSchedule {
         let mut prev: Option<DateTime> = None;
         let mut cur = from;
         loop {
-            let n = self.next_civil_after(cur)?;
+            // The first search includes `from`, so a slot exactly at `from` counts.
+            let n = if prev.is_none() { self.next_civil_at_or_after(cur)? } else { self.next_civil_after(cur)? };
             if n >= end {
                 return Ok(None);
             }
@@ -325,8 +326,8 @@ fn normalize(text: &str) -> Result<String, CronSyntaxError> {
     let mut out: Vec<String> = fields.iter().map(|f| (*f).to_string()).collect();
     misplaced_name(&out[3], &WEEKDAYS, "weekday", FIELD_NAMES[3])?;
     misplaced_name(&out[4], &MONTHS, "month", FIELD_NAMES[4])?;
-    out[3] = replace_names(&out[3], &MONTHS, 1);
-    out[4] = replace_names(&out[4], &WEEKDAYS, 0);
+    out[3] = replace_names(&out[3], &MONTHS, 1, FIELD_NAMES[3])?;
+    out[4] = replace_names(&out[4], &WEEKDAYS, 0, FIELD_NAMES[4])?;
     for (i, field) in out.iter().enumerate() {
         if i == 4 && field.starts_with('+') {
             return Err(CronSyntaxError::PlusPrefix);
@@ -359,32 +360,55 @@ fn misplaced_name(field: &str, names: &[&str], kind: &'static str, field_name: &
     Ok(())
 }
 
-/// Replace each run of letters that is a name in `names` with its number (`first` is the number
-/// of the first name). A run that is not a name stays, and the next check refuses it.
-fn replace_names(field: &str, names: &[&str], first: usize) -> String {
+/// Replace each name in `names` with its number (`first` is the number of the first name). A name
+/// must be a whole part of a token: it starts the field or follows `,`, `-` or `/`, and it ends the
+/// field or comes before `,`, `-` or `/`. Any other token that holds a name or a run of three or
+/// more letters is refused, so `JAN0` does not become `10`. A short run that is not a name stays,
+/// and the next check refuses it.
+fn replace_names(field: &str, names: &[&str], first: usize, field_name: &'static str) -> Result<String, CronSyntaxError> {
+    let is_sep = |c: char| matches!(c, ',' | '-' | '/');
+    let chars: Vec<char> = field.chars().collect();
     let mut out = String::new();
-    let mut run = String::new();
-    let flush = |run: &mut String, out: &mut String| {
-        if run.is_empty() {
-            return;
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_alphabetic() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
         }
+        let start = i;
+        while i < chars.len() && chars[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let run: String = chars[start..i].iter().collect();
         let upper = run.to_ascii_uppercase();
-        match names.iter().position(|n| *n == upper) {
-            Some(i) => out.push_str(&(i + first).to_string()),
-            None => out.push_str(run),
+        let position = names.iter().position(|n| *n == upper);
+        if position.is_some() || run.len() >= 3 {
+            // A leading `+` stays: the next check names it.
+            let before_ok = start == 0 || is_sep(chars[start - 1]) || (start == 1 && chars[0] == '+');
+            let after_ok = i == chars.len() || is_sep(chars[i]);
+            if position.is_none() || !(before_ok && after_ok) {
+                // The token is the text between separators that holds the run.
+                let mut from = start;
+                while from > 0 && !is_sep(chars[from - 1]) {
+                    from -= 1;
+                }
+                let mut to = i;
+                while to < chars.len() && !is_sep(chars[to]) {
+                    to += 1;
+                }
+                let token: String = chars[from..to].iter().collect();
+                return Err(CronSyntaxError::Croner(format!(
+                    "the token `{token}` in the {field_name} field is not valid: a name must stand alone between `,`, `-` or `/`"
+                )));
+            }
         }
-        run.clear();
-    };
-    for c in field.chars() {
-        if c.is_ascii_alphabetic() {
-            run.push(c);
-        } else {
-            flush(&mut run, &mut out);
-            out.push(c);
+        match position {
+            Some(p) => out.push_str(&(p + first).to_string()),
+            None => out.push_str(&run),
         }
     }
-    flush(&mut run, &mut out);
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -502,6 +526,17 @@ mod tests {
     fn names_that_hold_extension_letters_are_accepted() {
         for c in ["0 9 * JUL *", "0 9 * * WED", "0 9 * APR-JUL SAT"] {
             assert!(parse(c).is_ok(), "{c}");
+        }
+    }
+
+    #[test]
+    fn a_name_is_a_whole_token_part() {
+        for c in ["0 9 * JAN *", "0 9 * JAN-MAR *", "0 9 * JAN-JUN/2 *", "0 9 * * mon-fri", "0 9 * JAN,MAR *"] {
+            assert!(parse(c).is_ok(), "{c}: {:?}", parse(c).err());
+        }
+        for (c, token) in [("0 9 * JAN0 *", "JAN0"), ("0 9 * 0JAN *", "0JAN"), ("0 9 * JANX *", "JANX"), ("0 9 * * MON1", "MON1")] {
+            let err = syntax(c).to_string();
+            assert!(err.contains(token), "{c}: {err}");
         }
     }
 
@@ -673,6 +708,12 @@ mod tests {
         assert_eq!(gap("*/15 * * * *", 900), Ok(None));
         assert_eq!(gap("*/15 * * * *", 901), Ok(Some(900)));
         assert_eq!(gap("* * * * *", 900), Ok(Some(60)));
+    }
+
+    #[test]
+    fn civil_gap_check_counts_a_slot_exactly_at_the_start() {
+        let from = civil("2027-03-01T00:00:00");
+        assert_eq!(sched("0,1 0 1 3 *", "UTC").min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, 900), Ok(Some(60)));
     }
 
     #[test]

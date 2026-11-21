@@ -164,6 +164,7 @@ fn apply_error_display_pins_the_text() {
             "active timer limit exceeded: 49 before, 51 after, limit 50".to_string(),
         ),
         (ApplyError::BudgetExceeded { created: 101, limit: 100 }, "daily timer budget exceeded: 101 made, limit 100".to_string()),
+        (ApplyError::LeaseMissing, "the inbox has no lease row".to_string()),
         (ApplyError::Store("db down".to_string()), "store error: db down".to_string()),
     ];
     for (err, text) in cases {

@@ -98,6 +98,9 @@ pub enum ApplyError {
         /// The limit.
         limit: u32,
     },
+    /// The inbox has no `inbox_lease` row. This is a bug: the run commit holds that row.
+    #[error("the inbox has no lease row")]
+    LeaseMissing,
     /// The store failed. The text is the cause.
     #[error("store error: {0}")]
     Store(String),

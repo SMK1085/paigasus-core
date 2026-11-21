@@ -374,14 +374,55 @@ async fn two_back_offs_from_the_same_read_count_one_attempt() {
     let id = due_follow_up(&env, &ib, 30).await;
     let before = db_now(&env).await;
     let sched = scheduler(&env.db, settings());
+    let read = support::timer::timer_state(&env.db, id).await;
     // Two workers read `fire_attempts = 0` and both fail. Only the first back-off counts.
-    assert!(sched.back_off_after_read(id, 0, "test category").await.expect("first"));
-    assert!(!sched.back_off_after_read(id, 0, "test category").await.expect("second"), "the second found the row changed");
+    assert!(sched.back_off_after_read(id, 0, read.fire_count, read.next_fire_at_us, "test category").await.expect("first"));
+    // The row now has the first back-off in it, so the second read value of `next_fire_at` is stale.
+    assert!(
+        !sched.back_off_after_read(id, 0, read.fire_count, read.next_fire_at_us, "test category").await.expect("second"),
+        "the second found the row changed"
+    );
     let state = support::timer::timer_state(&env.db, id).await;
     assert_eq!((state.status.as_str(), state.fire_attempts), ("active", 1));
-    // The wait comes from the value that was read: base 60 s * 2^0.
-    let wait_us = state.next_fire_at_us - before.as_microsecond();
-    assert!((59_000_000..=62_000_000).contains(&wait_us), "{wait_us}");
+    let after = db_now(&env).await;
+    // The wait comes from the value that was read: base 60 s * 2^0. The scheduler rounds the time
+    // up to a whole second before it adds the wait, so the upper bound has one more second.
+    let low = before.as_microsecond() + 60_000_000;
+    let high = after.as_microsecond() + 61_000_000;
+    assert!((low..=high).contains(&state.next_fire_at_us), "next_fire_at {} not in [{low}, {high}]", state.next_fire_at_us);
+}
+
+#[tokio::test]
+async fn a_back_off_from_before_a_fire_changes_nothing() {
+    let Some(env) = env().await else {
+        eprintln!("skipping scheduler_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    // A schedule stays active after a fire, so the stale back-off meets an active row.
+    let now = db_now(&env).await;
+    let back = (now - SignedDuration::from_hours(2)).as_second();
+    let at = Timestamp::from_second(back - back.rem_euclid(3600)).expect("ts");
+    let slot = at.to_zoned(TimeZone::UTC).datetime();
+    let id = due_schedule(&env, &ib, "0 * * * *", "UTC", &civil_text(slot), at).await;
+    let sched = scheduler(&env.db, settings());
+    // Worker A reads the row and cannot decode it. Worker B fires the row.
+    let read = support::timer::timer_state(&env.db, id).await;
+    assert_eq!(sched.fire_due(10).await.expect("fire"), 1);
+    let fired = support::timer::timer_state(&env.db, id).await;
+    assert_eq!(fired.fire_count, read.fire_count + 1);
+    // The stale back-off of A matches nothing, even at the last attempt.
+    assert!(
+        !sched
+            .back_off_after_read(id, i64::from(read.fire_attempts), read.fire_count, read.next_fire_at_us, "stale")
+            .await
+            .expect("stale")
+    );
+    let after = support::timer::timer_state(&env.db, id).await;
+    assert_eq!(
+        (after.status.as_str(), after.fire_attempts, after.fire_count, after.next_fire_at_us),
+        (fired.status.as_str(), fired.fire_attempts, fired.fire_count, fired.next_fire_at_us)
+    );
 }
 
 #[tokio::test]

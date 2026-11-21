@@ -440,6 +440,54 @@ async fn a_sql_error_in_the_savepoint_is_a_store_error_and_the_transaction_stays
 }
 
 #[tokio::test]
+async fn apply_in_without_a_lease_row_fails_and_writes_nothing() {
+    let Some(env) = env().await else {
+        eprintln!("skipping timer_store_pg: Docker unavailable");
+        return;
+    };
+    let x = new_inbox(&env).await;
+    let now = env.store.db_now().await.expect("now");
+    // No lease row exists for this inbox.
+    let txn = env.db.begin().await.expect("begin");
+    let err = env
+        .store
+        .apply_in(&txn, &x.id, &TimerCaps::default(), ins(vec![follow_up(&x, TimerOrigin::Agent, hours(now, 1))]))
+        .await
+        .expect_err("no lease row");
+    assert_eq!(err, ApplyError::LeaseMissing);
+    txn.commit().await.expect("the outer transaction commits");
+    assert_eq!(count(&env, &x, "").await, 0);
+}
+
+#[tokio::test]
+async fn an_insert_counts_from_its_statement_time_not_the_transaction_start() {
+    let Some(env) = env().await else {
+        eprintln!("skipping timer_store_pg: Docker unavailable");
+        return;
+    };
+    let x = new_inbox(&env).await;
+    let now = env.store.db_now().await.expect("now");
+    let txn = env.db.begin().await.expect("begin");
+    support::timer::lock_lease_row(&txn, x.uuid).await;
+    // `now()` is the start of this transaction. Wait, then insert.
+    txn.execute_unprepared("SELECT pg_sleep(1.2)").await.expect("sleep");
+    env.store
+        .apply_in(&txn, &x.id, &TimerCaps::default(), ins(vec![follow_up(&x, TimerOrigin::Agent, hours(now, 1))]))
+        .await
+        .expect("apply");
+    let row = txn
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT count(*)::bigint AS n FROM timer WHERE created_at > now() + interval '1 second'",
+        ))
+        .await
+        .expect("query")
+        .expect("row");
+    assert_eq!(row.try_get::<i64>("", "n").expect("n"), 1, "created_at is the statement time");
+    txn.commit().await.expect("commit");
+}
+
+#[tokio::test]
 async fn the_lease_row_lock_serializes_apply_in() {
     let Some(env) = env().await else {
         eprintln!("skipping timer_store_pg: Docker unavailable");
@@ -457,13 +505,23 @@ async fn the_lease_row_lock_serializes_apply_in() {
     let db = env.db.clone();
     let inbox = x.id.clone();
     let changes = ins(vec![follow_up(&x, TimerOrigin::Agent, hours(now, 1))]);
-    let mut task = tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let txn = db.begin().await.expect("begin");
         let r = store.apply_in(&txn, &inbox, &TimerCaps::default(), changes).await;
         txn.commit().await.expect("commit");
         r
     });
-    assert!(tokio::time::timeout(Duration::from_millis(300), &mut task).await.is_err(), "apply_in waits for the lease row lock");
+    // Poll until a backend waits on a lock, so the check does not rely on a fixed sleep. The wait is bounded.
+    let mut waiting = 0;
+    for _ in 0..100 {
+        waiting = support::scalar_i64(&env.db, "SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock'").await;
+        if waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(waiting > 0, "apply_in waits for the lease row lock");
+    assert!(!task.is_finished(), "apply_in is still blocked while the holder keeps the lock");
     holder.commit().await.expect("release");
     let r = tokio::time::timeout(Duration::from_secs(5), task).await.expect("done within 5 s").expect("join");
     r.expect("apply");

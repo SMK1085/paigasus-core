@@ -56,6 +56,10 @@ impl PgTimerStore {
     /// commit with the caller's transaction. On any error it rolls back to the savepoint and
     /// returns the error, so `txn` stays usable and holds no part of the change set. It never
     /// commits or rolls back `txn`. It expects READ COMMITTED.
+    ///
+    /// When the rollback to the savepoint fails too, the error is `ApplyError::Store` with a text
+    /// that starts with `savepoint rollback failed`, and the failure is logged at `error`. Then the
+    /// state of `txn` is unknown: the caller must roll back `txn` and must not use it again.
     pub async fn apply_in(&self, txn: &DatabaseTransaction, inbox: &InboxId, caps: &TimerCaps, changes: TimerChanges) -> Result<ApplyReport, ApplyError> {
         let savepoint = txn.begin().await.map_err(store_err)?;
         match apply_body(&savepoint, inbox, caps, changes).await {
@@ -72,10 +76,14 @@ impl PgTimerStore {
                 }
                 Ok(report)
             }
-            Err(e) => {
-                let _ = savepoint.rollback().await;
-                Err(e)
-            }
+            Err(e) => match savepoint.rollback().await {
+                Ok(()) => Err(e),
+                Err(rollback_err) => {
+                    // The state of `txn` is unknown now. The error says so, and the caller must roll back.
+                    tracing::error!(error = %rollback_err, "the rollback of the timer savepoint failed");
+                    Err(ApplyError::Store(format!("savepoint rollback failed: {rollback_err}; the apply error was: {e}")))
+                }
+            },
         }
     }
 
@@ -153,9 +161,14 @@ impl TimerRepository for PgTimerStore {
 /// The work of `apply_in` on the savepoint. The caller releases or rolls it back.
 async fn apply_body(txn: &DatabaseTransaction, inbox: &InboxId, caps: &TimerCaps, changes: TimerChanges) -> Result<ApplyReport, ApplyError> {
     // The lease row lock is the fence of the run commit (spec §8). It does not lock `inbox`.
-    txn.query_one_raw(stmt("SELECT 1 FROM inbox_lease WHERE inbox_id = $1 FOR UPDATE", vec![inbox.uuid().into()]))
+    let lease = txn
+        .query_one_raw(stmt("SELECT 1 FROM inbox_lease WHERE inbox_id = $1 FOR UPDATE", vec![inbox.uuid().into()]))
         .await
         .map_err(store_err)?;
+    if lease.is_none() {
+        // No row means that no lock is held and no fence exists. Write nothing.
+        return Err(ApplyError::LeaseMissing);
+    }
 
     for t in &changes.inserts {
         if t.inbox() != inbox {
@@ -196,10 +209,13 @@ async fn apply_body(txn: &DatabaseTransaction, inbox: &InboxId, caps: &TimerCaps
     }
 
     if changes.inserts.iter().any(|t| t.origin() == TimerOrigin::Agent) {
+        // `statement_timestamp()` is stable inside one statement, so the index on `created_at` can
+        // serve the range. This statement starts after the lease lock statement, so its time is
+        // after any wait for that lock.
         let row = txn
             .query_one_raw(stmt(
                 "SELECT count(*)::bigint AS n FROM timer WHERE inbox_id = $1 AND origin = 'agent' \
-                 AND created_at > clock_timestamp() - interval '24 hours'",
+                 AND created_at > statement_timestamp() - interval '24 hours'",
                 vec![inbox.uuid().into()],
             ))
             .await
@@ -252,8 +268,8 @@ async fn insert_timer(txn: &DatabaseTransaction, t: &Timer) -> Result<(), DbErr>
         t.next_fire_at().as_second().into(),
     ];
     txn.execute_raw(stmt(
-        "INSERT INTO timer (id, inbox_id, kind, origin, status, thread_id, cron, tz, next_slot, next_slot_second, note, next_fire_at) \
-         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8::timestamp, $9, $10, to_timestamp($11::bigint))",
+        "INSERT INTO timer (id, inbox_id, kind, origin, status, thread_id, cron, tz, next_slot, next_slot_second, note, next_fire_at, created_at) \
+         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8::timestamp, $9, $10, to_timestamp($11::bigint), statement_timestamp())",
         values,
     ))
     .await?;
