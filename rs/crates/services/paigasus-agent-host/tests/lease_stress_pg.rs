@@ -25,7 +25,7 @@ use paigasus_agent_host_core::lease::{ClaimError, CompleteError};
 use paigasus_agent_host_core::ports::{ClaimRepository, InboxRepository, InsertOutcome, LeaseRepository};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{expire, insert_thread, lease_state};
+use support::lease::{expire, insert_pending_event, insert_thread, lease_state, snapshot};
 use uuid::Uuid;
 
 const WORKERS: usize = 8;
@@ -36,6 +36,10 @@ const INBOX: Uuid = Uuid::from_u128(2);
 const FOREIGN_INBOX: Uuid = Uuid::from_u128(3);
 const THREAD: Uuid = Uuid::from_u128(10);
 const FOREIGN_THREAD: Uuid = Uuid::from_u128(11);
+/// The inbox of the sequential overlap phase. It is not the stress inbox, so the history checks
+/// see only the stress events.
+const SEQ_INBOX: Uuid = Uuid::from_u128(8);
+const SEQ_EVENT: Uuid = Uuid::from_u128(0x2000);
 /// The statement timeout of one heartbeat. It is shorter than the heartbeat interval (§8.6).
 const HB_TIMEOUT: Duration = Duration::from_millis(500);
 /// The upper bound of drain rounds. Each round completes one claim.
@@ -240,6 +244,33 @@ async fn drain(store: &PgLeaseStore, db: &DatabaseConnection) -> Vec<Completed> 
     panic!("the drain did not end within {DRAIN_ROUNDS} rounds");
 }
 
+/// The sequential overlap phase. A claims under its own keeper, the test expires the lease, B
+/// takes it and holds a live lease, and then A completes. Only the token half of the complete
+/// fence refuses this complete. It gives one overlap on every run, so the coverage floor does
+/// not depend on a random coincidence.
+async fn sequential_overlap(url: &str, db: &DatabaseConnection) -> usize {
+    insert_inbox(db, ORG, SEQ_INBOX, Uuid::from_u128(12), Uuid::from_u128(13)).await;
+    insert_pending_event(db, SEQ_INBOX, SEQ_EVENT, 10).await;
+    let seq = InboxId::new(ORG, SEQ_INBOX);
+    let ttl = timing().lease_ttl;
+    let store_a = Arc::new(PgLeaseStore::new(support::connect_pinned(url).await, HB_TIMEOUT));
+    let store_b = PgLeaseStore::new(support::connect_pinned(url).await, HB_TIMEOUT);
+    let a = store_a.acquire(&seq, "seq-a", ttl).await.expect("A acquire").expect("A takes the lease");
+    let keeper = LeaseKeeper::start(a, store_a.clone(), store_a.clone(), timing());
+    let claim = keeper.claim(&cfg()).await.expect("A claim").expect("A claims the event");
+    let a_token = claim.lease_token.0;
+    expire(db, SEQ_INBOX).await;
+    let b = store_b.acquire(&seq, "seq-b", ttl).await.expect("B acquire").expect("B takes the expired lease");
+    let state = lease_state(db, SEQ_INBOX).await.expect("lease row");
+    assert!(state.1 && state.0 != a_token, "B does not hold a live lease with a new token: {state:?}");
+    let before = snapshot(db, SEQ_INBOX).await;
+    assert_eq!(keeper.complete(claim).await, Err(CompleteError::LeaseLost), "A completed under the live lease of B");
+    assert_eq!(before, snapshot(db, SEQ_INBOX).await, "the stale complete of A changed a row");
+    keeper.release().await.expect("A release");
+    store_b.release(b).await.expect("B release");
+    1
+}
+
 async fn rows(db: &DatabaseConnection, sql: &str) -> Vec<sea_orm::QueryResult> {
     db.query_all_raw(Statement::from_string(DatabaseBackend::Postgres, sql.to_string())).await.expect(sql)
 }
@@ -326,6 +357,11 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     let total = support::scalar_i64(&db, &format!("SELECT count(*) AS n FROM inbox_event WHERE inbox_id = '{INBOX}'")).await;
     assert_eq!(total, i64::try_from(inserted.len()).expect("count"), "seed {seed}: the inbox holds other events");
     assert_eq!(settled, total, "seed {seed}: an event is not done or dead after the drain (AG2)");
+
+    // The random overlaps depend on timing. The sequential phase adds one on every run.
+    let random_overlap = overlap;
+    let overlap = overlap + sequential_overlap(&url, &db).await;
+    eprintln!("lease_stress_pg: seed {seed}: overlaps {overlap} ({random_overlap} random, 1 sequential)");
 
     // Coverage: the run did contend.
     assert!(worker_completes >= 1, "seed {seed}: coverage: no worker completed a claim");
