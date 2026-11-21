@@ -182,6 +182,7 @@ retries = 0
 # once: a retry would report the failure FLAKY and pass. This block comes BEFORE the block below,
 # because the first matching block that sets `retries` wins. It inherits `test-group` from it.
 filter = 'package(=paigasus-agent-host) and binary(scheduler_pg)'
+threads-required = 'num-test-threads'
 retries = 0
 
 [[profile.default.overrides]]
