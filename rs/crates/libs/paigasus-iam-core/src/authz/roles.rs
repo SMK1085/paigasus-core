@@ -1171,4 +1171,10 @@ mod tests {
     fn tool_policy_reader_is_root_only() {
         assert_eq!(role("tool_policy_reader").unwrap().scope_kinds, vec![NodeKind::Root]);
     }
+
+    /// SMA-787: `agent_event_writer` is an Organization-only role. A team grant must not exist.
+    #[test]
+    fn agent_event_writer_is_organization_only() {
+        assert_eq!(role("agent_event_writer").unwrap().scope_kinds, vec![NodeKind::Organization]);
+    }
 }

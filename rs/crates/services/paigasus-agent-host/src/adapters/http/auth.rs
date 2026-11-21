@@ -540,6 +540,32 @@ mod tests {
 
     // ---- §6.3 step 1: the key scope ---------------------------------------------------------
 
+    /// The table of `key_scope_allows`: each refused row trips one sub-guard.
+    #[test]
+    fn key_scope_allows_table() {
+        let o = org();
+        let rows: Vec<(String, bool)> = vec![
+            ("prn:pgs:iam:::root/00000000-0000-0000-0000-000000000000".to_string(), true),
+            (format!("prn:pgs:iam:::organization/{o}"), true),
+            (format!("prn:pgs:iam:::organization/{}", o.to_string().to_uppercase()), true),
+            // Wrong service.
+            (format!("prn:pgs:agents:::organization/{o}"), false),
+            // A region.
+            (format!("prn:pgs:iam:eu::organization/{o}"), false),
+            // An org segment.
+            (format!("prn:pgs:iam::{o}:organization/{o}"), false),
+            // Root with an id that is not nil.
+            (format!("prn:pgs:iam:::root/{}", u(0x77)), false),
+            // Another org.
+            (format!("prn:pgs:iam:::organization/{}", u(0x600)), false),
+            (String::new(), false),
+            ("garbage".to_string(), false),
+        ];
+        for (scope, want) in rows {
+            assert_eq!(key_scope_allows(&scope, o), want, "scope {scope:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_key_scoped_to_another_org_is_forbidden() {
         for principal in [stranger(), owner()] {
