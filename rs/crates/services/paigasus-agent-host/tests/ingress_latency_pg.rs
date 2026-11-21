@@ -18,7 +18,7 @@ const READY_BUDGET: Duration = Duration::from_secs(90);
 const TOKEN: &str = "latency-secret";
 const REQUESTS: usize = 1000;
 const CONCURRENCY: usize = 16;
-const WARMUP: usize = 20;
+const WARMUP: usize = 64;
 const P99_LIMIT: Duration = Duration::from_millis(50);
 
 fn event(id: &str) -> String {
@@ -73,25 +73,35 @@ async fn handler_p99_is_under_50_ms_with_the_worker_off() {
         }
     };
 
-    for n in 0..WARMUP {
-        let (status, _) = post(format!("warm-{n}")).await;
-        assert_eq!(status, 202, "warm-up request {n}; log:\n{}", child.tail());
-    }
-
+    // The warm-up runs at the full concurrency, so all 16 HTTP connections and the Postgres pool
+    // connections are open before the measured window. Its samples are dropped.
     let gate = Arc::new(Semaphore::new(CONCURRENCY));
-    let mut tasks = Vec::with_capacity(REQUESTS);
-    for n in 0..REQUESTS {
-        let permit = gate.clone().acquire_owned().await.expect("permit");
-        let fut = post(format!("evt-{n}"));
-        tasks.push(tokio::spawn(async move {
-            let out = fut.await;
-            drop(permit);
+    let run = |prefix: &'static str, count: usize| {
+        let gate = gate.clone();
+        let post = &post;
+        async move {
+            let mut tasks = Vec::with_capacity(count);
+            for n in 0..count {
+                let permit = gate.clone().acquire_owned().await.expect("permit");
+                let fut = post(format!("{prefix}-{n}"));
+                tasks.push(tokio::spawn(async move {
+                    let out = fut.await;
+                    drop(permit);
+                    out
+                }));
+            }
+            let mut out = Vec::with_capacity(count);
+            for task in tasks {
+                out.push(task.await.expect("task"));
+            }
             out
-        }));
+        }
+    };
+    for (status, _) in run("warm", WARMUP).await {
+        assert_eq!(status, 202, "every warm-up request must be accepted; log:\n{}", child.tail());
     }
     let mut times = Vec::with_capacity(REQUESTS);
-    for task in tasks {
-        let (status, elapsed) = task.await.expect("task");
+    for (status, elapsed) in run("evt", REQUESTS).await {
         assert_eq!(status, 202, "every request must be accepted; log:\n{}", child.tail());
         times.push(elapsed);
     }
