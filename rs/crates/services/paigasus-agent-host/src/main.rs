@@ -323,6 +323,26 @@ fn describe_agent_host_metrics() {
         names::AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL,
         "NATS messages on a subject that no channel maps. Each one is nacked with the maximum delay."
     );
+    describe_counter!(
+        names::AGENT_HOST_TIMER_FIRED_TOTAL,
+        "Timer firings, labeled by kind (follow_up or schedule), origin (agent or system) and outcome (inserted or duplicate)."
+    );
+    describe_counter!(
+        names::AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL,
+        "Timer rows that a scheduler pass could not fire, labeled by class (permanent or transient)."
+    );
+    describe_counter!(names::AGENT_HOST_TIMER_FAILED_TOTAL, "Timer rows set to failed, labeled by kind and origin.");
+    describe_counter!(names::AGENT_HOST_TIMER_CANCEL_NOT_ACTIVE_TOTAL, "Buffered timer cancels that found the timer not active.");
+    describe_histogram!(names::AGENT_HOST_SCHEDULER_PASS_DURATION_SECONDS, "Duration of one scheduler pass in seconds.");
+    describe_gauge!(
+        names::AGENT_HOST_SCHEDULER_LAG_SECONDS,
+        "Age in seconds of the oldest due active timer after a scheduler pass. It is 0 when nothing is due."
+    );
+    describe_gauge!(
+        names::AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
+        "Unix time in seconds of the last scheduler pass that finished."
+    );
+    describe_counter!(names::AGENT_HOST_TIMER_TOOL_CALLS_TOTAL, "Timer tool calls, labeled by tool and outcome (ok or refused).");
     // The name is provisional until SMA-798 moves it to `names::`.
     describe_counter!(
         "agent_host_memory_refusals_total",
