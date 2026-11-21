@@ -217,6 +217,23 @@ impl MemoryWorkspace {
         }
     }
 
+    /// True when the file exists for this run, with the store as the first source. A buffered put
+    /// gives `true` and a buffered delete gives `false`. Otherwise the store is read again, not
+    /// the cache: when the store holds the path, the answer is `true`, and `known` does not
+    /// change, so the first-sight baseline stays. When the store does not hold the path, the
+    /// answer is the one of `exists`, so a stale cached presence also gives `true`.
+    pub(super) async fn exists_fresh(&mut self, path: &MemoryPath) -> Result<bool, WorkspaceError> {
+        match self.changes.get(path) {
+            Some(MemoryChange::Put { .. }) => return Ok(true),
+            Some(MemoryChange::Delete { .. }) => return Ok(false),
+            None => {}
+        }
+        if self.store.get(&self.scope, path).await?.is_some() {
+            return Ok(true);
+        }
+        self.exists(path).await
+    }
+
     /// List every file under `dir` with its size, in byte order of the path.
     pub async fn list(&mut self, dir: &MemoryDir) -> Result<Vec<(MemoryPath, u64)>, WorkspaceError> {
         if !self.listings.contains_key(dir.as_str()) {
@@ -1224,5 +1241,34 @@ mod tests {
         direct(&f, &s, "/done/z", "z").await;
         assert_eq!(ws.list(&d("/done")).await.unwrap(), vec![]);
         assert_eq!(ws.list_fresh(&d("/done")).await.unwrap(), vec![(p("/done/z"), 1)]);
+    }
+
+    #[tokio::test]
+    async fn exists_fresh_reads_the_store_not_the_cached_absence() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        assert!(!ws.exists(&p("/done")).await.unwrap());
+        direct(&f, &s, "/done", "d").await;
+        // The cache still says absent. The fresh check sees the store.
+        assert!(!ws.exists(&p("/done")).await.unwrap());
+        assert!(ws.exists_fresh(&p("/done")).await.unwrap());
+        // The cached absence stays the baseline, so a write to the path is a conflict.
+        assert!(!ws.exists(&p("/done")).await.unwrap());
+        // A stale cached presence still answers true, so the destination guard stays strict.
+        direct(&f, &s, "/gone", "g").await;
+        assert!(ws.exists(&p("/gone")).await.unwrap());
+        direct_delete(&f, &s, "/gone").await;
+        assert!(ws.exists_fresh(&p("/gone")).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn exists_fresh_follows_the_buffer() {
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/x", "x").await;
+        assert!(ws.exists(&p("/x")).await.unwrap());
+        ws.remove(&p("/x")).await.unwrap();
+        // The store holds the file, but the buffered delete wins.
+        assert!(!ws.exists_fresh(&p("/x")).await.unwrap());
+        ws.write(&p("/y"), "y".to_string()).await.unwrap();
+        assert!(ws.exists_fresh(&p("/y")).await.unwrap());
     }
 }

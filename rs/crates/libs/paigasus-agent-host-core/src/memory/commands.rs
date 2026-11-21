@@ -332,7 +332,13 @@ async fn delete(ws: &mut MemoryWorkspace, raw: &str) -> Result<String, MemoryCom
     }
     let mut files = targets(ws, &parsed, raw).await?;
     if files.is_empty() {
-        return Err(missing_path(raw));
+        // The cached view says empty. The store check finds a child that another writer made
+        // since, and it gives the conflict. A source that is still empty does not exist.
+        ws.check_dir(&parsed.dir).await?;
+        files = targets(ws, &parsed, raw).await?;
+        if files.is_empty() {
+            return Err(missing_path(raw));
+        }
     }
     let as_file = parsed.file.as_ref().is_some_and(|f| files.len() == 1 && files[0] == *f);
     let mut guards = Vec::new();
@@ -360,7 +366,17 @@ async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Resul
     }
     let mut sources = targets(ws, &old, old_raw).await?;
     if sources.is_empty() {
-        return Err(missing_path(old_raw));
+        // The inside refusal reads nothing, so an empty source there does not reach the store.
+        if old.dir.contains_dir(&new.dir) && old.dir != new.dir {
+            return Err(missing_path(old_raw));
+        }
+        // The cached view says empty. The store check finds a child that another writer made
+        // since, and it gives the conflict. A source that is still empty does not exist.
+        ws.check_dir(&old.dir).await?;
+        sources = targets(ws, &old, old_raw).await?;
+        if sources.is_empty() {
+            return Err(missing_path(old_raw));
+        }
     }
     // A single file that is not a directory moves as a file. Anything else moves as a directory.
     let as_file = old.file.as_ref().filter(|f| sources.len() == 1 && sources[0] == **f);
@@ -384,7 +400,7 @@ async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Resul
         true
     } else {
         let files_under = !ws.list_fresh(&new.dir).await?.is_empty();
-        files_under || ws.exists(&MemoryPath::parse(new.dir.as_str())?).await?
+        files_under || ws.exists_fresh(&MemoryPath::parse(new.dir.as_str())?).await?
     };
     if exists {
         return Err(MemoryCommandError::new(format!("Error: The destination {new_shown} already exists")));
@@ -1216,5 +1232,61 @@ mod tests {
         assert_eq!(all, vec![(MemoryPath::parse("/a/x.md").unwrap(), 1), (MemoryPath::parse("/a/y.md").unwrap(), 1)]);
         assert_eq!(content(&mut fresh, "/a/x.md").await.as_deref(), Some("x"));
         assert_eq!(content(&mut fresh, "/a/y.md").await.as_deref(), Some("y"));
+    }
+
+    #[tokio::test]
+    async fn a_file_created_at_the_destination_after_a_view_gives_already_exists() {
+        let (store, scope, mut ws) = committed_parts(&[("/tasks/a.md", "a")], MemoryCaps::default()).await;
+        let _ = run(&mut ws, json!({"command":"view","path":"/memories/done"})).await;
+        other_writer(&store, &scope, "/done", "d").await;
+        assert_eq!(
+            run(&mut ws, rename_cmd("/memories/tasks", "/memories/done")).await.unwrap_err(),
+            "Error: The destination /memories/done already exists"
+        );
+        let set = ws.take_changes();
+        assert!(set.changes.is_empty());
+        assert!(set.guards.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_child_created_under_a_viewed_empty_dir_conflicts_on_delete() {
+        let conflict = "The file /memories/tasks/a.md changed outside this run. Your changes to it in this run are gone. Use view to read it again.";
+        let (store, scope, mut ws) = committed_parts(&[], MemoryCaps::default()).await;
+        let _ = run(&mut ws, json!({"command":"view","path":"/memories/tasks"})).await;
+        other_writer(&store, &scope, "/tasks/a.md", "a").await;
+        let cmd = json!({"command":"delete","path":"/memories/tasks"});
+        assert_eq!(run(&mut ws, cmd.clone()).await.unwrap_err(), conflict);
+        assert!(ws.armed_guards().is_empty());
+        run(&mut ws, json!({"command":"view","path":"/memories/tasks"})).await.unwrap();
+        run(&mut ws, cmd).await.unwrap();
+        ws.commit().await.unwrap();
+        let mut fresh = fresh_ws(&store, &scope);
+        assert_eq!(content(&mut fresh, "/tasks/a.md").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_child_created_under_a_viewed_empty_dir_conflicts_on_rename() {
+        let conflict = "The file /memories/tasks/a.md changed outside this run. Your changes to it in this run are gone. Use view to read it again.";
+        let (store, scope, mut ws) = committed_parts(&[], MemoryCaps::default()).await;
+        let _ = run(&mut ws, json!({"command":"view","path":"/memories/tasks"})).await;
+        other_writer(&store, &scope, "/tasks/a.md", "a").await;
+        let cmd = rename_cmd("/memories/tasks", "/memories/done");
+        assert_eq!(run(&mut ws, cmd.clone()).await.unwrap_err(), conflict);
+        assert!(ws.armed_guards().is_empty());
+        run(&mut ws, json!({"command":"view","path":"/memories/tasks"})).await.unwrap();
+        run(&mut ws, cmd).await.unwrap();
+        ws.commit().await.unwrap();
+        let mut fresh = fresh_ws(&store, &scope);
+        assert_eq!(content(&mut fresh, "/done/a.md").await.as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    async fn a_truly_missing_dir_source_gives_does_not_exist() {
+        let missing = "Error: The path /memories/tasks does not exist";
+        let (_store, _scope, mut ws) = committed_parts(&[], MemoryCaps::default()).await;
+        let _ = run(&mut ws, json!({"command":"view","path":"/memories/tasks"})).await;
+        assert_eq!(run(&mut ws, json!({"command":"delete","path":"/memories/tasks"})).await.unwrap_err(), missing);
+        assert_eq!(run(&mut ws, rename_cmd("/memories/tasks", "/memories/done")).await.unwrap_err(), missing);
+        assert!(ws.take_changes().changes.is_empty());
     }
 }

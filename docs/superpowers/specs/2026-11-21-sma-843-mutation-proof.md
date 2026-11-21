@@ -1,10 +1,11 @@
 # SMA-843 mutation proof
 
-Each row removes one piece of the guard code. The crate suite (`paigasus-agent-host-core`, 141
+Each row removes one piece of the guard code. The crate suite (`paigasus-agent-host-core`, 148
 tests) and the `memory_pg` suite (12 tests, Docker) then run. Every row fails at least one test.
-The unmutated tree passes both suites. The mutated line compiles under `-D warnings`. All 16 rows
-were re-run on the tree after the final-review fix (`e7dfcc5d` plus the blind-retry test). The
-table gives the failing tests of that re-run. Both suites ran for every row.
+The unmutated tree passes both suites. The mutated line compiles under `-D warnings`. Rows 1 to 16
+were re-run on the tree after the final-review fix (`e7dfcc5d` plus the blind-retry test). Rows 17
+and 18 were run on the tree with the destination and empty-source fixes. The table gives the
+failing tests of those runs. Rows 1 to 16 ran both suites. Rows 17 and 18 ran the core suite only.
 
 Names: `cmd::` is `memory::commands::tests::`, `ws::` is `memory::workspace::tests::`, `fake::` is
 `memory::fake::tests::`, and `pg::` is `memory_pg`.
@@ -13,7 +14,7 @@ Names: `cmd::` is `memory::commands::tests::`, `ws::` is `memory::workspace::tes
 |---|---|---|---|
 | 1 | Remove the `check_guards` call in the Postgres `apply` | pg::a_directory_rename_conflicts_on_a_file_added_before_the_commit, pg::postgres_passes_the_conformance_suite | pass |
 | 2 | Remove the guard step of the fake `apply` | fake::the_fake_passes_the_conformance_suite, cmd::dir_delete_then_an_outsider_conflicts_at_commit, cmd::dir_rename_then_an_outsider_at_the_source_conflicts_at_commit, cmd::dir_rename_then_an_outsider_at_the_destination_conflicts_at_commit | pass |
-| 3 | Drop the `path = $4` term in the Postgres guard read | pg::postgres_passes_the_conformance_suite ("expected a conflict at /done, got Ok(())") | pass |
+| 3 | Replace the `path = $4` term with `$4::text = ''` in the Postgres guard read | pg::postgres_passes_the_conformance_suite ("expected a conflict at /done, got Ok(())") | pass |
 | 4 | Remove the scope columns from the guard read | pg::postgres_passes_the_conformance_suite. It fails at the first guard check that shares the database with another scope (a false conflict at `/tasks/b.md`), before check 8. | pass |
 | 5 | Remove the guard of `delete` | cmd::dir_delete_then_an_outsider_conflicts_at_commit, cmd::an_early_conflict_under_a_dir_delete_drops_the_delete, cmd::a_create_after_a_dir_delete_where_the_file_is_deleted_drops_the_guard, cmd::a_guard_only_dir_delete_drops_on_an_early_conflict, cmd::a_create_after_a_dir_delete_joins_and_a_conflict_drops_the_guard, cmd::a_dir_delete_after_a_buffered_move_drops_with_the_move | pass |
 | 6 | Remove `old.dir` from the guards of `rename` | cmd::dir_rename_then_an_outsider_at_the_source_conflicts_at_commit, cmd::a_dir_rename_onto_a_moved_away_destination_drops_with_the_move, pg::a_directory_rename_conflicts_on_a_file_added_before_the_commit | pass |
@@ -27,6 +28,8 @@ Names: `cmd::` is `memory::commands::tests::`, `ws::` is `memory::workspace::tes
 | 14 | Remove the listing replace in `check_dir` | cmd::a_stale_cached_row_gives_the_dir_missing_text, ws::check_dir_records_a_never_seen_path_and_replaces_the_cache | pass |
 | 15 | Use the cached listing for the destination of `rename` | cmd::a_file_at_the_destination_gives_already_exists | pass |
 | 16 | Remove the join term for the groups that a new guard covers in `join_group` | cmd::a_dir_delete_after_a_buffered_move_drops_with_the_move, cmd::a_dir_rename_onto_a_moved_away_destination_drops_with_the_move | pass |
+| 17 | Use `ws.exists` instead of `ws.exists_fresh` for the destination file check in `rename` | cmd::a_file_created_at_the_destination_after_a_view_gives_already_exists | pass |
+| 18 | Remove the `check_dir` call on an empty source in `delete` and `rename` | cmd::a_child_created_under_a_viewed_empty_dir_conflicts_on_delete, cmd::a_child_created_under_a_viewed_empty_dir_conflicts_on_rename | pass |
 
 Notes:
 
@@ -39,6 +42,10 @@ Notes:
 - After the last row, `git diff --stat -- rs/` printed nothing. In the re-run, a hash check after
   each reverse edit confirmed the file. Row 13 has two identical mutated lines, so its reverse edit
   used the comment line above each one to find it.
+- Row 3 proves that the exact-path term is needed. Without it, a file at the directory path itself
+  (`/done`) is not refused. Other rows prove the descendant term and the Rust `covers` filter.
+- Rows 17 and 18 came from the review of the destination check and the empty source. Row 17 keeps a
+  call to `exists_fresh` so that the line compiles under `-D warnings`. Row 18 removes both calls.
 - Row 16 came from the final review. The mutation replaces the term with an empty `extend`,
   because a plain removal fails `unused_mut` under `-D warnings`. On 141 tests the core suite gave
   139 passed and 2 failed.
