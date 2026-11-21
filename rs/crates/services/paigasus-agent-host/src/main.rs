@@ -6,8 +6,8 @@
 //! 4. connect to the database, 5. bind the HTTP listener (and the metrics listener), 6. serve the
 //!    boot router, 7. start the Prometheus upkeep task, 8. migrate under the advisory lock,
 //! 9. when `[nats]` is set, check each channel inbox and the durable (spec §9.1), 10. install the
-//!    application router in the boot slot, 11. start the NATS source, 12. wait for a shutdown
-//!    signal and drain.
+//!    application router in the boot slot, 11. start the NATS source and, when `timers.enabled` is
+//!    true, the scheduler loop, 12. wait for a shutdown signal and drain.
 //!
 //! The binary connects to the database first and binds second, as `paigasus-iam` does. A replica
 //! that migrates, or that waits for the lock, is then present and not ready, and not absent.
@@ -21,8 +21,11 @@ use paigasus_agent_host::adapters::iam::IamClient;
 use paigasus_agent_host::adapters::nats::consumer::{NatsSource, bind_channels, connect_and_check};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
+use paigasus_agent_host::adapters::persistence::scheduler::PgScheduler;
+use paigasus_agent_host::application::scheduler_loop::run_scheduler_loop;
 use paigasus_agent_host::config::Config;
-use paigasus_agent_host_core::ports::InboxRepository;
+use paigasus_agent_host_core::ports::{InboxRepository, Scheduler};
+use paigasus_agent_host_core::timer::BundledTzResolver;
 use paigasus_observability::names;
 use sea_orm::Database;
 use tokio::task::JoinSet;
@@ -146,16 +149,16 @@ async fn serve() -> anyhow::Result<()> {
 
     // One signal registration for the whole life of the process. A second registration can lose a
     // signal that arrives in the gap between the two.
-    let outcome: anyhow::Result<Option<NatsTask>> = tokio::select! {
+    let outcome: anyhow::Result<BootTasks> = tokio::select! {
         r = boot(&db, &config, &slot) => r,
         () = &mut shutdown => {
             tracing::info!("shutdown signal received during boot");
             interrupted = true;
-            Ok(None)
+            Ok(BootTasks::default())
         }
     };
-    let nats = match outcome {
-        Ok(nats) if !interrupted => nats,
+    let BootTasks { nats, scheduler } = match outcome {
+        Ok(tasks) if !interrupted => tasks,
         Ok(_) => {
             let _ = tx.send(());
             drain(&mut servers).await;
@@ -172,6 +175,14 @@ async fn serve() -> anyhow::Result<()> {
         let rx = rx.clone();
         servers.spawn(async move { source.run(inboxes, rx).await });
         tracing::info!("the NATS source started");
+    }
+    if let Some(scheduler) = scheduler {
+        let rx = rx.clone();
+        let settings = config.timers.loop_settings();
+        // The loop ends only on the shutdown watch. It reads the watch between rows and never
+        // cuts a fire short.
+        servers.spawn(async move { run_scheduler_loop(scheduler, settings, rx).await });
+        tracing::info!("the scheduler loop started");
     }
 
     tracing::info!(%config.http_addr, "paigasus-agent-host started");
@@ -208,10 +219,17 @@ struct NatsTask {
     inboxes: Arc<dyn InboxRepository>,
 }
 
+/// The tasks that `boot` builds and `serve` spawns after the application router is in place.
+#[derive(Default)]
+struct BootTasks {
+    nats: Option<NatsTask>,
+    scheduler: Option<Arc<dyn Scheduler>>,
+}
+
 /// Everything between the bind and ready: the migration, the NATS boot checks and the install of
 /// the application router. It returns an error and does not use `?` out of `serve`, so that
 /// `serve` always drains.
-async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot) -> anyhow::Result<Option<NatsTask>> {
+async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot) -> anyhow::Result<BootTasks> {
     let migration = migrate_under_lock(db, config.migration.lock_wait()).await?;
     tracing::info!(
         waited = ?migration.waited,
@@ -246,10 +264,18 @@ async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot
             None
         }
     };
+    // Only the resolver and the scheduler: the timer store has no caller in this binary yet.
+    let scheduler: Option<Arc<dyn Scheduler>> = if config.timers.enabled {
+        let tz = Arc::new(BundledTzResolver::new());
+        Some(Arc::new(PgScheduler::new(db.clone(), tz, config.timers.scheduler_settings())))
+    } else {
+        tracing::info!("timers.enabled is false; the scheduler loop is off");
+        None
+    };
     tracing::info!(worker_enabled = config.worker.enabled, "worker.enabled is read, and SMA-787 starts no worker");
     let state = AppState { db: db.clone(), inboxes, ingress };
     slot.install(app_router(state, None))?;
-    Ok(nats)
+    Ok(BootTasks { nats, scheduler })
 }
 
 /// Wait for the server tasks, at most [`DRAIN_TIMEOUT`]. A task that ignores the shutdown watch

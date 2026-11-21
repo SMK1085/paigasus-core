@@ -195,3 +195,54 @@ async fn metrics_count_requests_with_the_agent_host_prefix() {
     assert!(total >= 1.0, "one request on /v1/x must give a sample >= 1; /metrics:\n{after_route}");
     assert!((total - (base + 1.0)).abs() < f64::EPSILON, "the count must grow by exactly 1 (from {base} to {total})");
 }
+
+/// The inbox of a timer boot test, with one due follow-up. Its `next_fire_at` is a minute old.
+async fn insert_due_follow_up(db: &sea_orm::DatabaseConnection) -> uuid::Uuid {
+    let inbox = uuid::Uuid::new_v4();
+    support::inbox::insert_inbox(db, uuid::Uuid::new_v4(), inbox, uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).await;
+    support::timer::insert_follow_up_row(db, inbox, uuid::Uuid::new_v4(), "agent", "date_trunc('second', now() - interval '1 minute')", "check the build").await;
+    inbox
+}
+
+#[tokio::test]
+async fn a_boot_with_timers_fires_a_due_row() {
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    let db = support::connect(&url).await;
+    let (mut child, port) = support::spawn_service_with(&url, &[("AGENT_HOST_TIMERS__POLL_INTERVAL_SECS", "1".to_string())]);
+    support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
+
+    let inbox = insert_due_follow_up(&db).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let events = support::timer::timer_events(&db, inbox).await;
+        if let Some(event) = events.first() {
+            assert_eq!(event.source, "urn:paigasus:agents:timer:agent");
+            assert_eq!(event.status, "pending");
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "no timer event within 10 s; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_boot_with_timers_off_fires_nothing() {
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    let db = support::connect(&url).await;
+    let (mut child, port) = support::spawn_service_with(&url, &[("AGENT_HOST_TIMERS__POLL_INTERVAL_SECS", "1".to_string()), ("AGENT_HOST_TIMERS__ENABLED", "false".to_string())]);
+    support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
+
+    let inbox = insert_due_follow_up(&db).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(
+        support::timer::timer_events(&db, inbox).await.is_empty(),
+        "a disabled scheduler must fire nothing; log:\n{}",
+        child.tail()
+    );
+}

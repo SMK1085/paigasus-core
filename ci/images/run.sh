@@ -1128,6 +1128,35 @@ smoke_agent_host() {
   wait_ready "$AH_NAME" "http://${AH_NAME}:8086/readyz"
   expect_status "agent-host /healthz" "http://${AH_NAME}:8086/healthz" 200
   expect_status "agent-host /readyz"  "http://${AH_NAME}:8086/readyz"  200
+  # SMA-788 spec 5.1, the second control: the scheduler resolves `Europe/Berlin` in this image.
+  # The runtime rootfs has no /usr/share/zoneinfo, so a schedule row in that zone fires only when
+  # the bundled time zone data works. The row is due one minute ago. The default scheduler loop
+  # runs without any setting. A miss is an error, and `fire_attempts` must stay 0.
+  local ah_psql=(docker exec "$AH_PG_NAME" psql -U postgres -d agent_host -v ON_ERROR_STOP=1 -tA)
+  "${ah_psql[@]}" -c "
+    WITH i AS (
+      INSERT INTO inbox (id, org_id, agent_id, principal_id)
+      VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid())
+      RETURNING id)
+    INSERT INTO timer (id, inbox_id, kind, origin, status, note, cron, tz, next_slot, next_slot_second, next_fire_at)
+    SELECT gen_random_uuid(), i.id, 'schedule', 'agent', 'active', '', '0 9 * * *', 'Europe/Berlin',
+           '2026-01-01 09:00'::timestamp, false, now() - interval '1 minute'
+    FROM i" >/dev/null
+  local ah_fired=0 ah_try
+  for ah_try in $(seq 1 30); do
+    ah_fired="$("${ah_psql[@]}" -c "SELECT count(*) FROM inbox_event WHERE source = 'urn:paigasus:agents:timer:agent'")"
+    [ "$ah_fired" -ge 1 ] && break
+    sleep 1
+  done
+  if [ "$ah_fired" -lt 1 ]; then
+    echo "::error::agent-host fired no timer event for a due Europe/Berlin schedule within 30 s" >&2
+    docker logs "$AH_NAME" 2>&1 | tail -n 20 >&2
+    return 1
+  fi
+  local ah_attempts
+  ah_attempts="$("${ah_psql[@]}" -c "SELECT max(fire_attempts) FROM timer")"
+  [ "$ah_attempts" = "0" ] || { echo "::error::agent-host timer row has fire_attempts=${ah_attempts}, expected 0" >&2; return 1; }
+  echo "  agent-host fired a due Europe/Berlin schedule (bundled time zone data works in the image)"
   # The NEGATIVE row: stop Postgres. /readyz must report 503, and the in-image healthcheck must
   # exit exactly 1 (0 = healthy, 1 = unhealthy, 2 = usage error). Exit 2 would mean --path was
   # rejected, so a bare non-zero check would stop proving that --path works.

@@ -18,6 +18,7 @@ use crate::adapters::nats::channels::filters_overlap;
 use crate::adapters::nats::{DURABLE_NAME, STREAM_NAME};
 use crate::adapters::persistence::scheduler::SchedulerSettings;
 use crate::application::lease_keeper::{KeeperTiming, KeeperTimingError};
+use crate::application::scheduler_loop::LoopSettings;
 
 /// A connection URL that can hold a password. `Debug` and `Serialize` print a fixed placeholder.
 /// Read the real value with [`RedactedUrl::as_str`].
@@ -128,6 +129,15 @@ impl TimersConfig {
     #[must_use]
     pub fn statement_timeout(&self) -> Duration {
         Duration::from_millis(self.statement_timeout_ms)
+    }
+
+    /// The settings of the scheduler loop.
+    #[must_use]
+    pub fn loop_settings(&self) -> LoopSettings {
+        LoopSettings {
+            poll_interval: self.poll_interval(),
+            pass_limit: self.pass_limit,
+        }
     }
 
     /// The settings of the scheduler. The back-off base is the poll interval.
@@ -903,6 +913,20 @@ mod tests {
             assert_eq!(cfg.timers.poll_interval_secs, 1);
             assert_eq!(cfg.timers.pass_limit, 100);
             assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn timers_to_loop_settings() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.timers.poll_interval_secs = 4;
+            cfg.timers.pass_limit = 9;
+            let l = cfg.timers.loop_settings();
+            assert_eq!(l.poll_interval, Duration::from_secs(4));
+            assert_eq!(l.pass_limit, 9);
             Ok(())
         });
     }
