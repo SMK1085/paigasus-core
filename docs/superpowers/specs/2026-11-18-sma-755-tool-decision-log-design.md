@@ -612,8 +612,11 @@ Known limits, which the runbook states:
   - The deployment rule (§5.2) is only detected, not prevented.
   - A restore to an older generation is missed when the relay that wrote the newer generation has
     stopped and no other relay saw a failed KV step.
-- If only the consumer group is removed (`XGROUP DESTROY`), `NOGROUP` counts a reset, but the stream
-  still holds its events. The relay reads them again from ID 0, so the lost estimate overcounts.
+- If only the consumer group is removed (`XGROUP DESTROY`), the stream still holds its events. Since
+  SMA-821, `NOGROUP` only makes the group again. The group script writes a new generation, and the KV
+  step counts a reset at the next step. It counts nothing when the KV entry is missing at that moment,
+  for example at the first write. The relay reads the events again from ID 0, so the lost estimate
+  overcounts. See the SMA-821 spec, section 5.4 ("`XGROUP DESTROY` only").
 - A cross-account import of `gateway.decision.>` into an account with a stream that captures it gives
   two PubAck responders. The foreign stream answers 10060. If that answer comes first, the relay retries
   without end, although `GATEWAY_DECISIONS` stored the event. Nothing in `ops/nats` exports the subject
@@ -652,7 +655,9 @@ primes the series at zero:
 
 - **Drops:** `sum(increase(gateway_decision_log_dropped_total{reason!="shutdown"}[15m])) > 0`.
   `shutdown` is left out, because every deploy can have it.
-- **Redis reset:** `sum(increase(gateway_decision_log_redis_resets_total[15m])) > 0`.
+- **Redis reset:** `sum(increase(gateway_decision_log_redis_resets_total[15m])) > 0 or
+  max(gateway_decision_log_last_reset_timestamp_seconds) > time() - 900`. The timestamp clause is
+  necessary because the counter series of a fresh pod starts at 1, and `increase()` misses it.
 - **Relay stalled:** `written` increases while `published` does not, for 10 minutes. Or the
   backlog is above 50 % of `max_len`.
 - **Breaker:** a decision-log breaker alert with `{role="decision_log"}`. Add `{role="limits"}`
