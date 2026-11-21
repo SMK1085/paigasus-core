@@ -103,6 +103,12 @@ impl StubIam {
         self
     }
 
+    /// Introspection works, and the self-query finds IAM unavailable.
+    pub fn self_query_outage(mut self) -> Self {
+        self.allowed = Leg::Rpc(Code::Unavailable, None);
+        self
+    }
+
     /// The names of the calls, in order.
     pub fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().unwrap().clone()

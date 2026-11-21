@@ -132,8 +132,17 @@ because the IAM and gateway copies live in service crates.
    inactive one. `503` `iam-unavailable` when IAM cannot be reached.
 4. **Inbox lookup** by UUID (`InboxRepository::get_by_uuid`).
 5. **Authorisation** (§6.3). An unknown inbox and a refused caller both give `403` `forbidden` with
-   the same body, so a caller cannot probe which inbox UUIDs exist. The two paths differ in latency
-   (an unknown inbox makes no `IsAuthorized` call). This is accepted: inbox UUIDs are random.
+   the same body, so a caller cannot probe which inbox UUIDs exist. The two paths make the same IAM
+   calls: for an unknown inbox, the host runs the non-owner self-query against a nil org and
+   ignores the verdict. A key out of scope runs the same probe. During an IAM outage the self-query
+   fails, and every one of these paths gives `503` `iam-unavailable`. So the outage does not show
+   which inbox exists to a caller that is not the owner. One path differs: an OIDC caller that
+   owns the inbox but is not a member of the inbox org gets `403` with no further IAM call, also
+   during an outage. An OIDC caller that does not own the inbox runs the self-query, so an outage
+   gives it `503`. That answer
+   does not reveal other inboxes. The owner path makes no self-query and does not change. (Changed in the
+   SMA-787 follow-up sweep. Before, an outage gave `503` for an existing inbox and `403` for an
+   unknown inbox.)
 6. **Envelope parse and validation** with `paigasus-cloudevents`. Invalid JSON gives `400`
    `invalid-request-body`; a valid JSON that is not a valid CloudEvent gives `400`
    `invalid-request-schema`. A `type` that starts with `agents.` gives `400`

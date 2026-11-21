@@ -846,3 +846,121 @@ async fn boot_reverts_an_out_of_band_edit_and_records_it_in_the_audit_log() {
         "a converged row must not keep auditing every boot"
     );
 }
+
+/// Inserts a policy row the way an OLDER release's `PutPolicy` wrote it: `system = false`, and no
+/// `content_fingerprint` or `starter_revision` (`doc_to_model` never sets either). Raw SQL,
+/// because THIS release's `PutPolicy` rejects every starter id. The older release did not know
+/// the id, so it accepted it.
+async fn insert_operator_policy(db: &DatabaseConnection, policy_id: &str, source: &str) {
+    db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        format!(r#"INSERT INTO "policy" (policy_id, kind, source, description, system, created_at, updated_at) VALUES ('{policy_id}', 'static', '{source}', 'operator policy', false, now(), now())"#),
+    ))
+    .await
+    .unwrap();
+}
+
+/// The persisted `(source, system, content_fingerprint)` of one row.
+async fn stored_row_state(db: &DatabaseConnection, policy_id: &str) -> (String, bool, Option<String>) {
+    use paigasus_iam::adapters::persistence::entities::policy;
+    let row = policy::Entity::find_by_id(policy_id.to_string()).one(db).await.unwrap().unwrap();
+    (row.source, row.system, row.content_fingerprint)
+}
+
+/// An operator policy that an older release accepted at an id that a later release made a starter
+/// id. Boot must not overwrite it, and must not write any other starter row. Boot must fail with an
+/// error that names each colliding id. This applies to every starter id, not only to
+/// `agent_event_writer` (SMA-787 follow-up).
+#[tokio::test]
+async fn boot_refuses_to_overwrite_an_operator_policy_at_a_starter_id() {
+    use paigasus_iam::adapters::persistence::entities::policy;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let gens = Generations::memory();
+    let operator_source = "permit(principal, action, resource) when { false };";
+    insert_operator_policy(&db, "agent_event_writer", operator_source).await;
+    insert_operator_policy(&db, "tool_policy_reader", operator_source).await;
+
+    let err = reconcile_starter(&reconcile_deps(&db, &gens)).await.expect_err("boot must refuse an operator policy at a starter id");
+    let message = err.to_string();
+    let paigasus_iam_core::AuthzError::StarterPolicyIdCollision(ids) = err else {
+        panic!("expected StarterPolicyIdCollision, got {message}")
+    };
+    assert_eq!(
+        ids,
+        vec!["agent_event_writer".to_string(), "tool_policy_reader".to_string()],
+        "the error must name every colliding policy id"
+    );
+    assert!(message.contains("Rename each policy"), "the error must tell the operator to rename the policy, got: {message}");
+
+    for id in ["agent_event_writer", "tool_policy_reader"] {
+        let (source, system, fingerprint) = stored_row_state(&db, id).await;
+        assert_eq!(source, operator_source, "{id}: the operator source must stay");
+        assert!(!system, "{id}: the operator row must stay a non-system row");
+        assert_eq!(fingerprint, None, "{id}: boot must not stamp the operator row");
+    }
+    // Boot refused BEFORE it wrote any starter row: only the two operator rows exist.
+    assert_eq!(policy::Entity::find().all(&db).await.unwrap().len(), 2, "a refused boot must not seed the other starter policies");
+    assert!(role::Entity::find().all(&db).await.unwrap().is_empty(), "a refused boot must not seed roles");
+}
+
+/// The no-collision path is unchanged: an operator policy at a NON-starter id is left alone, and
+/// boot seeds every starter policy as normal.
+#[tokio::test]
+async fn boot_seeds_normally_next_to_an_operator_policy_at_a_free_id() {
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let gens = Generations::memory();
+    let operator_source = "permit(principal, action, resource) when { false };";
+    insert_operator_policy(&db, "acme_custom_policy", operator_source).await;
+
+    reconcile_starter(&reconcile_deps(&db, &gens)).await.unwrap();
+
+    let docs = PgPolicyStore::new(db.clone(), gens.clone()).list_all().await.unwrap();
+    assert_eq!(docs.len(), starter_policies().len() + 1);
+    for want in starter_policies() {
+        assert!(
+            docs.iter().any(|d| d.policy_id == want.policy_id && d.system && d.source == want.source),
+            "starter policy {} must be seeded",
+            want.policy_id
+        );
+    }
+    let (source, system, fingerprint) = stored_row_state(&db, "acme_custom_policy").await;
+    assert_eq!((source.as_str(), system, fingerprint), (operator_source, false, None));
+    assert_eq!(role::Entity::find().all(&db).await.unwrap().len(), system_roles().len());
+}
+
+/// The adapter half of the guard. `reconcile_system` holds the row lock, so it is the check
+/// that a row created after the pre-scan cannot pass. It must write NOTHING for an operator row,
+/// and `operator_authored_starter_ids` must report exactly that row and no other.
+#[tokio::test]
+async fn reconcile_system_never_writes_an_operator_policy_at_a_starter_id() {
+    use paigasus_iam_core::SystemPolicyReconciler;
+    use paigasus_iam_core::authz::reconcile::StarterPolicyOutcome;
+    use paigasus_iam_core::authz::roles::STARTER_POLICY_REVISION;
+
+    let Some((_pg, db)) = support::start_migrated_postgres().await else { return };
+    let store = PgPolicyStore::new(db.clone(), Generations::memory());
+    let docs = starter_policies();
+    let doc = docs.iter().find(|d| d.policy_id == "agent_event_writer").unwrap().clone();
+    let operator_source = "permit(principal, action, resource) when { false };";
+    insert_operator_policy(&db, &doc.policy_id, operator_source).await;
+    // A drifted SYSTEM row next to it: `system` cleared, content and provenance kept. The scan
+    // must not report it, because it is not an operator's policy.
+    let drifted = docs.iter().find(|d| d.policy_id == "org_admin").unwrap().clone();
+    store.reconcile_system(&drifted, STARTER_POLICY_REVISION).await.unwrap();
+    db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        r#"UPDATE "policy" SET system = false WHERE policy_id = 'org_admin'"#.to_string(),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        store.operator_authored_starter_ids(&docs, STARTER_POLICY_REVISION).await.unwrap(),
+        vec![doc.policy_id.clone()],
+        "the scan reports the operator row only"
+    );
+    assert_eq!(store.reconcile_system(&doc, STARTER_POLICY_REVISION).await.unwrap(), StarterPolicyOutcome::OperatorAuthored);
+    let (source, system, fingerprint) = stored_row_state(&db, &doc.policy_id).await;
+    assert_eq!((source.as_str(), system, fingerprint), (operator_source, false, None), "the operator row must stay as it was");
+}

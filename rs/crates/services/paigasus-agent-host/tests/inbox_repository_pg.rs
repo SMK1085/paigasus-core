@@ -129,6 +129,45 @@ async fn a_duplicate_with_another_type_reports_a_mismatch() {
     );
 }
 
+// Postgres `jsonb` stores a number as a numeric: `1e18` and `1000000000000000000` are one
+// value. `serde_json` keeps the written form. The compare must treat them as equal.
+#[tokio::test]
+async fn numerically_equal_numbers_in_another_form_match() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let repo = PgInboxRepository::new(db);
+    let first: Value = serde_json::from_str(r#"{"data": {"n": 1000000000000000000, "m": 1.50, "k": [2.0]}}"#).expect("json");
+    let second: Value = serde_json::from_str(r#"{"data": {"n": 1e18, "m": 1.5, "k": [2]}}"#).expect("json");
+    repo.insert_event(new_event(10, 2, "c1", "agents.x", first, None)).await.expect("first");
+    let outcome = repo.insert_event(new_event(11, 2, "c1", "agents.x", second, None)).await.expect("second");
+    assert_eq!(
+        outcome,
+        InsertOutcome::Duplicate {
+            id: EventId::from_uuid(u(10)),
+            payload_matches: true
+        }
+    );
+}
+
+// Two integers that differ only below the f64 precision are different values.
+#[tokio::test]
+async fn large_integers_that_differ_beyond_f64_precision_do_not_match() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let repo = PgInboxRepository::new(db);
+    let first: Value = serde_json::from_str(r#"{"data": {"n": 9007199254740993}}"#).expect("json");
+    let second: Value = serde_json::from_str(r#"{"data": {"n": 9007199254740992}}"#).expect("json");
+    repo.insert_event(new_event(10, 2, "c1", "agents.x", first, None)).await.expect("first");
+    let outcome = repo.insert_event(new_event(11, 2, "c1", "agents.x", second, None)).await.expect("second");
+    assert_eq!(
+        outcome,
+        InsertOutcome::Duplicate {
+            id: EventId::from_uuid(u(10)),
+            payload_matches: false
+        }
+    );
+}
+
 #[tokio::test]
 async fn absent_and_null_data_match() {
     let Some((_node, _url, db)) = migrated_postgres().await else { return };

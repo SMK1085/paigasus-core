@@ -8,7 +8,11 @@ use crate::{CloudEvent, ExtensionValue, ParseError, SchemaError};
 
 /// Read one CloudEvents 1.0 JSON event (structured mode).
 ///
-/// A JSON `null` counts as an absent attribute. `data_base64` is not supported.
+/// A JSON `null` counts as an absent attribute. The JSON event format of CloudEvents 1.0 says that
+/// an unset attribute MAY be encoded as `null`, and that a decoder MUST treat a `null` as an unset
+/// or omitted attribute. This crate applies the same rule to `data`: `"data": null` and a missing
+/// `data` both give `data() == None`. A consumer cannot tell the two forms apart, so a duplicate
+/// compare treats them as equal. `data_base64` is not supported.
 ///
 /// # Errors
 /// Returns [`ParseError::Json`] for text that is not JSON. Returns [`ParseError::Schema`] for an
@@ -221,6 +225,24 @@ mod tests {
         assert!(e.data().is_none());
         assert!(e.time().is_none());
         assert!(e.extension("schemaversion").is_none());
+    }
+
+    // Pins the rule of the `parse` docs: `"data": null` is the same as no `data`.
+    #[test]
+    fn data_null_is_the_same_as_absent_data() {
+        let absent = parse_value(&with("subject", json!("s"))).unwrap();
+        let mut v = with("subject", json!("s"));
+        v["data"] = Value::Null;
+        let null = parse_value(&v).unwrap();
+        assert!(absent.data().is_none());
+        assert!(null.data().is_none());
+        assert_eq!(absent, null);
+        // A JSON value that is not null stays data, including `false`, `0` and `""`.
+        for data in [json!(false), json!(0), json!(""), json!({})] {
+            let mut v = with("subject", json!("s"));
+            v["data"] = data.clone();
+            assert_eq!(parse_value(&v).unwrap().data(), Some(&data));
+        }
     }
 
     #[test]

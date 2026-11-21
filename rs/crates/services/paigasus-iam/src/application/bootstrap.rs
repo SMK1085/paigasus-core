@@ -32,6 +32,25 @@
 //!
 //! Both halves therefore snapshot the persisted ids ONCE before their loop and decide fatality
 //! against it ([`classify_failure`]).
+//!
+//! **An operator's policy at a starter id is fatal, and boot never writes that row.** A release
+//! that adds a starter policy reserves its id from then on. An OLDER release did not, so its
+//! `PutPolicy` could create an operator row at that id. Converging that row would replace the
+//! operator's policy, and the policy would silently stop governing decisions. So before the loop
+//! writes any row, [`reconcile_policies`] asks the store for every such row
+//! ([`SystemPolicyReconciler::operator_authored_starter_ids`]). If there is one, boot fails with
+//! [`AuthzError::StarterPolicyIdCollision`], which names every colliding id. A refusal by this
+//! pre-scan writes no policy row. There is no automatic rename.
+//!
+//! The loop also checks each row again under its row lock
+//! ([`StarterPolicyOutcome::OperatorAuthored`]), because an older replica can still create such a
+//! row during a rolling deploy, and because the pre-scan read can fail. This in-loop refusal does
+//! not stop the loop: the other starter rows, before AND after the colliding row, can converge
+//! before boot fails. Only the colliding row is certain to stay unchanged. When a row's
+//! reconciliation FAILS, nothing classified it, so the loop asks the scan again for that one row.
+//! The stored row is kept only when that check proves it is not an operator's policy. A failed
+//! check is fatal. A system row that drifted is NOT this case, and it converges as before: see
+//! `authz::reconcile::classify_starter_policy` for the rule that tells them apart.
 
 use metrics::counter;
 use paigasus_iam_core::authz::model::root_prn;
@@ -127,7 +146,27 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
         }
     };
 
-    for doc in authz_roles::starter_policies() {
+    // Before ANY write: an operator's policy at a starter id makes boot fail, and a refusal here
+    // writes no policy row. A failed READ is warned about and does not stop boot by itself: the
+    // loop below checks each row again under its row lock, and a row whose reconciliation fails
+    // is checked again with this scan. So the scan is the first line, not the only one.
+    let docs = authz_roles::starter_policies();
+    match deps.policies.operator_authored_starter_ids(&docs, STARTER_POLICY_REVISION).await {
+        Ok(ids) if !ids.is_empty() => {
+            for id in &ids {
+                report_operator_collision(id);
+            }
+            return Err(AuthzError::StarterPolicyIdCollision(ids));
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(
+            error = %err,
+            "could not scan for operator-authored policies at starter policy ids; each row is checked again during reconciliation, and a row whose reconciliation fails is then fatal unless a second check proves it is not an operator's policy"
+        ),
+    }
+
+    let mut collisions: Vec<String> = Vec::new();
+    for doc in docs {
         let outcome = match deps.policies.reconcile_system(&doc, STARTER_POLICY_REVISION).await {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -135,10 +174,32 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
                 match classify_failure(existing_ids.as_deref(), &doc.policy_id) {
                     // The row exists: it governed decisions perfectly well before this change,
                     // so keeping it for one more boot beats refusing to start (SMA-477 D12).
-                    FailureKind::Survivable => {
-                        tracing::error!(policy_id = %doc.policy_id, error = %err, "starter policy reconciliation failed; keeping the stored row for this boot");
-                        continue;
-                    }
+                    //
+                    // But the failed call did not classify the row, so it can be an operator's
+                    // policy (the pre-scan failed, or the row appeared after it). Keeping such a
+                    // row would let it govern decisions in place of the starter policy. So ask
+                    // the scan again for this one row, and keep the row only when the scan
+                    // proves that it is not an operator's policy.
+                    FailureKind::Survivable => match deps.policies.operator_authored_starter_ids(std::slice::from_ref(&doc), STARTER_POLICY_REVISION).await {
+                        Ok(ids) if ids.contains(&doc.policy_id) => {
+                            report_operator_collision(&doc.policy_id);
+                            collisions.push(doc.policy_id.clone());
+                            continue;
+                        }
+                        Ok(_) => {
+                            tracing::error!(policy_id = %doc.policy_id, error = %err, "starter policy reconciliation failed; keeping the stored row for this boot");
+                            continue;
+                        }
+                        Err(check_err) => {
+                            tracing::error!(
+                                policy_id = %doc.policy_id,
+                                error = %err,
+                                check_error = %check_err,
+                                "starter policy reconciliation failed and the ownership check of the stored row also failed, so the row can be an operator's policy at a starter id; refusing to boot rather than keep it"
+                            );
+                            return Err(err);
+                        }
+                    },
                     // The row is MISSING and could not be written. `AppState::new` guarantees
                     // the initial snapshot compiles at least the starter set; booting past this
                     // would compile a partial one, which denies everything.
@@ -159,7 +220,11 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
                 }
             }
         };
-        count(outcome.metric_label());
+        // A collision is counted once, in `report_operator_collision` below. Do not count it here
+        // too.
+        if !matches!(outcome, StarterPolicyOutcome::OperatorAuthored) {
+            count(outcome.metric_label());
+        }
 
         match &outcome {
             StarterPolicyOutcome::Unchanged => {}
@@ -207,7 +272,18 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
                 );
                 record_reconcile_audit(deps, &doc, "external_modification", *content_changed, previous_content).await;
             }
+            // The adapter wrote nothing. Report it NOW: a later fatal row error returns before
+            // the summary below. Keep going, so the error names EVERY colliding id.
+            StarterPolicyOutcome::OperatorAuthored => {
+                report_operator_collision(&doc.policy_id);
+                collisions.push(doc.policy_id.clone());
+            }
         }
+    }
+    if !collisions.is_empty() {
+        // Each id is already counted and logged, where the loop found it.
+        collisions.sort();
+        return Err(AuthzError::StarterPolicyIdCollision(collisions));
     }
 
     // A failed scan degrades to "no orphans", which is indistinguishable from a healthy database
@@ -229,6 +305,16 @@ pub async fn reconcile_policies<I: IdGenerator, C: Clock>(deps: &ReconcileStarte
         );
     }
     Ok(())
+}
+
+/// Logs and counts one operator-authored policy at a starter id. Called once for each id, where
+/// the id is found, so a later fatal error cannot hide it.
+fn report_operator_collision(id: &str) {
+    count(StarterPolicyOutcome::OperatorAuthored.metric_label());
+    tracing::error!(
+        policy_id = %id,
+        "an operator-authored policy uses a reserved starter policy id; refusing to boot rather than overwrite it. Rename the policy: create it again under a new policy_id and delete the old row, with the previous release or with SQL"
+    );
 }
 
 /// One audit entry recording content this boot is about to destroy. Best-effort by design
@@ -405,6 +491,16 @@ mod tests {
         /// The `known` set the orphan scan was called with, captured so a test can prove the
         /// scan ran and was handed the code-defined ids.
         orphan_known: Mutex<Vec<String>>,
+        /// What the pre-loop collision scan returns.
+        collisions: Vec<String>,
+        /// Simulates the collision scan itself failing.
+        collisions_fail: bool,
+        /// `reconcile_system` fails only for these ids (in addition to `fail`).
+        fail_ids: Vec<String>,
+        /// What the collision scan returns on every call AFTER the first, filtered to the ids of
+        /// the docs it is asked about: a row that appeared after the pre-scan.
+        late_collisions: Vec<String>,
+        scan_calls: AtomicUsize,
     }
 
     impl ScriptedPolicies {
@@ -421,7 +517,7 @@ mod tests {
     impl SystemPolicyReconciler for ScriptedPolicies {
         async fn reconcile_system(&self, doc: &PolicyDocument, _revision: u32) -> Result<StarterPolicyOutcome, AuthzError> {
             self.seen.lock().unwrap().push(doc.policy_id.clone());
-            if self.fail {
+            if self.fail || self.fail_ids.contains(&doc.policy_id) {
                 return Err(backend_error("db down"));
             }
             Ok(self.outcome.lock().unwrap().clone().unwrap_or(StarterPolicyOutcome::Unchanged))
@@ -436,6 +532,16 @@ mod tests {
                 return Err(backend_error("snapshot read failed"));
             }
             Ok(self.existing.clone())
+        }
+        async fn operator_authored_starter_ids(&self, docs: &[PolicyDocument], _revision: u32) -> Result<Vec<String>, AuthzError> {
+            let call = self.scan_calls.fetch_add(1, Ordering::SeqCst);
+            if self.collisions_fail {
+                return Err(backend_error("collision scan failed"));
+            }
+            if call > 0 {
+                return Ok(self.late_collisions.iter().filter(|id| docs.iter().any(|d| &d.policy_id == *id)).cloned().collect());
+            }
+            Ok(self.collisions.clone())
         }
     }
 
@@ -517,6 +623,155 @@ mod tests {
                 description,
             },
         }
+    }
+
+    /// Counts of `operator_collision` that a recorder saw. The tests below run on the current-thread
+    /// runtime, so a thread-local recorder guard sees every `count` call.
+    fn collision_count(snapshotter: &metrics_util::debugging::Snapshotter) -> u64 {
+        use metrics_util::debugging::DebugValue;
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .filter(|(key, _, _, _)| key.key().name() == names::IAM_STARTER_POLICY_RECONCILES_TOTAL && key.key().labels().any(|l| l.key() == "outcome" && l.value() == "operator_collision"))
+            .map(|(_, _, _, v)| if let DebugValue::Counter(n) = v { *n } else { 0 })
+            .sum()
+    }
+
+    /// The pre-scan finds operator policies at starter ids: boot fails BEFORE it calls
+    /// `reconcile_system` for any row, so it writes nothing, and the error names every id.
+    #[tokio::test]
+    async fn a_pre_scan_collision_refuses_boot_before_any_write() {
+        let policies = Arc::new(ScriptedPolicies {
+            existing: all_starter_ids(),
+            collisions: vec!["agent_event_writer".to_string(), "tool_policy_reader".to_string()],
+            ..Default::default()
+        });
+        let roles = ScriptedRoles::seeded();
+        let entries = FakeAuditLog::default();
+        let d = deps_with_roles(policies.clone(), roles.clone(), Arc::new(entries.clone()));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let err = reconcile_starter(&d).await.expect_err("a collision must refuse boot");
+        let AuthzError::StarterPolicyIdCollision(ids) = err else {
+            panic!("expected StarterPolicyIdCollision, got {err:?}")
+        };
+        assert_eq!(ids, vec!["agent_event_writer".to_string(), "tool_policy_reader".to_string()]);
+        assert_eq!(collision_count(&snapshotter), 2, "one count for each colliding id");
+        assert!(policies.seen.lock().unwrap().is_empty(), "no starter row may be reconciled after a collision");
+        assert!(roles.seen.lock().unwrap().is_empty(), "no role may be reconciled after a collision");
+        assert!(entries.0.lock().unwrap().is_empty(), "a refused boot overwrites nothing, so it audits nothing");
+    }
+
+    /// The in-loop guard: a row that the scan did not report (an older replica created it during
+    /// a rolling deploy, or the scan read failed) still refuses boot. The loop goes on so that the
+    /// error names EVERY colliding id, and the roles half does not run.
+    #[tokio::test]
+    async fn an_in_loop_collision_refuses_boot_and_names_every_id() {
+        let policies = Arc::new(ScriptedPolicies {
+            outcome: Mutex::new(Some(StarterPolicyOutcome::OperatorAuthored)),
+            existing: all_starter_ids(),
+            collisions_fail: true,
+            ..Default::default()
+        });
+        let roles = ScriptedRoles::seeded();
+        let d = deps_with_roles(policies.clone(), roles.clone(), Arc::new(FakeAuditLog::default()));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let err = reconcile_starter(&d).await.expect_err("a collision must refuse boot");
+        let AuthzError::StarterPolicyIdCollision(ids) = err else {
+            panic!("expected StarterPolicyIdCollision, got {err:?}")
+        };
+        let mut want = all_starter_ids();
+        want.sort();
+        assert_eq!(ids, want, "every colliding id, sorted");
+        assert_eq!(collision_count(&snapshotter), want.len() as u64, "one count for each colliding id, not two");
+        assert_eq!(policies.seen.lock().unwrap().len(), starter_policies().len(), "the loop must visit every starter policy");
+        assert!(roles.seen.lock().unwrap().is_empty(), "the roles half must not run after a collision");
+    }
+
+    /// A failed scan READ does not stop boot by itself: with no collision in the loop, boot
+    /// finishes as before.
+    #[tokio::test]
+    async fn a_failed_collision_scan_does_not_stop_a_clean_boot() {
+        let policies = Arc::new(ScriptedPolicies {
+            existing: all_starter_ids(),
+            collisions_fail: true,
+            ..Default::default()
+        });
+        let d = deps(policies.clone(), Arc::new(FakeAuditLog::default()));
+        reconcile_policies(&d).await.unwrap();
+        assert_eq!(policies.seen.lock().unwrap().len(), starter_policies().len());
+    }
+
+    /// The scan failed AND the row's reconciliation failed: nothing classified the row, so it can
+    /// be an operator's policy. Boot must not keep it as a starter row. The row exists, so before
+    /// the fix this took the survivable path and returned `Ok`.
+    #[tokio::test]
+    async fn an_unclassified_row_after_a_failed_scan_refuses_boot() {
+        let policies = Arc::new(ScriptedPolicies {
+            fail: true,
+            existing: all_starter_ids(),
+            collisions_fail: true,
+            ..Default::default()
+        });
+        let d = deps(policies.clone(), Arc::new(FakeAuditLog::default()));
+        reconcile_policies(&d).await.expect_err("a row with unknown ownership must not be kept");
+        assert_eq!(policies.seen.lock().unwrap().len(), 1, "boot stops at the first unclassified row");
+    }
+
+    /// The pre-scan was clean, a row then appeared (an older replica wrote it), and its
+    /// reconciliation failed. The check after the row error finds the collision.
+    #[tokio::test]
+    async fn a_failed_row_is_checked_again_and_a_late_collision_refuses_boot() {
+        let late = starter_policies()[0].policy_id.clone();
+        let policies = Arc::new(ScriptedPolicies {
+            existing: all_starter_ids(),
+            fail_ids: vec![late.clone()],
+            late_collisions: vec![late.clone()],
+            ..Default::default()
+        });
+        let d = deps(policies.clone(), Arc::new(FakeAuditLog::default()));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let err = reconcile_policies(&d).await.expect_err("a late collision must refuse boot");
+        let AuthzError::StarterPolicyIdCollision(ids) = err else {
+            panic!("expected StarterPolicyIdCollision, got {err:?}")
+        };
+        assert_eq!(ids, vec![late]);
+        assert_eq!(collision_count(&snapshotter), 1);
+    }
+
+    /// An in-loop collision, then a fatal seed failure at a later row. The collision must already
+    /// be counted and logged, because the seed error ends the loop before the summary.
+    #[tokio::test]
+    async fn an_in_loop_collision_is_counted_before_a_later_fatal_failure() {
+        let docs = starter_policies();
+        let last = docs[docs.len() - 1].policy_id.clone();
+        let policies = Arc::new(ScriptedPolicies {
+            outcome: Mutex::new(Some(StarterPolicyOutcome::OperatorAuthored)),
+            existing: all_starter_ids().into_iter().filter(|id| *id != last).collect(),
+            fail_ids: vec![last],
+            ..Default::default()
+        });
+        let d = deps(policies.clone(), Arc::new(FakeAuditLog::default()));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let err = reconcile_policies(&d).await.expect_err("a seed failure is fatal");
+        assert!(!matches!(err, AuthzError::StarterPolicyIdCollision(_)), "the seed error is returned, got {err:?}");
+        assert_eq!(collision_count(&snapshotter), (docs.len() - 1) as u64, "every collision before the fatal row is counted once");
     }
 
     #[tokio::test]

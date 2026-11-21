@@ -65,12 +65,22 @@ this order:
 | 415 | `unsupported-content-type` | The content type is not `application/cloudevents+json`. |
 | 413 | `request-too-large` | The body is larger than `ingress.max_body_bytes`. |
 | 401 | `invalid-token` | The credential is missing, inactive or a DPoP credential. |
-| 503 | `iam-unavailable` | The service cannot reach IAM. |
+| 503 | `iam-unavailable` | The service cannot reach IAM. This includes the self-query of step 5. |
 | 403 | `forbidden` | The inbox is unknown, or the caller has no right to write to it. |
 | 400 | `invalid-request-body` | The body is not valid JSON. |
 | 400 | `invalid-request-schema` | The body is not a valid CloudEvent, or its `type` starts with `agents.`. |
 | 503 | `store-unavailable` | A database error occurred. The caller can retry. |
 | 202 | none | The event is stored, or it is a duplicate. The body is `{"id": "<event uuid>"}`. |
+
+An unknown inbox looks the same as an inbox that the caller may not write to. The service makes
+the same IAM calls for both, and it gives the same `403`. When IAM is unavailable, both get `503`
+`iam-unavailable`. So an IAM outage does not show which inboxes exist to a caller that is not the
+owner. An OIDC caller that owns the inbox but is not a member of the inbox org gets `403` with no
+IAM call, also during an outage. That answer does not reveal other inboxes. The owner of an inbox
+needs no self-query, so an outage of the self-query does not stop the owner.
+
+The probe for an unknown inbox makes the same IAM call, and writes the same denial-audit row, as
+a non-owner request to an existing inbox. So it adds no new class of load.
 
 A duplicate returns the id of the stored row. A retry by the client gets the same body.
 A `Content-Length` larger than the limit gives 413 before the authentication. A chunked body that

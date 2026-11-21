@@ -849,7 +849,7 @@ fn describe_iam_metrics() {
     );
     describe_counter!(
         names::IAM_STARTER_POLICY_RECONCILES_TOTAL,
-        "Boot-time starter-policy reconciliation, labeled by outcome (unchanged/seeded/reconciled/adopted/stale_binary/externally_modified/orphaned/failed). System-role reconciliation shares this counter for the 'failed' label only."
+        "Boot-time starter-policy reconciliation, labeled by outcome (unchanged/seeded/reconciled/adopted/stale_binary/externally_modified/operator_collision/orphaned/failed). System-role reconciliation shares this counter for the 'failed' label only."
     );
     describe_counter!(
         names::IAM_OUTBOX_RELAY_TICKS_TOTAL,
