@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.13.1",
+  "checkpoint_id": "38b80076cf61",
+  "strategy": "manual-commit",
+  "branch": "feature/sma-841-chart-app-version-0-3-0",
+  "checkpoints_count": 30,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/38/b80076cf61/0/metadata.json",
+      "transcript": "/38/b80076cf61/0/full.jsonl",
+      "compact_transcript": "/38/b80076cf61/0/transcript.jsonl",
+      "content_hash": "/38/b80076cf61/0/content_hash.txt",
+      "prompt": "/38/b80076cf61/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 196,
+    "cache_creation_tokens": 110934,
+    "cache_read_tokens": 8078691,
+    "output_tokens": 18964,
+    "api_call_count": 72,
+    "subagent_tokens": {
+      "input_tokens": 94,
+      "cache_creation_tokens": 171140,
+      "cache_read_tokens": 5728284,
+      "output_tokens": 33424,
+      "api_call_count": 47
+    }
+  },
+  "redaction": {
+    "replacements": 852,
+    "layers": {
+      "betterleaks": 42,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 810,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
