@@ -44,7 +44,11 @@ impl NatsGenKv {
             Ok(store) => store,
             Err(err) => match get_bucket_failure(&err) {
                 BucketFailure::NotFound => self.js.create_key_value(gen_kv_config()).await.map_err(|e| {
-                    if e.kind() == jetstream::context::CreateKeyValueErrorKind::TimedOut {
+                    // The account INFO call runs first. Its timeout comes wrapped as a JetStream error.
+                    let info_timed_out = std::error::Error::source(&e)
+                        .and_then(|s| s.downcast_ref::<jetstream::context::AccountError>())
+                        .is_some_and(|a| a.kind() == jetstream::context::AccountErrorKind::TimedOut);
+                    if info_timed_out || e.kind() == jetstream::context::CreateKeyValueErrorKind::TimedOut {
                         KvError::Timeout
                     } else {
                         KvError::NoBucket

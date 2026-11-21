@@ -1945,6 +1945,7 @@ async fn an_xack_of_zero_and_a_group_made_by_another_relay_counts_one_reset() {
     }
     let a = start_relay(&redis_url, &nats_url, "a").await;
     wait_for("the KV record holds the sample 3", || async { kv_record(&admin).await.is_some_and(|r| r.sample == Some(3)) }).await;
+    wait_for("relay A holds three pending deliveries", || async { delivery_counts(&node).await.len() == 3 }).await;
     redis_cli(&node, &["FLUSHALL"]).await;
     let b = start_relay(&redis_url, &nats_url, "b").await;
     wait_for("one reset", || async { resets(&snap) >= 1 }).await;
