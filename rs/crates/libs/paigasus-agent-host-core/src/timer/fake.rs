@@ -41,6 +41,7 @@ impl InMemoryTimerRepository {
                 note: v.timer.note().clone(),
                 origin: v.timer.origin(),
                 status,
+                scheduled_at: v.timer.scheduled_at(),
                 next_fire_at: v.timer.next_fire_at(),
             };
             v.timer = super::Timer::new(parts);

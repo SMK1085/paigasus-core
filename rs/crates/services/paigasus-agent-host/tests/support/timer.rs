@@ -15,8 +15,8 @@ fn literal(text: &str) -> String {
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub async fn insert_follow_up_row(db: &DatabaseConnection, inbox: Uuid, id: Uuid, origin: &str, next_fire_at_sql: &str, note: &str) {
     db.execute_unprepared(&format!(
-        "INSERT INTO timer (id, inbox_id, kind, origin, status, note, next_fire_at) \
-         VALUES ('{id}', '{inbox}', 'follow_up', {}, 'active', {}, {next_fire_at_sql})",
+        "INSERT INTO timer (id, inbox_id, kind, origin, status, note, scheduled_at, next_fire_at) \
+         VALUES ('{id}', '{inbox}', 'follow_up', {}, 'active', {}, {next_fire_at_sql}, {next_fire_at_sql})",
         literal(origin),
         literal(note)
     ))
@@ -29,8 +29,8 @@ pub async fn insert_follow_up_row(db: &DatabaseConnection, inbox: Uuid, id: Uuid
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub async fn insert_schedule_row(db: &DatabaseConnection, inbox: Uuid, id: Uuid, cron: &str, tz: &str, next_slot: &str, next_fire_at_sql: &str) {
     db.execute_unprepared(&format!(
-        "INSERT INTO timer (id, inbox_id, kind, origin, status, note, cron, tz, next_slot, next_slot_second, next_fire_at) \
-         VALUES ('{id}', '{inbox}', 'schedule', 'agent', 'active', '', {}, {}, {}::timestamp, false, {next_fire_at_sql})",
+        "INSERT INTO timer (id, inbox_id, kind, origin, status, note, cron, tz, next_slot, next_slot_second, scheduled_at, next_fire_at) \
+         VALUES ('{id}', '{inbox}', 'schedule', 'agent', 'active', '', {}, {}, {}::timestamp, false, {next_fire_at_sql}, {next_fire_at_sql})",
         literal(cron),
         literal(tz),
         literal(next_slot)
@@ -46,6 +46,7 @@ pub struct TimerState {
     pub status: String,
     pub fire_count: i64,
     pub fire_attempts: i32,
+    pub scheduled_at_us: i64,
     pub next_fire_at_us: i64,
     pub next_slot: Option<String>,
     pub failure: Option<String>,
@@ -55,7 +56,7 @@ pub struct TimerState {
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub async fn timer_state(db: &DatabaseConnection, id: Uuid) -> TimerState {
     let sql = format!(
-        "SELECT status, fire_count, fire_attempts, (EXTRACT(EPOCH FROM next_fire_at) * 1000000)::bigint AS next_us, \
+        "SELECT status, fire_count, fire_attempts, (EXTRACT(EPOCH FROM scheduled_at) * 1000000)::bigint AS sched_us, (EXTRACT(EPOCH FROM next_fire_at) * 1000000)::bigint AS next_us, \
          to_char(next_slot, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS next_slot, failure FROM timer WHERE id = '{id}'"
     );
     let row = db
@@ -67,6 +68,7 @@ pub async fn timer_state(db: &DatabaseConnection, id: Uuid) -> TimerState {
         status: row.try_get("", "status").expect("status"),
         fire_count: row.try_get("", "fire_count").expect("fire_count"),
         fire_attempts: row.try_get("", "fire_attempts").expect("fire_attempts"),
+        scheduled_at_us: row.try_get("", "sched_us").expect("sched_us"),
         next_fire_at_us: row.try_get("", "next_us").expect("next_us"),
         next_slot: row.try_get("", "next_slot").expect("next_slot"),
         failure: row.try_get("", "failure").expect("failure"),

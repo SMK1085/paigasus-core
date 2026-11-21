@@ -337,6 +337,7 @@ impl TimerWorkspace {
             note,
             origin: TimerOrigin::Agent,
             status: TimerStatus::Active,
+            scheduled_at: due,
             next_fire_at: due,
         }));
         Ok(FollowUpSet { id, due, beyond_thread_ttl })
@@ -392,6 +393,7 @@ impl TimerWorkspace {
             note,
             origin: TimerOrigin::Agent,
             status: TimerStatus::Active,
+            scheduled_at: first_at,
             next_fire_at: first_at,
         }));
         Ok(ScheduleSet { id, schedule, next })
@@ -518,6 +520,7 @@ mod tests {
             note: Note::parse("stored").unwrap(),
             origin,
             status,
+            scheduled_at: start() + SignedDuration::from_secs(3600 * (n as i64 + 1)),
             next_fire_at: start() + SignedDuration::from_secs(3600 * (n as i64 + 1)),
         });
         rig.store.seed(TimerView {

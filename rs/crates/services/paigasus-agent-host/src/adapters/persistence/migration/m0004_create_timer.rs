@@ -5,8 +5,10 @@
 //! The composite foreign key `(thread_id, inbox_id)` makes the schema enforce that a timer
 //! targets a thread of its own inbox. The CHECK constraints keep a `schedule` row and a
 //! `follow_up` row in their two valid shapes. The note and the failure text have a length limit
-//! in characters. The two time columns must be finite: an `infinity` value would break the due
-//! query and the decode of a row.
+//! in characters. The time columns must be finite: an `infinity` value would break the due
+//! query and the decode of a row. `scheduled_at` is the scheduled instant of the pending firing
+//! and is the time that the event carries. `next_fire_at` is the due time: it equals
+//! `scheduled_at`, except during a back-off, when it is later.
 
 use sea_orm_migration::prelude::*;
 
@@ -27,6 +29,7 @@ const UP: [&str; 4] = [
         next_slot timestamp,
         next_slot_second boolean,
         note text NOT NULL CHECK (char_length(note) <= 1000),
+        scheduled_at timestamptz NOT NULL,
         next_fire_at timestamptz NOT NULL,
         last_fired_at timestamptz,
         fire_count bigint NOT NULL DEFAULT 0,
@@ -39,7 +42,9 @@ const UP: [&str; 4] = [
         CHECK ((cron IS NULL) = (next_slot IS NULL)),
         CHECK ((cron IS NULL) = (next_slot_second IS NULL)),
         CHECK ((kind = 'schedule') = (cron IS NOT NULL)),
+        CHECK (isfinite(scheduled_at)),
         CHECK (isfinite(next_fire_at)),
+        CHECK (next_fire_at >= scheduled_at),
         CHECK (last_fired_at IS NULL OR isfinite(last_fired_at))
     )",
     "CREATE INDEX timer_due ON timer (next_fire_at) WHERE status = 'active'",

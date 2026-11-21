@@ -161,10 +161,14 @@ decision.
 The M0 `Timer` type changes as follows.
 
 - `Timer { id: TimerId, inbox: InboxId, kind: TimerKind, thread: Option<ThreadId>, note: Note,
-  origin: TimerOrigin, status: TimerStatus, next_fire_at: Timestamp }`.
-- `TimerKind::FollowUp` (the due time is `next_fire_at`) or
+  origin: TimerOrigin, status: TimerStatus, scheduled_at: Timestamp, next_fire_at: Timestamp }`.
+  `scheduled_at` is the scheduled instant of the pending firing: the due time of a follow-up, or
+  the instant of the slot of a schedule. `next_fire_at` is the due time. It equals `scheduled_at`,
+  except during a back-off (§11.1), when it is later. The constructor keeps
+  `next_fire_at >= scheduled_at`.
+- `TimerKind::FollowUp` (the scheduled instant is `scheduled_at`) or
   `TimerKind::Schedule { schedule: CronSchedule, next_slot: Slot }`, where
-  `Slot { civil: civil::DateTime, second: bool }` is the civil slot that `next_fire_at` resolves,
+  `Slot { civil: civil::DateTime, second: bool }` is the civil slot that `scheduled_at` resolves,
   with the occurrence flag of R3 (§6.2).
 - `fire_seq` is removed (S4).
 - `TimerStatus`: `Active`, `Done`, `Cancelled`, `Failed`.
@@ -179,7 +183,7 @@ The M0 `Timer` type changes as follows.
   resolved `TimeZone` and the parsed `croner` pattern. It is made only through
   `CronSchedule::parse(cron, tz_name, &dyn TzResolver)`. `PartialEq` and `Eq` compare the cron
   text and the zone name only.
-- The `Timer` constructor **rounds `next_fire_at` up** to the next whole second, so a follow-up
+- The `Timer` constructor **rounds `scheduled_at` and `next_fire_at` up** to the next whole second, so a follow-up
   never fires early and every path (the tools and SMA-795) gives one text form of `fire_at`.
 - `TimerView`: the read model for `list_timers`. It is `Timer` plus `fire_count`,
   `last_fired_at` and `created_at`.
@@ -190,7 +194,7 @@ A slot is a **civil time**: a wall-clock date and time in the schedule's zone, w
 The cron pattern matches civil times. An instant is a point on the UTC time line. The design
 keeps the two apart, so the DST rules are our code and not the crate's behaviour.
 
-The stored state of a schedule is the pair (`next_slot`, `next_fire_at`). The walk starts from
+The stored state of a schedule is the pair (`next_slot`, `scheduled_at`). The walk starts from
 the stored civil slot, not from the instant. So a tzdb rule change between two fires cannot move
 the start of the walk and cause an extra fire.
 
@@ -261,9 +265,10 @@ A pure function decides each fire. It takes the timer and the database `now` and
 `FirePlan { fire_at, next: Next }`, where `Next` is `Done` or
 `Advance { slot: Slot, at: Timestamp }`.
 
-- `fire_at` is the stored `next_fire_at`. For a schedule that missed slots, this is the first
+- `fire_at` is the stored `scheduled_at`. For a schedule that missed slots, this is the first
   missed slot. So a repeated fire of the same row and slot gives the same `fire_at`, also after a
-  rollback and a retry.
+  rollback, a retry and a back-off. A back-off moves only `next_fire_at`, so the event id and
+  `TimerFired.fireAt` always carry the scheduled slot and never the retry time.
 - For a follow-up, `next` is `Done`.
 - For a schedule, `next` is `Advance(next_after(next_slot, now, bound))`. `next_after` starts
   from the fired slot, not from `now`.
@@ -290,7 +295,8 @@ CREATE TABLE timer (
   next_slot      timestamp,              -- civil time, no zone; schedules only
   next_slot_second boolean,              -- second occurrence in an overlap (R3); schedules only
   note           text NOT NULL CHECK (char_length(note) <= 1000),
-  next_fire_at   timestamptz NOT NULL,
+  scheduled_at   timestamptz NOT NULL,   -- the scheduled instant of the pending firing (the event time)
+  next_fire_at   timestamptz NOT NULL,   -- the due time; later than scheduled_at only during a back-off
   last_fired_at  timestamptz,
   fire_count     bigint NOT NULL DEFAULT 0,
   fire_attempts  integer NOT NULL DEFAULT 0,
@@ -301,7 +307,10 @@ CREATE TABLE timer (
   CHECK ((cron IS NULL) = (tz IS NULL)),
   CHECK ((cron IS NULL) = (next_slot IS NULL)),
   CHECK ((cron IS NULL) = (next_slot_second IS NULL)),
-  CHECK ((kind = 'schedule') = (cron IS NOT NULL))
+  CHECK ((kind = 'schedule') = (cron IS NOT NULL)),
+  CHECK (isfinite(scheduled_at)),
+  CHECK (isfinite(next_fire_at)),
+  CHECK (next_fire_at >= scheduled_at)
 );
 CREATE INDEX timer_due ON timer (next_fire_at) WHERE status = 'active';
 CREATE INDEX timer_inbox_active ON timer (inbox_id) WHERE status = 'active';
@@ -310,6 +319,8 @@ CREATE INDEX timer_inbox_agent_created ON timer (inbox_id, created_at) WHERE ori
 
 - `fire_attempts` counts fire attempts that failed with a permanent-looking error (§11.1). A
   successful fire sets it to 0.
+- `scheduled_at` is the instant that the event carries (§6.3). A fire that advances a schedule
+  sets `scheduled_at` and `next_fire_at` to the instant of the new slot.
 - The `down` is `DROP TABLE timer`.
 - Two existing tests count migration steps back from the newest: `tests/schema_pg.rs:164`
   (`down(Some(1))` for m0003) and `tests/memory_pg.rs:346` (`down(Some(2))` for m0002). Both
@@ -564,7 +575,8 @@ For each row, one transaction:
 - **Permanent-looking errors.** A row that cannot be read (for example an unknown zone or pattern
   after a rolling deploy to an older replica), a `PlanError`, a panic, or a database error of
   SQLSTATE class 22 (data exception) or 23 (integrity constraint). In a new short transaction,
-  the row gets `fire_attempts + 1` and `next_fire_at = now + backoff` (exponential from the poll
+  the row gets `fire_attempts + 1` and `next_fire_at = now + backoff`. The back-off moves only the
+  due time: `scheduled_at` does not change (exponential from the poll
   interval, at most 1 hour). When `fire_attempts` reaches `max_fire_attempts`, the row gets
   `status = 'failed'` and `failure = <reason>` instead. The reason has at most 500 characters,
   no control characters, and never the note. A metric is counted and a warning is logged with the
@@ -834,6 +846,9 @@ From the second adversarial challenge (approve with changes), all folded in:
   `statement_timestamp()` for the budget bound; the lease-row lock inside `apply_in`; the port gaps;
   testable bound and crash tests; the timing-test isolation; retention for the budget window
   (NG5); the index in the SQL block; the cross-inbox cancel test.
+- Decided by Sven after the PR review (D1): the row stores the scheduled instant in `scheduled_at`.
+  A back-off moves only `next_fire_at`, so `fireAt` and the event id carry the scheduled slot
+  (§6.1, §6.3, §7.1, §11.1).
 - Decided by Sven at the second GATE 1: S6 (Vixie cron behaviour in the repeated hour, §6.2 R3)
   and S7 (a follow-up after the thread TTL uses the note, §10.2). Sven approved the spec.
 

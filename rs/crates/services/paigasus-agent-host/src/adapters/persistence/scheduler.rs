@@ -483,7 +483,7 @@ async fn update_fired(txn: &DatabaseTransaction, timer: &Timer, plan: &FirePlan)
         }
         Next::Advance { slot, at } => {
             txn.execute_raw(stmt(
-                "UPDATE timer SET next_slot = $2::timestamp, next_slot_second = $3, next_fire_at = to_timestamp($4::bigint), \
+                "UPDATE timer SET next_slot = $2::timestamp, next_slot_second = $3, scheduled_at = to_timestamp($4::bigint), next_fire_at = to_timestamp($4::bigint), \
                  last_fired_at = now(), fire_count = fire_count + 1, fire_attempts = 0, updated_at = now() WHERE id = $1",
                 vec![id, civil_param(slot.civil).into(), slot.second.into(), at.as_second().into()],
             ))

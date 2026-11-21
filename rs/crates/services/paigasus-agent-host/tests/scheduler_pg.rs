@@ -334,9 +334,9 @@ async fn a_double_fire_is_a_matching_duplicate() {
     exec(
         &env,
         &format!(
-            "UPDATE timer SET next_slot = '{}'::timestamp, next_fire_at = to_timestamp({}) WHERE id = '{id}'",
+            "UPDATE timer SET next_slot = '{}'::timestamp, scheduled_at = to_timestamp({at}), next_fire_at = to_timestamp({at}) WHERE id = '{id}'",
             civil_text(slot),
-            at.as_second()
+            at = at.as_second()
         ),
     )
     .await;
@@ -359,6 +359,7 @@ async fn a_double_fire_is_a_matching_duplicate() {
         note: Note::parse("").expect("note"),
         origin: TimerOrigin::Agent,
         status: TimerStatus::Active,
+        scheduled_at: at,
         next_fire_at: at,
     });
     let second = build_fire_event(&second_timer, at, now, EventId::from_uuid(Uuid::new_v4())).expect("second build");
@@ -605,8 +606,8 @@ async fn a_schedule_over_the_budget_still_fires() {
     exec(
         &env,
         &format!(
-            "INSERT INTO timer (id, inbox_id, kind, origin, status, note, next_fire_at) \
-             SELECT gen_random_uuid(), '{}', 'follow_up', 'agent', 'done', 'old', now() - interval '1 hour' FROM generate_series(1, {})",
+            "INSERT INTO timer (id, inbox_id, kind, origin, status, note, scheduled_at, next_fire_at) \
+             SELECT gen_random_uuid(), '{}', 'follow_up', 'agent', 'done', 'old', now() - interval '1 hour', now() - interval '1 hour' FROM generate_series(1, {})",
             ib.uuid,
             BUDGET + 1
         ),
@@ -646,4 +647,87 @@ async fn due_lag_is_zero_with_nothing_due_and_positive_with_a_backlog() {
     due_follow_up(&env, &ib, 30).await;
     let lag = sched.due_lag().await.expect("lag");
     assert!(lag >= Duration::from_secs(119) && lag < Duration::from_secs(300), "the lag is that of the oldest due row: {lag:?}");
+}
+
+/// Back off the row from its current state. It returns the state after the back-off.
+async fn back_off_once(sched: &PgScheduler, env: &Env, id: Uuid) -> support::timer::TimerState {
+    let read = support::timer::timer_state(&env.db, id).await;
+    assert!(
+        sched
+            .back_off_after_read(id, i64::from(read.fire_attempts), read.fire_count, read.next_fire_at_us, "test category")
+            .await
+            .expect("back-off")
+    );
+    support::timer::timer_state(&env.db, id).await
+}
+
+#[tokio::test]
+async fn a_back_off_moves_only_the_due_time_and_the_event_keeps_the_scheduled_slot() {
+    let Some(env) = env().await else {
+        eprintln!("skipping scheduler_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let id = due_follow_up(&env, &ib, 30).await;
+    let sched = scheduler(&env.db, settings());
+    let seeded = support::timer::timer_state(&env.db, id).await;
+    let backed = back_off_once(&sched, &env, id).await;
+    assert_eq!(backed.scheduled_at_us, seeded.scheduled_at_us, "the back-off leaves the scheduled instant");
+    assert!(backed.next_fire_at_us > seeded.next_fire_at_us, "the back-off moves the due time");
+    // The retry becomes due. It succeeds.
+    exec(&env, &format!("UPDATE timer SET next_fire_at = now() - interval '1 second' WHERE id = '{id}'")).await;
+    assert_eq!(sched.fire_due(10).await.expect("pass"), 1);
+    assert_eq!(support::timer::timer_state(&env.db, id).await.status, "done");
+    let slot = Timestamp::from_microsecond(seeded.scheduled_at_us).expect("ts");
+    let events = support::timer::timer_events(&env.db, ib.uuid).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].ce_id, format!("timer:{id}:{}", format_fire_at(slot)), "the event id carries the scheduled slot");
+    assert_eq!(events[0].envelope["data"]["fireAt"].as_str().expect("fireAt"), format_fire_at(slot), "fireAt is the scheduled slot");
+}
+
+#[tokio::test]
+async fn a_schedule_fire_after_a_back_off_advances_both_times() {
+    let Some(env) = env().await else {
+        eprintln!("skipping scheduler_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let now = db_now(&env).await;
+    let back = (now - SignedDuration::from_hours(2)).as_second();
+    let at = Timestamp::from_second(back - back.rem_euclid(3600)).expect("ts");
+    let slot = at.to_zoned(TimeZone::UTC).datetime();
+    let id = due_schedule(&env, &ib, "0 * * * *", "UTC", &civil_text(slot), at).await;
+    let sched = scheduler(&env.db, settings());
+    let backed = back_off_once(&sched, &env, id).await;
+    assert_eq!(backed.scheduled_at_us, at.as_microsecond());
+    exec(&env, &format!("UPDATE timer SET next_fire_at = now() - interval '1 second' WHERE id = '{id}'")).await;
+    assert_eq!(sched.fire_due(10).await.expect("pass"), 1);
+    let events = support::timer::timer_events(&env.db, ib.uuid).await;
+    assert_eq!(events[0].ce_id, format!("timer:{id}:{}", format_fire_at(at)), "the event carries the slot");
+    let after = support::timer::timer_state(&env.db, id).await;
+    assert!(after.scheduled_at_us > now.as_microsecond(), "the next slot is after now");
+    assert_eq!(after.scheduled_at_us, after.next_fire_at_us, "both times are the new slot");
+}
+
+#[tokio::test]
+async fn replica_a_backs_off_and_replica_b_fires_one_event_with_the_scheduled_slot() {
+    let Some(env) = env().await else {
+        eprintln!("skipping scheduler_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let id = due_follow_up(&env, &ib, 30).await;
+    let a = scheduler(&env.db, settings());
+    let b = scheduler(&env.db, settings());
+    let seeded = support::timer::timer_state(&env.db, id).await;
+    // Replica A fails to fire and backs off. The row becomes due again.
+    back_off_once(&a, &env, id).await;
+    exec(&env, &format!("UPDATE timer SET next_fire_at = now() - interval '1 second' WHERE id = '{id}'")).await;
+    // Replica B fires the row. Replica A fires it again with a stale read: it finds a done row.
+    assert_eq!(b.fire_due(10).await.expect("b"), 1);
+    assert_eq!(a.fire_due(10).await.expect("a"), 0);
+    let events = support::timer::timer_events(&env.db, ib.uuid).await;
+    assert_eq!(events.len(), 1, "one event");
+    let slot = Timestamp::from_microsecond(seeded.scheduled_at_us).expect("ts");
+    assert_eq!(events[0].ce_id, format!("timer:{id}:{}", format_fire_at(slot)));
 }

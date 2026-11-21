@@ -73,6 +73,7 @@ fn timer(ib: &Ib, origin: TimerOrigin, status: TimerStatus, kind: TimerKind, at:
         note: Note::parse("check the build").expect("note"),
         origin,
         status,
+        scheduled_at: at,
         next_fire_at: at,
     })
 }
@@ -104,6 +105,33 @@ async fn apply(env: &Env, ib: &Ib, caps: &TimerCaps, changes: TimerChanges) -> R
 
 async fn count(env: &Env, ib: &Ib, extra: &str) -> i64 {
     support::scalar_i64(&env.db, &format!("SELECT count(*)::bigint AS n FROM timer WHERE inbox_id = '{}' {extra}", ib.uuid)).await
+}
+
+#[tokio::test]
+async fn a_timer_with_a_later_due_time_round_trips_both_times() {
+    let Some(env) = env().await else {
+        eprintln!("skipping timer_store_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let now = Timestamp::from_second(env.store.db_now().await.expect("now").as_second()).expect("whole second");
+    let base = follow_up(&ib, TimerOrigin::Agent, hours(now, 2));
+    let backed_off = Timer::new(TimerParts {
+        id: base.id(),
+        inbox: ib.id.clone(),
+        kind: TimerKind::FollowUp,
+        thread: Some(ThreadId::from_uuid(ib.thread)),
+        note: Note::parse("n").expect("note"),
+        origin: TimerOrigin::Agent,
+        status: TimerStatus::Active,
+        scheduled_at: hours(now, 2),
+        next_fire_at: hours(now, 3),
+    });
+    apply(&env, &ib, &TimerCaps::default(), ins(vec![backed_off.clone()])).await.expect("apply");
+    let got = env.store.get(&ib.id, backed_off.id()).await.expect("get").expect("the timer");
+    assert_eq!(got.timer, backed_off);
+    assert_eq!(got.timer.scheduled_at(), hours(now, 2));
+    assert_eq!(got.timer.next_fire_at(), hours(now, 3));
 }
 
 #[tokio::test]
@@ -422,6 +450,7 @@ async fn a_sql_error_in_the_savepoint_is_a_store_error_and_the_transaction_stays
         note: Note::parse("check the build").expect("note"),
         origin: TimerOrigin::Agent,
         status: TimerStatus::Active,
+        scheduled_at: hours(now, 1),
         next_fire_at: hours(now, 1),
     });
 

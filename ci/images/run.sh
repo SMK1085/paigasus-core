@@ -1147,9 +1147,9 @@ smoke_agent_host() {
       INSERT INTO inbox (id, org_id, agent_id, principal_id)
       VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid())
       RETURNING id)
-    INSERT INTO timer (id, inbox_id, kind, origin, status, note, cron, tz, next_slot, next_slot_second, next_fire_at)
+    INSERT INTO timer (id, inbox_id, kind, origin, status, note, cron, tz, next_slot, next_slot_second, scheduled_at, next_fire_at)
     SELECT gen_random_uuid(), i.id, 'schedule', 'agent', 'active', '', '0 9 * * *', 'Europe/Berlin',
-           '2026-01-01 09:00'::timestamp, false, now() - interval '1 minute'
+           '2026-01-01 09:00'::timestamp, false, now() - interval '1 minute', now() - interval '1 minute'
     FROM i" >/dev/null
   # Every psql call below runs under `with_deadline`, so a stalled psql cannot outlive the 30 s
   # budget. The budget is absolute: `$SECONDS` tracks the elapsed time.

@@ -203,7 +203,14 @@ async fn insert_timer(db: &DatabaseConnection, tid: u128, base: &[(&str, &str)],
 }
 
 /// A valid `follow_up` row.
-const FOLLOW_UP: [(&str, &str); 5] = [("kind", "'follow_up'"), ("origin", "'agent'"), ("status", "'active'"), ("note", "'n'"), ("next_fire_at", "now()")];
+const FOLLOW_UP: [(&str, &str); 6] = [
+    ("kind", "'follow_up'"),
+    ("origin", "'agent'"),
+    ("status", "'active'"),
+    ("note", "'n'"),
+    ("scheduled_at", "now()"),
+    ("next_fire_at", "now()"),
+];
 
 /// The extra columns that make the base row a valid `schedule`.
 const SCHEDULE: [(&str, &str); 5] = [
@@ -260,12 +267,28 @@ async fn timer_checks_hold() {
     for (n, col, lit) in [
         (5017, "next_fire_at", "'-infinity'"),
         (5018, "next_fire_at", "'infinity'"),
+        (5022, "scheduled_at", "'-infinity'"),
+        (5023, "scheduled_at", "'infinity'"),
         (5019, "last_fired_at", "'-infinity'"),
         (5020, "last_fired_at", "'infinity'"),
     ] {
         assert_check_violation(insert_timer(&db, n, &FOLLOW_UP, &[(col, lit)]).await, &format!("{col} {lit}"));
     }
     insert_timer(&db, 5021, &FOLLOW_UP, &[("last_fired_at", "now()")]).await.expect("a finite last_fired_at");
+    // `next_fire_at` is the due time. It must not be before `scheduled_at`.
+    assert_check_violation(
+        insert_timer(&db, 5024, &FOLLOW_UP, &[("scheduled_at", "now() + interval '1 minute'"), ("next_fire_at", "now()")]).await,
+        "next_fire_at before scheduled_at",
+    );
+    insert_timer(&db, 5025, &FOLLOW_UP, &[("scheduled_at", "now()"), ("next_fire_at", "now() + interval '1 minute'")])
+        .await
+        .expect("a due time after the scheduled instant (a back-off)");
+    let no_scheduled: Vec<(&str, &str)> = FOLLOW_UP.iter().filter(|(c, _)| *c != "scheduled_at").copied().collect();
+    let err = insert_timer(&db, 5026, &no_scheduled, &[]).await.expect_err("scheduled_at is required");
+    assert!(
+        err.to_string().contains("scheduled_at") && err.to_string().contains("null value"),
+        "expected a NOT NULL error on scheduled_at, got {err:?}"
+    );
 }
 
 #[tokio::test]

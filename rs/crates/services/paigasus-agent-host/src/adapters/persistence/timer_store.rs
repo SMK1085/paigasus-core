@@ -265,11 +265,12 @@ async fn insert_timer(txn: &DatabaseTransaction, t: &Timer) -> Result<(), DbErr>
         slot.into(),
         second.into(),
         t.note().as_str().into(),
+        t.scheduled_at().as_second().into(),
         t.next_fire_at().as_second().into(),
     ];
     txn.execute_raw(stmt(
-        "INSERT INTO timer (id, inbox_id, kind, origin, status, thread_id, cron, tz, next_slot, next_slot_second, note, next_fire_at, created_at) \
-         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8::timestamp, $9, $10, to_timestamp($11::bigint), statement_timestamp())",
+        "INSERT INTO timer (id, inbox_id, kind, origin, status, thread_id, cron, tz, next_slot, next_slot_second, note, scheduled_at, next_fire_at, created_at) \
+         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8::timestamp, $9, $10, to_timestamp($11::bigint), to_timestamp($12::bigint), statement_timestamp())",
         values,
     ))
     .await?;

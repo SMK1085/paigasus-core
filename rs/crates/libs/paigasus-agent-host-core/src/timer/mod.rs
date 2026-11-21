@@ -188,7 +188,11 @@ pub struct TimerParts {
     pub origin: TimerOrigin,
     /// The status of the timer.
     pub status: TimerStatus,
-    /// The time of the next firing.
+    /// The scheduled instant of the pending firing. It is the time that the event carries.
+    /// A back-off does not change it.
+    pub scheduled_at: Timestamp,
+    /// The time when the pending firing is due. It is never before `scheduled_at`. A back-off
+    /// moves it later.
     pub next_fire_at: Timestamp,
 }
 
@@ -202,6 +206,7 @@ pub struct Timer {
     note: Note,
     origin: TimerOrigin,
     status: TimerStatus,
+    scheduled_at: Timestamp,
     next_fire_at: Timestamp,
 }
 
@@ -226,9 +231,11 @@ pub fn format_fire_at(t: Timestamp) -> String {
 }
 
 impl Timer {
-    /// Build a timer. It rounds `next_fire_at` up to a whole second.
+    /// Build a timer. It rounds `scheduled_at` and `next_fire_at` up to a whole second. It keeps
+    /// `next_fire_at` at or after `scheduled_at`.
     #[must_use]
     pub fn new(parts: TimerParts) -> Timer {
+        let scheduled_at = round_up_to_second(parts.scheduled_at);
         Timer {
             id: parts.id,
             inbox: parts.inbox,
@@ -237,7 +244,8 @@ impl Timer {
             note: parts.note,
             origin: parts.origin,
             status: parts.status,
-            next_fire_at: round_up_to_second(parts.next_fire_at),
+            scheduled_at,
+            next_fire_at: round_up_to_second(parts.next_fire_at).max(scheduled_at),
         }
     }
 
@@ -283,7 +291,14 @@ impl Timer {
         self.status
     }
 
-    /// The time of the next firing.
+    /// The scheduled instant of the pending firing. The event of the firing carries it.
+    #[must_use]
+    pub fn scheduled_at(&self) -> Timestamp {
+        self.scheduled_at
+    }
+
+    /// The time when the pending firing is due. It is the scheduled instant, or a later time
+    /// after a back-off.
     #[must_use]
     pub fn next_fire_at(&self) -> Timestamp {
         self.next_fire_at

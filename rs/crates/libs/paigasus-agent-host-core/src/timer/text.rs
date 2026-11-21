@@ -140,6 +140,7 @@ mod tests {
             note: Note::parse(note).unwrap(),
             origin: TimerOrigin::Agent,
             status: TimerStatus::Active,
+            scheduled_at: "2026-06-01T02:00:00Z".parse().unwrap(),
             next_fire_at: "2026-06-01T02:00:00Z".parse().unwrap(),
         })
     }

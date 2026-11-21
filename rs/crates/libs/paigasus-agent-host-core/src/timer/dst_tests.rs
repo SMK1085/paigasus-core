@@ -40,6 +40,7 @@ fn timer_of(kind: TimerKind, next_fire_at: Timestamp) -> Timer {
         note: Note::parse("").unwrap(),
         origin: TimerOrigin::Agent,
         status: TimerStatus::Active,
+        scheduled_at: next_fire_at,
         next_fire_at,
     })
 }

@@ -43,6 +43,7 @@ fn follow_up(id: u128, inbox: &InboxId, origin: TimerOrigin, next: Timestamp) ->
         note: Note::parse("n").unwrap(),
         origin,
         status: TimerStatus::Active,
+        scheduled_at: next,
         next_fire_at: next,
     })
 }

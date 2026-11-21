@@ -16,6 +16,7 @@ use super::time::from_micros;
 /// for a join. Times are epoch microseconds. `next_slot` is text.
 pub(crate) const TIMER_COLUMNS: &str = "t.id, t.inbox_id, t.kind, t.origin, t.status, t.thread_id, t.cron, t.tz, \
      to_char(t.next_slot, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS next_slot, t.next_slot_second, t.note, \
+     (EXTRACT(EPOCH FROM t.scheduled_at) * 1000000)::bigint AS scheduled_us, \
      (EXTRACT(EPOCH FROM t.next_fire_at) * 1000000)::bigint AS next_fire_us, \
      (EXTRACT(EPOCH FROM t.last_fired_at) * 1000000)::bigint AS last_fired_us, \
      t.fire_count, t.fire_attempts::bigint AS fire_attempts, t.failure, \
@@ -55,6 +56,7 @@ pub(crate) fn row_to_view(row: &QueryResult, org: Uuid, tz: &dyn TzResolver) -> 
     let status: String = col(row, "status")?;
     let thread: Option<Uuid> = col(row, "thread_id")?;
     let note: String = col(row, "note")?;
+    let scheduled_us: i64 = col(row, "scheduled_us")?;
     let next_fire_us: i64 = col(row, "next_fire_us")?;
     let last_fired_us: Option<i64> = col(row, "last_fired_us")?;
     let fire_count: i64 = col(row, "fire_count")?;
@@ -90,6 +92,7 @@ pub(crate) fn row_to_view(row: &QueryResult, org: Uuid, tz: &dyn TzResolver) -> 
         note: Note::parse(&note).map_err(|_| bad("the stored note is not valid"))?,
         origin: TimerOrigin::parse(&origin).ok_or_else(|| bad(format!("unknown timer origin {origin:?}")))?,
         status: TimerStatus::parse(&status).ok_or_else(|| bad(format!("unknown timer status {status:?}")))?,
+        scheduled_at: from_micros(scheduled_us).map_err(|e| bad(e.0))?,
         next_fire_at: from_micros(next_fire_us).map_err(|e| bad(e.0))?,
     });
     Ok(TimerView {

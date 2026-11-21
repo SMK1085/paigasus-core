@@ -105,6 +105,7 @@ mod tests {
             note: Note::parse("check the reply").unwrap(),
             origin,
             status: TimerStatus::Active,
+            scheduled_at: ts("2026-03-29T01:00:00Z"),
             next_fire_at: ts("2026-03-29T01:00:00Z"),
         })
     }
@@ -123,6 +124,7 @@ mod tests {
             note: Note::parse("check the reply").unwrap(),
             origin: TimerOrigin::System,
             status: TimerStatus::Active,
+            scheduled_at: ts("2026-03-29T07:00:00Z"),
             next_fire_at: ts("2026-03-29T07:00:00Z"),
         })
     }
