@@ -149,11 +149,12 @@ tasks:
       bash ci/next-env/run.sh --negative-control
       bash ci/next-env/run.sh
     toolchain: 'system'
-    # Ordered AFTER each app's build, not merely to have a fresh tree: `next typegen` writes
-    # into that app's own `.next`, which is `<app>-ts:build`'s declared output. Letting both run
-    # concurrently would race on that directory (a build cleaning .next under a running
-    # typegen), which is the flake shape SMA-427 already paid for with wasm-pack's destructive
-    # --out-dir. One `deps` edge per app serializes it against this gate.
+    # Ordered AFTER each app's build. Until the follow-up sweep after PR 516, `next typegen` wrote
+    # into that app's own `.next`, which is `<app>-ts:build`'s declared output, and the two raced
+    # on that directory (a build cleaning .next under a running typegen). That is the flake shape
+    # SMA-427 already paid for with wasm-pack's destructive --out-dir. The gate now runs typegen in
+    # a scratch copy with its own `.next`. The gate still reads the app's node_modules and the
+    # working-tree next-env.d.ts, so the edges stay. One `deps` edge per app serializes it.
     deps:
       - 'iam-console-ts:build'
       - 'gateway-console-ts:build'
@@ -539,14 +540,14 @@ tasks:
     # rename: without it, BOTH greps could go empty and the gate would pass while guarding nothing.
     script: |
       cd rs/crates
-      for d in libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests; do
+      for d in libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests services/paigasus-agent-host/src services/paigasus-agent-host/tests; do
         if [ ! -d "$d" ]; then
           echo "scan directory rs/crates/$d is missing — the guard would scan less without saying so (moved? renamed?)" >&2
           exit 2
         fi
       done
-      named_hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager|\.get_multiplexed_async_connection' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
-      bare_get_connection_hits="$(grep -rnE '\.get_connection\b' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -v '/persistence/migration/' || true)"
+      named_hits="$(grep -rnE 'ConnectionManager|\.get_connection_manager|\.get_multiplexed_async_connection' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests services/paigasus-agent-host/src services/paigasus-agent-host/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      bare_get_connection_hits="$(grep -rnE '\.get_connection\b' libs/paigasus-redis/src services/paigasus-iam/src services/paigasus-iam/tests services/paigasus-gateway/src services/paigasus-gateway/tests services/paigasus-agent-host/src services/paigasus-agent-host/tests | grep -vE ':[0-9]+:[[:space:]]*//' | grep -v '/persistence/migration/' || true)"
       hits="$(printf '%s\n%s\n' "$named_hits" "$bare_get_connection_hits" | grep -v '^$' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E '^libs/paigasus-redis/src/' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE '^libs/paigasus-redis/src/' || true)"
@@ -567,9 +568,11 @@ tasks:
       - 'rs/crates/services/paigasus-iam/tests/**/*'
       - 'rs/crates/services/paigasus-gateway/src/**/*'
       - 'rs/crates/services/paigasus-gateway/tests/**/*'
+      - 'rs/crates/services/paigasus-agent-host/src/**/*'
+      - 'rs/crates/services/paigasus-agent-host/tests/**/*'
 
   iam-docker-policy-single-site:
-    description: 'Assert the Docker-unavailable decision exists exactly once, in the paigasus-test-docker crate, so a new container-backed suite in IAM or the gateway cannot hand-roll copy #12 (SMA-538, SMA-726). The id still says iam: ci.yml and the root CLAUDE.md gate the target list byte for byte.'
+    description: 'Assert the Docker-unavailable decision exists exactly once, in the paigasus-test-docker crate, so a new container-backed suite in IAM, the gateway or the agent host cannot hand-roll copy #12 (SMA-538, SMA-726). The id still says iam: ci.yml and the root CLAUDE.md gate the target list byte for byte.'
     # WHAT IS GATED — two independent tells, in IAM's and the gateway's tests/, both expected to
     # appear ONLY in rs/crates/libs/paigasus-test-docker/src/, which owns the policy (SMA-726 D22):
     #
@@ -610,9 +613,10 @@ tasks:
     # lines by CONTENT (`:[0-9]+:[[:space:]]*//`) so prose may still name the variable or the API
     # (e.g. `nats_publisher.rs`'s two `AsyncRunner::start` doc-comment mentions).
     #
-    # SCOPE (SMA-726): the crate's src/ (the one allowed site), IAM's tests/ and the gateway's
-    # tests/. IAM's tests/support/docker.rs is now a one-line re-export, so it holds no hit. The
-    # crate's own tests/ is not scanned: it tests the policy, it does not consume it. Every scan
+    # SCOPE (SMA-726, SMA-786): the crate's src/ (the one allowed site), IAM's tests/, the gateway's
+    # tests/ and the agent host's src/ and tests/. IAM's tests/support/docker.rs is now a one-line
+    # re-export, so it holds no hit. The crate's own
+    # tests/ is not scanned: it tests the policy, it does not consume it. Every scan
     # directory must exist; the loop below exits 2 if one is missing, because `grep -r` on a
     # missing directory only prints to stderr and `|| true` would hide it.
     #
@@ -620,13 +624,13 @@ tasks:
     # without it all greps could go empty and the gate would pass while guarding nothing.
     script: |
       cd rs/crates
-      for d in libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests; do
+      for d in libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests services/paigasus-agent-host/src services/paigasus-agent-host/tests; do
         if [ ! -d "$d" ]; then
           echo "scan directory rs/crates/$d is missing — the guard would scan less without saying so (moved? renamed?)" >&2
           exit 2
         fi
       done
-      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+      hits="$(grep -rnE 'var_os\("CI"\)|var\("CI"\)|option_env!\("CI"\)|use .*runners::.*AsyncRunner' libs/paigasus-test-docker/src services/paigasus-iam/tests services/paigasus-gateway/tests services/paigasus-agent-host/src services/paigasus-agent-host/tests | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
       expected="$(printf '%s\n' "$hits" | grep -E '^libs/paigasus-test-docker/src/' || true)"
       offenders="$(printf '%s\n' "$hits" | grep -vE '^libs/paigasus-test-docker/src/' | grep -v '^$' || true)"
       if [ -z "$expected" ]; then
@@ -644,6 +648,8 @@ tasks:
       - 'rs/crates/libs/paigasus-test-docker/src/**/*'
       - 'rs/crates/services/paigasus-iam/tests/**/*'
       - 'rs/crates/services/paigasus-gateway/tests/**/*'
+      - 'rs/crates/services/paigasus-agent-host/src/**/*'
+      - 'rs/crates/services/paigasus-agent-host/tests/**/*'
 
   input-liveness:
     description: 'Assert every repo:* task input still matches a tracked file, so a wired gate cannot silently stop firing (SMA-553).'

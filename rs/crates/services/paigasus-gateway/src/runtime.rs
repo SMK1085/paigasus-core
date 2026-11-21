@@ -18,20 +18,28 @@ use metrics::counter;
 use paigasus_gateway_core::{AllowAll, ToolCallDecider};
 use paigasus_observability::names;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::task::TaskTracker;
 
+use crate::adapters::decision_log::jetstream;
+use crate::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, prime_decision_log_metrics, run_relay, run_writer};
+use crate::adapters::http::interception::ToolInterception;
 use crate::adapters::iam::client::build_channel;
 use crate::adapters::nats::PolicyEvents;
 use crate::adapters::policy_source::file::FilePolicySource;
 use crate::adapters::policy_source::iam::IamPolicySource;
-use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy};
+use crate::application::decision_log::DecisionRecorder;
+use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
 use crate::config::{GatewayConfig, PolicySourceConfig};
-use crate::domain::limits::ChargeDropReason;
+use crate::domain::decision_log::{Entropy, TracingDecisionLog};
+use crate::domain::limits::{ChargeDropReason, Clock};
 use crate::domain::tool_policy::PolicySource;
 
 /// D16: how long shutdown waits for in-flight limit charges.
 pub const CHARGE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
+
+/// SMA-755 § 5.6, P-18: how long shutdown waits for the writer and the relay of the decision log.
+pub const DECISION_LOG_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 
 /// Supervise a set of server tasks on a shared graceful-shutdown watch.
 ///
@@ -47,10 +55,19 @@ pub const CHARGE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 ///   first `changed().await` correctly waits.
 /// - `charges`: the Redis limit store's spawned charges (SMA-677 D16). After the servers drain,
 ///   they get at most [`CHARGE_DRAIN_BUDGET`]; the rest are counted as dropped.
+/// - `decision_log`: the writer and the relay run outside `servers`, on a shutdown watch of their own (P-18).
+///   They drain last, after the servers and after the charges, because a server that stops can still
+///   record a decision. They get at most [`DECISION_LOG_DRAIN_BUDGET`]. They never end the gateway.
 /// - Callers must pass either a non-empty `servers` or a `shutdown` that resolves; an
 ///   empty set with a non-resolving `shutdown` would disable both `select!` arms and
 ///   wait forever. The gateway always spawns its main HTTP task, so it never hits this.
-pub async fn supervise(mut servers: JoinSet<anyhow::Result<()>>, shutdown: impl Future<Output = ()>, tx: watch::Sender<()>, charges: Option<TaskTracker>) -> anyhow::Result<()> {
+pub async fn supervise(
+    mut servers: JoinSet<anyhow::Result<()>>,
+    shutdown: impl Future<Output = ()>,
+    tx: watch::Sender<()>,
+    charges: Option<TaskTracker>,
+    decision_log: Option<DecisionLogTasks>,
+) -> anyhow::Result<()> {
     // Stop on the first of: shutdown signal, or a server task ending.
     let early_error: Option<anyhow::Error> = tokio::select! {
         () = shutdown => {
@@ -92,7 +109,113 @@ pub async fn supervise(mut servers: JoinSet<anyhow::Result<()>>, shutdown: impl 
     if let Some(charges) = charges {
         drain_charges(&charges, CHARGE_DRAIN_BUDGET).await;
     }
+    if let Some(tasks) = decision_log {
+        tasks.drain(DECISION_LOG_DRAIN_BUDGET).await;
+    }
     result
+}
+
+/// The three tasks of the Redis decision log. They run outside the server `JoinSet` (P-18): a failure of
+/// one of them never stops the gateway (spec § 5.6).
+pub struct DecisionLogTasks {
+    shutdown: watch::Sender<()>,
+    writer: JoinHandle<()>,
+    relay: JoinHandle<()>,
+    connector: JoinHandle<()>,
+}
+
+/// The time that [`DecisionLogTasks::drain`] adds to the budget before it aborts a task.
+pub const DECISION_LOG_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+impl DecisionLogTasks {
+    /// The tasks and the sender of their shutdown watch. Each task must hold a receiver of `shutdown`.
+    #[must_use]
+    pub fn new(shutdown: watch::Sender<()>, writer: JoinHandle<()>, relay: JoinHandle<()>, connector: JoinHandle<()>) -> Self {
+        Self { shutdown, writer, relay, connector }
+    }
+
+    /// Send the shutdown signal, then wait for the three tasks. The writer and the relay drain for at most
+    /// `budget` themselves. A task that is still running `budget` plus [`DECISION_LOG_DRAIN_GRACE`] after the
+    /// signal is aborted.
+    pub async fn drain(self, budget: Duration) {
+        let Self { shutdown, writer, relay, connector } = self;
+        let _ = shutdown.send(());
+        let grace = budget + DECISION_LOG_DRAIN_GRACE;
+        tokio::join!(wait_task("writer", writer, grace), wait_task("relay", relay, grace), wait_task("connector", connector, grace));
+    }
+}
+
+async fn wait_task(name: &'static str, mut handle: JoinHandle<()>, grace: Duration) {
+    match tokio::time::timeout(grace, &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(task = name, error = %e, "a decision-log task ended with a panic"),
+        Err(_) => {
+            tracing::warn!(task = name, "a decision-log task did not stop in time and was aborted");
+            handle.abort();
+        }
+    }
+}
+
+/// What the composition root wires for the decision log.
+pub struct DecisionLogRuntime {
+    /// The one recorder (P-8). The same `Arc` goes to the decider, the request side and the report site.
+    pub recorder: Arc<DecisionRecorder>,
+    /// The writer, the relay and the connect loop. `None` with `[decision_log] enabled = false`.
+    pub tasks: Option<DecisionLogTasks>,
+}
+
+/// Build the decision log from a config that passed [`GatewayConfig::validate`]. With the log off, the
+/// recorder writes the tracing line only. With the log on, it builds the Redis log, spawns the connect loop,
+/// the writer and the relay, and primes the metrics. It never waits for Redis or NATS: the connect loop and
+/// the NATS client connect in the background, so a broker that is down does not stop the boot (spec § 5.6).
+///
+/// # Errors
+///
+/// A `[decision_log]` config that skipped `validate` (no Redis URL or no `[decision_log.nats]`), or a NATS
+/// creds file that cannot be read or parsed.
+pub async fn build_decision_log(config: &GatewayConfig, clock: Arc<dyn Clock>, entropy: Arc<dyn Entropy>) -> anyhow::Result<DecisionLogRuntime> {
+    let dl = &config.decision_log;
+    if !dl.enabled {
+        return Ok(DecisionLogRuntime {
+            recorder: Arc::new(DecisionRecorder::new(Arc::new(TracingDecisionLog), clock, entropy, dl.digest_key())),
+            tasks: None,
+        });
+    }
+    let redis_url = dl.redis_url.clone().ok_or_else(|| anyhow::anyhow!("decision_log.enabled = true requires decision_log.redis_url"))?;
+    let nats = dl.nats.as_ref().ok_or_else(|| anyhow::anyhow!("decision_log.enabled = true requires [decision_log.nats]"))?;
+    let violations = jetstream::Violations::default();
+    let js = jetstream::connect(nats, violations.clone()).await?;
+    let (log, queue) = RedisDecisionLog::new(dl.queue_capacity);
+    let recorder = Arc::new(DecisionRecorder::new(Arc::new(log), clock, entropy, dl.digest_key()));
+    prime_decision_log_metrics();
+
+    let key = format!("{}:decisions", dl.key_prefix);
+    let slot = RedisSlot::new();
+    let (shutdown, rx) = watch::channel(());
+    let connector = tokio::spawn(connect_loop(redis_url, slot.clone(), rx.clone()));
+    let writer = tokio::spawn(run_writer(
+        queue,
+        slot.clone(),
+        WriterSettings {
+            key: key.clone(),
+            max_len: dl.stream_max_len,
+        },
+        rx.clone(),
+        DECISION_LOG_DRAIN_BUDGET,
+    ));
+    let relay = tokio::spawn(run_relay(
+        slot,
+        js,
+        RelaySettings::new(key, recorder.instance_id().to_string()),
+        violations,
+        rx,
+        DECISION_LOG_DRAIN_BUDGET,
+    ));
+    tracing::info!("the decision log is on (SMA-755): tool decisions go to a Redis stream and from there to JetStream");
+    Ok(DecisionLogRuntime {
+        recorder,
+        tasks: Some(DecisionLogTasks::new(shutdown, writer, relay, connector)),
+    })
 }
 
 /// D16: close the tracker and wait at most `budget`. Returns the number of charges still running
@@ -116,6 +239,27 @@ pub struct ToolPolicyRuntime {
     /// the request side there is no snapshot, and the Cedar decider would block every call (fail
     /// closed). Otherwise `AllowAll`, as before SMA-752.
     pub decider: Arc<dyn ToolCallDecider>,
+    /// The Cedar decider behind `decider` (the same allocation), `None` with the tool policy off. It lets a
+    /// test check that the decider holds the one recorder (P-8).
+    pub cedar: Option<Arc<CedarDecider>>,
+    /// The one decision recorder (P-8). `None` with the tool policy off: nothing is recorded.
+    pub recorder: Option<Arc<DecisionRecorder>>,
+}
+
+/// The tool interception of the composition root, only with `[tool_interception] enabled = true`.
+/// It holds the decider and the recorder of `rt`, so the report site records through the recorder
+/// of the decider and of the request side (P-8).
+#[must_use]
+pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Option<Arc<ToolInterception>> {
+    config.tool_interception.enabled.then(|| {
+        tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
+        // SMA-752: the Cedar decider only with the tool policy on (`build_tool_policy`).
+        Arc::new(ToolInterception {
+            limits: config.tool_interception.limits(),
+            decider: Arc::clone(&rt.decider),
+            recorder: rt.recorder.clone(),
+        })
+    })
 }
 
 /// Build the tool policy from a config that passed [`GatewayConfig::validate`]: `settings()` panics
@@ -125,11 +269,13 @@ pub struct ToolPolicyRuntime {
 /// # Errors
 ///
 /// `enabled = true` with no `[tool_policy.source]` (a config that skipped `validate`).
-pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRuntime> {
+pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>) -> anyhow::Result<ToolPolicyRuntime> {
     if !config.tool_policy.enabled {
         return Ok(ToolPolicyRuntime {
             policy: None,
             decider: Arc::new(AllowAll),
+            cedar: None,
+            recorder: None,
         });
     }
     let settings = config.tool_policy.settings();
@@ -160,9 +306,13 @@ pub fn build_tool_policy(config: &GatewayConfig) -> anyhow::Result<ToolPolicyRun
             "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
         );
     }
+    prime_tool_policy_metrics();
+    let cedar = Arc::new(CedarDecider::new(Arc::clone(&recorder)));
     Ok(ToolPolicyRuntime {
-        policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings)))),
-        decider: Arc::new(CedarDecider),
+        policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder))))),
+        decider: Arc::clone(&cedar) as Arc<dyn ToolCallDecider>,
+        cedar: Some(cedar),
+        recorder: Some(recorder),
     })
 }
 
@@ -223,7 +373,7 @@ mod tool_policy_tests {
         let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
         let out = decider.decide(Arc::new(ctx), Arc::new(turn), calls).await.expect("decide");
         assert_eq!(out.len(), 1);
-        out[0]
+        out[0].decision
     }
 
     /// SMA-752 D19, Task 16 ruling (b): with the tool policy off, nothing is built and the decider
@@ -231,7 +381,7 @@ mod tool_policy_tests {
     #[tokio::test]
     async fn the_tool_policy_off_builds_nothing_and_allows_every_call() {
         let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
-        let rt = build_tool_policy(&cfg).expect("builds");
+        let rt = build_tool_policy(&cfg, rec()).expect("builds");
         assert!(rt.policy.is_none());
         assert_eq!(decide_one(&rt.decider).await, Decision::Allow);
     }
@@ -247,7 +397,7 @@ mod tool_policy_tests {
             ),
             true,
         );
-        let rt = build_tool_policy(&cfg).expect("builds");
+        let rt = build_tool_policy(&cfg, rec()).expect("builds");
         assert!(rt.policy.is_some());
         assert_eq!(decide_one(&rt.decider).await, Decision::Block { code: BlockCode::PolicyUnavailable });
     }
@@ -256,8 +406,74 @@ mod tool_policy_tests {
     #[test]
     fn the_tool_policy_on_without_a_source_is_an_error() {
         let cfg = config(&format!("{BASE}[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\n"), false);
-        let err = build_tool_policy(&cfg).err().expect("an error");
+        let err = build_tool_policy(&cfg, rec()).err().expect("an error");
         assert!(err.to_string().contains("tool_policy.source"), "{err}");
+    }
+
+    fn rec() -> Arc<DecisionRecorder> {
+        Arc::new(DecisionRecorder::tracing())
+    }
+
+    fn enabled_config() -> GatewayConfig {
+        config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n"
+            ),
+            true,
+        )
+    }
+
+    /// P-8: one recorder serves the decider, the request side and the report site.
+    #[tokio::test]
+    async fn the_decider_the_request_side_and_the_report_site_share_one_recorder() {
+        use crate::application::decision_log::DigestKey;
+        use crate::domain::decision_log::{MemoryDecisionLog, OsEntropy};
+        use crate::domain::limits::SystemClock;
+
+        let key = DigestKey::new("k1".into(), "k".repeat(32).into()).expect("key");
+        let recorder = Arc::new(DecisionRecorder::new(Arc::new(MemoryDecisionLog::new(true)), Arc::new(SystemClock), Arc::new(OsEntropy), Some(key)));
+        let cfg = enabled_config();
+        let rt = build_tool_policy(&cfg, Arc::clone(&recorder)).expect("builds");
+        let (_, request_side) = rt.policy.as_ref().expect("on");
+        assert!(Arc::ptr_eq(request_side.recorder(), &recorder), "the request side");
+        assert!(Arc::ptr_eq(rt.recorder.as_ref().expect("a recorder"), &recorder), "the runtime");
+        let ti = tool_interception(&cfg, &rt).expect("interception is on");
+        assert!(Arc::ptr_eq(ti.recorder.as_ref().expect("a recorder"), &recorder), "the report site");
+        // The decider: a true identity check through the accessor of the Cedar decider.
+        let cedar = rt.cedar.as_ref().expect("the Cedar decider");
+        assert!(Arc::ptr_eq(cedar.recorder(), &recorder), "the decider");
+        let cedar_as_dyn: Arc<dyn ToolCallDecider> = Arc::clone(cedar) as Arc<dyn ToolCallDecider>;
+        assert!(std::ptr::addr_eq(Arc::as_ptr(&cedar_as_dyn), Arc::as_ptr(&rt.decider)), "the runtime decider is the Cedar decider");
+    }
+
+    /// With the tool policy off nothing is recorded: no recorder is kept.
+    #[test]
+    fn the_tool_policy_off_keeps_no_recorder() {
+        let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
+        let rt = build_tool_policy(&cfg, rec()).expect("builds");
+        assert!(rt.recorder.is_none());
+        assert!(tool_interception(&cfg, &rt).expect("on").recorder.is_none());
+    }
+
+    #[test]
+    fn prime_tool_policy_metrics_primes_six_series_at_zero() {
+        let debugging = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = debugging.snapshotter();
+        let _local = metrics::set_default_local_recorder(&debugging);
+        build_tool_policy(&enabled_config(), rec()).expect("builds");
+        for side in ["request", "response"] {
+            for kind in ["name_collision", "unparsed_arguments", "other"] {
+                let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
+                assert_eq!(v, Some(0), "{side}/{kind} is primed at 0");
+            }
+        }
+        let series = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL)
+            .count();
+        assert_eq!(series, 6);
     }
 
     /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.
@@ -281,7 +497,7 @@ mod tool_policy_tests {
     #[tokio::test]
     async fn the_nats_subscription_is_built_only_with_the_policy_on_and_a_nats_table() {
         let url = format!("nats://127.0.0.1:{}", closed_port());
-        let cache = build_tool_policy(&tp_config(true, None)).expect("builds").policy.expect("on").0;
+        let cache = build_tool_policy(&tp_config(true, None), rec()).expect("builds").policy.expect("on").0;
 
         assert!(build_policy_events(&tp_config(true, None), &cache).await.expect("no error").is_none(), "no nats table: refresh only");
         assert!(build_policy_events(&tp_config(false, Some(&url)), &cache).await.expect("no error").is_none(), "the tool policy is off");
@@ -292,12 +508,65 @@ mod tool_policy_tests {
         assert!(events.is_some(), "on with a nats table: the subscription is built");
     }
 
+    fn decision_log_config(enabled: bool) -> GatewayConfig {
+        let dl = if enabled {
+            format!(
+                "[decision_log]\nenabled = true\nredis_url = \"redis://127.0.0.1:{}\"\ndigest_key = \"{}\"\ndigest_key_id = \"k1\"\n[decision_log.nats]\nurl = \"nats://127.0.0.1:{}\"\n",
+                closed_port(),
+                "k".repeat(32),
+                closed_port()
+            )
+        } else {
+            String::new()
+        };
+        config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n{dl}"
+            ),
+            true,
+        )
+    }
+
+    fn clock_and_entropy() -> (Arc<dyn crate::domain::limits::Clock>, Arc<dyn crate::domain::decision_log::Entropy>) {
+        (Arc::new(crate::domain::limits::SystemClock), Arc::new(crate::domain::decision_log::OsEntropy))
+    }
+
+    #[tokio::test]
+    async fn the_decision_log_off_uses_the_tracing_log() {
+        let (clock, entropy) = clock_and_entropy();
+        let rt = build_decision_log(&decision_log_config(false), clock, entropy).await.expect("builds");
+        assert!(!rt.recorder.log().wants_digest(), "the tracing log wants no digest");
+        assert!(rt.tasks.is_none());
+    }
+
+    /// With the log on, the recorder holds the Redis log, and the decider, the request side and the
+    /// `ToolInterception` hold that one recorder. Redis and NATS are unreachable: the build does not wait.
+    #[tokio::test]
+    async fn the_decision_log_on_shares_one_redis_log() {
+        let (clock, entropy) = clock_and_entropy();
+        let cfg = decision_log_config(true);
+        let dl = tokio::time::timeout(Duration::from_secs(5), build_decision_log(&cfg, clock, entropy))
+            .await
+            .expect("neither Redis nor NATS is waited for")
+            .expect("builds");
+        assert!(dl.recorder.log().wants_digest(), "the Redis log wants the digest");
+        let tasks = dl.tasks.expect("the three tasks");
+        let recorder = dl.recorder;
+        let rt = build_tool_policy(&cfg, Arc::clone(&recorder)).expect("builds");
+        let (_, request_side) = rt.policy.as_ref().expect("on");
+        assert!(Arc::ptr_eq(request_side.recorder(), &recorder), "the request side");
+        assert!(Arc::ptr_eq(rt.cedar.as_ref().expect("cedar").recorder(), &recorder), "the decider");
+        let ti = tool_interception(&cfg, &rt).expect("interception is on");
+        assert!(Arc::ptr_eq(ti.recorder.as_ref().expect("a recorder"), &recorder), "the report site");
+        tasks.drain(Duration::from_millis(100)).await;
+    }
+
     /// A creds file that does not exist is a boot error that names the path, not the URL.
     #[tokio::test]
     async fn a_missing_creds_file_is_a_boot_error_without_the_url() {
         let mut cfg = tp_config(true, Some("nats://user:hunter2@127.0.0.1:1"));
         cfg.tool_policy.nats.as_mut().expect("nats").creds_file = Some("/nonexistent/gw.creds".to_string());
-        let cache = build_tool_policy(&cfg).expect("builds").policy.expect("on").0;
+        let cache = build_tool_policy(&cfg, rec()).expect("builds").policy.expect("on").0;
         let err = build_policy_events(&cfg, &cache).await.err().expect("an error");
         let text = format!("{err:#}");
         assert!(text.contains("/nonexistent/gw.creds"), "{text}");
@@ -309,6 +578,21 @@ mod tool_policy_tests {
 mod tests {
     use super::*;
     use std::future::{pending, ready};
+
+    /// I1 (SMA-821): with the production values, the relay's wait for an in-flight KV step after the shutdown
+    /// signal fits inside the time that `DecisionLogTasks::drain` gives the relay task. A wait of `kv_timeout`
+    /// (5 s) would not fit, and drain would abort the relay while the step runs on.
+    #[test]
+    fn the_relay_step_wait_fits_inside_the_drain_time() {
+        let s = RelaySettings::new("k".to_owned(), "c".to_owned());
+        let wait = crate::adapters::decision_log::relay::step_shutdown_wait(&s, DECISION_LOG_DRAIN_BUDGET);
+        assert!(
+            wait < DECISION_LOG_DRAIN_BUDGET + DECISION_LOG_DRAIN_GRACE,
+            "the relay waits {wait:?} for a KV step, and drain aborts it after {:?}",
+            DECISION_LOG_DRAIN_BUDGET + DECISION_LOG_DRAIN_GRACE
+        );
+        assert!(wait <= DECISION_LOG_DRAIN_BUDGET, "the step wait is above the relay's own budget");
+    }
 
     /// Spawn a task that returns `Ok(())` only once the shutdown broadcast fires.
     fn spawn_until_shutdown(servers: &mut JoinSet<anyhow::Result<()>>, mut rx: watch::Receiver<()>) {
@@ -328,7 +612,7 @@ mod tests {
         servers.spawn(async { Err(anyhow::anyhow!("boom")) });
 
         // `shutdown` never fires; the only way out is the failing task.
-        let result = supervise(servers, pending(), tx, None).await;
+        let result = supervise(servers, pending(), tx, None, None).await;
 
         let err = result.expect_err("a failing task must surface as Err");
         assert_eq!(err.to_string(), "boom");
@@ -342,7 +626,7 @@ mod tests {
         spawn_until_shutdown(&mut servers, rx.clone());
 
         // `shutdown` is ready immediately → supervise broadcasts, both tasks drain Ok.
-        let result = supervise(servers, ready(()), tx, None).await;
+        let result = supervise(servers, ready(()), tx, None, None).await;
 
         assert!(result.is_ok(), "clean shutdown must drain all tasks to Ok, got {result:?}");
     }
@@ -355,7 +639,7 @@ mod tests {
         // A task that returns Ok before any shutdown — the warn branch, not an error.
         servers.spawn(async { Ok(()) });
 
-        let result = supervise(servers, pending(), tx, None).await;
+        let result = supervise(servers, pending(), tx, None, None).await;
 
         assert!(result.is_ok(), "a clean early return is not an error, got {result:?}");
     }
@@ -369,7 +653,7 @@ mod tests {
         servers.spawn(async { Err(anyhow::anyhow!("late boom")) });
 
         // Whichever `select!` arm wins, the drain must still surface the error.
-        let result = supervise(servers, ready(()), tx, None).await;
+        let result = supervise(servers, ready(()), tx, None, None).await;
 
         let err = result.expect_err("the error must survive even when shutdown wins the select");
         assert_eq!(err.to_string(), "late boom");
@@ -400,6 +684,63 @@ mod tests {
         assert_eq!(counter(&snapshotter, names::GATEWAY_LIMIT_CHARGES_DROPPED_TOTAL, &[("reason", "shutdown")]), Some(1));
     }
 
+    /// P-18: the decision log drains after the servers. A server that records a decision during its own
+    /// graceful stop is seen by the writer. A stand-in writer reads the queue after the signal.
+    #[tokio::test]
+    async fn supervise_drains_the_decision_log_after_the_servers() {
+        use crate::adapters::decision_log::RedisDecisionLog;
+        use crate::domain::decision_log::DecisionLog;
+        use paigasus_gateway_core::decision_log::{RecordHeader, ReportedCall, build_response};
+        use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, ReportEntry};
+        use std::sync::atomic::AtomicUsize;
+
+        let (log, mut queue) = RedisDecisionLog::new(8);
+        let log = Arc::new(log);
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (dl_tx, mut dl_rx) = watch::channel(());
+        let writer_seen = Arc::clone(&seen);
+        let writer = tokio::spawn(async move {
+            let _ = dl_rx.changed().await;
+            while let Ok(_event) = queue.try_recv() {
+                writer_seen.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let idle = tokio::spawn(std::future::pending::<()>());
+        let relay = tokio::spawn(async {});
+        let tasks = DecisionLogTasks {
+            shutdown: dl_tx,
+            writer,
+            relay,
+            connector: idle,
+        };
+
+        let (tx, mut rx) = watch::channel(());
+        let mut servers = JoinSet::new();
+        let server_log = Arc::clone(&log);
+        servers.spawn(async move {
+            let _ = rx.changed().await;
+            // A graceful stop that takes a moment and records one decision on the way.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let entry = ReportEntry {
+                choice: 0,
+                position: 0,
+                name: "read_file".into(),
+                decision: ReportDecision::Block,
+                basis: Some(Basis::Decider),
+                code: Some(BlockCode::Policy),
+                enforced: Some(true),
+                reason: None,
+            };
+            let ctx = DecisionContext::new("prn:pgs:iam:::user/u", "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1", None);
+            let header = RecordHeader::new(uuid::Uuid::nil(), std::time::SystemTime::UNIX_EPOCH, uuid::Uuid::nil(), 1, None);
+            server_log.record(build_response(header, &ctx, &ReportedCall::new(entry, None, None)));
+            Ok(())
+        });
+        let result = supervise(servers, ready(()), tx, None, Some(tasks)).await;
+        assert!(result.is_ok());
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "the writer saw the decision that a server recorded while it stopped");
+    }
+
     #[tokio::test]
     async fn supervise_drains_the_charges_after_the_servers() {
         let (tx, rx) = watch::channel(());
@@ -412,7 +753,7 @@ mod tests {
             tokio::task::yield_now().await;
             flag.store(true, Ordering::SeqCst);
         });
-        let result = supervise(servers, ready(()), tx, Some(charges)).await;
+        let result = supervise(servers, ready(()), tx, Some(charges), None).await;
         assert!(result.is_ok());
         assert!(landed.load(Ordering::SeqCst), "supervise waits for an in-flight charge");
     }

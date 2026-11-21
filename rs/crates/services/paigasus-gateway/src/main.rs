@@ -9,12 +9,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::limits::build_limits;
 use paigasus_gateway::adapters::openai::OpenAiClient;
 use paigasus_gateway::config::GatewayConfig;
+use paigasus_gateway::domain::decision_log::OsEntropy;
+use paigasus_gateway::domain::limits::SystemClock;
 use paigasus_gateway::runtime;
 use paigasus_gateway::service_info::Capabilities;
 use paigasus_observability::names;
@@ -25,6 +26,10 @@ use tokio::task::JoinSet;
 ///
 /// Exit codes: 0 healthy, 1 unhealthy, 2 usage error.
 fn main() -> std::process::ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("decisions") {
+        return decisions(&argv[1..]);
+    }
     match paigasus_observability::health::dispatch(std::env::args().skip(1)) {
         Ok(paigasus_observability::health::Mode::Serve) => match serve() {
             Ok(()) => std::process::ExitCode::SUCCESS,
@@ -39,6 +44,25 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(2)
         }
     }
+}
+
+/// `decisions export` (SMA-755 § 5.11): the operator export of the decision log. Exit codes: 0 done, 1 bad
+/// arguments, 2 NATS or stream error, 3 an event of a wrong org, 4 more than `--max-events`.
+fn decisions(args: &[String]) -> std::process::ExitCode {
+    use paigasus_gateway::application::decision_export::{Exit, USAGE};
+    if args.first().map(String::as_str) != Some("export") {
+        eprintln!("{USAGE}");
+        return std::process::ExitCode::from(Exit::BadArgs.code());
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: no runtime: {e}");
+            return std::process::ExitCode::from(Exit::Nats.code());
+        }
+    };
+    let exit = runtime.block_on(paigasus_gateway::adapters::decision_log::reader::run(args[1..].to_vec()));
+    std::process::ExitCode::from(exit.code())
 }
 
 /// `load()` but deliberately NOT `validate()`: the probe needs only `http_addr`, and
@@ -92,7 +116,12 @@ async fn serve() -> anyhow::Result<()> {
     )?;
 
     // SMA-752 D19: the tool policy. Only after `validate` above (see `build_tool_policy`).
-    let runtime::ToolPolicyRuntime { policy: tool_policy, decider } = runtime::build_tool_policy(&config)?;
+    // SMA-755: one recorder for the decider, the request side and the report site (P-8). The decision log
+    // never waits for Redis or NATS, so a broker that is down does not block the boot (spec § 5.6).
+    let decision_log = runtime::build_decision_log(&config, Arc::new(SystemClock), Arc::new(OsEntropy)).await?;
+    let tool_policy_runtime = runtime::build_tool_policy(&config, decision_log.recorder)?;
+    let tool_interception = runtime::tool_interception(&config, &tool_policy_runtime);
+    let tool_policy = tool_policy_runtime.policy;
 
     let state = AppState {
         iam: Arc::new(iam),
@@ -101,14 +130,7 @@ async fn serve() -> anyhow::Result<()> {
         capabilities: Capabilities::from_config(&config),
         limits: limits.limits,
         dpop_enabled: config.dpop.enabled,
-        tool_interception: config.tool_interception.enabled.then(|| {
-            tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
-            // SMA-752: the Cedar decider only with the tool policy on (`build_tool_policy`).
-            Arc::new(ToolInterception {
-                limits: config.tool_interception.limits(),
-                decider,
-            })
-        }),
+        tool_interception,
         tool_policy: tool_policy.as_ref().map(|(_, tp)| Arc::clone(tp)),
         responses: config.responses.enabled.then(|| {
             tracing::info!("the responses route is on (SMA-769)");
@@ -214,11 +236,11 @@ async fn serve() -> anyhow::Result<()> {
 
     // Supervise: stop on the first of a shutdown signal or any task ending, broadcast graceful
     // shutdown to the rest, and surface the first error (SMA-463).
-    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks).await
+    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, decision_log.tasks).await
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 14 metric families `paigasus-gateway`
-/// emits (spec §4.1), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
+/// Registers `# HELP`/`# TYPE` exposition text for the 35 metric families listed below (SMA-755 counted
+/// them; the number is a plain count, not a gate). `paigasus-gateway` emits them (spec §4.1 and later), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.3.
 fn describe_gateway_metrics() {
     use metrics::{describe_counter, describe_gauge, describe_histogram};
@@ -295,10 +317,38 @@ fn describe_gateway_metrics() {
         "Seconds the tool policy adds to one request: the request side plus the decider."
     );
     describe_counter!(
+        names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+        "Tool-policy findings, labeled by side (request, response) and kind (name_collision, unparsed_arguments, other)."
+    );
+    describe_counter!(
         names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
         "Tool-policy cache invalidations from NATS, labeled by cause (message, connect, resubscribe, slow_consumer)."
     );
     describe_gauge!(names::GATEWAY_TOOL_POLICY_NATS_CONNECTED, "1 while the tool-policy NATS client is connected, else 0.");
+    describe_counter!(names::GATEWAY_DECISION_LOG_RECORDED_TOTAL, "Tool decision records that the decision log accepted.");
+    describe_counter!(names::GATEWAY_DECISION_LOG_WRITTEN_TOTAL, "Tool decision events that the writer put into the Redis stream.");
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_DROPPED_TOTAL,
+        "Tool decision events that the gateway dropped, labeled by reason (queue_full, closed, redis_unavailable, write_error, breaker_open, backlog_full, publish_rejected, redis_deleted, shutdown)."
+    );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL,
+        "Panics that a decision-log task caught and survived, labeled by task (writer, relay)."
+    );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_PUBLISHED_TOTAL,
+        "Tool decision events that the relay published to JetStream and that got a PubAck."
+    );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_REDIS_RESETS_TOTAL,
+        "Redis losses of the decision stream that the relay detected (the consumer group was gone). One per incident."
+    );
+    describe_counter!(
+        names::GATEWAY_DECISION_LOG_LOST_ESTIMATE_TOTAL,
+        "An estimate of the decision events in the Redis losses: the last 15 s XLEN sample of the relay. It can undercount or overcount."
+    );
+    describe_histogram!(names::GATEWAY_DECISION_LOG_PUBLISH_SECONDS, "Seconds from the publish of a decision event to its JetStream PubAck.");
+    describe_gauge!(names::GATEWAY_DECISION_LOG_BACKLOG, "Entries in the decision stream in Redis (XLEN), sampled every 15 s by the relay.");
 }
 
 async fn shutdown_signal() {

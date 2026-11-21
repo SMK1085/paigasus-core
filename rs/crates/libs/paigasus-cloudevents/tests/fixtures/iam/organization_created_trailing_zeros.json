@@ -1,0 +1,1 @@
+{"specversion":"1.0","id":"00000000-0000-0000-0000-000000000002","source":"urn:paigasus:iam","type":"iam.organization.created","subject":"prn:pgs:iam:::organization/00000000-0000-0000-0000-000000000500","time":"2026-08-07T12:30:45.100000Z","datacontenttype":"application/json","schemaversion":1,"data":{"slug":"acme"}}

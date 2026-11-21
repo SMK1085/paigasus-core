@@ -8,8 +8,8 @@
 # cedar-policy has already overflowed once) or become a T_EXEMPT entry. It runs from
 # .github/workflows/images.yml instead.
 #
-# usage: ci/images/run.sh build [iam|gateway]     # [iam|gateway] scopes the build
-#        ci/images/run.sh smoke [iam|gateway]...   # no argument: both images; else exactly those
+# usage: ci/images/run.sh build [iam|gateway|agent-host]     # scopes the build
+#        ci/images/run.sh smoke [iam|gateway|agent-host]...   # no argument: iam and gateway only; else exactly those
 #        ci/images/run.sh smoke <iam-console|gateway-console>...   # SMA-688: paigasus-<key>:dev
 #        ci/images/run.sh all                       # build both + smoke; takes no service arg
 #        ci/images/run.sh build-oci <key> <outdir>  # SMA-658/SMA-688: OCI archive, no --load
@@ -67,6 +67,7 @@ crate_for() {
   case "$1" in
     iam)     echo "paigasus-iam" ;;
     gateway) echo "paigasus-gateway" ;;
+    agent-host) echo "paigasus-agent-host" ;;
     *) echo "unknown service: $1" >&2; return 1 ;;
   esac
 }
@@ -76,7 +77,7 @@ crate_for() {
 # table does not know fails kind_for_key, and so fails build-oci and smoke for that key.
 kind_for_key() {
   case "$1" in
-    iam|gateway) echo cargo ;;
+    iam|gateway|agent-host) echo cargo ;;
     iam-console|gateway-console) echo npm ;;
     *) echo "unknown release key: $1" >&2; return 1 ;;
   esac
@@ -869,11 +870,13 @@ load_oci() {
 RUN_ID="$$"
 NET="paigasus-smoke-${RUN_ID}"
 GW_NAME="smoke-gw-${RUN_ID}"
+AH_NAME="smoke-agent-host-${RUN_ID}"
+AH_PG_NAME="smoke-ah-pg-${RUN_ID}"
 IAM_NAME="smoke-iam-${RUN_ID}"
 PG_NAME="smoke-pg-${RUN_ID}"
 CERTPROBE_NAME="certprobe-${RUN_ID}"
 cleanup() {
-  docker rm -f "$IAM_NAME" "$GW_NAME" "$PG_NAME" "$CERTPROBE_NAME" >/dev/null 2>&1 || true
+  docker rm -fv "$IAM_NAME" "$GW_NAME" "$PG_NAME" "$AH_NAME" "$AH_PG_NAME" "$CERTPROBE_NAME" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 
@@ -1109,6 +1112,38 @@ smoke_iam() {
   assert_base_intact paigasus-iam:dev
 }
 
+# SMA-786 spec 6.10: the agent host has its own Postgres container, so this smoke does not share
+# state with smoke_iam. The database host is a container NAME, never an IP, so glibc name
+# resolution in the chiseled rootfs is exercised. The password is a literal dummy.
+smoke_agent_host() {
+  echo "== agent-host: with postgres, reached BY HOSTNAME =="
+  docker run -d --name "$AH_PG_NAME" --network "$NET" \
+    --health-cmd 'pg_isready -U postgres' --health-interval=1s \
+    -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=agent_host "$POSTGRES_16_ALPINE_DIGEST" >/dev/null
+  wait_healthy "$AH_PG_NAME"
+  docker run -d --name "$AH_NAME" --network "$NET" \
+    -e AGENT_HOST_DATABASE_URL="postgres://postgres:smoke@${AH_PG_NAME}:5432/agent_host" \
+    paigasus-agent-host:dev >/dev/null
+  wait_healthy "$AH_NAME"
+  wait_ready "$AH_NAME" "http://${AH_NAME}:8086/readyz"
+  expect_status "agent-host /healthz" "http://${AH_NAME}:8086/healthz" 200
+  expect_status "agent-host /readyz"  "http://${AH_NAME}:8086/readyz"  200
+  # The NEGATIVE row: stop Postgres. /readyz must report 503, and the in-image healthcheck must
+  # exit exactly 1 (0 = healthy, 1 = unhealthy, 2 = usage error). Exit 2 would mean --path was
+  # rejected, so a bare non-zero check would stop proving that --path works.
+  docker stop "$AH_PG_NAME" >/dev/null
+  expect_status "agent-host /readyz (postgres stopped)" "http://${AH_NAME}:8086/readyz" 503
+  local readyz_rc=0
+  docker exec "$AH_NAME" /usr/local/bin/paigasus-service healthcheck --path /readyz || readyz_rc=$?
+  case "$readyz_rc" in
+    1) echo "  agent-host readyz probe exits 1 (unhealthy) while postgres is down (in-image, --path works)" ;;
+    0) echo "::error::agent-host readyz probe reported healthy (exit 0) with postgres stopped" >&2; return 1 ;;
+    2) echo "::error::agent-host readyz probe exited 2 (usage error) — --path was rejected" >&2; return 1 ;;
+    *) echo "::error::agent-host readyz probe exited ${readyz_rc}, expected exactly 1 (unhealthy)" >&2; return 1 ;;
+  esac
+  assert_base_intact paigasus-agent-host:dev
+}
+
 # `docker top`, not `docker inspect .Config.User`: the latter reads IMAGE config, so a
 # `--user 0` invocation would still pass it.
 # `-o pid,uid`, not `-o pid,user` or `-o user` alone: `pid` stays required — some docker
@@ -1135,6 +1170,7 @@ smoke() {
     case "$s" in
       gateway) assert_fresh paigasus-gateway:dev; smoke_gateway; assert_uid "$GW_NAME" ;;
       iam)     assert_fresh paigasus-iam:dev;     smoke_iam;     assert_uid "$IAM_NAME" ;;
+      agent-host) assert_fresh paigasus-agent-host:dev; smoke_agent_host; assert_uid "$AH_NAME" ;;
       *) echo "unknown service: $s" >&2; return 1 ;;
     esac
   done
@@ -2589,7 +2625,7 @@ rehearse() {
 
 # One usage string for both the missing-command case and the unknown-command case below, so the
 # two never drift apart. Lists every command the case block accepts, in the order it accepts them.
-USAGE="usage: ci/images/run.sh build [iam|gateway] | ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway]... | ci/images/run.sh smoke <iam-console|gateway-console>... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles | ci/images/run.sh context-check"
+USAGE="usage: ci/images/run.sh build [iam|gateway|agent-host] | ci/images/run.sh build-oci <iam|gateway|iam-console|gateway-console> <outdir> | ci/images/run.sh load-oci <archive> <image-name> | ci/images/run.sh smoke [iam|gateway|agent-host]... | ci/images/run.sh smoke <iam-console|gateway-console>... | ci/images/run.sh all | ci/images/run.sh rehearse <archive.oci.tar>... | ci/images/run.sh build-console [iam|gateway] | ci/images/run.sh all-consoles | ci/images/run.sh context-check"
 cmd="${1:?$USAGE}"
 target="${2:-}"
 services=("iam" "gateway")
@@ -2645,6 +2681,12 @@ case "$cmd" in
     # SMA-688: the pins of the key's own Dockerfile. assert_pins reads rs/Dockerfile and the
     # chisel release; assert_console_pins reads ts/Dockerfile. An unknown key stops here.
     oci_kind="$(kind_for_key "$target")"
+    # SMA-786 spec A7: agent-host is a cargo key for build and smoke only. It has no release
+    # chain, so it has no OCI archive and no publish path.
+    if [ "$target" = agent-host ]; then
+      echo "::error::build-oci does not support agent-host: it has no release chain, no OCI archive and no publish path (SMA-786)." >&2
+      exit 1
+    fi
     if [ "$oci_kind" = npm ]; then assert_console_pins; else assert_pins; fi
     build_oci "$target" "$3"
     ;;

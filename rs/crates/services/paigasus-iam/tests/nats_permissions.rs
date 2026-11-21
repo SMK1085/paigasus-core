@@ -53,6 +53,9 @@ const DURABLE: &str = "gateway-cache-invalidator";
 const PUBLISHER_INBOX: &str = "_INBOX_IAM_PUB";
 const CONSUMER_INBOX: &str = "_INBOX_GW";
 const PROVISIONER_INBOX: &str = "_INBOX_PROV";
+/// The agent host's own durable and inbox prefix (SMA-787 §9.2, `AGENT_HOST_*` in `subjects.env`).
+const AGENT_HOST_DURABLE: &str = "agent-host-inbox";
+const AGENT_HOST_INBOX: &str = "_INBOX_AGH";
 
 /// Repo root, from this crate's manifest dir: `rs/crates/services/paigasus-iam` → four levels up.
 fn repo_root() -> PathBuf {
@@ -91,7 +94,11 @@ struct Fixture {
     url: String,
     publisher: Identity,
     consumer: Identity,
+    agent_host: Identity,
     provisioner: Identity,
+    gw_publisher: Identity,
+    gw_reader: Identity,
+    gw_provisioner: Identity,
 }
 
 /// Renders `accounts.conf.tmpl` with freshly minted identities and boots the broker with the
@@ -105,7 +112,11 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
 
     let publisher = mint(dir.path(), "iam-publisher");
     let consumer = mint(dir.path(), "gateway-consumer");
+    let agent_host = mint(dir.path(), "agent-host-consumer");
     let provisioner = mint(dir.path(), "iam-provisioner");
+    let gw_publisher = mint(dir.path(), "gateway-decision-publisher");
+    let gw_reader = mint(dir.path(), "gateway-decision-reader");
+    let gw_provisioner = mint(dir.path(), "gateway-decision-provisioner");
     let sys = mint(dir.path(), "sys");
 
     // The permission lists are read from the COMMITTED template verbatim; only the identities are
@@ -117,7 +128,11 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         .replace("{{SYS_NKEY}}", &sys.public_key)
         .replace("{{PUBLISHER_NKEY}}", &publisher.public_key)
         .replace("{{CONSUMER_NKEY}}", &consumer.public_key)
-        .replace("{{PROVISIONER_NKEY}}", &provisioner.public_key);
+        .replace("{{AGENT_HOST_CONSUMER_NKEY}}", &agent_host.public_key)
+        .replace("{{PROVISIONER_NKEY}}", &provisioner.public_key)
+        .replace("{{GW_DEC_PUBLISHER_NKEY}}", &gw_publisher.public_key)
+        .replace("{{GW_DEC_READER_NKEY}}", &gw_reader.public_key)
+        .replace("{{GW_DEC_PROVISIONER_NKEY}}", &gw_provisioner.public_key);
 
     // Named, not inlined: `server_conf` varies per caller (the TLS fixture picks a different file),
     // so a typo must panic with the path it looked for rather than a bare "os error 2".
@@ -142,7 +157,11 @@ async fn start_fixture(server_conf: &str, extra_files: Vec<(String, Vec<u8>)>) -
         url: format!("nats://127.0.0.1:{port}"),
         publisher,
         consumer,
+        agent_host,
         provisioner,
+        gw_publisher,
+        gw_reader,
+        gw_provisioner,
     })
 }
 
@@ -305,6 +324,24 @@ async fn provision(fixture: &Fixture) {
         )
         .await
         .expect("the provisioner grant must cover consumer creation");
+
+    // The agent host's durable, as `provision.sh` makes it (SMA-787 §9.2): pull, explicit ack,
+    // deliver new, unlimited redelivery, 30 s ack wait, one filter per channel subject.
+    stream
+        .get_or_create_consumer(
+            AGENT_HOST_DURABLE,
+            jetstream::consumer::pull::Config {
+                durable_name: Some(AGENT_HOST_DURABLE.to_string()),
+                ack_policy: jetstream::consumer::AckPolicy::Explicit,
+                deliver_policy: jetstream::consumer::DeliverPolicy::New,
+                max_deliver: -1,
+                ack_wait: Duration::from_secs(30),
+                filter_subjects: vec!["iam.organization.>".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the provisioner grant must cover the agent host durable");
 }
 
 /// Sufficiency: the committed publisher grant must cover stream ensure plus a publish on every
@@ -609,6 +646,94 @@ async fn neither_service_identity_can_subscribe_to_the_others_inbox() {
     expect_permissions_violation(&mut publisher_events, "_INBOX_GW.>").await;
 }
 
+/// SMA-787 §9.2: the agent host identity can do exactly what a pull consumer on a pre-provisioned
+/// durable needs: fetch, read `CONSUMER.INFO` (the boot check) and ack. The durable delivers only
+/// new messages, so the event is published after the durable exists.
+#[tokio::test]
+async fn the_agent_host_consumer_pulls_acks_and_reads_info_of_its_durable() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    provision(&fixture).await;
+
+    let publisher = NatsEventPublisher::connect(&cfg_for(&fixture, &fixture.publisher, PUBLISHER_INBOX)).await.expect("connect publisher");
+    publisher.publish(&event(1, EventType::OrganizationCreated)).await.expect("publish an organization event");
+
+    let (client, mut events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+    let js = jetstream::new(client);
+    let mut consumer: jetstream::consumer::PullConsumer = js
+        .get_consumer_from_stream(AGENT_HOST_DURABLE, STREAM)
+        .await
+        .expect("the agent host grant must cover CONSUMER.INFO on its own durable");
+    let info = consumer.info().await.expect("consumer info");
+    assert_eq!(info.config.filter_subjects, vec!["iam.organization.>".to_string()]);
+    assert_eq!(info.config.max_deliver, -1);
+
+    let mut batch = consumer.fetch().max_messages(1).messages().await.expect("the agent host grant must cover MSG.NEXT");
+    let msg = tokio::time::timeout(Duration::from_secs(10), batch.next())
+        .await
+        .expect("an organization event must be delivered")
+        .expect("stream yields a message")
+        .expect("message is Ok");
+    assert_eq!(msg.subject.as_str(), "iam.organization.created");
+    msg.double_ack().await.expect("the agent host grant must cover $JS.ACK on its own durable");
+    let seen: Vec<String> = drain(&mut events).into_iter().filter(|e| e.to_lowercase().contains("violation")).collect();
+    assert!(seen.is_empty(), "no permission violation on the happy path: {seen:?}");
+}
+
+/// The agent host identity cannot create or update a consumer in any form, and cannot use the
+/// gateway durable. A CREATE verb would let it widen its own filter, so these denials make the
+/// pre-provisioned filter binding. It also has no `STREAM.INFO`: the boot check uses
+/// `CONSUMER.INFO` only.
+#[tokio::test]
+async fn the_agent_host_consumer_cannot_create_a_consumer_or_read_the_gateway_durable() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    provision(&fixture).await;
+    let (client, mut events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+
+    for subject in [
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.wide-open",
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS",
+        "$JS.API.CONSUMER.DURABLE.CREATE.IAM_EVENTS.wide-open",
+        "$JS.API.CONSUMER.CREATE.IAM_EVENTS.agent-host-inbox",
+        "$JS.API.CONSUMER.DURABLE.CREATE.IAM_EVENTS.agent-host-inbox",
+        "$JS.API.CONSUMER.MSG.NEXT.IAM_EVENTS.gateway-cache-invalidator",
+        "$JS.API.CONSUMER.INFO.IAM_EVENTS.gateway-cache-invalidator",
+        "$JS.API.STREAM.INFO.IAM_EVENTS",
+    ] {
+        expect_publish_denied(&client, &mut events, subject).await;
+    }
+}
+
+/// The agent host identity reads one filtered durable. It cannot subscribe to the event subjects or
+/// forge an event onto them.
+#[tokio::test]
+async fn the_agent_host_consumer_cannot_subscribe_to_or_forge_events() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+
+    let _sub = client.subscribe("iam.>").await.expect("accepted locally, refused by the server");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "iam.>").await;
+
+    expect_publish_denied(&client, &mut events, "iam.organization.created").await;
+}
+
+/// The two consumer identities have separate inbox prefixes. Neither can read the other's
+/// deliveries.
+#[tokio::test]
+async fn neither_consumer_identity_can_subscribe_to_the_others_inbox() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+
+    let (agent_client, mut agent_events) = client_for(&fixture, &fixture.agent_host, AGENT_HOST_INBOX).await;
+    let _agent_sub = agent_client.subscribe("_INBOX_GW.>").await.expect("accepted locally, refused by the server");
+    agent_client.flush().await.expect("flush");
+    expect_permissions_violation(&mut agent_events, "_INBOX_GW.>").await;
+
+    let (gw_client, mut gw_events) = client_for(&fixture, &fixture.consumer, CONSUMER_INBOX).await;
+    let _gw_sub = gw_client.subscribe("_INBOX_AGH.>").await.expect("accepted locally, refused by the server");
+    gw_client.flush().await.expect("flush");
+    expect_permissions_violation(&mut gw_events, "_INBOX_AGH.>").await;
+}
+
 /// Mints a CA and a server certificate signed by it, with an IP SAN for 127.0.0.1 (the tests dial
 /// a mapped host port). Nothing is committed: `rcgen` is already a dev-dependency here for the
 /// mock IdP, and a per-run key pair keeps certificate material out of git entirely.
@@ -825,4 +950,256 @@ async fn a_rotated_credential_restores_a_denied_publish_without_a_restart() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The gateway tool decision log account (SMA-755 § 5.10, P-13, P-15, P-16). The calls below are the
+// exact calls of the relay (`get_or_create_stream`, `send_publish` with a message id) and of the
+// export CLI (`get_stream_no_info`, `create_consumer(OrderedConfig)`).
+// ---------------------------------------------------------------------------------------------
+
+const GW_STREAM: &str = "GATEWAY_DECISIONS";
+const GW_PUBLISHER_INBOX: &str = "_INBOX_GW_DEC";
+const GW_READER_INBOX: &str = "_INBOX_GW_RD";
+const GW_PROVISIONER_INBOX: &str = "_INBOX_GW_PROV";
+
+/// The stream config of `ops/nats/subjects.env`, except `max_bytes`: the fixture account holds
+/// 256 MiB, and a limit above the account limit is refused by the broker.
+fn gw_stream_config() -> jetstream::stream::Config {
+    jetstream::stream::Config {
+        name: GW_STREAM.to_string(),
+        subjects: vec!["gateway.decision.>".to_string()],
+        retention: jetstream::stream::RetentionPolicy::Limits,
+        storage: jetstream::stream::StorageType::File,
+        max_age: Duration::from_secs(2_592_000),
+        max_bytes: 134_217_728,
+        discard: jetstream::stream::DiscardPolicy::Old,
+        duplicate_window: Duration::from_secs(120),
+        max_message_size: 65_536,
+        num_replicas: 1,
+        ..Default::default()
+    }
+}
+
+/// Publishes one event with a message id, as the relay does, and waits for the PubAck.
+async fn gw_publish(js: &jetstream::Context, subject: &str, id: &str) -> jetstream::publish::PublishAck {
+    let publish = jetstream::message::PublishMessage::build().message_id(id).payload("{}".into());
+    js.send_publish(subject.to_string(), publish)
+        .await
+        .expect("the publish is accepted locally")
+        .await
+        .expect("the publisher grant must deliver a PubAck")
+}
+
+#[tokio::test]
+async fn the_decision_publisher_ensures_the_stream_and_publishes_with_an_ack() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, _events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let js = jetstream::new(client);
+    // The relay reads the account limit first, to size `max_bytes` (SMA-755 § 5.10).
+    let account = js.query_account().await.expect("the publisher grant must cover $JS.API.INFO");
+    assert_eq!(account.limits.max_storage, Some(268_435_456), "the reply holds the limit of the fixture account");
+    js.get_or_create_stream(gw_stream_config())
+        .await
+        .expect("the publisher grant must cover STREAM.INFO and STREAM.CREATE under the account limits");
+    let subject = format!("gateway.decision.{}", Uuid::from_u128(7));
+    let ack = gw_publish(&js, &subject, "decision-1").await;
+    assert_eq!(ack.stream, GW_STREAM);
+    assert_eq!(ack.sequence, 1);
+}
+
+#[tokio::test]
+async fn the_decision_publisher_cannot_read_delete_or_touch_iam() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let _sub = client.subscribe("gateway.decision.>").await.expect("subscribe is accepted locally, then refused");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "gateway.decision.>").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.DELETE.GATEWAY_DECISIONS").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.PURGE.GATEWAY_DECISIONS").await;
+    expect_publish_denied(&client, &mut events, "iam.role.granted").await;
+}
+
+/// The generation bucket config of `ops/nats/subjects.env` (SMA-821). A literal copy, as `gw_stream_config` is.
+fn gw_gen_config() -> jetstream::kv::Config {
+    jetstream::kv::Config {
+        bucket: "GATEWAY_DECISIONS_GEN".to_string(),
+        history: 1,
+        storage: jetstream::stream::StorageType::File,
+        num_replicas: 1,
+        max_age: Duration::ZERO,
+        max_bytes: 1_048_576,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn the_decision_publisher_uses_the_generation_bucket() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, _events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let js = jetstream::new(client);
+    // The calls of the relay, in its order: get the bucket, read, create, update. The relay never makes the
+    // bucket (D20): the provisioner makes it, as `provision-decisions.sh` does.
+    assert!(js.get_key_value("GATEWAY_DECISIONS_GEN").await.is_err(), "no bucket yet");
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    jetstream::new(pclient)
+        .create_key_value(gw_gen_config())
+        .await
+        .expect("the provisioner grant must cover the bucket create");
+    let kv = js.get_key_value("GATEWAY_DECISIONS_GEN").await.expect("STREAM.INFO.KV_…");
+    assert!(kv.entry("k1").await.expect("direct get of a missing key").is_none());
+    let rev = kv.create("k1", "a".into()).await.expect("$KV.GATEWAY_DECISIONS_GEN.>");
+    let rev2 = kv.update("k1", "b".into(), rev).await.expect("CAS update");
+    assert!(kv.update("k1", "c".into(), rev).await.is_err(), "a stale revision fails");
+    assert_eq!(kv.entry("k1").await.expect("direct get").map(|e| e.revision), Some(rev2));
+}
+
+#[tokio::test]
+async fn the_decision_publisher_cannot_reach_beyond_the_generation_bucket() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    for subject in [
+        "$KV.OTHER.k",
+        "$JS.API.STREAM.DELETE.KV_GATEWAY_DECISIONS_GEN",
+        "$JS.API.STREAM.PURGE.KV_GATEWAY_DECISIONS_GEN",
+        "$JS.API.STREAM.MSG.GET.KV_GATEWAY_DECISIONS_GEN",
+        "$JS.API.DIRECT.GET.GATEWAY_DECISIONS",
+        "$JS.API.STREAM.MSG.GET.GATEWAY_DECISIONS",
+        "$JS.API.CONSUMER.CREATE.KV_GATEWAY_DECISIONS_GEN",
+    ] {
+        expect_publish_denied(&client, &mut events, subject).await;
+    }
+    // D20, MEASURED on a live broker: with this grant, the publisher made the bucket stream as a mirror of
+    // GATEWAY_DECISIONS and read every decision through the direct get of the bucket. The publisher has no
+    // STREAM.CREATE grant on the bucket, so the create request below must be refused.
+    let mirror = r#"{"name":"KV_GATEWAY_DECISIONS_GEN","mirror":{"name":"GATEWAY_DECISIONS"},"allow_direct":true,"mirror_direct":true}"#;
+    client
+        .publish("$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN", mirror.into())
+        .await
+        .expect("a denied publish is still accepted locally");
+    client.flush().await.expect("flush");
+    expect_permissions_violation(&mut events, "$JS.API.STREAM.CREATE.KV_GATEWAY_DECISIONS_GEN").await;
+}
+
+#[tokio::test]
+async fn the_decision_reader_reads_with_an_ordered_consumer() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    jetstream::new(pclient)
+        .get_or_create_stream(gw_stream_config())
+        .await
+        .expect("the provisioner grant must cover stream creation");
+    let (wclient, _wevents) = client_for(&fixture, &fixture.gw_publisher, GW_PUBLISHER_INBOX).await;
+    let wjs = jetstream::new(wclient);
+    let subject = format!("gateway.decision.{}", Uuid::from_u128(9));
+    gw_publish(&wjs, &subject, "decision-1").await;
+    gw_publish(&wjs, &subject, "decision-2").await;
+
+    let (client, _events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    let js = jetstream::new(client);
+    let stream = js.get_stream_no_info(GW_STREAM).await.expect("get_stream_no_info makes no network call");
+    // The account has `max_mem: 0`, and the stream is file-backed. The ordered consumer still asks for memory
+    // storage of its own state (`OrderedConfig` sets `memory_storage: true` in async-nats 0.53), so this create
+    // proves that the reader works under these limits. It does not prove that the consumer uses no memory.
+    // `DeliverPolicy::All` here, not `ByStartTime`: the latter needs the `time` crate, and the
+    // permission subjects are the same for both.
+    let consumer = stream
+        .create_consumer(jetstream::consumer::pull::OrderedConfig {
+            filter_subject: subject.clone(),
+            deliver_policy: jetstream::consumer::DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .expect("an ordered consumer must work under the account limits (max_mem 0) with the reader grants");
+    assert_eq!(consumer.cached_info().num_pending, 2);
+    let mut messages = consumer.clone().messages().await.expect("start the read");
+    for _ in 0..2 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), messages.next())
+            .await
+            .expect("a published event must be delivered")
+            .expect("stream yields a message")
+            .expect("message is Ok");
+        assert_eq!(msg.subject.as_str(), subject);
+    }
+
+    // Delete the consumer server side with the reader's own DELETE grant. The ordered consumer must
+    // recreate itself (a named CREATE with a filter suffix) and read on.
+    let name = consumer.cached_info().name.clone();
+    stream.delete_consumer(&name).await.expect("the reader grant must cover CONSUMER.DELETE on its own consumer");
+    gw_publish(&wjs, &subject, "decision-3").await;
+    let msg = tokio::time::timeout(Duration::from_secs(40), messages.next())
+        .await
+        .expect("the ordered consumer must recreate itself and deliver the third event")
+        .expect("stream yields a message")
+        .expect("message is Ok");
+    assert_eq!(msg.subject.as_str(), subject);
+    // All three events share one subject and one payload. Only the stream sequence shows that the
+    // recreated consumer did not replay the first or the second event.
+    let info = msg.info().expect("a stream message carries its info");
+    assert_eq!(info.stream_sequence, 3, "the recreated consumer must read on from the third event");
+}
+
+#[tokio::test]
+async fn the_decision_reader_cannot_publish_or_purge() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (client, mut events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    expect_publish_denied(&client, &mut events, "gateway.decision.x").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.PURGE.GATEWAY_DECISIONS").await;
+    expect_publish_denied(&client, &mut events, "$JS.API.STREAM.CREATE.X").await;
+}
+
+#[tokio::test]
+async fn a_gateway_account_user_cannot_see_iam_events() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    // The IAM stream exists, in the other account.
+    provision(&fixture).await;
+    let (client, mut events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    let js = jetstream::new(client);
+    let stream = js.get_stream_no_info(STREAM).await.expect("get_stream_no_info makes no network call");
+    let created = stream
+        .create_consumer(jetstream::consumer::pull::OrderedConfig {
+            filter_subject: "iam.>".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(created.is_err(), "the reader must not create a consumer on IAM_EVENTS");
+    expect_permissions_violation(&mut events, "$JS.API.CONSUMER.CREATE.IAM_EVENTS").await;
+
+    // A user with the stream API right in the gateway account still does not find IAM_EVENTS.
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    // The broker must answer "stream not found". A timeout or a disconnect is also an error, but it proves nothing
+    // about what the gateway account can see.
+    let found = jetstream::new(pclient).get_stream(STREAM).await;
+    match found.map(|_| ()).map_err(|e| e.kind()) {
+        Err(jetstream::context::GetStreamErrorKind::JetStream(err)) => assert_eq!(
+            err.error_code(),
+            jetstream::ErrorCode::STREAM_NOT_FOUND,
+            "IAM_EVENTS lives in another account and must not be visible: {err}"
+        ),
+        other => panic!("the broker must answer stream not found for IAM_EVENTS, got {other:?}"),
+    }
+}
+
+/// After a reconnect, an ordered consumer calls `consumer.get_info()` (async-nats 0.52 `pull.rs:990`),
+/// which sends `$JS.API.CONSUMER.INFO.<stream>.<name>`. The reader grant must cover it.
+#[tokio::test]
+async fn the_decision_reader_can_read_its_consumer_info() {
+    let Some(fixture) = start_fixture("nats-server.conf", Vec::new()).await else { return };
+    let (pclient, _pevents) = client_for(&fixture, &fixture.gw_provisioner, GW_PROVISIONER_INBOX).await;
+    jetstream::new(pclient)
+        .get_or_create_stream(gw_stream_config())
+        .await
+        .expect("the provisioner grant must cover stream creation");
+    let (client, _events) = client_for(&fixture, &fixture.gw_reader, GW_READER_INBOX).await;
+    let stream = jetstream::new(client).get_stream_no_info(GW_STREAM).await.expect("get_stream_no_info makes no network call");
+    let mut consumer = stream
+        .create_consumer(jetstream::consumer::pull::OrderedConfig {
+            filter_subject: "gateway.decision.>".to_string(),
+            deliver_policy: jetstream::consumer::DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .expect("create the ordered consumer");
+    let info = consumer.info().await.expect("the reader grant must cover CONSUMER.INFO on its own consumer");
+    assert_eq!(info.stream_name, GW_STREAM);
 }

@@ -221,3 +221,22 @@
 # id                    = "0190a100-0000-7000-8000-0000000000a1"
 # mode                  = "enforce"
 # on_policy_unavailable = "open"     # optional override of the global value
+
+# --- SMA-755: the tool decision log (§ 5.12) ---
+# Records each tool-policy decision in a Redis stream, and a relay publishes it to NATS.
+# enabled = true needs [tool_policy] enabled = true, redis_url, digest_key, digest_key_id and [decision_log.nats].
+# A Redis outage or a NATS outage at boot does not stop the gateway.
+#
+# [decision_log]
+# enabled        = false                         # env GATEWAY_DECISION_LOG__ENABLED
+# redis_url      = "redis://redis:6379"          # required when enabled; never written to logs or dumps
+# key_prefix     = "paigasus:gateway"            # default shown; must not be empty or padded
+# stream_max_len = 100000                        # default shown; at least 1
+# queue_capacity = 4096                          # default shown; at least 1
+# digest_key     = "change-me-at-least-32-bytes-long-secret"   # required when enabled; at least 32 bytes; never logged
+# digest_key_id  = "2026-11"                     # required when enabled; names the key for a rotation
+#
+# [decision_log.nats]                            # required when enabled
+# url        = "nats://nats:4222"                # never written to logs or dumps
+# creds_file = "/etc/paigasus/nats/gateway-decision-publisher.creds"
+# ca_file    = "/etc/paigasus/nats/ca.pem"       # optional; REPLACES the system trust store (absent: system roots)

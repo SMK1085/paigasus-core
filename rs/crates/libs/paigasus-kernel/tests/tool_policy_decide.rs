@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, PolicyOrigin, PolicyRef, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, UNPARSED_ARGUMENTS, decide};
+use paigasus_kernel::tool_policy::{
+    ActionGroup, Declared, Effect, Facts, Findings, PolicyOrigin, PolicyRef, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, UNPARSED_ARGUMENTS, decide,
+};
 use paigasus_kernel::{CedarUid, Prn, to_cedar_uid};
 
 const ORG: &str = "0190a100-0000-7000-8000-0000000000aa";
@@ -203,4 +205,47 @@ fn a_request_that_cannot_be_built_is_floor_denied() {
     let p = policies(BIG, ALL, &["pay"]);
     let v = decide(&call("pay", "{}"), &bad, &Findings::new(), &p);
     assert_eq!((v.decision, v.floor_denied, v.errored_forbid), (Effect::Deny, true, true));
+}
+
+fn bad_facts() -> Facts {
+    Facts::new(
+        CedarUid {
+            entity_type: "not a type".into(),
+            entity_id: "x".into(),
+        },
+        ORG.parse().expect("uuid"),
+        RequestInfo::new("s", "responses", "m"),
+        SessionInfo::placeholder(),
+    )
+}
+
+fn findings(kinds: &[&str]) -> Findings {
+    let mut f = Findings::new();
+    for k in kinds {
+        f.insert(k);
+    }
+    f
+}
+
+#[test]
+fn the_verdict_holds_the_final_findings() {
+    // The input is not JSON, so the kernel adds unparsed_arguments. The caller gave name_collision.
+    let p = policies("", "", &[]);
+    let v = decide(&call("x", "not json"), &facts(), &findings(&["name_collision"]), &p);
+    assert_eq!(v.findings.iter().map(String::as_str).collect::<Vec<_>>(), ["name_collision", "unparsed_arguments"]);
+}
+
+#[test]
+fn a_catalog_name_is_in_the_catalog_group_and_another_is_unregistered() {
+    let p = policies("", "", &["Read_File"]);
+    assert_eq!(decide(&call(" read_file", "{}"), &facts(), &Findings::new(), &p).action_group, ActionGroup::Catalog);
+    assert_eq!(decide(&call("rm", "{}"), &facts(), &Findings::new(), &p).action_group, ActionGroup::Unregistered);
+}
+
+#[test]
+fn an_unevaluable_request_keeps_the_caller_findings() {
+    let p = policies("", "", &[]);
+    let v = decide(&call("x", "{}"), &bad_facts(), &findings(&["name_collision"]), &p);
+    assert!(v.floor_denied);
+    assert!(v.findings.contains("name_collision"));
 }

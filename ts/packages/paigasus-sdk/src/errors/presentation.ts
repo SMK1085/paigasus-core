@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 92 keys rather than 91.
+// demanding an entry for it would make the table 93 keys rather than 92.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -103,6 +103,8 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.INVALID_PATH_SEGMENT]: 'from-transport',
   // SMA-700. A 401 from both services; the transport table already presents it as relogin.
   [ErrorReason.INVALID_DPOP_PROOF]: 'from-transport',
+  // SMA-787. A 503 from the agent host. The transport status table already presents it.
+  [ErrorReason.STORE_UNAVAILABLE]: 'from-transport',
   // SMA-774. The IAM tool catalog and tool policy set calls. The transport status table already
   // presents each of their statuses (invalid input, conflict, not found, unavailable).
   [ErrorReason.TOOL_POLICY_INVALID]: 'from-transport',

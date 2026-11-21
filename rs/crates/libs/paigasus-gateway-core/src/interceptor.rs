@@ -12,6 +12,8 @@ use std::time::Instant;
 use bytes::Bytes;
 
 use crate::anthropic::stream::AnthropicStream;
+use crate::decider::DecidedCall;
+use crate::decision_log::{CallFacts, ReportedCall};
 use crate::limits::{Limits, OnFailure};
 use crate::openai::stream::OpenAiStream;
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
@@ -52,6 +54,9 @@ pub enum Action {
     /// Call [`Interceptor::tick`] no later than this instant.
     Wake(Instant),
     Count(Metric),
+    /// One final report entry with what the report site knows about it (SMA-755). It follows
+    /// the `: paigasus-decision` comment of the same entry, in the same order.
+    Reported(Box<ReportedCall>),
 }
 
 #[derive(Clone)]
@@ -168,7 +173,7 @@ impl Interceptor {
     }
 
     /// The decider's answer for `hold`. An answer for a hold that is no longer deciding is ignored.
-    pub fn decided(&mut self, hold: HoldKey, result: Result<Vec<Decision>, DeciderError>, now: Instant) -> Vec<Action> {
+    pub fn decided(&mut self, hold: HoldKey, result: Result<Vec<DecidedCall>, DeciderError>, now: Instant) -> Vec<Action> {
         if self.ended {
             return Vec::new();
         }
@@ -289,8 +294,9 @@ impl Interceptor {
                 self.enqueue(frame, now);
             }
             Ok(Step::Frame { frame, opened, completed, reports }) => {
-                for r in &reports {
-                    self.emit(report_comment(r), now);
+                for r in reports {
+                    self.emit(report_comment(&r), now);
+                    self.out.push(Action::Reported(Box::new(ReportedCall::new(r, None, None))));
                 }
                 for k in opened {
                     self.open(k, now);
@@ -352,36 +358,37 @@ impl Interceptor {
 
     // ---- decisions and failures ----------------------------------------------------------------
 
-    fn apply_decision(&mut self, hold: HoldKey, result: Result<Vec<Decision>, DeciderError>, now: Instant) {
+    fn apply_decision(&mut self, hold: HoldKey, result: Result<Vec<DecidedCall>, DeciderError>, now: Instant) {
         let Some(Track::Deciding { calls, observe, .. }) = self.holds.get(&hold).cloned() else { return };
         let checked = match result {
             Ok(d) if d.len() == calls.len() => Ok(d),
             Ok(_) => Err(DeciderError { reason: "wrong_length" }),
             Err(e) => Err(e),
         };
-        let (verdict, decisions, mut basis) = match (checked, self.limits.on_failure) {
+        let (verdict, decided, mut basis) = match (checked, self.limits.on_failure) {
             (Ok(d), _) => {
-                let v = if d.iter().all(|d| d.is_allow()) { Verdict::AllowAll } else { Verdict::PerCall(d.clone()) };
+                let decisions: Vec<Decision> = d.iter().map(|c| c.decision).collect();
+                let v = if decisions.iter().all(|d| d.is_allow()) { Verdict::AllowAll } else { Verdict::PerCall(decisions) };
                 (v, d, Basis::Decider)
             }
             (Err(_), OnFailure::Block) => {
                 self.count(Metric::OnFailure("decider_error"));
                 (
                     Verdict::BlockAll(BlockCode::DeciderError),
-                    vec![Decision::Block { code: BlockCode::DeciderError }; calls.len()],
+                    vec![DecidedCall::from(Decision::Block { code: BlockCode::DeciderError }); calls.len()],
                     Basis::OnFailure,
                 )
             }
             (Err(_), OnFailure::Allow) => {
                 self.count(Metric::OnFailure("decider_error"));
-                (Verdict::AllowAll, vec![Decision::Allow; calls.len()], Basis::OnFailure)
+                (Verdict::AllowAll, vec![DecidedCall::from(Decision::Allow); calls.len()], Basis::OnFailure)
             }
         };
         if observe {
             basis = Basis::OnFailure;
         }
-        for (c, d) in calls.iter().zip(&decisions) {
-            let (decision, code) = match d {
+        for (c, d) in calls.iter().zip(decided) {
+            let (decision, code) = match &d.decision {
                 // An observed hold is already released as pass-through, so a block is not applied:
                 // the report says what happened, an allowed call with the would-be code.
                 Decision::Block { code } if observe => (ReportDecision::Allow, Some(*code)),
@@ -396,6 +403,7 @@ impl Interceptor {
             });
             let entry = report_entry(c, decision, basis, code);
             self.emit(report_comment(&entry), now);
+            self.out.push(Action::Reported(Box::new(ReportedCall::new(entry, Some(CallFacts::of(c)), d.detail))));
         }
         if !observe {
             self.verdicts.insert(hold, verdict);
@@ -433,6 +441,7 @@ impl Interceptor {
                 basis: Basis::OnFailure.as_str(),
             });
             self.out.push(Action::Emit(report_comment(&entry)));
+            self.out.push(Action::Reported(Box::new(ReportedCall::new(entry, None, None))));
         }
     }
 
@@ -583,10 +592,17 @@ impl Interceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decision_log::{DecisionDetail, RecordBasis};
     use crate::limits::OnFailure;
     use crate::types::{BlockCode, Decision};
     use serde_json::{Value, json};
+    use std::sync::Arc;
     use std::time::Duration;
+
+    /// A decision vector without detail, as the interceptor takes it (SMA-755).
+    fn plain(d: Vec<Decision>) -> Vec<DecidedCall> {
+        d.into_iter().map(DecidedCall::from).collect()
+    }
 
     #[test]
     fn a_namespaced_call_reports_the_qualified_name() {
@@ -687,11 +703,11 @@ mod tests {
                     Action::Decide { hold, calls } => {
                         r.decides.push((hold, calls.clone()));
                         if let Some(res) = decide(&calls) {
-                            pending.extend(i.decided(hold, res, now));
+                            pending.extend(i.decided(hold, res.map(plain), now));
                         }
                     }
                     Action::Count(m) => r.counts.push(m),
-                    Action::Wake(_) => {}
+                    Action::Wake(_) | Action::Reported(_) => {}
                 }
             }
         }
@@ -762,12 +778,12 @@ mod tests {
             ev(json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}})).as_bytes(),
             t0,
         );
-        let acts = i.decided(HoldKey::Block(0), Ok(vec![Decision::Allow]), t0);
+        let acts = i.decided(HoldKey::Block(0), Ok(plain(vec![Decision::Allow])), t0);
         let out = emitted(&acts);
         assert!(out.contains("\"read\""), "block 0's frames are released: {out}");
         assert!(!out.contains("CANARY"), "block 1's undecided call stays queued: {out}");
         assert!(!out.contains("message_delta"), "a frame touching an undecided hold stays queued: {out}");
-        let out = emitted(&i.decided(HoldKey::Block(1), Ok(vec![Decision::Block { code: BlockCode::Policy }]), t0));
+        let out = emitted(&i.decided(HoldKey::Block(1), Ok(plain(vec![Decision::Block { code: BlockCode::Policy }])), t0));
         assert!(!out.contains("CANARY") && out.contains("[paigasus]") && out.contains("message_delta"), "{out}");
     }
 
@@ -778,7 +794,7 @@ mod tests {
         for c in [tool_start(0, "read"), json_delta(0, "\"CANARY\""), block_stop(0)] {
             i.push(c.as_bytes(), t0);
         }
-        let out = emitted(&i.decided(HoldKey::Block(0), Ok(vec![Decision::Observe { would: BlockCode::Policy }]), t0));
+        let out = emitted(&i.decided(HoldKey::Block(0), Ok(plain(vec![Decision::Observe { would: BlockCode::Policy }])), t0));
         assert!(out.contains("CANARY"), "the call is released unchanged: {out}");
         assert!(!out.contains("[paigasus]"), "no notice: {out}");
         assert!(out.contains(r#""enforced":false"#) && out.contains(r#""decision":"allow""#), "{out}");
@@ -817,7 +833,7 @@ mod tests {
         assert!(acts.contains(&Action::Count(Metric::RecordDropped("after_done"))), "{acts:?}");
         assert!(!acts.contains(&Action::Count(Metric::RecordDropped("oversized"))), "{acts:?}");
         assert!(!acts.contains(&Action::Count(Metric::OnFailure("malformed"))), "{acts:?}");
-        let out = emitted(&acts) + &emitted(&i.decided(HoldKey::Choice(0), Ok(vec![Decision::Block { code: BlockCode::Policy }]), t0));
+        let out = emitted(&acts) + &emitted(&i.decided(HoldKey::Choice(0), Ok(plain(vec![Decision::Block { code: BlockCode::Policy }])), t0));
         assert!(!out.contains("(malformed)") && !out.contains("pass-through"), "{out}");
         assert!(out.contains("(policy)") && !out.contains("X1"), "{out}");
         assert!(out.ends_with("data: [DONE]\n\n"), "{out}");
@@ -995,7 +1011,7 @@ mod tests {
         out.push_str(&emitted(&i.push(finish(0).as_bytes(), t0 + Duration::from_secs(302))));
         out.push_str(&emitted(&i.decided(
             HoldKey::Choice(0),
-            Ok(vec![Decision::Block { code: BlockCode::Policy }]),
+            Ok(plain(vec![Decision::Block { code: BlockCode::Policy }])),
             t0 + Duration::from_secs(302),
         )));
         assert!(out.contains("X1") && !out.contains("[paigasus]"), "the released call is not blocked: {out}");
@@ -1013,7 +1029,7 @@ mod tests {
         assert!(out.contains("(decider-error)"), "{out}");
         // The late answer is ignored.
         assert!(
-            i.decided(HoldKey::Choice(0), Ok(vec![Decision::Allow]), t0 + Duration::from_secs(7))
+            i.decided(HoldKey::Choice(0), Ok(plain(vec![Decision::Allow])), t0 + Duration::from_secs(7))
                 .iter()
                 .all(|a| !matches!(a, Action::Emit(_)))
         );
@@ -1066,7 +1082,7 @@ mod tests {
         i.push(finish(0).as_bytes(), t0);
         i.finish(t0);
         assert!(!i.is_finished());
-        i.decided(HoldKey::Choice(0), Ok(vec![Decision::Allow]), t0);
+        i.decided(HoldKey::Choice(0), Ok(plain(vec![Decision::Allow])), t0);
         assert!(i.is_finished());
     }
 
@@ -1221,5 +1237,152 @@ mod tests {
             assert!(i.is_finished());
             assert_eq!(i.retained_bytes(), 0);
         }
+    }
+
+    // ---- the Reported action (SMA-755) ----------------------------------------------------------
+
+    type DecideCalls<'a> = dyn Fn(&[ToolCall]) -> Option<Result<Vec<DecidedCall>, DeciderError>> + 'a;
+
+    /// Run a whole stream and keep every action in order. `decide` answers each Decide at once.
+    fn run_actions(format: Format, limits: Limits, chunks: &[String], decide: &DecideCalls<'_>) -> Vec<Action> {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(format, limits, Bytes::from_static(TERMINAL), t0);
+        let mut all: Vec<Action> = Vec::new();
+        let feed = |i: &mut Interceptor, first: Vec<Action>, all: &mut Vec<Action>| {
+            let mut pending = first;
+            while !pending.is_empty() {
+                for a in std::mem::take(&mut pending) {
+                    if let Action::Decide { hold, calls } = &a
+                        && let Some(res) = decide(calls)
+                    {
+                        pending.extend(i.decided(*hold, res, t0));
+                    }
+                    all.push(a);
+                }
+            }
+        };
+        for c in chunks {
+            let acts = i.push(c.as_bytes(), t0);
+            feed(&mut i, acts, &mut all);
+        }
+        let acts = i.finish(t0);
+        feed(&mut i, acts, &mut all);
+        all
+    }
+
+    fn comment_json(a: &Action) -> Option<Value> {
+        let Action::Emit(b) = a else { return None };
+        let text = std::str::from_utf8(b).ok()?;
+        let body = text.strip_prefix(": paigasus-decision ")?;
+        Some(serde_json::from_str(body.trim_end()).expect("the comment holds JSON"))
+    }
+
+    fn reported(acts: &[Action]) -> Vec<&ReportedCall> {
+        acts.iter().filter_map(|a| if let Action::Reported(r) = a { Some(&**r) } else { None }).collect()
+    }
+
+    /// Every report comment has one `Reported` action right after it, with the same entry.
+    fn assert_one_reported_per_comment(acts: &[Action], what: &str) -> usize {
+        let comments: Vec<(usize, Value)> = acts.iter().enumerate().filter_map(|(k, a)| comment_json(a).map(|j| (k, j))).collect();
+        let reps = reported(acts);
+        assert_eq!(comments.len(), reps.len(), "{what}: one Reported per comment");
+        for ((k, json), rep) in comments.iter().zip(&reps) {
+            let entry: Value = serde_json::from_str(&rep.entry.to_json()).unwrap();
+            assert_eq!(&entry, json, "{what}: the entry equals the comment");
+            assert!(matches!(&acts[k + 1], Action::Reported(r) if r.entry == rep.entry), "{what}: Reported follows its comment at {k}");
+        }
+        comments.len()
+    }
+
+    fn a_detail() -> Arc<DecisionDetail> {
+        Arc::new(DecisionDetail::new(RecordBasis::Policy, None, None))
+    }
+
+    fn responses_with_search() -> Vec<String> {
+        let life = |t: &str, output: Value| json!({"type":t,"response":{"id":"resp_1","status":"in_progress","output":output}});
+        let search = json!({"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"q"}});
+        let read = responses_call(0, "read", "{}");
+        let output = json!([read[3]["item"], search]);
+        let mut evs = vec![life("response.created", json!([])), life("response.in_progress", json!([]))];
+        evs.extend(read);
+        evs.extend([
+            json!({"type":"response.output_item.added","output_index":1,"item":{"type":"web_search_call","id":"ws_1","status":"in_progress"}}),
+            json!({"type":"response.web_search_call.in_progress","output_index":1,"item_id":"ws_1"}),
+            json!({"type":"response.web_search_call.completed","output_index":1,"item_id":"ws_1"}),
+            json!({"type":"response.output_item.done","output_index":1,"item":search}),
+            life("response.completed", output),
+        ]);
+        evs.into_iter().map(ev).collect()
+    }
+
+    #[test]
+    fn every_report_comment_has_one_reported_action() {
+        let blocks_rm = |c: &[ToolCall]| {
+            Some(Ok(plain(
+                c.iter().map(|t| if t.name == "rm" { Decision::Block { code: BlockCode::Policy } } else { Decision::Allow }).collect(),
+            )))
+        };
+        // OpenAI chat: two calls in one choice, the decider blocks "rm".
+        let chat = [call(0, 0, "read", "{}"), call(0, 1, "rm", "{}"), finish(0), "data: [DONE]\n\n".into()];
+        let acts = run_actions(Format::OpenAiChat, limits(), &chat, &blocks_rm);
+        assert_eq!(assert_one_reported_per_comment(&acts, "chat"), 2);
+        let reps = reported(&acts);
+        assert_eq!(reps.iter().map(|r| r.entry.decision).collect::<Vec<_>>(), [ReportDecision::Allow, ReportDecision::Block]);
+        assert_eq!(reps.iter().map(|r| r.call.as_ref().map(|c| c.name.as_str())).collect::<Vec<_>>(), [Some("read"), Some("rm")]);
+        // A hold-limit block_all: the decider is never asked, and the entry has no call facts (P-2).
+        let l = Limits { max_held_bytes: 600, ..limits() };
+        let mut over = vec![call(0, 0, "read", "{")];
+        over.extend((0..50).map(|_| args(0, 0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+        over.extend([finish(0), "data: [DONE]\n\n".into()]);
+        let acts = run_actions(Format::OpenAiChat, l, &over, &|_| None);
+        assert!(assert_one_reported_per_comment(&acts, "hold limit") >= 1);
+        assert!(
+            reported(&acts)
+                .iter()
+                .all(|r| r.call.is_none() && r.detail.is_none() && r.entry.basis == Some(Basis::OnFailure) && r.entry.code == Some(BlockCode::HoldLimit))
+        );
+        // A Responses stream with a web_search_call: the protocol report is an unenforceable entry.
+        let acts = run_actions(Format::OpenAiResponses, limits(), &responses_with_search(), &|c| Some(Ok(plain(vec![Decision::Allow; c.len()]))));
+        assert_eq!(assert_one_reported_per_comment(&acts, "responses"), 2);
+        let reps = reported(&acts);
+        assert!(
+            reps.iter().any(|r| r.entry.decision == ReportDecision::Unenforceable && r.call.is_none() && r.detail.is_none()),
+            "{reps:?}"
+        );
+        assert!(reps.iter().any(|r| r.entry.decision == ReportDecision::Allow && r.call.is_some()), "{reps:?}");
+    }
+
+    #[test]
+    fn the_detail_of_a_decided_call_reaches_the_reported_action() {
+        let (d0, d1) = (a_detail(), a_detail());
+        let want = (Arc::clone(&d0), Arc::clone(&d1));
+        let decide = move |_: &[ToolCall]| {
+            Some(Ok(vec![
+                DecidedCall::new(Decision::Allow, Some(Arc::clone(&d0))),
+                DecidedCall::new(Decision::Block { code: BlockCode::Policy }, Some(Arc::clone(&d1))),
+            ]))
+        };
+        let chat = [call(0, 0, "read", "{}"), call(0, 1, "rm", "{}"), finish(0), "data: [DONE]\n\n".into()];
+        let acts = run_actions(Format::OpenAiChat, limits(), &chat, &decide);
+        let reps = reported(&acts);
+        assert_eq!(reps.len(), 2);
+        assert!(reps[0].detail.as_ref().is_some_and(|d| Arc::ptr_eq(d, &want.0)));
+        assert!(reps[1].detail.as_ref().is_some_and(|d| Arc::ptr_eq(d, &want.1)));
+        assert!(!Arc::ptr_eq(reps[0].detail.as_ref().unwrap(), reps[1].detail.as_ref().unwrap()), "each call keeps its own detail");
+    }
+
+    #[test]
+    fn a_decider_error_reports_without_detail() {
+        let chat = [call(0, 0, "read", "{}"), finish(0), "data: [DONE]\n\n".into()];
+        let acts = run_actions(Format::OpenAiChat, limits(), &chat, &|_| Some(Err(DeciderError { reason: "boom" })));
+        assert_eq!(assert_one_reported_per_comment(&acts, "decider error"), 1);
+        let reps = reported(&acts);
+        assert!(reps[0].detail.is_none());
+        assert_eq!(reps[0].entry.basis, Some(Basis::OnFailure));
+        assert_eq!(reps[0].entry.code, Some(BlockCode::DeciderError));
+        assert_eq!(reps[0].call.as_ref().map(|c| c.name.as_str()), Some("read"));
+        // A wrong-length answer is a decider error as well, and drops the details.
+        let acts = run_actions(Format::OpenAiChat, limits(), &chat, &|_| Some(Ok(vec![DecidedCall::new(Decision::Allow, Some(a_detail())); 2])));
+        assert!(reported(&acts).iter().all(|r| r.detail.is_none() && r.entry.basis == Some(Basis::OnFailure)));
     }
 }

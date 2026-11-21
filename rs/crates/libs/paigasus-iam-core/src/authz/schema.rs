@@ -24,6 +24,7 @@ namespace Pgs::Iam {
          CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
          IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog, ListOutboxDeadLetters,
          ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, RetireSystemPolicy, InvokeModel,
+         WriteInboxEvent,
          CreateUser, GetUser, LinkExternalIdentity, UnlinkExternalIdentity, ChangeUserEmail,
          ManageToolCatalog, ReadToolCatalog, ManageToolPolicies, ReadToolPolicies,
          ManageToolPolicyFloor, ReadToolPolicyFloor, ManageToolPolicySettings,

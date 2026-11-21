@@ -12,7 +12,7 @@ mod normalise;
 mod optimistic;
 mod types;
 
-pub use compile::{CompileError, FloorPolicies, PolicyOrigin, PolicyRef, ToolPolicies};
+pub use compile::{ActionGroup, CompileError, FloorPolicies, PolicyOrigin, PolicyRef, ToolPolicies};
 pub use decide::{Effect, Verdict, decide};
 pub use normalise::normalise;
 pub use optimistic::{ToolVerdict, decide_tool};

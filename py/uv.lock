@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [manifest]
@@ -963,7 +963,7 @@ requires-dist = [
 
 [[package]]
 name = "paigasus-kernel"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "packages/paigasus-kernel" }
 dependencies = [
     { name = "paigasus-py-bindings" },
@@ -979,7 +979,7 @@ source = { editable = "packages/paigasus-ml" }
 
 [[package]]
 name = "paigasus-proto"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "packages/paigasus-proto" }
 dependencies = [
     { name = "betterproto2", extra = ["grpclib"] },
@@ -990,7 +990,7 @@ requires-dist = [{ name = "betterproto2", extras = ["grpclib"], specifier = ">=0
 
 [[package]]
 name = "paigasus-py-bindings"
-version = "0.2.1"
+version = "0.3.0"
 source = { directory = "../rs/crates/bindings/paigasus-py-bindings" }
 
 [[package]]

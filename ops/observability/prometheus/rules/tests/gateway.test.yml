@@ -154,3 +154,343 @@ tests:
             exp_annotations:
               summary: "Gateway limits Redis circuit breaker is not closed (role limits)"
               description: "The gateway's limits Redis circuit breaker has been open or half-open for 2m. The rate limits and token budgets are NOT applied (fail-open), and the tokens used now are not charged to any budget. See RUNBOOK-observability.md, section \"Gateway limits: fail-open and Redis requirements\"."
+
+  # GatewayDecisionLogDrops: a non-shutdown drop rises after a series primed at 0. Fires at once (for: 0m).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_dropped_total{reason="queue_full"}'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogDrops
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogDrops
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision log is dropping events"
+              description: "The gateway dropped decision-log events in the last 15m for a reason other than shutdown. The audit trail has gaps. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogDrops quiet: a reason="shutdown" rise does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_dropped_total{reason="shutdown"}'
+        values: '0 0 0 5 5 5 5'
+      - series: 'gateway_decision_log_dropped_total{reason="queue_full"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDecisionLogDrops
+        exp_alerts: []
+
+  # GatewayDecisionLogRedisReset: a reset rises after a series primed at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision log lost entries of its Redis stream"
+              description: "The relay found that the Redis decision stream lost entries: Redis lost the stream, or went back to an older state. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRedisReset: a fresh pod counts at its first tick, so the counter series starts at 1 and
+  # increase() reads 0. The last-reset gauge fires the alert (SMA-821 § 5.3a).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '_ _ _ 1 1 1 1'
+      - series: 'gateway_decision_log_last_reset_timestamp_seconds'
+        values: '_ _ _ 180 180 180 180'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision log lost entries of its Redis stream"
+              description: "The relay found that the Redis decision stream lost entries: Redis lost the stream, or went back to an older state. Events in the stream were lost. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRedisReset quiet: the last reset is older than 900 s.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '1x25'
+      - series: 'gateway_decision_log_last_reset_timestamp_seconds'
+        values: '60x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+
+  # GatewayDecisionLogRedisReset quiet: the counter stays at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_redis_resets_total'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDecisionLogRedisReset
+        exp_alerts: []
+
+  # GatewayDecisionLogGenerationCheckFailing: errors for 15m fire. The series rises each minute, `for` is 15m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_generation_check_errors_total{kind="timeout"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GatewayDecisionLogGenerationCheckFailing
+        exp_alerts: []
+      - eval_time: 32m
+        alertname: GatewayDecisionLogGenerationCheckFailing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log Redis reset check is failing"
+              description: "The Redis reset check against the NATS KV bucket GATEWAY_DECISIONS_GEN had errors again and again for 15m: each 15m window had at least one failed check. A failed check does not count a Redis reset, so a reset can be missed. A check that passes still counts a reset, and the alert can stay active up to 15m after the checks pass again. Read gateway_decision_log_generation_check_errors_total by kind. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogGenerationCheckFailing quiet: a flat series does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_generation_check_errors_total{kind="timeout"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 32m
+        alertname: GatewayDecisionLogGenerationCheckFailing
+        exp_alerts: []
+
+  # GatewayDecisionLogRelayStalled: a backlog is held and published stays at 0. The backlog is above 0 from 2m,
+  # the 5m window reads 0, and `for` is 5m, so the alert is pending at 2m and fires at 7m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x20'
+      - series: 'gateway_decision_log_published_total'
+        values: '0x20'
+      - series: 'gateway_decision_log_backlog'
+        values: '0 0 100x18'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log relay is not publishing to NATS"
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRelayStalled timing: the relay publishes until 5m and stops. The 5m window (left-open) reads 0
+  # from 9m, `for` is 5m, so the alert fires at 14m, about 9m to 10m after the last publish. It is quiet at 13m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x5 50x20'
+      - series: 'gateway_decision_log_published_total'
+        values: '0+10x5 50x20'
+      - series: 'gateway_decision_log_backlog'
+        values: '100x25'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log relay is not publishing to NATS"
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRelayStalled backlog: the backlog rises above 50000 at 2m, while publishing continues.
+  # The branch shares the `for: 5m`, so it fires at 7m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_published_total'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_backlog'
+        values: '0 0 60000x28'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log relay is not publishing to NATS"
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRelayStalled quiet: written and published rise together, the backlog is small.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0+10x20'
+      - series: 'gateway_decision_log_published_total'
+        values: '0+10x20'
+      - series: 'gateway_decision_log_backlog'
+        values: '5x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+
+  # GatewayDecisionLogRelayStalled backlog is max, not sum: two replicas that sample the same stream at 30000 each
+  # must stay quiet (a sum would read 60000).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total{instance="gw-1"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_published_total{instance="gw-1"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_backlog{instance="gw-1"}'
+        values: '30000x30'
+      - series: 'gateway_decision_log_written_total{instance="gw-2"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_published_total{instance="gw-2"}'
+        values: '0+10x30'
+      - series: 'gateway_decision_log_backlog{instance="gw-2"}'
+        values: '30000x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+
+  # GatewayDecisionLogRelayStalled quiet: an idle gateway (written and published both flat at 0, backlog 0).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0x30'
+      - series: 'gateway_decision_log_published_total'
+        values: '0x30'
+      - series: 'gateway_decision_log_backlog'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+
+  # GatewayDecisionLogRelayStalled burst then idle (review round 1): 100 events are written once, the relay
+  # published a few early and then stopped, and no more traffic comes. The written counter is flat again after
+  # 10m, but the backlog of 100 stays. The alert must fire (the old `increase(written[10m]) > 0` branch was true
+  # for about one minute only). The last publish is at 1m, so the 5m window reads 0 from 5m and it fires at 10m.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0 0 100x28'
+      - series: 'gateway_decision_log_published_total'
+        values: '0 5 5x28'
+      - series: 'gateway_decision_log_backlog'
+        values: '0 0 100x28'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway decision-log relay is not publishing to NATS"
+              description: "The gateway holds decision events in the Redis backlog and the relay published none to JetStream for about 10m, or the Redis backlog is above 50000 (50 percent of the default stream_max_len). See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRelayStalled recovery: the same burst, then the relay publishes and the backlog drains to 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_written_total'
+        values: '0 0 100x28'
+      - series: 'gateway_decision_log_published_total'
+        values: '0 5 5x4 105x20'
+      - series: 'gateway_decision_log_backlog'
+        values: '0 0 100x4 0x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GatewayDecisionLogRelayStalled
+        exp_alerts: []
+
+  # GatewayDecisionLogRedisBreakerOpen: the decision_log breaker reads 2 (open) for 5 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="decision_log"}'
+        values: '2x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GatewayDecisionLogRedisBreakerOpen
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GatewayDecisionLogRedisBreakerOpen
+        exp_alerts:
+          - exp_labels: { severity: warning, job: gateway, role: decision_log }
+            exp_annotations:
+              summary: "Gateway decision-log Redis circuit breaker is not closed"
+              description: "The decision-log Redis circuit breaker has been open or half-open for 2m. The gateway drops decision events. Tool calls are not affected. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogRedisBreakerOpen quiet: a closed breaker and a limits breaker at 2 do not fire it.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="decision_log"}'
+        values: '0x5'
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="limits"}'
+        values: '2x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayDecisionLogRedisBreakerOpen
+        exp_alerts: []
+
+  # GatewayLimitsRedisBreakerOpen quiet: a decision_log gauge at 2 does not fire it (SMA-755).
+  - interval: 1m
+    input_series:
+      - series: 'gateway_redis_breaker_state{job="gateway",instance="gw-1",role="decision_log"}'
+        values: '2x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayLimitsRedisBreakerOpen
+        exp_alerts: []
+
+  # GatewayDecisionLogTaskRestarts: a restart rises after a series primed at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_task_restarts_total{task="writer"}'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDecisionLogTaskRestarts
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayDecisionLogTaskRestarts
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "A gateway decision-log task panicked and restarted"
+              description: "A decision-log writer or relay task caught a panic in the last 15m. This is a defect. See RUNBOOK-observability.md, section \"Gateway decision log\"."
+
+  # GatewayDecisionLogTaskRestarts quiet: the counter stays at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_decision_log_task_restarts_total{task="writer"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDecisionLogTaskRestarts
+        exp_alerts: []
