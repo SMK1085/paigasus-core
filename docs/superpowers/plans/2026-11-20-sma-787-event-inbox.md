@@ -532,13 +532,14 @@ an_open_acquirer_does_not_block_an_insert
     `WHERE`. The test must fail.
   - `an_open_acquirer_does_not_block_an_insert`: change `FOR NO KEY UPDATE OF inbox` to
     `FOR UPDATE OF inbox`. The test must time out.
-  - `a_second_take_while_live_is_none`: remove `WHERE inbox_lease.expires_at < now()` from the
-    take. The test must fail.
+  - `a_second_take_while_live_is_none`: remove `WHERE inbox_lease.expires_at < clock_timestamp()`
+    from the take. The test must fail.
 
 - [ ] **Step 2: Run and see them fail.** Run: `cd rs && cargo nextest run --locked -p paigasus-agent-host --test lease_pg`. Expected: compile errors.
 - [ ] **Step 3: Implement.**
   - The take and the heartbeat are the SQL of §8.3, with `$ttl` bound as microseconds:
-    `now() + ($3::bigint * interval '1 microsecond')`.
+    `clock_timestamp() + ($3::bigint * interval '1 microsecond')`. Both read the live clock,
+    because each can wait for a row lock (spec §8).
   - `acquire`: the take alone (one statement). `acquire_next`: one transaction. First
     `CANDIDATES_SQL`, then the take for each candidate in order; the first token commits and
     returns. No token: commit and return `None`.
@@ -812,7 +813,9 @@ enum ThreadChoice { None, ExistingOfRun, Foreign }
   - at most one worker holds a handle whose token equals `inbox_lease.token` and the lease is live
     (`expires_at > clock_timestamp()`);
   - at most one `run` row with `status = 'running'` and `lease_token` = the current live token;
-  - the tokens each `Acquire` and `Claim` returned are unique and strictly increase;
+  - each token that an `Acquire` or a rotating `Claim` allocates is strictly larger than every
+    earlier token; the first `Claim` after an `Acquire` returns the same token as that `Acquire`
+    (no rotation, Task 5 R6);
   - the `done` id sets of the successful `Complete` calls are pairwise disjoint;
   - every event with a `claimed_run_id` has `thread_id = run.thread_id` (AG5);
   - every `attempts <= max_attempts`;

@@ -113,28 +113,30 @@ impl LeaseKeeper {
     }
 
     /// Claim a batch of events under the mutex. After the lease is lost, it gives `LeaseLost`
-    /// with no store call.
+    /// with no store call. A claim that loses the lease or poisons the handle (a failed COMMIT,
+    /// spec §8.4) cancels the run at once. The original error is returned.
     pub async fn claim(&self, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError> {
         let mut guard = self.handle.lock().await;
         let Some(handle) = guard.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
             return Err(ClaimError::LeaseLost);
         };
         let result = self.claims.claim(handle, cfg).await;
-        if matches!(result, Err(ClaimError::LeaseLost)) {
+        if matches!(result, Err(ClaimError::LeaseLost)) || handle.is_poisoned() {
             self.lose();
         }
         result
     }
 
     /// Complete a claim under the mutex. After the lease is lost, it gives `LeaseLost` with no
-    /// store call.
+    /// store call. A completion that loses the lease or poisons the handle (a failed COMMIT,
+    /// spec §8.5) cancels the run at once. The original error is returned.
     pub async fn complete(&self, claim: Claim) -> Result<Vec<EventId>, CompleteError> {
         let mut guard = self.handle.lock().await;
         let Some(handle) = guard.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
             return Err(CompleteError::LeaseLost);
         };
         let result = self.claims.complete(handle, claim).await;
-        if matches!(result, Err(CompleteError::LeaseLost)) {
+        if matches!(result, Err(CompleteError::LeaseLost)) || handle.is_poisoned() {
             self.lose();
         }
         result
@@ -281,6 +283,8 @@ mod tests {
         Poison,
         /// Return `LeaseLost`.
         Lost,
+        /// Return a store error and leave the handle valid.
+        StoreError,
     }
 
     /// A fake of both ports. It records each heartbeat.
@@ -289,6 +293,7 @@ mod tests {
         heartbeat_sleep: Duration,
         claim_mode: ClaimMode,
         complete_lost: bool,
+        complete_poisons: bool,
         heartbeat_panics: bool,
         heartbeats: AtomicUsize,
         claims: AtomicUsize,
@@ -304,6 +309,7 @@ mod tests {
                 heartbeat_sleep: Duration::ZERO,
                 claim_mode: ClaimMode::Rotate,
                 complete_lost: false,
+                complete_poisons: false,
                 heartbeat_panics: false,
                 heartbeats: AtomicUsize::new(0),
                 claims: AtomicUsize::new(0),
@@ -369,10 +375,15 @@ mod tests {
                     Err(ClaimError::Store("commit failed".into()))
                 }
                 ClaimMode::Lost => Err(ClaimError::LeaseLost),
+                ClaimMode::StoreError => Err(ClaimError::Store("connection reset".into())),
             }
         }
 
-        async fn complete(&self, _handle: &mut LeaseHandle, _claim: Claim) -> Result<Vec<EventId>, CompleteError> {
+        async fn complete(&self, handle: &mut LeaseHandle, _claim: Claim) -> Result<Vec<EventId>, CompleteError> {
+            if self.complete_poisons {
+                handle.poison();
+                return Err(CompleteError::Store("commit failed".into()));
+            }
             if self.complete_lost { Err(CompleteError::LeaseLost) } else { Ok(Vec::new()) }
         }
     }
@@ -572,6 +583,44 @@ mod tests {
         sleep_ms(10_100).await;
         assert_eq!(fake.heartbeats(), 0);
         assert!(keeper.cancellation().is_cancelled());
+    }
+
+    /// A claim that poisons the handle cancels the run at once, not at the next heartbeat. The
+    /// error stays the store error.
+    #[tokio::test(start_paused = true)]
+    async fn a_poisoning_claim_cancels_the_keeper_at_once() {
+        let fake = Arc::new(Fake {
+            claim_mode: ClaimMode::Poison,
+            ..Fake::new()
+        });
+        let keeper = start(&fake);
+        assert!(matches!(keeper.claim(&cfg()).await, Err(ClaimError::Store(_))));
+        assert!(keeper.cancellation().is_cancelled());
+    }
+
+    /// The same for a completion whose COMMIT fails.
+    #[tokio::test(start_paused = true)]
+    async fn a_poisoning_complete_cancels_the_keeper_at_once() {
+        let fake = Arc::new(Fake {
+            complete_poisons: true,
+            ..Fake::new()
+        });
+        let keeper = start(&fake);
+        assert!(matches!(keeper.complete(a_claim()).await, Err(CompleteError::Store(_))));
+        assert!(keeper.cancellation().is_cancelled());
+        assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
+    }
+
+    /// A store error that leaves the handle valid does not cancel.
+    #[tokio::test(start_paused = true)]
+    async fn a_retryable_store_error_does_not_cancel() {
+        let fake = Arc::new(Fake {
+            claim_mode: ClaimMode::StoreError,
+            ..Fake::new()
+        });
+        let keeper = start(&fake);
+        assert!(matches!(keeper.claim(&cfg()).await, Err(ClaimError::Store(_))));
+        assert!(!keeper.cancellation().is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]

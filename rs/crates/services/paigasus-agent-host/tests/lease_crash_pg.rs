@@ -18,7 +18,7 @@ use paigasus_agent_host_core::ids::InboxId;
 use paigasus_agent_host_core::lease::{CompleteError, LeaseHandle};
 use paigasus_agent_host_core::ports::{ClaimRepository, LeaseRepository};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{insert_pending_event, snapshot};
+use support::lease::{expires_us, insert_pending_event, snapshot};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -103,6 +103,10 @@ async fn a_crashed_worker_is_taken_over(crash: Crash) {
         }
     }
 
+    // The expiry of A's lease on the database clock, read after the heartbeat stopped. A late
+    // heartbeat can only make the real expiry later, so this value is a lower bound.
+    let a_expiry_us = expires_us(&db, INBOX).await;
+
     // B polls until the lease of A expires on the database clock.
     let crashed = Instant::now();
     let mut polls = 0usize;
@@ -114,7 +118,16 @@ async fn a_crashed_worker_is_taken_over(crash: Crash) {
         assert!(crashed.elapsed() < TAKEOVER_BUDGET, "B did not take the lease within {TAKEOVER_BUDGET:?} after A crashed");
         tokio::time::sleep(POLL).await;
     };
-    assert!(polls >= 1, "B took the lease at once: the crash released it, the ttl did not expire it");
+    // The take of B must come after A's expiry on the database clock. The take sets `expires_at`
+    // to its clock plus the ttl, so the take time is that value minus the ttl. This does not
+    // depend on the number of polls: a test that resumes late can take the lease on its first poll.
+    let ttl_us = i64::try_from(ttl.as_micros()).expect("ttl in microseconds");
+    let b_take_us = expires_us(&db, INBOX).await - ttl_us;
+    assert!(
+        b_take_us >= a_expiry_us,
+        "B took the lease {} us before A's lease expired: the crash released it, the ttl did not expire it",
+        a_expiry_us - b_take_us
+    );
     eprintln!("{crash:?}: B took the lease {:?} after the crash, after {polls} polls", crashed.elapsed());
     assert!(b.token().0 > a_token.0, "the take of B has a larger token");
 

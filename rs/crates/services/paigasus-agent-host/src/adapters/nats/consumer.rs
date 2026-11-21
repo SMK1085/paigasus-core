@@ -525,6 +525,21 @@ mod tests {
         assert_eq!(value(&counters(&snap), names::AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL), 1);
     }
 
+    /// A NUL in `data` makes the body a malformed event: terminated, not nacked, so it is never
+    /// redelivered.
+    #[tokio::test]
+    async fn a_nul_in_data_is_terminated() {
+        let recorder = DebuggingRecorder::new();
+        let snap = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let repo = Memory::new();
+        let body = br#"{"specversion":"1.0","id":"e1","source":"s","type":"iam.organization.created","data":{"k":{"v":"a\u0000b"}}}"#;
+        let d = handle_message(&[channel(0x500)], &repo, "iam.organization.created", body, 1).await;
+        assert_eq!(d, Disposition::Term);
+        assert!(repo.rows().is_empty());
+        assert_eq!(value(&counters(&snap), names::AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL), 1);
+    }
+
     #[tokio::test]
     async fn an_unmapped_subject_is_nacked_with_the_maximum_delay() {
         let recorder = DebuggingRecorder::new();

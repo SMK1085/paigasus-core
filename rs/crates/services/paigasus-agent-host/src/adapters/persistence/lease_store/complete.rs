@@ -11,15 +11,16 @@ use paigasus_agent_host_core::ports::ClaimRepository;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseTransaction, Statement, TransactionTrait, Value};
 use uuid::Uuid;
 
-use super::{PgLeaseStore, lost};
+use super::{PgLeaseStore, commit_or_poison, lost};
 
 /// `$1` = inbox, `$2` = token. No row means that the lease is lost.
 const LOCK_SQL: &str = "SELECT token FROM inbox_lease \
      WHERE inbox_id = $1 AND token = $2 AND expires_at > clock_timestamp() FOR UPDATE";
 
-/// `$1` = run, `$2` = token. Zero rows means that the lease is lost.
+/// `$1` = run, `$2` = token. No row means that the lease is lost. It returns the thread that is
+/// stored on the run: step 4 updates that thread, not the `thread` field of the `Claim` value.
 const COMPLETE_RUN_SQL: &str = "UPDATE run SET status = 'completed', finished_at = now() \
-     WHERE id = $1 AND status = 'running' AND lease_token = $2";
+     WHERE id = $1 AND status = 'running' AND lease_token = $2 RETURNING thread_id";
 
 /// `$1` = run, `$2` = the claimed events. Only the claimed events, never other pending events (G6).
 const DONE_SQL: &str = "UPDATE inbox_event SET status = 'done' \
@@ -69,26 +70,6 @@ impl ClaimRepository for PgLeaseStore {
     }
 }
 
-/// Await the commit of the transaction. The handle is poisoned unless the commit returns `Ok`.
-/// This covers a failed commit and a future that the caller drops while the commit is pending.
-async fn commit_or_poison<E>(handle: &mut LeaseHandle, commit: impl std::future::Future<Output = Result<(), E>>) -> Result<(), E> {
-    struct PoisonUnlessDisarmed<'a> {
-        handle: &'a mut LeaseHandle,
-        armed: bool,
-    }
-    impl Drop for PoisonUnlessDisarmed<'_> {
-        fn drop(&mut self) {
-            if self.armed {
-                self.handle.poison();
-            }
-        }
-    }
-    let mut guard = PoisonUnlessDisarmed { handle, armed: true };
-    let result = commit.await;
-    guard.armed = result.is_err();
-    result
-}
-
 /// Steps 1 to 4 of §8.5 in the open transaction. `None` means that the lease is lost.
 async fn complete_in(txn: &DatabaseTransaction, handle: &LeaseHandle, claim: &Claim) -> Result<Option<Vec<Uuid>>, CompleteError> {
     let inbox = handle.inbox().uuid();
@@ -100,9 +81,10 @@ async fn complete_in(txn: &DatabaseTransaction, handle: &LeaseHandle, claim: &Cl
         return Ok(None);
     }
     // Step 2: complete the run, fenced by its token.
-    if txn.execute_raw(stmt(COMPLETE_RUN_SQL, [run.into(), token.into()])).await.map_err(store)?.rows_affected() == 0 {
+    let Some(run_row) = txn.query_one_raw(stmt(COMPLETE_RUN_SQL, [run.into(), token.into()])).await.map_err(store)? else {
         return Ok(None);
-    }
+    };
+    let thread: Uuid = run_row.try_get("", "thread_id").map_err(store)?;
     // Step 3: mark the claimed events done.
     let claimed: Vec<Uuid> = claim.events.iter().map(|e| e.id.uuid()).collect();
     let rows = txn.query_all_raw(stmt(DONE_SQL, [run.into(), claimed.into()])).await.map_err(store)?;
@@ -110,8 +92,8 @@ async fn complete_in(txn: &DatabaseTransaction, handle: &LeaseHandle, claim: &Cl
     for row in rows {
         done.push(row.try_get::<Uuid>("", "id").map_err(store)?);
     }
-    // Step 4: the thread.
-    let thread = claim.thread.uuid();
+    // Step 4: the thread of the run. A `Claim` value whose `thread` was changed cannot move
+    // `last_run_at` or a successor link onto another thread.
     if let Some(row) = txn.query_one_raw(stmt(THREAD_SQL, [thread.into(), inbox.into()])).await.map_err(store)? {
         let predecessor: Option<Uuid> = row.try_get("", "predecessor_id").map_err(store)?;
         if let Some(predecessor) = predecessor {

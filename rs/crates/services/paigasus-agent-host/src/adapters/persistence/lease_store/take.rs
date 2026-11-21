@@ -13,12 +13,18 @@ use uuid::Uuid;
 /// `$1` = inbox, `$2` = holder, `$3` = ttl in microseconds. The `WHERE` of the conflict branch is
 /// what keeps a live lease: without it, a second holder would take a live lease. No row means that
 /// another holder has a live lease. The row is never deleted, so a token never repeats.
+///
+/// The statement uses `clock_timestamp()`, not `now()` (spec §8: a statement that can wait on a
+/// lock reads the live clock). The conflict branch can wait for the row lock of another take or
+/// of a claim. `now()` is the start of the transaction, so after a long wait the new expiry could
+/// already be in the past. With the live clock, the expiry check and the new expiry both read the
+/// clock after the lock is granted.
 const TAKE_SQL: &str = "INSERT INTO inbox_lease (inbox_id, holder, token, expires_at) \
-     VALUES ($1, $2, 1, now() + ($3::bigint * interval '1 microsecond')) \
+     VALUES ($1, $2, 1, clock_timestamp() + ($3::bigint * interval '1 microsecond')) \
      ON CONFLICT (inbox_id) DO UPDATE \
        SET token = inbox_lease.token + 1, holder = EXCLUDED.holder, \
-           expires_at = now() + ($3::bigint * interval '1 microsecond') \
-       WHERE inbox_lease.expires_at < now() \
+           expires_at = clock_timestamp() + ($3::bigint * interval '1 microsecond') \
+       WHERE inbox_lease.expires_at < clock_timestamp() \
      RETURNING token";
 
 /// The ttl in whole microseconds, capped at the largest `bigint`.

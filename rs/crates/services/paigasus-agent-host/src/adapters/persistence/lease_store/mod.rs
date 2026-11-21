@@ -51,6 +51,28 @@ const RELEASE_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp()
 const DISCARD_RUN_SQL: &str = "UPDATE run SET status = 'discarded', finished_at = now() \
      WHERE id = $1 AND status = 'running' AND lease_token = $2";
 
+/// Await the commit of the transaction of `claim` or `complete` (spec §8.4, §8.5). The handle is
+/// poisoned unless the commit returns `Ok`. This covers a failed commit and a future that the
+/// caller drops while the commit is pending: in both cases the database may have committed, so
+/// the token or the open claim of the handle may be stale.
+pub(super) async fn commit_or_poison<E>(handle: &mut LeaseHandle, commit: impl std::future::Future<Output = Result<(), E>>) -> Result<(), E> {
+    struct PoisonUnlessDisarmed<'a> {
+        handle: &'a mut LeaseHandle,
+        armed: bool,
+    }
+    impl Drop for PoisonUnlessDisarmed<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                self.handle.poison();
+            }
+        }
+    }
+    let mut guard = PoisonUnlessDisarmed { handle, armed: true };
+    let result = commit.await;
+    guard.armed = result.is_err();
+    result
+}
+
 /// The lease store on a Postgres pool.
 #[derive(Debug, Clone)]
 pub struct PgLeaseStore {

@@ -3,7 +3,7 @@
 use jiff::Timestamp;
 use serde_json::{Map, Value};
 
-use crate::event::{ID_MAX_CHARS, TYPE_MAX_CHARS, URI_MAX_CHARS, check_extension_name, check_extension_value, check_text};
+use crate::event::{ID_MAX_CHARS, TYPE_MAX_CHARS, URI_MAX_CHARS, check_absolute_uri, check_extension_name, check_extension_value, check_text};
 use crate::{CloudEvent, ExtensionValue, ParseError, SchemaError};
 
 /// Read one CloudEvents 1.0 JSON event (structured mode).
@@ -42,6 +42,60 @@ fn optional_text(map: &mut Map<String, Value>, name: &'static str) -> Result<Opt
     Ok(v)
 }
 
+/// Parse an RFC 3339 `date-time` (RFC 3339 section 5.6). The jiff `Timestamp` parser is wider:
+/// it also accepts a time with no seconds (`12:30Z`) and a bracketed annotation (`Z[UTC]`). So the
+/// shape is checked first: `YYYY-MM-DD`, `T` (or `t`, or a space, which RFC 3339 allows),
+/// `HH:MM:SS`, an optional `.` and one or more digits, then `Z`, `z` or `+HH:MM` / `-HH:MM`.
+fn parse_rfc3339(s: &str) -> Result<Timestamp, SchemaError> {
+    let b = s.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b.get(r).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
+    let mut ok = b.len() >= 20
+        && digits(0..4)
+        && b[4] == b'-'
+        && digits(5..7)
+        && b[7] == b'-'
+        && digits(8..10)
+        && matches!(b[10], b'T' | b't' | b' ')
+        && digits(11..13)
+        && b[13] == b':'
+        && digits(14..16)
+        && b[16] == b':'
+        && digits(17..19);
+    let mut i = 19;
+    if ok && b.get(i) == Some(&b'.') {
+        let start = i + 1;
+        i = start;
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        ok = i > start;
+    }
+    ok = ok
+        && match b.get(i) {
+            Some(b'Z' | b'z') => i + 1 == b.len(),
+            Some(b'+' | b'-') => i + 6 == b.len() && digits(i + 1..i + 3) && b[i + 3] == b':' && digits(i + 4..i + 6),
+            _ => false,
+        };
+    if !ok {
+        return Err(SchemaError::InvalidTime);
+    }
+    s.parse::<Timestamp>().map_err(|_| SchemaError::InvalidTime)
+}
+
+/// Refuse a `data` value that holds U+0000 in an object key or a string, at any depth. Postgres
+/// cannot store U+0000 in `jsonb`, so such an event can never be inserted: over HTTP it would be a
+/// `503` on every retry, and over NATS (no delivery limit) a redelivery with no end. So it is a
+/// malformed event. Other control characters stay valid in `data`: JSON and `jsonb` allow them.
+fn check_data_has_no_nul(value: &Value) -> Result<(), SchemaError> {
+    let bad = || SchemaError::InvalidCharacter("data".to_string());
+    match value {
+        Value::String(s) if s.contains('\0') => Err(bad()),
+        Value::Array(items) => items.iter().try_for_each(check_data_has_no_nul),
+        Value::Object(members) => members.iter().try_for_each(|(k, v)| if k.contains('\0') { Err(bad()) } else { check_data_has_no_nul(v) }),
+        _ => Ok(()),
+    }
+}
+
 fn from_map(map: &mut Map<String, Value>) -> Result<CloudEvent, SchemaError> {
     match map.remove("specversion") {
         None => return Err(SchemaError::MissingAttribute("specversion")),
@@ -59,11 +113,17 @@ fn from_map(map: &mut Map<String, Value>) -> Result<CloudEvent, SchemaError> {
     let subject = optional_text(map, "subject")?;
     let datacontenttype = optional_text(map, "datacontenttype")?;
     let dataschema = optional_text(map, "dataschema")?;
+    if let Some(s) = &dataschema {
+        check_absolute_uri("dataschema", s)?;
+    }
     let time = match take_string(map, "time")? {
         None => None,
-        Some(s) => Some(s.parse::<Timestamp>().map_err(|_| SchemaError::InvalidTime)?),
+        Some(s) => Some(parse_rfc3339(&s)?),
     };
     let data = map.remove("data");
+    if let Some(d) = &data {
+        check_data_has_no_nul(d)?;
+    }
     if map.contains_key("data_base64") {
         return Err(SchemaError::DataBase64NotSupported);
     }
@@ -197,9 +257,12 @@ mod tests {
     fn length_limits_count_characters() {
         let cases: [(&str, usize); 6] = [("id", 256), ("type", 256), ("source", 1024), ("subject", 1024), ("dataschema", 1024), ("ext", 1024)];
         for (attr, max) in cases {
-            let ok = parse_value(&with(attr, json!("é".repeat(max))));
+            // `dataschema` must be an absolute URI, so its value starts with a two-character
+            // scheme prefix. The total is still `max` (and `max + 1`) characters.
+            let value = |n: usize| if attr == "dataschema" { format!("x:{}", "é".repeat(n - 2)) } else { "é".repeat(n) };
+            let ok = parse_value(&with(attr, json!(value(max))));
             assert!(ok.is_ok(), "{attr} at {max}: {ok:?}");
-            let bad = parse_value(&with(attr, json!("é".repeat(max + 1))));
+            let bad = parse_value(&with(attr, json!(value(max + 1))));
             assert!(matches!(bad, Err(ParseError::Schema(SchemaError::TooLong { .. }))), "{attr}: {bad:?}");
         }
     }
@@ -210,5 +273,50 @@ mod tests {
         assert!(matches!(r, Err(ParseError::Schema(SchemaError::InvalidTime))), "{r:?}");
         let e = parse_value(&with("time", json!("2026-08-07T12:30:45.5Z"))).unwrap();
         assert!(e.time().is_some());
+        // jiff accepts these two forms, and RFC 3339 does not: a time with no seconds, and a
+        // bracketed annotation.
+        for bad in ["2026-08-07T12:30Z", "2026-08-07T12:30:45Z[UTC]", "2026-08-07T12:30:45.Z", "2026-08-07T12:30:45+0100", "2026-08-07"] {
+            let r = parse_value(&with("time", json!(bad)));
+            assert!(matches!(r, Err(ParseError::Schema(SchemaError::InvalidTime))), "{bad}: {r:?}");
+        }
+        for good in ["2026-08-07T12:30:45Z", "2026-08-07t12:30:45z", "2026-08-07T12:30:45.123456+01:00", "2026-08-07 12:30:45-05:30"] {
+            assert!(parse_value(&with("time", json!(good))).is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn dataschema_must_be_an_absolute_uri() {
+        let r = parse_value(&with("dataschema", json!("schemas/order.json")));
+        assert!(matches!(r, Err(ParseError::Schema(SchemaError::NotAbsoluteUri("dataschema")))), "{r:?}");
+        let e = parse_value(&with("dataschema", json!("https://example.com/order.json"))).unwrap();
+        assert_eq!(e.dataschema(), Some("https://example.com/order.json"));
+        // `source` is a URI-reference: a relative value stays valid.
+        assert!(parse_value(&with("source", json!("/relative/source"))).is_ok());
+    }
+
+    #[test]
+    fn a_nul_in_data_is_refused_at_any_depth() {
+        let nul = |data: Value| parse_value(&with("data", data));
+        let refused = |r: Result<crate::CloudEvent, ParseError>| matches!(r, Err(ParseError::Schema(SchemaError::InvalidCharacter(ref a))) if a == "data");
+        // A nested string value, a nested key, a string in an array, and a top-level string.
+        assert!(refused(nul(json!({"a": {"b": "x\u{0}y"}}))));
+        assert!(refused(nul(json!({"a": {"k\u{0}": 1}}))));
+        assert!(refused(nul(json!({"a": [1, ["ok", "\u{0}"]]}))));
+        assert!(refused(nul(json!("\u{0}"))));
+        // The same shapes with no NUL are valid, and other control characters stay valid in data.
+        assert!(nul(json!({"a": {"b": "x\u{1}y", "k": [1, "ok"]}})).is_ok());
+    }
+
+    #[test]
+    fn a_control_character_in_a_context_string_is_refused() {
+        for (key, value) in [("id", json!("a\u{0}")), ("subject", json!("x\ny")), ("correlationid", json!("c\u{7f}")), ("type", json!("t\u{fffe}"))] {
+            let r = parse_value(&with(key, value));
+            assert!(matches!(r, Err(ParseError::Schema(SchemaError::InvalidCharacter(ref a))) if a == key), "{key}: {r:?}");
+        }
+        // The rule is for context strings only: `data` keeps any JSON string.
+        let e = parse_value(&with("data", json!({"text": "a\u{1}b"}))).unwrap();
+        assert!(e.data().is_some());
+        // A normal id still passes.
+        assert!(parse_value(&with("id", json!("order-42/é"))).is_ok());
     }
 }

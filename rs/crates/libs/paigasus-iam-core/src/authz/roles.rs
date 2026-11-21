@@ -443,6 +443,7 @@ mod tests {
     /// archived (`archived_org`), and the one principal every case grants roles to.
     struct Universe {
         org_o: OrganizationId,
+        org_other: OrganizationId,
         team_o: TeamId,
         team_other: TeamId,
         project_in_o: ProjectId,
@@ -490,6 +491,7 @@ mod tests {
 
         Universe {
             org_o,
+            org_other,
             team_o,
             team_other,
             project_in_o,
@@ -928,6 +930,27 @@ mod tests {
                 grants: vec![grant(144, &uni.principal, "agent_event_writer", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
                 action: Action::WriteInboxEvent,
                 resource: uni.project_in_other.prn().clone(),
+                expect: Effect::Deny,
+            },
+            // Ingress queries the ORG PRN of the inbox (spec §6.3 step 3), so these two cases use
+            // that resource type: another org, and an archived org that holds the grant.
+            Case {
+                name: "agent_event_writer denies WriteInboxEvent on a different org PRN (SMA-787)",
+                grants: vec![grant(149, &uni.principal, "agent_event_writer", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::WriteInboxEvent,
+                resource: uni.org_other.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "forbid-archived-writes denies WriteInboxEvent on an archived org even for its agent_event_writer (SMA-787)",
+                grants: vec![grant(
+                    150,
+                    &uni.principal,
+                    "agent_event_writer",
+                    GrantScope::Node(TenancyNodeRef::Organization(uni.archived_org.clone())),
+                )],
+                action: Action::WriteInboxEvent,
+                resource: uni.archived_org.prn().clone(),
                 expect: Effect::Deny,
             },
             Case {

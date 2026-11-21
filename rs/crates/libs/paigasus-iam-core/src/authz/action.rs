@@ -55,8 +55,9 @@ pub enum Action {
     /// dead-letter actions above.
     RetireSystemPolicy,
     InvokeModel,
-    /// Write an event into an agent inbox of an organization (SMA-787 §6.1). Held only by the
-    /// dedicated `agent_event_writer` role, never by `org_admin`.
+    /// Write an event into an agent inbox of an organization (SMA-787 §6.1). Of the scoped starter
+    /// roles, only the dedicated `agent_event_writer` grants it directly; `org_admin` never holds
+    /// it. `platform_admin` permits every action, so it permits this one too.
     WriteInboxEvent,
     /// Mint a user principal (SMA-584). Authorized at `Root` only: a user principal has no
     /// owner tenancy node (users attach to orgs/teams later, via memberships), so there is no

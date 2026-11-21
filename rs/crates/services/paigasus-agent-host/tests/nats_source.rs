@@ -235,6 +235,24 @@ async fn term_on_a_bad_body() {
     task.await.expect("join").expect("run");
 }
 
+/// A NUL in `data` is a malformed event: the consumer terminates it, and NATS never redelivers it.
+#[tokio::test]
+async fn term_on_a_nul_in_data() {
+    let Some(s) = stack("term_on_a_nul_in_data", 0x500, &[FILTER]).await else { return };
+    let (stop, task) = start_source(&s).await;
+    let body = br#"{"specversion":"1.0","id":"e1","source":"s","type":"iam.organization.created","data":{"k":{"v":"a\u0000b"}}}"#;
+    publish(&s.js, body.to_vec()).await;
+    all_acked(&s.js, Duration::from_secs(10)).await;
+    // A nak would redeliver within the 3 s; a term never does.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let info = consumer_info(&s.js).await;
+    assert_eq!(info.num_ack_pending, 0);
+    assert_eq!(info.num_redelivered, 0);
+    assert_eq!(rows(&s.db).await, 0);
+    let _ = stop.send(());
+    task.await.expect("join").expect("run");
+}
+
 #[tokio::test]
 async fn redelivery_after_a_database_error() {
     let Some(s) = stack("redelivery_after_a_database_error", 0x500, &[FILTER]).await else { return };

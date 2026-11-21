@@ -15,7 +15,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseTransaction, Statement, 
 use uuid::Uuid;
 
 use super::take::ttl_micros;
-use super::{PgLeaseStore, lost};
+use super::{PgLeaseStore, commit_or_poison, lost};
 use crate::adapters::id::mint_uuid;
 use crate::adapters::persistence::inbox_repository::{event_columns, row_to_event};
 
@@ -106,8 +106,8 @@ enum Step {
 
 impl PgLeaseStore {
     /// Claim one batch of events under the lease of `handle` (spec §8.4). `Ok(None)` means that no
-    /// event is claimable; the lease is still held. A `COMMIT` error leaves the outcome unknown,
-    /// so it poisons the handle.
+    /// event is claimable; the lease is still held. A `COMMIT` error, or a claim future that the
+    /// caller drops during the `COMMIT`, leaves the outcome unknown, so it poisons the handle.
     pub async fn claim_events(&self, handle: &mut LeaseHandle, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError> {
         handle.check_claim()?;
         let txn = self.db.begin().await.map_err(store)?;
@@ -118,10 +118,10 @@ impl PgLeaseStore {
                 Err(ClaimError::LeaseLost)
             }
             Step::Commit { token, dead, claim } => {
-                if let Err(e) = txn.commit().await {
-                    handle.poison();
-                    return Err(store(e));
-                }
+                // The database may have rotated the token and opened the run. If the commit fails
+                // or the caller drops this future during it, the handle keeps the old token and no
+                // open claim, so it is poisoned (as in `complete`).
+                commit_or_poison(handle, txn.commit()).await.map_err(store)?;
                 handle.record_claim(token, claim.as_ref().map(|c| c.run.clone()));
                 if dead > 0 {
                     metrics::counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL).increment(dead);

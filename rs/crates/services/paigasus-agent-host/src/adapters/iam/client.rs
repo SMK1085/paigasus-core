@@ -80,20 +80,24 @@ pub trait Iam: Send + Sync {
 pub struct IamClient {
     authn: AuthnServiceClient<Channel>,
     authz: AuthorizationServiceClient<Channel>,
+    /// `iam.call_timeout_ms`. It bounds each whole call (see [`bounded`]).
+    call_timeout: Duration,
 }
 
 impl IamClient {
     /// Build the channel from the config. The channel connects on the first call, so an IAM that
     /// is down does not stop the boot. The TLS material is read now, so a bad certificate fails at
-    /// boot. `call_timeout_ms` bounds three steps one by one: the TCP connect (of the first
-    /// connection and of each reconnect), the TLS handshake, and each call on an open connection.
-    /// So a call that must connect first can take up to three times `call_timeout_ms`. Call it
-    /// inside a Tokio runtime.
+    /// boot. `call_timeout_ms` bounds each whole call: the wait for a connection, the response
+    /// headers, the response message and the trailers ([`bounded`]). It also bounds the TCP
+    /// connect and the TLS handshake one by one. The channel makes the connection in its own
+    /// task, so a call that stops at its bound does not stop the connect. Call it inside a Tokio
+    /// runtime.
     pub fn connect(cfg: &IamClientConfig) -> Result<IamClient, IamError> {
         let channel = build_channel(cfg)?;
         Ok(IamClient {
             authn: AuthnServiceClient::new(channel.clone()),
             authz: AuthorizationServiceClient::new(channel),
+            call_timeout: Duration::from_millis(cfg.call_timeout_ms),
         })
     }
 }
@@ -101,19 +105,37 @@ impl IamClient {
 #[async_trait]
 impl Iam for IamClient {
     async fn introspect_api_key(&self, token: &str) -> Result<IntrospectApiKeyResponse, IamError> {
-        let resp = self.authn.clone().introspect_api_key(introspect_request(token)).await?;
+        let mut authn = self.authn.clone();
+        let resp = bounded(self.call_timeout, authn.introspect_api_key(introspect_request(token))).await?;
         Ok(resp.into_inner())
     }
 
     async fn introspect_token(&self, token: &str) -> Result<IntrospectResponse, IamError> {
-        let resp = self.authn.clone().introspect(token_introspect_request(token)).await?;
+        let mut authn = self.authn.clone();
+        let resp = bounded(self.call_timeout, authn.introspect(token_introspect_request(token))).await?;
         Ok(resp.into_inner())
     }
 
     async fn is_authorized_self(&self, caller: &CallerCredential, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError> {
         let req = self_authorize_request(caller, principal_prn, action, resource_prn)?;
-        let resp = self.authz.clone().is_authorized(req).await?;
+        let mut authz = self.authz.clone();
+        let resp = bounded(self.call_timeout, authz.is_authorized(req)).await?;
         Ok(resp.into_inner().allowed)
+    }
+}
+
+/// Bound one whole unary call by `limit`. `Endpoint::timeout` is not enough: tonic's
+/// `GrpcTimeout` stops when the response HEADERS arrive, and the generated client then decodes
+/// the message and reads the trailers with no bound. So an IAM that sends the headers and then
+/// stalls could hold a request with no limit. On expiry the call is dropped, and the result is
+/// `Status::deadline_exceeded`. `http::auth` maps that code to `503 iam-unavailable`.
+async fn bounded<T>(limit: Duration, call: impl std::future::Future<Output = Result<T, tonic::Status>>) -> Result<T, IamError> {
+    match tokio::time::timeout(limit, call).await {
+        Ok(result) => result.map_err(IamError::from),
+        Err(_) => Err(IamError::Rpc(tonic::Status::deadline_exceeded(format!(
+            "the IAM call did not end within iam.call_timeout_ms ({} ms)",
+            limit.as_millis()
+        )))),
     }
 }
 
@@ -468,6 +490,58 @@ mod tests {
         let addr = silent_server().await;
         let code = bounded_call(cfg(&format!("http://{addr}"), IamTlsConfig::LoopbackInsecure)).await;
         assert!(matches!(code, tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled), "{code:?}");
+    }
+
+    /// An h2c server that answers every gRPC call with `200` and `application/grpc` headers, and
+    /// then sends no message and no trailers. The endpoint timeout stops at the headers, so only
+    /// the whole-call bound can end such a call.
+    async fn headers_then_stall_server() -> std::net::SocketAddr {
+        use axum::body::Body;
+        use axum::http::{Response, header};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().fallback(|| async {
+            Response::builder()
+                .status(200)
+                .header(header::CONTENT_TYPE, "application/grpc")
+                .body(Body::from_stream(futures::stream::pending::<Result<axum::body::Bytes, std::io::Error>>()))
+                .expect("a valid response")
+        });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn the_call_timeout_bounds_a_server_that_stalls_after_the_headers() {
+        let addr = headers_then_stall_server().await;
+        let mut config = cfg(&format!("http://{addr}"), IamTlsConfig::LoopbackInsecure);
+        config.call_timeout_ms = SHORT_MS;
+        let client = IamClient::connect(&config).expect("lazy connect");
+        let caller = CallerCredential::ApiKey("k".into());
+        // Each of the three calls must end within the budget, with `DeadlineExceeded`.
+        let started = std::time::Instant::now();
+        let key = tokio::time::timeout(BUDGET, client.introspect_api_key("tok"))
+            .await
+            .expect("IntrospectApiKey must end within the budget");
+        let token = tokio::time::timeout(BUDGET, client.introspect_token("tok")).await.expect("Introspect must end within the budget");
+        let authz = tokio::time::timeout(BUDGET, client.is_authorized_self(&caller, "p", "WriteInboxEvent", "r"))
+            .await
+            .expect("IsAuthorized must end within the budget");
+        for (name, code) in [
+            ("IntrospectApiKey", key.map(|_| ()).err()),
+            ("Introspect", token.map(|_| ()).err()),
+            ("IsAuthorized", authz.map(|_| ()).err()),
+        ] {
+            match code {
+                Some(IamError::Rpc(status)) => assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{name}: {status:?}"),
+                other => panic!("{name}: expected a DeadlineExceeded Rpc error, got {other:?}"),
+            }
+        }
+        // Each call waited for its bound, so the headers did arrive and the stall was after them.
+        assert!(started.elapsed() >= Duration::from_millis(3 * SHORT_MS), "{:?}", started.elapsed());
     }
 
     #[test]

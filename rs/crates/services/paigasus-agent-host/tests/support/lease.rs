@@ -14,6 +14,31 @@ pub async fn expire(db: &DatabaseConnection, inbox: Uuid) {
         .expect("expire lease");
 }
 
+/// The ids of the `done` and `dead` events of an inbox.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn terminal_event_ids(db: &DatabaseConnection, inbox: Uuid) -> std::collections::HashSet<Uuid> {
+    let sql = format!("SELECT id FROM inbox_event WHERE inbox_id = '{inbox}' AND status IN ('done', 'dead')");
+    db.query_all_raw(Statement::from_string(DatabaseBackend::Postgres, sql))
+        .await
+        .expect("terminal events")
+        .iter()
+        .map(|r| r.try_get("", "id").expect("id"))
+        .collect()
+}
+
+/// Expires the lease of an inbox only while it still has `token`. It returns false when another
+/// take already replaced that token, so the caller does not expire the lease of another holder.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn expire_token(db: &DatabaseConnection, inbox: Uuid, token: i64) -> bool {
+    db.execute_unprepared(&format!(
+        "UPDATE inbox_lease SET expires_at = now() - interval '1 second' WHERE inbox_id = '{inbox}' AND token = {token}"
+    ))
+    .await
+    .expect("expire lease")
+    .rows_affected()
+        == 1
+}
+
 /// Inserts one pending event, received `age_secs` seconds ago and due now.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub async fn insert_pending_event(db: &DatabaseConnection, inbox: Uuid, event: Uuid, age_secs: i64) {
@@ -103,13 +128,16 @@ pub async fn newest_run_thread(db: &DatabaseConnection, inbox: Uuid) -> Option<U
     Some(row.try_get("", "thread_id").expect("thread_id"))
 }
 
-/// Every `inbox_event`, `run` and `thread` row of an inbox as one text. Two equal texts mean that
-/// no row of these tables changed.
+/// Every `inbox_event`, `run`, `thread` and `inbox_lease` row of an inbox as one text. Two equal
+/// texts mean that no row of these tables changed. The lease row holds the token, the holder and
+/// the stored `expires_at` (not a live flag, which changes as time passes), so a stale call that
+/// moves the expiry of the current lease also shows.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub async fn snapshot(db: &DatabaseConnection, inbox: Uuid) -> String {
     let mut out = String::new();
-    for table in ["inbox_event", "run", "thread"] {
-        let sql = format!("SELECT coalesce(string_agg(row_to_json(x)::text, '|' ORDER BY x.id), '') AS s FROM {table} x WHERE x.inbox_id = '{inbox}'");
+    for table in ["inbox_event", "run", "thread", "inbox_lease"] {
+        // `inbox_lease` has no `id` column; one row per inbox, so the text order is enough.
+        let sql = format!("SELECT coalesce(string_agg(row_to_json(x)::text, '|' ORDER BY row_to_json(x)::text), '') AS s FROM {table} x WHERE x.inbox_id = '{inbox}'");
         let row = db.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql)).await.expect("snapshot").expect("row");
         out.push_str(&row.try_get::<String>("", "s").expect("text column named s"));
         out.push('\n');

@@ -167,6 +167,17 @@ async fn acquire_next_takes_the_inbox_with_the_oldest_pending_event() {
     // So only the ORDER BY of the query puts it first: id order and heap order both say u(10).
     insert_pending_event(&db, u(10), u(101), 9).await;
     insert_pending_event(&db, u(20), u(201), 10).await;
+    // Set both times from ONE database time, so a slow second insert cannot make the event of
+    // inbox 20 the newer one.
+    db.execute_unprepared(&format!(
+        "WITH t AS (SELECT now() AS t0) UPDATE inbox_event e SET received_at = t.t0 - CASE e.id WHEN '{}' THEN interval '9 seconds' ELSE interval '10 seconds' END, \
+         not_before = t.t0 - interval '10 seconds' FROM t WHERE e.id IN ('{}', '{}')",
+        u(101),
+        u(101),
+        u(201)
+    ))
+    .await
+    .expect("set the event times");
     let store = PgLeaseStore::new(db, HB_TIMEOUT);
     let first = store.acquire_next("w", TTL).await.expect("acquire_next").expect("some");
     assert_eq!(first.inbox(), &inbox_id(20));

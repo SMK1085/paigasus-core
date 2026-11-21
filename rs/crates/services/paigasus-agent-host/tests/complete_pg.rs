@@ -10,7 +10,7 @@ use std::time::Duration;
 use metrics_util::debugging::DebuggingRecorder;
 use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host_core::claim::ClaimConfig;
-use paigasus_agent_host_core::ids::{EventId, InboxId};
+use paigasus_agent_host_core::ids::{EventId, InboxId, ThreadId};
 use paigasus_agent_host_core::lease::{CompleteError, LeaseHandle};
 use paigasus_agent_host_core::ports::{ClaimRepository, LeaseRepository};
 use paigasus_agent_host_core::run::LeaseToken;
@@ -79,7 +79,9 @@ async fn complete_marks_only_the_claimed_events_done() {
     insert_pending_event(&db, u(INBOX), u(11), 10).await;
     let claim = store.claim(&mut handle, &cfg()).await.expect("claim").expect("some");
     let run = claim.run.uuid();
-    let done = store.complete(&mut handle, claim).await.expect("complete");
+    let mut done = store.complete(&mut handle, claim).await.expect("complete");
+    // `UPDATE ... RETURNING` has no defined order, and the port does not promise one.
+    done.sort_by_key(EventId::uuid);
     assert_eq!(done, vec![EventId::from_uuid(u(10)), EventId::from_uuid(u(11))]);
     assert_eq!(status_count(&db, "done").await, 2);
     assert_eq!(
@@ -99,6 +101,22 @@ async fn complete_sets_last_run_at_and_the_successor() {
     store.complete(&mut handle, claim).await.expect("complete");
     assert_eq!(count(&db, &format!("SELECT count(*) AS n FROM thread WHERE id = '{new}' AND last_run_at IS NOT NULL")).await, 1);
     assert_eq!(count(&db, &format!("SELECT count(*) AS n FROM thread WHERE id = '{}' AND successor_id = '{new}'", u(70))).await, 1);
+}
+
+/// `complete` updates the thread that is stored on the run, not the `thread` field of the
+/// `Claim` value. A caller that changes that field to another thread of the inbox cannot set
+/// `last_run_at` on it.
+#[tokio::test]
+async fn complete_updates_the_thread_of_the_run_not_of_the_claim_value() {
+    let Some((_node, db, store, mut handle)) = setup().await else { return };
+    insert_pending_event(&db, u(INBOX), u(10), 10).await;
+    insert_thread(&db, u(INBOX), u(72)).await;
+    let mut claim = store.claim(&mut handle, &cfg()).await.expect("claim").expect("some");
+    let run_thread = claim.thread.uuid();
+    claim.thread = ThreadId::from_uuid(u(72));
+    store.complete(&mut handle, claim).await.expect("complete");
+    assert_eq!(count(&db, &format!("SELECT count(*) AS n FROM thread WHERE id = '{run_thread}' AND last_run_at IS NOT NULL")).await, 1);
+    assert_eq!(count(&db, &format!("SELECT count(*) AS n FROM thread WHERE id = '{}' AND last_run_at IS NULL", u(72))).await, 1);
 }
 
 #[tokio::test]

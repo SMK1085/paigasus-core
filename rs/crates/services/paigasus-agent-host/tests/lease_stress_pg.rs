@@ -7,7 +7,10 @@
 //! successful complete. After a drain, the test checks the history against the `run` rows.
 //!
 //! The binary has `retries = 0` in `rs/.config/nextest.toml`: a race that reds one run must not
-//! pass on a retry. Set `LEASE_STRESS_SEED` to replay the expire decisions of a failed run.
+//! pass on a retry. Set `LEASE_STRESS_SEED` to replay the fault decisions of a failed run. The
+//! seed gives each worker the same fault decisions in the order of its successful claims. It does
+//! not replay the task schedule: the retry jitter has its own generator, so a different number of
+//! failed acquires does not move the fault decisions.
 
 mod support;
 
@@ -25,7 +28,7 @@ use paigasus_agent_host_core::lease::{ClaimError, CompleteError};
 use paigasus_agent_host_core::ports::{ClaimRepository, InboxRepository, InsertOutcome, LeaseRepository};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{expire, insert_pending_event, insert_thread, lease_state, snapshot};
+use support::lease::{expire, expire_token, insert_pending_event, insert_thread, lease_state, snapshot, terminal_event_ids};
 use uuid::Uuid;
 
 const WORKERS: usize = 8;
@@ -110,6 +113,9 @@ struct Log {
     /// A claim or a complete that lost the lease with no expire. Only a local deadline under
     /// heavy load can cause it. It is not a safety violation.
     lost_without_expire: usize,
+    /// A planned expire that found its token already replaced by another take. The test then
+    /// expires nothing, and the complete is still stale.
+    expire_found_new_token: usize,
 }
 
 /// After an expire, waits up to `TAKEOVER_WAIT` for another task to take the lease. It returns
@@ -130,12 +136,15 @@ async fn wait_for_new_holder(db: &DatabaseConnection, own: i64) -> bool {
 }
 
 async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed: u64) -> Log {
-    let mut rng = Lcg(seed ^ (u64::try_from(w).expect("w") + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let worker_seed = seed ^ (u64::try_from(w).expect("w") + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    // Two generators: the fault decisions do not depend on how many acquires failed.
+    let mut rng = Lcg(worker_seed);
+    let mut jitter = Lcg(worker_seed.rotate_left(32) ^ 0x5DEE_CE66_D1CE_4E5B);
     let holder = format!("w{w}");
     let mut log = Log::default();
     for _ in 0..ROUNDS {
         let Some(handle) = store.acquire(&inbox(), &holder, timing().lease_ttl).await.expect("acquire") else {
-            tokio::time::sleep(Duration::from_millis(1 + rng.below(3))).await;
+            tokio::time::sleep(Duration::from_millis(1 + jitter.below(3))).await;
             continue;
         };
         log.takes += 1;
@@ -151,7 +160,11 @@ async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed
                 // before the complete. Then the expiry half of the fence refuses it.
                 let mut own_row = false;
                 if expired {
-                    expire(&db, INBOX).await;
+                    // Expire only the own token: if another task already took the lease, its
+                    // live lease stays, and the complete is stale anyway.
+                    if !expire_token(&db, INBOX, token).await {
+                        log.expire_found_new_token += 1;
+                    }
                     if rng.below(2) == 0 {
                         overlap = wait_for_new_holder(&db, token).await;
                     } else {
@@ -256,7 +269,11 @@ async fn sequential_overlap(url: &str, db: &DatabaseConnection) -> usize {
     let store_a = Arc::new(PgLeaseStore::new(support::connect_pinned(url).await, HB_TIMEOUT));
     let store_b = PgLeaseStore::new(support::connect_pinned(url).await, HB_TIMEOUT);
     let a = store_a.acquire(&seq, "seq-a", ttl).await.expect("A acquire").expect("A takes the lease");
-    let keeper = LeaseKeeper::start(a, store_a.clone(), store_a.clone(), timing());
+    // A long heartbeat interval: the first heartbeat of A comes after 20 s, so no heartbeat of A
+    // can see B's take and cancel the keeper before the complete. The stale complete then always
+    // reaches the token fence of `PgLeaseStore::complete`.
+    let seq_timing = KeeperTiming::new(Duration::from_secs(60), Duration::from_secs(20)).expect("timing");
+    let keeper = LeaseKeeper::start(a, store_a.clone(), store_a.clone(), seq_timing);
     let claim = keeper.claim(&cfg()).await.expect("A claim").expect("A claims the event");
     let a_token = claim.lease_token.0;
     expire(db, SEQ_INBOX).await;
@@ -264,6 +281,7 @@ async fn sequential_overlap(url: &str, db: &DatabaseConnection) -> usize {
     let state = lease_state(db, SEQ_INBOX).await.expect("lease row");
     assert!(state.1 && state.0 != a_token, "B does not hold a live lease with a new token: {state:?}");
     let before = snapshot(db, SEQ_INBOX).await;
+    assert!(!keeper.cancellation().is_cancelled(), "the keeper of A must not stop before the complete reaches the store");
     assert_eq!(keeper.complete(claim).await, Err(CompleteError::LeaseLost), "A completed under the live lease of B");
     assert_eq!(before, snapshot(db, SEQ_INBOX).await, "the stale complete of A changed a row");
     keeper.release().await.expect("A release");
@@ -304,9 +322,10 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     let sum = |f: fn(&Log) -> usize| logs.iter().map(f).sum::<usize>();
     let (takes, stale, lost) = (sum(|l| l.takes), sum(|l| l.stale), sum(|l| l.lost_without_expire));
     let (overlap, own_row) = (sum(|l| l.stale_under_new_holder), sum(|l| l.stale_own_row));
+    let replaced = sum(|l| l.expire_found_new_token);
     eprintln!(
         "lease_stress_pg: seed {seed}, {:?}: takes {takes}, worker completes {worker_completes}, drain completes {}, \
-         stale completes {stale} ({overlap} under a new holder, {own_row} on the own expired row), lost with no expire {lost}",
+         stale completes {stale} ({overlap} under a new holder, {own_row} on the own expired row), lost with no expire {lost}, expires that found a new token {replaced}",
         started.elapsed(),
         drained.len()
     );
@@ -357,6 +376,9 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     let total = support::scalar_i64(&db, &format!("SELECT count(*) AS n FROM inbox_event WHERE inbox_id = '{INBOX}'")).await;
     assert_eq!(total, i64::try_from(inserted.len()).expect("count"), "seed {seed}: the inbox holds other events");
     assert_eq!(settled, total, "seed {seed}: an event is not done or dead after the drain (AG2)");
+    // The ids, not only the counts: each inserted event, and no other, is `done` or `dead`.
+    let inserted_ids: HashSet<Uuid> = inserted.iter().copied().collect();
+    assert_eq!(terminal_event_ids(&db, INBOX).await, inserted_ids, "seed {seed}: the done and dead events are not the inserted events");
 
     // The random overlaps depend on timing. The sequential phase adds one on every run.
     let random_overlap = overlap;

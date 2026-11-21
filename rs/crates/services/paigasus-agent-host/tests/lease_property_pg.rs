@@ -28,7 +28,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{expire, insert_thread, lease_state, newest_run_thread, snapshot};
+use support::lease::{expire, insert_thread, lease_state, newest_run_thread, snapshot, terminal_event_ids};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(60);
@@ -392,6 +392,10 @@ impl Case<'_> {
         let inserted = i64::try_from(self.inserted.len()).expect("count");
         prop_assert_eq!(total, inserted, "the inbox holds other events than the inserted ones");
         prop_assert_eq!(settled, inserted, "an inserted event is not done or dead after the drain (AG2)");
+        // The counts can match while one inserted event is missing and another row took its place.
+        // So compare the ids too. Any mix of `done` and `dead` is valid.
+        let inserted_ids: HashSet<Uuid> = self.inserted.iter().copied().collect();
+        prop_assert_eq!(terminal_event_ids(&self.ctx.db, inbox).await, inserted_ids, "the done and dead events are not the inserted events");
         Ok(())
     }
 }

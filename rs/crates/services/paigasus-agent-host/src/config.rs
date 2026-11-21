@@ -314,10 +314,15 @@ struct MigrationConfigDefaults {
 }
 
 /// True when `grpc_addr`'s host is a loopback address (`127.0.0.0/8`, `localhost`, or an IPv6
-/// loopback such as `::1`). Deliberately a small hand-rolled parser rather than pulling in a
-/// `url` crate dependency for a single boot-time check: `grpc_addr` is `scheme://host[:port]`,
-/// optionally with a trailing path; strip the scheme, strip any path, then split the host from
-/// an optional port (bracketed for IPv6 literals).
+/// loopback such as `::1`).
+///
+/// The host comes from the URI AUTHORITY, parsed by the `http` crate's `Uri`: the same parser
+/// that `tonic::transport::Channel::from_shared` uses, so this check reads the host that the
+/// channel connects to. A text split is not safe here. The old `split("://").last()` read the
+/// text after the LAST `://`, so `http://192.0.2.10:9090/p/http://127.0.0.1:9090` passed the
+/// check while the channel connected to `192.0.2.10` in plaintext. A userinfo part is not the
+/// host either: in `http://127.0.0.1@192.0.2.10/` the host is `192.0.2.10`. A value that does
+/// not parse as a URI with a host is not loopback.
 ///
 /// The host is then classified by parsing it as a real IP and asking
 /// [`Ipv4Addr::is_loopback`]/[`Ipv6Addr::is_loopback`] — NOT a string prefix match. A prefix
@@ -332,23 +337,55 @@ struct MigrationConfigDefaults {
 fn is_loopback_host(grpc_addr: &str) -> bool {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    let after_scheme = grpc_addr.split("://").last().unwrap_or(grpc_addr);
-    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        // IPv6 literal, e.g. "[::1]:9090" or "[::1]" -> "::1" (brackets stripped so the
-        // `Ipv6Addr` parse below succeeds).
-        rest.split(']').next().unwrap_or(rest)
-    } else {
-        host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
+    let Ok(uri) = grpc_addr.parse::<axum::http::Uri>() else {
+        return false;
     };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    // `Uri::host` keeps the brackets of an IPv6 literal ("[::1]"). Strip them, so the
+    // `Ipv6Addr` parse below succeeds.
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
 
     host == "localhost" || host.parse::<Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false) || host.parse::<Ipv6Addr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
-/// True when `s` uses only the characters that RFC 3986 allows in a URI-reference, and each `%`
-/// starts a valid percent escape. A space, a control character and a non-ASCII character are not
-/// allowed. The characters `<>"{}|\^` and the backtick are not allowed either.
+/// True when `s` is a URI-reference (RFC 3986 section 4.1): it uses only the characters that RFC
+/// 3986 allows, each `%` starts a valid percent escape, and each component holds only its own
+/// characters. A space, a control character and a non-ASCII character are not allowed. The
+/// characters `<>"{}|\^` and the backtick are not allowed either.
+///
+/// The component rules: the first `#` starts the fragment, and the fragment has no second `#`.
+/// `[` and `]` are allowed only in the authority (an IP literal), never in the path, the query or
+/// the fragment. So `urn:paigasus:agents:nats:a#b#c` is refused.
 fn is_uri_reference(s: &str) -> bool {
+    if !has_uri_characters(s) {
+        return false;
+    }
+    let (before_fragment, fragment) = s.split_once('#').unwrap_or((s, ""));
+    if fragment.contains(['#', '[', ']']) {
+        return false;
+    }
+    let (hier, query) = before_fragment.split_once('?').unwrap_or((before_fragment, ""));
+    if query.contains(['[', ']']) {
+        return false;
+    }
+    // The scheme ends at the first `:` before any `/`. A `//` after it (or at the start of a
+    // relative reference) starts the authority, which ends at the next `/`.
+    let after_scheme = match hier.find([':', '/']) {
+        Some(i) if hier.as_bytes()[i] == b':' => &hier[i + 1..],
+        _ => hier,
+    };
+    let path = match after_scheme.strip_prefix("//") {
+        Some(rest) => rest.find('/').map_or("", |i| &rest[i..]),
+        None => after_scheme,
+    };
+    !path.contains(['[', ']'])
+}
+
+/// True when `s` uses only the characters that RFC 3986 allows in a URI-reference, and each `%`
+/// starts a valid percent escape.
+fn has_uri_characters(s: &str) -> bool {
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -762,6 +799,14 @@ mod tests {
                 ..loopback_iam()
             });
             assert_eq!(cfg.validate(), Err(ConfigError::IamLoopbackInsecureNotLoopback));
+            // A loopback address after a second `://` in the path is not the host (PR 518).
+            for addr in ["http://192.0.2.10:9090/path/http://127.0.0.1:9090", "http://127.0.0.1@192.0.2.10/"] {
+                cfg.iam = Some(IamClientConfig {
+                    grpc_addr: addr.to_owned(),
+                    ..loopback_iam()
+                });
+                assert_eq!(cfg.validate(), Err(ConfigError::IamLoopbackInsecureNotLoopback), "{addr}");
+            }
             cfg.iam = Some(loopback_iam());
             assert_eq!(cfg.validate(), Ok(()));
             // TLS needs no loopback host.
@@ -824,6 +869,35 @@ mod tests {
         assert!(!is_loopback_host("https://127.0.0.1.attacker.example.com:9090"));
         assert!(!is_loopback_host("https://localhost.evil.com:9090"));
         assert!(!is_loopback_host("https://iam.internal.example.com:9090"));
+    }
+
+    // The host comes from the URI authority only (CodeRabbit, PR 518). A loopback address in the
+    // PATH, after a second `://`, is not the host: the channel connects to the authority.
+    #[test]
+    fn is_loopback_host_reads_the_authority_not_a_later_scheme_in_the_path() {
+        assert!(!is_loopback_host("http://192.0.2.10:9090/path/http://127.0.0.1:9090"));
+        assert!(!is_loopback_host("http://iam.internal.example.com:9090/proxy://127.0.0.1:9090"));
+        assert!(!is_loopback_host("http://192.0.2.10:9090/http://[::1]:9090"));
+        assert!(!is_loopback_host("http://192.0.2.10/?next=http://localhost"));
+        // A loopback authority with a path is still loopback.
+        assert!(is_loopback_host("http://127.0.0.1:9090/path/http://192.0.2.10:9090"));
+    }
+
+    // A userinfo part is not the host: `127.0.0.1@` names a user, and the host is after the `@`.
+    #[test]
+    fn is_loopback_host_does_not_read_userinfo_as_the_host() {
+        assert!(!is_loopback_host("http://127.0.0.1@192.0.2.10/"));
+        assert!(!is_loopback_host("http://localhost:9090@192.0.2.10:9090"));
+        assert!(!is_loopback_host("http://[::1]@192.0.2.10:9090"));
+        assert!(!is_loopback_host("http://user:pass@iam.internal.example.com:9090"));
+    }
+
+    // A value with no parsable authority is not loopback (fail closed).
+    #[test]
+    fn is_loopback_host_fails_closed_on_a_value_that_is_not_a_uri() {
+        assert!(!is_loopback_host(""));
+        assert!(!is_loopback_host("not a uri"));
+        assert!(!is_loopback_host("/127.0.0.1:9090"));
     }
 
     #[test]
@@ -913,12 +987,26 @@ mod tests {
                 "urn:paigasus:agents:nats:a%4",
                 "urn:paigasus:agents:nats:\u{e4}",
                 "urn:paigasus:agents:nats:a<b",
+                // The component rules: one fragment, and no `[` or `]` outside an authority.
+                "urn:paigasus:agents:nats:a#b#c",
+                "urn:paigasus:agents:nats:a[1]",
+                "urn:paigasus:agents:nats:a?q=[1]",
+                "urn:paigasus:agents:nats:a#[x]",
             ] {
                 assert_eq!(with_channels(vec![channel("iam.>", 1, bad)]).validate(), Err(ConfigError::NatsSourceNotUri(bad.to_string())), "{bad}");
             }
             assert_eq!(with_channels(vec![channel("iam.>", 1, "urn:paigasus:agents:nats:iam-west_1.x~y%41")]).validate(), Ok(()));
             Ok(())
         });
+    }
+
+    #[test]
+    fn is_uri_reference_checks_the_components() {
+        assert!(is_uri_reference("urn:paigasus:agents:nats:a#frag?x/y"));
+        assert!(is_uri_reference("http://[::1]:9090/p?q#f"));
+        assert!(is_uri_reference("//[::1]/p"));
+        assert!(!is_uri_reference("http://h/p[1]"));
+        assert!(!is_uri_reference("a#b#c"));
     }
 
     #[test]

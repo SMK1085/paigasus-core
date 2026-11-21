@@ -378,16 +378,20 @@ only through the keeper.
 ```sql
 -- take: works also for an inbox with no lease row
 INSERT INTO inbox_lease (inbox_id, holder, token, expires_at)
-VALUES ($inbox, $holder, 1, now() + $ttl)
+VALUES ($inbox, $holder, 1, clock_timestamp() + $ttl)
 ON CONFLICT (inbox_id) DO UPDATE
-  SET token = inbox_lease.token + 1, holder = EXCLUDED.holder, expires_at = now() + $ttl
-  WHERE inbox_lease.expires_at < now()
+  SET token = inbox_lease.token + 1, holder = EXCLUDED.holder, expires_at = clock_timestamp() + $ttl
+  WHERE inbox_lease.expires_at < clock_timestamp()
 RETURNING token;
 
 -- heartbeat: zero rows = lease lost
 UPDATE inbox_lease SET expires_at = clock_timestamp() + $ttl
 WHERE inbox_id = $inbox AND token = $t AND expires_at > clock_timestamp();
 ```
+
+The take uses `clock_timestamp()`, not `now()`: its conflict branch can wait for a row lock, and
+`now()` (the transaction start) could then give a new lease that is already expired (PR 518
+review).
 
 ### 8.4 Claim (ADR (b) claim transaction, ADR (f))
 

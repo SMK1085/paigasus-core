@@ -245,6 +245,19 @@ async fn an_invalid_cloudevent_is_400_invalid_request_schema() {
     assert!(repo.inserted().is_empty());
 }
 
+/// A NUL in `data` cannot be stored in `jsonb`. It is a malformed event (400), not a store error
+/// (503), so a client does not retry it.
+#[tokio::test]
+async fn a_nul_in_data_is_400_invalid_request_schema() {
+    let (repo, iam) = owner_setup();
+    let mut e = event();
+    e["data"] = json!({"outer": {"note": "a\u{0}b"}});
+    let (status, body) = post().json(&e).send(&router(&repo, &iam)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(code(&body), "invalid-request-schema");
+    assert!(repo.inserted().is_empty());
+}
+
 #[tokio::test]
 async fn an_agents_type_is_400_invalid_request_schema() {
     let (repo, iam) = owner_setup();

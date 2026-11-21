@@ -4,7 +4,7 @@ use jiff::{Timestamp, tz::TimeZone};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::event::{ID_MAX_CHARS, TYPE_MAX_CHARS, URI_MAX_CHARS, check_extension_name, check_extension_value, check_text};
+use crate::event::{ID_MAX_CHARS, TYPE_MAX_CHARS, URI_MAX_CHARS, check_absolute_uri, check_extension_name, check_extension_value, check_text};
 use crate::{CloudEvent, ExtensionValue, SchemaError};
 
 impl CloudEvent {
@@ -47,13 +47,16 @@ impl CloudEvent {
     }
 
     /// # Errors
-    /// Returns an error when the value is empty or too long.
+    /// Returns an error when the value is empty, too long, or not an absolute URI.
     pub fn with_dataschema(mut self, value: &str) -> Result<Self, SchemaError> {
         check_text("dataschema", value, URI_MAX_CHARS)?;
+        check_absolute_uri("dataschema", value)?;
         self.dataschema = Some(value.to_string());
         Ok(self)
     }
 
+    /// Set `data`. The build side does not check it: `parse` refuses a `data` with U+0000, so a
+    /// host-built event with such data cannot be read back.
     #[must_use]
     pub fn with_data(mut self, data: Value) -> Self {
         self.data = Some(data);
@@ -208,6 +211,22 @@ mod tests {
         let a = text.find("\"actorprn\"").unwrap();
         let c = text.find("\"correlationid\"").unwrap();
         assert!(s < a && a < c, "{text}");
+    }
+
+    #[test]
+    fn with_dataschema_needs_an_absolute_uri() {
+        let e = event_at("2026-08-07T12:30:45Z");
+        assert!(e.clone().with_dataschema("https://example.com/order.json").is_ok());
+        assert_eq!(e.with_dataschema("schemas/order.json").err(), Some(SchemaError::NotAbsoluteUri("dataschema")));
+    }
+
+    #[test]
+    fn set_extension_refuses_a_control_character() {
+        let mut e = event_at("2026-08-07T12:30:45Z");
+        assert_eq!(
+            e.set_extension("correlationid", ExtensionValue::String("a\u{0}b".into())),
+            Err(SchemaError::InvalidCharacter("correlationid".into()))
+        );
     }
 
     #[test]

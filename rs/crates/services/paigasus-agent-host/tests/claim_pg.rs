@@ -325,3 +325,34 @@ async fn a_failed_commit_poisons_the_handle() {
     assert_eq!(count(&db, "SELECT count(*) AS n FROM run").await, 0);
     exec(&db, "DROP TRIGGER refuse_run ON run").await;
 }
+
+/// A claim future that the caller drops while its COMMIT runs poisons the handle (spec §8.4: the
+/// outcome is unknown). The database may commit the rotation and the run, so the handle must not
+/// stay valid with its old token and no open claim. A deferred trigger holds the COMMIT open, and
+/// the test drops the claim only when the database shows that the COMMIT is running.
+#[tokio::test]
+async fn a_claim_dropped_during_its_commit_poisons_the_handle() {
+    let Some((_node, db, store, mut handle)) = setup().await else { return };
+    insert_pending_event(&db, u(INBOX), u(10), 10).await;
+    exec(&db, "CREATE FUNCTION slow_run() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(5); RETURN NULL; END $$").await;
+    exec(
+        &db,
+        "CREATE CONSTRAINT TRIGGER slow_run AFTER INSERT ON run DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION slow_run()",
+    )
+    .await;
+    let committing = "SELECT count(*) AS n FROM pg_stat_activity WHERE state = 'active' AND query = 'COMMIT' AND wait_event = 'PgSleep'";
+    let config = cfg();
+    let in_commit = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while count(&db, committing).await == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "the claim never reached its COMMIT");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        outcome = store.claim_events(&mut handle, &config) => panic!("the COMMIT must still run when the test drops the claim: {outcome:?}"),
+        () = in_commit => {}
+    }
+    assert!(handle.is_poisoned(), "a claim dropped during its COMMIT must poison the handle");
+    assert_eq!(store.claim_events(&mut handle, &cfg()).await, Err(ClaimError::Poisoned));
+}

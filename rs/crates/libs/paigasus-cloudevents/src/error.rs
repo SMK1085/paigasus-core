@@ -19,6 +19,10 @@ pub enum SchemaError {
     InvalidTime,
     #[error("attribute `{0}` must not be empty")]
     Empty(&'static str),
+    #[error("attribute `{0}` contains a character that CloudEvents does not allow in a string")]
+    InvalidCharacter(String),
+    #[error("attribute `{0}` must be an absolute URI")]
+    NotAbsoluteUri(&'static str),
 }
 
 /// The reason `parse` rejects a message.

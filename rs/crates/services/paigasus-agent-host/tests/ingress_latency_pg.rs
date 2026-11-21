@@ -94,7 +94,8 @@ async fn handler_p99_is_under_50_ms_with_the_worker_off() {
                 .await
                 .expect("send");
             let status = resp.status().as_u16();
-            let _ = resp.bytes().await;
+            // A sample is a complete response: a body that ends early is a failure, not a time.
+            resp.bytes().await.expect("the complete response body");
             (status, started.elapsed())
         }
     };
@@ -126,6 +127,8 @@ async fn handler_p99_is_under_50_ms_with_the_worker_off() {
     for (status, _) in run("warm", WARMUP).await {
         assert_eq!(status, 202, "every warm-up request must be accepted; log:\n{}", child.tail());
     }
+    // The IAM calls of the warm-up are not part of the measured window.
+    let introspections_before = iam.introspections();
     let mut times = Vec::with_capacity(REQUESTS);
     for (status, elapsed) in run("evt", REQUESTS).await {
         assert_eq!(status, 202, "every request must be accepted; log:\n{}", child.tail());
@@ -140,7 +143,8 @@ async fn handler_p99_is_under_50_ms_with_the_worker_off() {
     let which = if limit == P99_LIMIT { "spec" } else { "CI" };
     println!("ingress latency over {REQUESTS} requests at concurrency {CONCURRENCY}: p50={p50:?} p99={p99:?} max={max:?} (limit {limit:?}, {which})");
 
-    assert!(iam.introspections() >= REQUESTS, "every request must call IAM; got {}", iam.introspections());
+    let measured_introspections = iam.introspections() - introspections_before;
+    assert!(measured_introspections >= REQUESTS, "every measured request must call IAM; got {measured_introspections}");
     assert!(p99 < limit, "p99 {p99:?} is not under the {which} limit {limit:?} (p50={p50:?}, max={max:?})");
     server.abort();
 }
