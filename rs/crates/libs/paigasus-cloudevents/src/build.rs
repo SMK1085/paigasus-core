@@ -13,12 +13,21 @@ impl CloudEvent {
     /// # Errors
     /// Returns an error when `source` or `ty` is empty or too long.
     pub fn new(id: Uuid, source: &str, ty: &str, time: Timestamp) -> Result<CloudEvent, SchemaError> {
-        let id = id.hyphenated().to_string();
-        check_text("id", &id, ID_MAX_CHARS)?;
+        CloudEvent::new_text_id(&id.hyphenated().to_string(), source, ty, time)
+    }
+
+    /// Make an event whose `id` is text, not a UUID. The `id` gets the same checks as in
+    /// [`CloudEvent::new`].
+    ///
+    /// # Errors
+    /// Returns an error when `id`, `source` or `ty` is empty, too long, or has a character that
+    /// CloudEvents does not allow.
+    pub fn new_text_id(id: &str, source: &str, ty: &str, time: Timestamp) -> Result<CloudEvent, SchemaError> {
+        check_text("id", id, ID_MAX_CHARS)?;
         check_text("source", source, URI_MAX_CHARS)?;
         check_text("type", ty, TYPE_MAX_CHARS)?;
         Ok(CloudEvent {
-            id,
+            id: id.to_string(),
             source: source.to_string(),
             ty: ty.to_string(),
             time: Some(time),
@@ -176,6 +185,21 @@ mod tests {
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn new_text_id_checks_the_id() {
+        let ok = "t".repeat(63);
+        assert_eq!(CloudEvent::new_text_id(&ok, "urn:s", "t", ts("2026-03-29T01:00:00Z")).unwrap().id(), ok);
+        assert!(matches!(CloudEvent::new_text_id("", "urn:s", "t", ts("2026-03-29T01:00:00Z")), Err(SchemaError::Empty("id"))));
+        assert!(matches!(
+            CloudEvent::new_text_id(&"a".repeat(257), "urn:s", "t", ts("2026-03-29T01:00:00Z")),
+            Err(SchemaError::TooLong { .. })
+        ));
+        assert!(matches!(
+            CloudEvent::new_text_id("a\nb", "urn:s", "t", ts("2026-03-29T01:00:00Z")),
+            Err(SchemaError::InvalidCharacter(_))
+        ));
     }
 
     fn event_at(time: &str) -> CloudEvent {

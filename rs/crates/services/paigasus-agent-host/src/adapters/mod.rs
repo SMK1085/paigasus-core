@@ -8,3 +8,4 @@ pub mod id;
 pub mod memory_commit;
 pub mod nats;
 pub mod persistence;
+pub mod timer_event;
