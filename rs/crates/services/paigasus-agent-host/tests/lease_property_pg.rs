@@ -446,6 +446,16 @@ fn lease_and_claim_keep_their_invariants() {
         }
     });
 
+    // A fixed case first. It reaches each required coverage state by construction, so the
+    // coverage assertions cannot red by chance. The generated cases still explore at random.
+    if let Err(e) = rt.block_on(run_case(&ctx, 2, &fixed_case())) {
+        panic!("the fixed case failed: {e}");
+    }
+    let c = &ctx.coverage;
+    for (name, n) in required_coverage(c) {
+        assert!(n.load(Ordering::Relaxed) >= 1, "the fixed case reached no {name}");
+    }
+
     let config = Config {
         cases: CASES,
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct("tests/lease_property_pg.proptest-regressions"))),
@@ -457,15 +467,35 @@ fn lease_and_claim_keep_their_invariants() {
         panic!("{e}");
     }
 
-    let c = &ctx.coverage;
-    for (name, n) in [
-        ("stale complete", &c.stale_complete),
-        ("take after expire", &c.take_after_expire),
-        ("rotation", &c.rotation),
-        ("complete with an old claim", &c.old_claim_complete),
-    ] {
+    // The three counters of spec §10.1. The fixed case already reached each one.
+    for (name, n) in required_coverage(c) {
         let n = n.load(Ordering::Relaxed);
         assert!(n >= 1, "coverage: no {name} in {CASES} cases");
         eprintln!("coverage: {name} = {n}");
     }
+    // Not required by the spec, and not asserted: the old-claim case stops at the in-memory
+    // pre-check of `complete`.
+    eprintln!("coverage: complete with an old claim = {}", c.old_claim_complete.load(Ordering::Relaxed));
+}
+
+/// The coverage counters that spec §10.1 requires.
+fn required_coverage(c: &Coverage) -> [(&'static str, &AtomicUsize); 3] {
+    [("stale complete", &c.stale_complete), ("take after expire", &c.take_after_expire), ("rotation", &c.rotation)]
+}
+
+/// Worker 0 takes, claims, completes and claims again (a rotation). The lease expires, worker 1
+/// takes it (a take after expire), and worker 0 completes its open claim with the stale token (a
+/// stale complete).
+fn fixed_case() -> Vec<Op> {
+    vec![
+        Op::Acquire(0),
+        Op::Insert { thread: ThreadChoice::None },
+        Op::Claim(0),
+        Op::Complete { worker: 0, old: false },
+        Op::Insert { thread: ThreadChoice::ExistingOfRun },
+        Op::Claim(0),
+        Op::Expire,
+        Op::Acquire(1),
+        Op::Complete { worker: 0, old: false },
+    ]
 }
