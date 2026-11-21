@@ -179,8 +179,11 @@ KV never delays the next tick or the gauge. The order inside the step is fixed (
 3. **`decide`**, then at most one **CAS** with the revision of step 1.
 
 Why this order: the Redis read in step 2 always comes after the KV get. Any write by another relay
-between step 1 and step 3 changes the revision, so this relay's CAS fails. A stale Redis read cannot
-reach the KV. No re-read rule is necessary.
+between step 1 and step 3 changes the revision, so this relay's CAS fails. That is the only guarantee: the
+CAS rejects a write to the KV entry between step 1 and step 3. It does not see a change in Redis after step
+2. If Redis changes after step 2 and no relay writes the KV entry, the CAS can store the earlier Redis
+observation. The next KV step then compares the new Redis state with that record. No re-read rule is
+necessary.
 
 **The detection script repairs a missing generation key (D7).** The relay passes a fresh id on each
 call. If the group exists and the generation key does not, the script writes that id with
@@ -322,6 +325,12 @@ Q2 (Sven): detect a loss inside one generation. The design uses an **epoch key**
   step runs, so the window lasts for the whole outage. The export shows the gaps.
 - The estimates are the last stored sample, with about one `sample_every` of error.
 - During the rolling deploy from SMA-755, one incident can count twice (§5.4).
+- During the rolling deploy from SMA-755, a loss of the stream key alone can be missed. The generation key
+  and the epoch key stay. If an SMA-755 relay makes the group again (at its start, or after its `NOGROUP`),
+  it writes no new generation. The new relays then see the same generation and a growing epoch, so they
+  count nothing. Only an SMA-755 relay that runs and gets `NOGROUP` first counts the loss, by its own
+  path. An SMA-755 relay that makes the group at its start counts nothing (case (a)). This ends when the
+  last old relay stops.
 - A relay that made an ambiguous counting write and stops before its next KV get loses that count.
 - A relay that only loses CAS races keeps a stale `last_own`: only a successful write sets it, and a lost
   CAS does not clear it. After a later restore to that generation, this relay can report a false

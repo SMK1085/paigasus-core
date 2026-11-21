@@ -1905,9 +1905,11 @@ no relay held. Use the export of the decisions to find the gaps.
 
 #### `GatewayDecisionLogGenerationCheckFailing` (warning)
 
-**Meaning.** A relay could not run the Redis reset check against the NATS KV bucket
-`GATEWAY_DECISIONS_GEN` for 15 minutes. **While this alert fires, a Redis reset is not counted.** Read
-`gateway_decision_log_generation_check_errors_total` by `kind`:
+**Meaning.** The Redis reset check against the NATS KV bucket `GATEWAY_DECISIONS_GEN` had errors again
+and again for 15 minutes: each 15-minute window had at least one failed check. The alert does not mean that
+every check failed. **A failed check does not count a Redis reset, so a reset can be missed.** A check that
+passes still counts a reset. The expression reads a 15-minute window, so the alert can stay active up to 15
+minutes after the checks pass again. Read `gateway_decision_log_generation_check_errors_total` by `kind`:
 
 - `permission`: the publisher creds do not have the KV grants. Run `PUSH=1 ops/nats/provision-decisions.sh`
   again and deploy the new creds to the gateway. Without `PUSH=1` the script does not push the account.
@@ -1937,6 +1939,9 @@ the bucket). Then deploy the new gateway binary with the new creds. A new binary
   snapshot. In normal operation the window is about 15 s. During a NATS outage the window lasts for the
   whole outage.
 - An operator `XSETID` or `RESTORE ... REPLACE` on the stream key alone keeps both keys. It is not detected.
+- During the rolling deploy from SMA-755, a loss of the stream key alone can be missed. An old relay that
+  makes the group again writes no new generation, so the new relays count nothing. Only an old relay that
+  gets `NOGROUP` first counts the loss. This ends when the last old relay stops.
 - A relay that made an ambiguous counting write and stops before its next KV get loses that count.
 - The deployment rule is only detected, not prevented (`foreign_writer`). While two deployments share one
   KV entry, each pod restart in either deployment adds one false reset.

@@ -553,20 +553,29 @@ There are three kinds of loss:
    the batch was in flight, and Redis can have stored it (a reply timeout). `shutdown` has two parts.
    Events that were still in the queue at the shutdown deadline never went to Redis, so they are lost.
    A batch that was in flight at the deadline has an unknown result, and Redis can have stored it.
-2. **A Redis loss that the relay detects.** When Redis loses the stream, it loses the consumer
-   group too, and the next command returns `NOGROUP`. The relay runs `XGROUP CREATE … 0
-   MKSTREAM`. Only one relay gets `OK`. That relay:
-   - counts 1 in `gateway_decision_log_redis_resets_total` (a best-effort count of the incidents,
-     not an exact one; see the known limits below)
-   - adds its last `XLEN` sample to `gateway_decision_log_lost_estimate_total`, and logs it
+2. **A Redis loss that the relay detects.** Since SMA-821 this is the generation record of
+   `docs/superpowers/specs/2026-11-20-sma-821-decision-log-generation-record-design.md` (§5.1 to
+   §5.3b). It replaces the count at `XGROUP CREATE`. When Redis loses the stream, it loses the
+   consumer group too. A relay makes the group again with a script that also writes a new
+   generation id. `NOGROUP` only makes the group again; it no longer counts. Each relay runs a KV
+   step beside its sampler. The step compares the Redis generation and epoch with the record in the
+   NATS KV bucket `GATEWAY_DECISIONS_GEN`. A different generation is a reset. The same generation
+   with an epoch that did not grow is a return to an older state. A compare-and-set on the KV entry
+   selects one relay: the relay whose counting write wins. That relay:
+   - counts 1 in `gateway_decision_log_redis_resets_total` (see the known limits below)
+   - adds an estimate to `gateway_decision_log_lost_estimate_total`, and logs it. For a reset, the
+     estimate is the newer of the sample in the KV record and the relay's own local sample of the
+     old generation. For a return to an older state, it is the sample in the KV record only. So a
+     relay that started after the loss uses the stored KV sample.
 
    The estimate is **not a bound**: it is the last sample. Entries that the writer added after
    the sample make it undercount. Entries that the relays published after the sample make it
    overcount. With a 15 s sample, the error is about 15 s of writes or publishes. The
-   dashboard says "estimate". If no relay has a sample, it adds 0 and logs that the loss is
-   unknown. The sampler keeps a sample only while the stream has the consumer group. After a loss
-   that no relay has found yet (for example while each relay holds a batch during a NATS outage),
-   the stream has no group, so its length does not replace the sample from before the loss.
+   dashboard says "estimate". If no sample exists, the relay adds 0 and logs that the loss is
+   unknown. A relay keeps a local sample only while the stream has the consumer group and a
+   generation. After a loss that no relay has found yet (for example while each relay holds a batch
+   during a NATS outage), the stream has no group, so its length does not replace the sample from
+   before the loss.
 3. **Exact gaps in the export.** Each record has a `sequence` per `(instance_id, org)`, which
    starts at 1 when the instance starts. The CLI reports, per instance, the sequence numbers that
    are missing inside the exported range. This is exact for the events of the exported org, also

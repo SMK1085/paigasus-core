@@ -164,7 +164,7 @@ Expected: FAIL (the new cases do not match the rules).
 - Add `GatewayDecisionLogGenerationCheckFailing`: `expr: sum(increase(gateway_decision_log_generation_check_errors_total[15m])) > 0`,
   `for: 15m`, `severity: warning`, with this copy:
   - summary: `Gateway decision-log Redis reset check is failing`
-  - description: `The relay could not run the Redis reset check against the NATS KV bucket GATEWAY_DECISIONS_GEN for 15m. While it fails, a Redis reset is not counted. Read gateway_decision_log_generation_check_errors_total by kind. See RUNBOOK-observability.md, section "Gateway decision log".`
+  - description: `The Redis reset check against the NATS KV bucket GATEWAY_DECISIONS_GEN had errors again and again for 15m: each 15m window had at least one failed check. A failed check does not count a Redis reset, so a reset can be missed. A check that passes still counts a reset, and the alert can stay active up to 15m after the checks pass again. Read gateway_decision_log_generation_check_errors_total by kind. See RUNBOOK-observability.md, section "Gateway decision log".`
 
 No annotation prints `$value`.
 
