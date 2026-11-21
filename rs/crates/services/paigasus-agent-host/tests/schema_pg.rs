@@ -156,14 +156,15 @@ async fn no_index_names_the_holder_column() {
 }
 
 #[tokio::test]
-async fn down_drops_every_table_of_m0002_in_dependency_order() {
+async fn down_drops_every_table_of_m0003_in_dependency_order() {
     let Some((_node, _url, db)) = migrated_postgres().await else {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
-    Migrator::down(&db, Some(1)).await.expect("down of m0002");
+    Migrator::down(&db, Some(1)).await.expect("down of m0003");
     for table in ["thread", "inbox_lease", "run", "run_event", "inbox_event"] {
         assert!(support::scalar_bool(&db, &format!("SELECT to_regclass('{table}') IS NULL AS v")).await, "{table} must be gone");
     }
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('memory_file') IS NOT NULL AS v").await, "m0002 must stay");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox') IS NOT NULL AS v").await, "m0001 must stay");
 }

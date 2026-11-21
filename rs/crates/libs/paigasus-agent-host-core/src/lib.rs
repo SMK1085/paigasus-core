@@ -11,9 +11,11 @@ pub mod error;
 pub mod ids;
 pub mod inbox;
 pub mod lease;
+pub mod memory;
 pub mod mid_run;
 pub mod outbox;
 pub mod ports;
+pub mod render;
 pub mod run;
 pub mod timer;
 

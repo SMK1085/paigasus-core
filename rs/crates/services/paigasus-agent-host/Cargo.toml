@@ -44,7 +44,9 @@ paigasus-helikon = { version = "=0.6.12", default-features = false, features = [
 tokio-util = { workspace = true }
 paigasus-agent-host-core = { workspace = true }
 # `adapters::persistence` and `application::ingest` — ids and microsecond timestamps.
-uuid = { workspace = true, features = ["serde"] }
+# `adapters::helikon::memory_tool::run_nonce` — a random value per run. `v4` needs `getrandom`,
+# which this native-only service crate may use. `tests/memory_pg.rs` also reads scope UUIDs.
+uuid = { workspace = true, features = ["serde", "v4"] }
 jiff = { workspace = true }
 # `adapters::id` — the kernel mints a UUIDv7 from the host clock and `rand` entropy.
 paigasus-kernel = { workspace = true }
@@ -66,7 +68,8 @@ async-nats = { workspace = true }
 # The same creds callback as the gateway and IAM (SMA-493 D8): it re-reads the creds file on every
 # connect attempt. `{ workspace = true }`, so `moon.yml` hand-declares the `dependsOn` edge.
 paigasus-nats-creds = { workspace = true }
-# `adapters::nats::consumer` reads the message stream of the pull consumer.
+# `adapters::nats::consumer` reads the message stream of the pull consumer. The test model of
+# `adapters::helikon` also names the `BoxStream` type of the core `Model` trait.
 futures = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
@@ -88,6 +91,8 @@ tokio = { workspace = true, features = ["test-util"] }
 metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
 # `tests/lease_property_pg.rs` — the sequential property test of the lease and the claim.
 proptest = { workspace = true }
+# `tests/memory_pg.rs` runs the conformance suite of `MemoryStore` against Postgres.
+paigasus-agent-host-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

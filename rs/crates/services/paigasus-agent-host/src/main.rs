@@ -323,4 +323,9 @@ fn describe_agent_host_metrics() {
         names::AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL,
         "NATS messages on a subject that no channel maps. Each one is nacked with the maximum delay."
     );
+    // The name is provisional until SMA-798 moves it to `names::`.
+    describe_counter!(
+        "agent_host_memory_refusals_total",
+        "Memory tool commands that the agent host refused, labeled by kind (conflict, cap, path, sealed, store)."
+    );
 }

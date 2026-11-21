@@ -37,6 +37,11 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `nats.stream` | `AGENT_HOST_NATS__STREAM` | none | Must be `IAM_EVENTS`. |
 | `nats.durable` | `AGENT_HOST_NATS__DURABLE` | none | Must be `agent-host-inbox`. |
 | `nats.channels` | none (TOML only) | none | List of `[[nats.channels]]` tables. At least one is required. See the NATS section. |
+| `memory.backend` | `AGENT_HOST_MEMORY__BACKEND` | `postgres` | Memory store backend. Only `postgres` exists now. A backend switch does not move data. |
+| `memory.caps.max_file_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_FILE_BYTES` | `65536` | Largest memory file, in bytes. Greater than 0. |
+| `memory.caps.max_store_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_STORE_BYTES` | `1048576` | Largest memory total of a scope, in bytes. Greater than 0. |
+| `memory.caps.max_store_files` | `AGENT_HOST_MEMORY__CAPS__MAX_STORE_FILES` | `512` | Largest number of memory files in a scope. Greater than 0. |
+| `memory.caps.max_loaded_file_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_LOADED_FILE_BYTES` | `8192` | The cut of each file that the run start loads into the context. A longer file is cut with a truncation note. `view` does not use it (it cuts at 16,000 characters). Greater than 0, at most `max_file_bytes`. |
 
 The `[iam]` and `[nats]` sections are optional. A nested value that has no default, for example
 `iam.tls`, is easiest to set in the TOML file. `agent-host.toml.example` shows every key.
@@ -95,9 +100,9 @@ The service compares principals by UUID, not by string. The owner path does not 
 
 ## Storage
 
-Migrations after `m0001_create_inbox` add five tables: `thread`, `inbox_lease`, `run`, `run_event`
-and `inbox_event`. The unique key of `inbox_event` is (`inbox_id`, `source`, `ce_id`). It gives the
-deduplication. Composite foreign keys make the schema enforce that a thread, a run and an event
+The migration `m0003_create_inbox_event_tables` adds five tables: `thread`, `inbox_lease`, `run`,
+`run_event` and `inbox_event`. The unique key of `inbox_event` is (`inbox_id`, `source`, `ce_id`).
+It gives the deduplication. Composite foreign keys make the schema enforce that a thread, a run and an event
 belong to one inbox.
 
 `inbox_event.thread_id` has two states. Before the first claim, it is the thread that the ingress

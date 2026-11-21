@@ -206,6 +206,71 @@ def _parse_check_attr(stdout: bytes) -> frozenset[str]:
     return frozenset(path for path, _attr, value in zip(parts[0:-1:3], parts[1:-1:3], parts[2:-1:3], strict=True) if value == "set")
 
 
+_REGULAR_MODES = ("100644", "100755")
+
+
+def _index_text(root: Path, path: str) -> str | None:
+    """The UTF-8 text of the index blob of the tracked regular file `path`, or None.
+
+    None when the index has no entry for `path`, more than one entry (a merge conflict), or an
+    entry that is not a regular file (a symlink or a gitlink). A blob that is not UTF-8 raises,
+    because G4 applies to the blob as it does to the file on disk.
+    """
+    import task_inputs  # see binary_paths for why the import is here
+
+    env = {k: v for k, v in os.environ.items() if k not in task_inputs._GIT_LOCAL_ENV}
+    proc = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "ls-files", "--stage", "-z", "--", f":(literal){path}"],
+        cwd=root, capture_output=True, env=env, check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    entries = [e for e in proc.stdout.decode("utf-8", "replace").split("\0") if e]
+    if len(entries) != 1:
+        return None
+    meta, _, entry_path = entries[0].partition("\t")
+    mode, sha, stage = [*meta.split(" "), "", "", ""][:3]
+    if entry_path != path or mode not in _REGULAR_MODES or stage != "0":
+        return None
+    blob = subprocess.run(["git", "cat-file", "blob", sha], cwd=root, capture_output=True, env=env, check=False)
+    if blob.returncode != 0:
+        raise MoonOutputError(
+            f"{path}: `git cat-file blob {sha}` failed with rc {blob.returncode}: "
+            f"{blob.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    try:
+        return blob.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MoonOutputError(
+            f"{path}: the index blob is not valid UTF-8 ({exc.reason} at byte {exc.start}) - the scan cannot read it"
+        ) from exc
+
+
+def _read_tracked(root: Path, path: str, read_text: Callable[[Path], str]) -> str:
+    """The text of the tracked file `path`: the file on disk, else its index blob (SMA-841).
+
+    A tool can delete and write again a tracked file while the ban runs. `ci/next-env/run.sh`
+    removes each `next-env.d.ts` for the full run of `next typegen`, and `buf generate` with
+    `clean: true` removes its output directories. The file is then missing for some seconds, and
+    `moon ci` runs those tasks at the same time as this one. The index blob is the content that
+    git records for the path, so the ban still scans the file and does not skip it. Only a path
+    that is missing on disk AND has no regular-file blob in the index raises.
+    """
+    full = root / path
+    if full.is_file():
+        try:
+            return read_text(full)
+        except FileNotFoundError:
+            pass  # deleted between the check and the read: use the index, as below
+    text = _index_text(root, path)
+    if text is None:
+        raise MoonOutputError(
+            f"{path}: tracked by git but not a file on disk, and the index holds no regular-file blob "
+            f"for it - the ban cannot read it"
+        )
+    return text
+
+
 def ban_rows(
     root: Path,
     tracked,
@@ -217,8 +282,9 @@ def ban_rows(
     """G-ban rows for the `tracked` paths, and the set of paths that were read.
 
     A line is split on `\\n`; its text for a pin is `line.rstrip("\\r").strip()`. A tracked path that
-    is missing on disk raises MoonOutputError; it is never skipped. `read_text` raises on a file that
-    is not UTF-8, so only a path in `binary` (skipped before the read) escapes G4.
+    is missing on disk is never skipped: the ban reads its index blob (`_read_tracked`, SMA-841), and
+    raises MoonOutputError only when the index has no regular-file blob either. `read_text` raises on
+    a file that is not UTF-8, so only a path in `binary` (skipped before the read) escapes G4.
     """
     root = Path(root)
     rows: list[str] = []
@@ -231,11 +297,8 @@ def ban_rows(
     for path in sorted(tracked):
         if _excluded_by(path, binary) is not None:
             continue
-        full = root / path
-        if not full.is_file():
-            raise MoonOutputError(f"{path}: tracked by git but not a file on disk - the ban cannot read it")
         reads.add(path)
-        text = read_text(full)
+        text = _read_tracked(root, path, read_text)
         for lineno, raw in enumerate(text.split("\n"), 1):
             names = token_hits(raw)
             if not names:
@@ -638,6 +701,72 @@ def _put(root: Path, rel: str, data: str | bytes) -> None:
     path.write_bytes(data)
 
 
+def _index_fallback_failures(read_utf8: Callable[[Path], str]) -> list[str]:
+    """SMA-841: a tracked file that is missing on disk is read from the index, in a real git fixture.
+
+    The fixture runs only `git init` and `git add`, so it needs no maintenance keys (ci/CLAUDE.md,
+    SMA-708). Each row fails on the code before SMA-841, which raised for every missing file.
+    """
+    failures: list[str] = []
+    import task_inputs
+
+    env = {k: v for k, v in os.environ.items() if k not in task_inputs._GIT_LOCAL_ENV}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+
+        def git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=root, env=env, capture_output=True, check=True)
+
+        git("init", "-q")
+        _put(root, "ci/gen.sh", "#!/bin/bash\nuv sync\n")
+        _put(root, "ci/race.sh", "uv lock\n")
+        _put(root, "ci/latin.sh", b"uv \xff\n")
+        (root / "ci" / "link.sh").symlink_to("gen.sh")
+        git("add", "ci/gen.sh", "ci/race.sh", "ci/latin.sh", "ci/link.sh")
+        for rel in ("ci/gen.sh", "ci/latin.sh", "ci/link.sh"):
+            (root / rel).unlink()
+
+        def run(tracked, read_text=read_utf8):
+            return ban_rows(root, tracked, read_text=read_text, binary=frozenset(), pinned={})
+
+        # A tracked file that a tool deleted (next-env.d.ts under `next typegen`) is scanned from the index.
+        try:
+            rows, reads = run(["ci/gen.sh"])
+            if len(rows) != 1 or "ci/gen.sh:2" not in rows[0] or reads != {"ci/gen.sh"}:
+                failures.append(f"python-env ban: a tracked file missing on disk gave {rows} and read {reads}, want one row for ci/gen.sh:2")
+        except Exception as exc:  # the code before SMA-841 raised here
+            failures.append(f"python-env ban: a tracked file missing on disk raised {type(exc).__name__}, want its index blob scanned: {exc}")
+
+        # The file goes away between the is_file check and the read.
+        def vanish(path: Path) -> str:
+            path.unlink()
+            return read_utf8(path)
+
+        try:
+            rows, _ = run(["ci/race.sh"], read_text=vanish)
+            if len(rows) != 1 or "ci/race.sh:1" not in rows[0]:
+                failures.append(f"python-env ban: a file deleted during the read gave {rows}, want one row for ci/race.sh:1")
+        except Exception as exc:
+            failures.append(f"python-env ban: a file deleted during the read raised {type(exc).__name__}, want its index blob scanned: {exc}")
+
+        # Fail closed: no file and no index entry, a dangling tracked symlink, a blob that is not UTF-8.
+        for rel, what, want in (
+            ("ci/never.sh", "a path with no file and no index entry", "ci/never.sh"),
+            ("ci/link.sh", "a tracked symlink that is missing on disk", "ci/link.sh"),
+            ("ci/latin.sh", "an index blob that is not UTF-8", "not valid UTF-8"),
+        ):
+            try:
+                run([rel])
+                failures.append(f"python-env ban: {what} did not raise")
+            except MoonOutputError as exc:
+                if want not in str(exc):
+                    failures.append(f"python-env ban: {what} raised without {want!r}: {exc}")
+            except Exception as exc:  # the wrong class is a row, not a crash
+                failures.append(f"python-env ban: {what} raised {type(exc).__name__}, want MoonOutputError: {exc}")
+    return failures
+
+
 def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callable[..., list[str] | None]) -> list[str]:
     """Every self-test row of the ban (spec 5.5). `read_utf8` and `smoke_unreached` come from cargo_moon_parity.py."""
     failures: list[str] = []
@@ -771,6 +900,8 @@ def self_test_failures(read_utf8: Callable[[Path], str], smoke_unreached: Callab
         rows, _ = run(["ci/sp2.sh"], pinned={("ci/sp2.sh", "uv sync"): "fixture"})
         if not any("ci/sp2.sh:1" in r for r in rows):
             failures.append(f"python-env ban: `uv  sync` matched the pin `uv sync`: {rows}")
+
+    failures.extend(_index_fallback_failures(read_utf8))
 
     # binary_paths reads the real .gitattributes of this repository.
     repo = _repo_root()

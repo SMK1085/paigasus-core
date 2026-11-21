@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! m0002 — create the `thread`, `inbox_lease`, `run`, `run_event` and `inbox_event` tables
+//! m0003 — create the `thread`, `inbox_lease`, `run`, `run_event` and `inbox_event` tables
 //! (spec §7.1).
 //!
 //! The composite foreign keys `(thread_id, inbox_id)` and `(claimed_run_id, inbox_id)` make the

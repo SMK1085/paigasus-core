@@ -8,6 +8,7 @@ use std::time::Duration;
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::{Figment, error::Error as FigmentError};
 use paigasus_agent_host_core::claim::ClaimConfig;
+use paigasus_agent_host_core::memory::MemoryCaps;
 use paigasus_agent_host_core::mid_run::MidRunPolicy;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -73,6 +74,44 @@ pub struct Config {
     /// The NATS source (spec §9.1). No `[nats]` section means no NATS task.
     #[serde(default)]
     pub nats: Option<NatsConfig>,
+    pub memory: MemoryConfig,
+}
+
+/// The agent memory store.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryConfig {
+    /// The store backend. A backend switch does not move data (spec 6.8).
+    pub backend: MemoryBackend,
+    pub caps: MemoryCapsConfig,
+}
+
+/// The memory backends. Only Postgres exists now. SMA-829 adds `s3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryBackend {
+    Postgres,
+}
+
+/// The memory limits. Every value is greater than 0. `max_loaded_file_bytes` is at most `max_file_bytes`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryCapsConfig {
+    pub max_file_bytes: u64,
+    pub max_store_bytes: u64,
+    pub max_store_files: u64,
+    pub max_loaded_file_bytes: u64,
+}
+
+impl MemoryCapsConfig {
+    /// The limits as the core type.
+    #[must_use]
+    pub fn to_caps(&self) -> MemoryCaps {
+        MemoryCaps {
+            max_file_bytes: self.max_file_bytes,
+            max_store_bytes: self.max_store_bytes,
+            max_store_files: self.max_store_files,
+            max_loaded_file_bytes: self.max_loaded_file_bytes,
+        }
+    }
 }
 
 /// The NATS source (spec §9.1).
@@ -286,6 +325,10 @@ pub enum ConfigError {
     NatsDurableName(String),
     #[error("nats.stream must be \"IAM_EVENTS\" (got \"{0}\"): the NATS identity grants only that stream")]
     NatsStreamName(String),
+    #[error("memory.caps.{0} must be greater than 0")]
+    MemoryCapZero(&'static str),
+    #[error("memory.caps.max_loaded_file_bytes must not be greater than memory.caps.max_file_bytes")]
+    MemoryLoadedOverFile,
 }
 
 /// The defaults. `database_url` has none: it is required. `iam` has none: no `[iam]` section
@@ -301,6 +344,21 @@ struct Defaults {
     claim: ClaimSettings,
     ingress: IngressConfig,
     mid_run: MidRunConfig,
+    memory: MemoryDefaults,
+}
+
+#[derive(Serialize)]
+struct MemoryDefaults {
+    backend: &'static str,
+    caps: MemoryCapsDefaults,
+}
+
+#[derive(Serialize)]
+struct MemoryCapsDefaults {
+    max_file_bytes: u64,
+    max_store_bytes: u64,
+    max_store_files: u64,
+    max_loaded_file_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -462,6 +520,15 @@ impl Config {
             },
             ingress: IngressConfig { max_body_bytes: 262_144 },
             mid_run: MidRunConfig { policy: MidRunPolicy::Queue },
+            memory: MemoryDefaults {
+                backend: "postgres",
+                caps: MemoryCapsDefaults {
+                    max_file_bytes: 65_536,
+                    max_store_bytes: 1_048_576,
+                    max_store_files: 512,
+                    max_loaded_file_bytes: 8_192,
+                },
+            },
         }))
         .merge(Toml::file("agent-host.toml"))
         .merge(Env::prefixed("AGENT_HOST_").split("__"))
@@ -536,6 +603,20 @@ impl Config {
                 return Err(ConfigError::NatsStreamName(nats.stream.clone()));
             }
             validate_nats_channels(&nats.channels)?;
+        }
+        let caps = &self.memory.caps;
+        for (name, value) in [
+            ("max_file_bytes", caps.max_file_bytes),
+            ("max_store_bytes", caps.max_store_bytes),
+            ("max_store_files", caps.max_store_files),
+            ("max_loaded_file_bytes", caps.max_loaded_file_bytes),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::MemoryCapZero(name));
+            }
+        }
+        if caps.max_loaded_file_bytes > caps.max_file_bytes {
+            return Err(ConfigError::MemoryLoadedOverFile);
         }
         Ok(())
     }
@@ -656,6 +737,23 @@ mod tests {
         });
     }
 
+    #[test]
+    fn memory_defaults() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_url();
+            assert_eq!(cfg.memory.backend, MemoryBackend::Postgres);
+            let caps = cfg.memory.caps.to_caps();
+            assert_eq!(caps.max_file_bytes, 65_536);
+            assert_eq!(caps.max_store_bytes, 1_048_576);
+            assert_eq!(caps.max_store_files, 512);
+            assert_eq!(caps.max_loaded_file_bytes, 8_192);
+            assert_eq!(caps, MemoryCaps::default());
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
     /// One §8.7 range: the key, a setter, the bounds, and the error of a value out of range.
     struct RangeRow {
         key: &'static str,
@@ -735,6 +833,53 @@ mod tests {
                     let expected = if ok { Ok(()) } else { Err((row.err)(value)) };
                     assert_eq!(cfg.validate(), expected, "{} = {value}", row.key);
                 }
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn memory_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AGENT_HOST_MEMORY__CAPS__MAX_FILE_BYTES", "1000");
+            jail.set_env("AGENT_HOST_MEMORY__CAPS__MAX_LOADED_FILE_BYTES", "500");
+            let cfg = with_url();
+            assert_eq!(cfg.memory.caps.max_file_bytes, 1000);
+            assert_eq!(cfg.memory.caps.max_loaded_file_bytes, 500);
+            assert_eq!(cfg.memory.caps.max_store_bytes, 1_048_576);
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn memory_backend_s3_is_refused_for_now() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AGENT_HOST_MEMORY__BACKEND", "s3");
+            let err = Config::load().expect_err("s3 is not a backend yet");
+            assert!(err.to_string().contains("s3"), "the error must name the value: {err}");
+            // Positive control: the postgres value loads.
+            jail.set_env("AGENT_HOST_MEMORY__BACKEND", "postgres");
+            assert!(Config::load().is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn memory_cap_zero_is_invalid() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            for name in ["max_file_bytes", "max_store_bytes", "max_store_files", "max_loaded_file_bytes"] {
+                let mut cfg = with_url();
+                match name {
+                    "max_file_bytes" => cfg.memory.caps.max_file_bytes = 0,
+                    "max_store_bytes" => cfg.memory.caps.max_store_bytes = 0,
+                    "max_store_files" => cfg.memory.caps.max_store_files = 0,
+                    _ => cfg.memory.caps.max_loaded_file_bytes = 0,
+                }
+                assert_eq!(cfg.validate(), Err(ConfigError::MemoryCapZero(name)), "{name} = 0");
             }
             Ok(())
         });
@@ -1104,6 +1249,21 @@ mod tests {
             let nats = cfg.nats.as_ref().expect("nats");
             assert_eq!(nats.channels.len(), 1);
             assert_eq!(nats.channels[0].inbox, Uuid::from_u128(1));
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loaded_cap_over_file_cap_is_invalid() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.memory.caps.max_file_bytes = 100;
+            cfg.memory.caps.max_loaded_file_bytes = 101;
+            assert_eq!(cfg.validate(), Err(ConfigError::MemoryLoadedOverFile));
+            // The boundary is accepted.
+            cfg.memory.caps.max_loaded_file_bytes = 100;
             assert_eq!(cfg.validate(), Ok(()));
             Ok(())
         });

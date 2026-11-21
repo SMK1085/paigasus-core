@@ -101,7 +101,7 @@ Core crate `rs/crates/libs/paigasus-agent-host-core/`: modify `src/inbox.rs`, `s
 `src/ports.rs`, `src/lib.rs`; create `src/lease.rs`, `src/claim.rs`, `src/mid_run.rs`.
 
 Service crate `rs/crates/services/paigasus-agent-host/`:
-- create `src/adapters/persistence/migration/m0002_create_inbox_event_tables.rs`,
+- create `src/adapters/persistence/migration/m0003_create_inbox_event_tables.rs`,
   `src/adapters/persistence/time.rs`, `src/adapters/persistence/inbox_repository.rs`,
   `src/adapters/persistence/lease_store/{mod.rs,take.rs,claim.rs,complete.rs}`,
   `src/adapters/id.rs`, `src/application/{mod.rs,ingest.rs,lease_keeper.rs}`,
@@ -135,7 +135,7 @@ Elsewhere: `rs/Cargo.toml`, `rs/Cargo.lock`, `rs/release-plz.toml`, `rs/.config/
 
 **Decisions this plan makes inside the spec's room (§14):**
 
-- One migration, `m0002_create_inbox_event_tables`, holds all five tables of §7.1. It adds
+- One migration, `m0003_create_inbox_event_tables`, holds all five tables of §7.1. It adds
   `CHECK (status IN ('pending','done','dead'))` on `inbox_event` and a foreign key
   `run_event.event_id → inbox_event(id)` (added after `inbox_event` exists). `run.status` has no
   `CHECK`, because SMA-790 adds values.
@@ -363,10 +363,10 @@ mid_run_policy_reads_snake_case                     // serde_json::from_str::<Mi
 
 ---
 
-### Task 3: The inbox tables (m0002)
+### Task 3: The inbox tables (m0003)
 
 **Files:**
-- Create: `src/adapters/persistence/migration/m0002_create_inbox_event_tables.rs`, `tests/schema_pg.rs`, `tests/support/inbox.rs`
+- Create: `src/adapters/persistence/migration/m0003_create_inbox_event_tables.rs`, `tests/schema_pg.rs`, `tests/support/inbox.rs`
 - Modify: `src/adapters/persistence/migration/mod.rs`, `tests/boot_pg.rs:36,51,55`,
   `tests/support/mod.rs`, `tests/docker_preflight.rs`, `rs/.config/nextest.toml`
 
@@ -401,7 +401,7 @@ no_index_names_the_holder_column                 // holder is diagnostic only: p
   foreign key to `FOREIGN KEY (thread_id) REFERENCES thread (id)`. The test must fail.
 
 - [ ] **Step 2: Run and see them fail.** Run: `cd rs && cargo nextest run --locked -p paigasus-agent-host --test schema_pg --test boot_pg`. Expected: FAIL (tables missing).
-- [ ] **Step 3: Implement m0002.** One `execute_unprepared` per statement, in this order: `thread`,
+- [ ] **Step 3: Implement m0003.** One `execute_unprepared` per statement, in this order: `thread`,
   `inbox_lease`, `run`, `run_event`, `inbox_event`, `ALTER TABLE run_event ADD FOREIGN KEY
   (event_id) REFERENCES inbox_event (id)`, the partial index. `down` drops in reverse order. Add
   the migration to `Migrator::migrations()`.

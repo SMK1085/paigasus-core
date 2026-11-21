@@ -20,12 +20,13 @@ use sea_orm_migration::MigratorTrait;
 
 const READY_BUDGET: Duration = Duration::from_secs(90);
 
-fn migration_count() -> i64 {
-    Migrator::migrations().len() as i64
-}
-
 async fn applied(db: &sea_orm::DatabaseConnection) -> i64 {
     support::scalar_i64(db, &format!("SELECT count(*)::bigint AS n FROM {MIGRATION_TABLE}")).await
+}
+
+/// The number of migrations of this crate.
+fn migrations() -> i64 {
+    i64::try_from(Migrator::migrations().len()).expect("a small count")
 }
 
 #[tokio::test]
@@ -38,7 +39,7 @@ async fn a_fresh_database_boots_and_applies_every_migration_once() {
     let (mut child, port) = support::spawn_service(&url);
     support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
 
-    assert_eq!(applied(&db).await, migration_count(), "every migration must be recorded exactly once");
+    assert_eq!(applied(&db).await, migrations(), "every migration must be recorded exactly once");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox') IS NOT NULL AS v").await, "m0001 must create the inbox table");
 }
 
@@ -53,11 +54,11 @@ async fn a_second_boot_applies_nothing() {
         let (mut first, port) = support::spawn_service(&url);
         support::wait_for_status(&mut first, port, "/readyz", 200, READY_BUDGET).await;
     }
-    assert_eq!(applied(&db).await, migration_count());
+    assert_eq!(applied(&db).await, migrations());
 
     let (mut second, port) = support::spawn_service(&url);
     support::wait_for_status(&mut second, port, "/readyz", 200, READY_BUDGET).await;
-    assert_eq!(applied(&db).await, migration_count(), "a second boot must not apply any migration again");
+    assert_eq!(applied(&db).await, migrations(), "a second boot must not apply a migration again");
 }
 
 #[tokio::test]
