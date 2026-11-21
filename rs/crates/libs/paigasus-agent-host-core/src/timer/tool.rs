@@ -74,19 +74,22 @@ pub async fn run_tool(ws: &mut TimerWorkspace, tool: TimerToolName, args: Value)
 
 async fn run(ws: &mut TimerWorkspace, tool: TimerToolName, args: &Value) -> Result<String, TimerRefusal> {
     let bad = |detail: &str| TimerRefusal::Arguments { tool, detail: detail.to_string() };
+    // A JSON null is an absent argument. Some providers send null for an optional argument.
+    let arg = |key: &str| args.get(key).filter(|v| !v.is_null());
     let text_arg = |key: &str| -> Result<&str, TimerRefusal> {
-        match args.get(key) {
+        match arg(key) {
             Some(Value::String(s)) => Ok(s.as_str()),
             Some(_) => Err(bad(&format!("{key} must be a text"))),
             None => Err(bad(&format!("{key} is missing"))),
         }
     };
-    if !args.is_object() {
+    // Some providers send null for a tool that takes no arguments.
+    if !args.is_object() && !(tool == TimerToolName::ListTimers && args.is_null()) {
         return Err(bad("the arguments must be a JSON object"));
     }
     match tool {
         TimerToolName::ScheduleFollowUp => {
-            let due = match (args.get("at"), args.get("in_seconds")) {
+            let due = match (arg("at"), arg("in_seconds")) {
                 (Some(_), Some(_)) => return Err(bad("give either at or in_seconds, not both")),
                 (None, None) => return Err(bad("give either at or in_seconds")),
                 (Some(Value::String(s)), None) => FollowUpDue::At(s.parse::<Timestamp>().map_err(|_| bad(AT_DETAIL))?),
@@ -94,8 +97,8 @@ async fn run(ws: &mut TimerWorkspace, tool: TimerToolName, args: &Value) -> Resu
                 (None, Some(v)) => FollowUpDue::InSeconds(v.as_i64().ok_or_else(|| bad("in_seconds must be an integer"))?),
             };
             let note = text_arg("note")?;
-            let new_thread = match args.get("new_thread") {
-                None | Some(Value::Null) => false,
+            let new_thread = match arg("new_thread") {
+                None => false,
                 Some(Value::Bool(b)) => *b,
                 Some(_) => return Err(bad("new_thread must be true or false")),
             };

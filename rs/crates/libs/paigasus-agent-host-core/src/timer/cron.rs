@@ -17,6 +17,8 @@ pub const WALK_BOUND: u32 = 10_000;
 /// The number of days that the civil gap check covers.
 pub const CIVIL_GAP_WINDOW_DAYS: u32 = 366;
 /// A walk starts at most this many hours before `now`. An older slot is a long outage.
+/// The smallest gap in seconds between two slots of a five-field cron pattern.
+const FIELD_FLOOR_SECS: u64 = 60;
 const WALK_CLAMP_HOURS: i64 = 25;
 
 const FIELD_NAMES: [&str; 5] = ["minute", "hour", "day of month", "month", "day of week"];
@@ -272,6 +274,10 @@ impl CronSchedule {
     /// # Errors
     /// `Cron` when the cron library finds no time. `Tz` when the end of the window is not valid.
     pub fn min_civil_gap(&self, from: DateTime, days: u32, min_secs: u64) -> Result<Option<u64>, WalkError> {
+        if min_secs <= FIELD_FLOOR_SECS {
+            // A five-field pattern has no gap below 60 s, so no gap can be below the minimum.
+            return Ok(None);
+        }
         let end = from.checked_add(Span::new().days(i64::from(days))).map_err(|e| WalkError::Tz(e.to_string()))?;
         let mut prev: Option<DateTime> = None;
         let mut cur = from;
@@ -284,6 +290,10 @@ impl CronSchedule {
                 let gap = u64::try_from(p.duration_until(n).as_secs()).unwrap_or(0);
                 if gap < min_secs {
                     return Ok(Some(gap));
+                }
+                if gap <= FIELD_FLOOR_SECS {
+                    // The smallest gap that a five-field pattern can have is seen. No later gap is smaller.
+                    return Ok(None);
                 }
             }
             prev = Some(n);
@@ -608,5 +618,16 @@ mod tests {
         assert_eq!(gap("*/15 * * * *", 900), Ok(None));
         assert_eq!(gap("*/15 * * * *", 901), Ok(Some(900)));
         assert_eq!(gap("* * * * *", 900), Ok(Some(60)));
+    }
+
+    #[test]
+    fn civil_gap_check_stops_early_at_the_five_field_floor() {
+        let from = civil("2026-01-01T00:00:00");
+        let started = std::time::Instant::now();
+        // No pattern has a gap below 60 s, so a minimum of 60 s needs no walk.
+        let none = sched("* * * * *", "UTC").min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, 60);
+        let low = sched("* * * * *", "UTC").min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, 1);
+        assert_eq!((none, low), (Ok(None), Ok(None)));
+        assert!(started.elapsed() < std::time::Duration::from_millis(300), "the walk did not stop early: {:?}", started.elapsed());
     }
 }

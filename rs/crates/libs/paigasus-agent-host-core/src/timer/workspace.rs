@@ -440,7 +440,7 @@ mod tests {
     use super::super::fake::{FakeClock, InMemoryTimerRepository, SeqIds};
     use super::super::{BundledTzResolver, TimerToolName, TimerView, follow_up_set_text, list_text, run_tool, schedule_set_text};
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -873,6 +873,33 @@ mod tests {
             assert_eq!(reply.cause, None);
         }
         assert!(ws.seal().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_null_argument_is_an_absent_argument() {
+        let (mut ws, _rig) = rig(TimerCaps::default());
+        let f = TimerToolName::ScheduleFollowUp;
+        let reply = run_tool(&mut ws, f, json!({"at": "2026-11-22T09:00:00Z", "in_seconds": null, "note": "n"})).await;
+        assert!(!reply.refused, "{}", reply.text);
+        let reply = run_tool(&mut ws, f, json!({"at": null, "in_seconds": 120, "note": "n", "new_thread": null})).await;
+        assert!(!reply.refused, "{}", reply.text);
+        // A null that stands for a missing required argument is still a refusal.
+        let reply = run_tool(&mut ws, f, json!({"at": null, "in_seconds": null, "note": "n"})).await;
+        assert!(reply.refused && reply.text.contains("give either at or in_seconds"), "{}", reply.text);
+        let reply = run_tool(&mut ws, TimerToolName::CancelTimer, json!({"timer_id": null})).await;
+        assert!(reply.refused && reply.text.contains("timer_id is missing"), "{}", reply.text);
+    }
+
+    #[tokio::test]
+    async fn list_timers_accepts_null_and_empty_arguments() {
+        let (mut ws, _rig) = rig(TimerCaps::default());
+        for args in [Value::Null, json!({})] {
+            let reply = run_tool(&mut ws, TimerToolName::ListTimers, args.clone()).await;
+            assert!(!reply.refused, "{args}: {}", reply.text);
+        }
+        // Another tool still needs an object.
+        let reply = run_tool(&mut ws, TimerToolName::CancelTimer, Value::Null).await;
+        assert!(reply.refused);
     }
 
     #[tokio::test]
