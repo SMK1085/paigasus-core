@@ -34,6 +34,9 @@ mod port_tests {
         assert_port::<dyn ClaimRepository>();
         assert_port::<dyn TimerRepository>();
         assert_port::<dyn Scheduler>();
+        assert_port::<dyn TzResolver>();
+        assert_port::<dyn RunClock>();
+        assert_port::<dyn IdSource>();
         assert_port::<dyn MemoryStore>();
         assert_port::<dyn Outbox>();
         assert_port::<dyn AgentResolver>();
