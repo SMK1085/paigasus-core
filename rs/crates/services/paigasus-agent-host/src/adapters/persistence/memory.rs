@@ -140,8 +140,8 @@ impl MemoryStore for PgMemoryStore {
 /// The work of `apply` and `apply_in` on one transaction (spec §6.8). The caller commits or
 /// rolls back.
 async fn apply_body(txn: &DatabaseTransaction, set: &MemoryCommitSet, caps: &MemoryCaps) -> Result<(), MemoryApplyError> {
-    // A set with no change takes no scope row and no lock.
-    if set.changes.is_empty() {
+    // A set with no change and no guard takes no scope row and no lock.
+    if set.is_empty() {
         return Ok(());
     }
     let scope = &set.scope;
@@ -157,6 +157,7 @@ async fn apply_body(txn: &DatabaseTransaction, set: &MemoryCommitSet, caps: &Mem
         .map_err(apply_err)?
         .ok_or_else(|| MemoryApplyError::Store("the memory scope row is missing after its insert".to_string()))?;
     let before = usage_of(&locked).map_err(apply_err)?;
+    check_guards(txn, set).await?;
 
     for change in set.changes.changes() {
         let conflict = || MemoryApplyError::Conflict { path: change.path().clone() };
@@ -210,6 +211,32 @@ async fn apply_body(txn: &DatabaseTransaction, set: &MemoryCommitSet, caps: &Mem
     ))
     .await
     .map_err(apply_err)?;
+    Ok(())
+}
+
+/// Refuse the set when the store holds a path that a guard covers and that no change names.
+///
+/// The guards run in set order, and the paths of one guard run in byte order. So the first
+/// outsider is the same path that every other adapter reports. A guard covers its own path as
+/// a file, and every path under it. The root guard has no file path, so only the prefix term
+/// matches.
+async fn check_guards(txn: &DatabaseTransaction, set: &MemoryCommitSet) -> Result<(), MemoryApplyError> {
+    for guard in &set.guards {
+        let rows = txn
+            .query_all_raw(stmt(
+                &format!("SELECT path FROM memory_file WHERE {SCOPE} AND (path = $4 OR path LIKE $5 ESCAPE '\\') ORDER BY path"),
+                with_scope(&set.scope, [guard.as_str().into(), like_prefix(guard).into()]),
+            ))
+            .await
+            .map_err(apply_err)?;
+        for row in &rows {
+            let raw: String = row.try_get("", "path").map_err(apply_err)?;
+            let path = MemoryPath::parse(&raw).map_err(|_| MemoryApplyError::Store("a stored path is not valid".to_string()))?;
+            if set.changes.get(&path).is_none() {
+                return Err(MemoryApplyError::Conflict { path });
+            }
+        }
+    }
     Ok(())
 }
 

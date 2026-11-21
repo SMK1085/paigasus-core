@@ -94,6 +94,16 @@ impl MemoryStore for InMemoryMemoryStore {
     async fn apply(&self, set: &MemoryCommitSet, caps: &MemoryCaps) -> Result<(), MemoryApplyError> {
         let mut state = self.lock();
         let before = usage_of(&state.files, &set.scope);
+        // A guard refuses a stored path that it covers and that no change names. This runs
+        // first, so a guard conflict wins over every cap refusal.
+        for guard in &set.guards {
+            for k in state.files.keys().filter(|k| in_scope(&set.scope, k)) {
+                let path = MemoryPath::parse(&k.3).expect("the store holds valid paths");
+                if guard.covers(&path) && set.changes.get(&path).is_none() {
+                    return Err(MemoryApplyError::Conflict { path });
+                }
+            }
+        }
         // Work on a copy, so a refusal leaves the store as it was.
         let mut files = state.files.clone();
         let mut counter = state.counter;
@@ -160,7 +170,7 @@ mod tests {
             content: "a\0b".into(),
             expected: Expected::Absent,
         });
-        let set = MemoryCommitSet { scope: scope.clone(), changes };
+        let set = MemoryCommitSet::new(scope.clone(), changes);
         let err = fake.apply(&set, &MemoryCaps::default()).await.unwrap_err();
         assert!(matches!(err, MemoryApplyError::Store(_)), "{err:?}");
         assert_eq!(fake.get(&scope, &path).await.unwrap(), None);
