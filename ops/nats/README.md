@@ -15,7 +15,7 @@ only the mechanics of using the directory; `permissions.md` covers the *why*.
 | path | purpose |
 |---|---|
 | `subjects.env` | The single source of truth for every subject/inbox-prefix grant. `provision.sh` and `check-subjects.sh` both source it — edit grants here, nowhere else. |
-| `provision-decisions.sh` | Idempotent. Mints the `PAIGASUS_GATEWAY` account, its three decision-log users and creds, and (with `PUSH=1`) the `GATEWAY_DECISIONS` stream. `provision.sh` calls it for a new environment. |
+| `provision-decisions.sh` | Idempotent. Mints the `PAIGASUS_GATEWAY` account, its three decision-log users and creds, and (with `PUSH=1`) the `GATEWAY_DECISIONS` stream and the `GATEWAY_DECISIONS_GEN` key-value bucket (SMA-821). `provision.sh` calls it for a new environment. |
 | `provision.sh` | Mints the IAM account, its three users, the `.creds` files, the stream, and the durable consumer against a real broker. At the end it calls `provision-decisions.sh` for the `PAIGASUS_GATEWAY` account. Run once per environment, by hand. |
 | `check-subjects.sh` | CI gate: asserts `test/accounts.conf.tmpl` grants *exactly* the subjects declared in `subjects.env`, in both directions. Keeps the artifact that is tested from drifting away from the artifact that is deployed. |
 | `permissions.md` | The design rationale behind every grant — read this before editing `subjects.env`. |
