@@ -221,12 +221,15 @@ The rules:
   - A fixed-hour pattern fires each civil slot once, at its first occurrence (R2). `30 1 * * *`
     fires once on a fall-back day.
   - An interval pattern fires a civil slot in the overlap twice: at its first occurrence and at
-    its second occurrence. So `0 * * * *` fires at 01:00 CEST and at 01:00 CET in Berlin, and
-    keeps a real gap of 1 hour. `*/15 * * * *` fires all eight slots of the repeated hour.
+    its second occurrence. Berlin's repeated hour is 02:00–02:59 (03:00 CEST goes back to
+    02:00 CET). So `0 * * * *` fires at 02:00 CEST and at 02:00 CET in Berlin, and keeps a real
+    gap of 1 hour. `*/15 * * * *` fires all eight slots of the repeated hour, in instant order.
+    New York's repeated hour is 01:00–01:59.
   - The walk state therefore has an occurrence flag (`first` or `second`) next to the civil slot.
-    After a first-occurrence fire of an interval pattern in an overlap, the next result is the
-    same civil slot with `second`, if its instant is after `now`. Otherwise the walk goes on with
-    step 3. A fixed-hour pattern never uses `second`.
+    The walk uses the **fold rule** for an interval pattern in an overlap: it first walks every
+    slot of the overlap with `first`, then goes back to the first slot at or after the start of
+    the overlap with `second`, walks those, and then leaves the overlap. So the fires come in
+    instant order. Plan Task 3 holds the exact steps. A fixed-hour pattern never uses `second`.
   - The event id stays `timer:<timer_id>:<fire_at>`. The two occurrences have different instants,
     so they have different ids.
 - R4. A slot that was skipped because its instant was not after `now` (step 5) does not fire.
@@ -617,8 +620,9 @@ Several replicas can run the loop. `SKIP LOCKED` keeps them off the same rows.
 
 ### 11.4 Wiring in this branch
 
-- `main.rs` and `boot.rs` build `PgTimerStore`, the `TzResolver` and `PgScheduler`, and spawn the
-  loop when `[timers] enabled` is true.
+- `main.rs` and `boot.rs` build the `TzResolver` and `PgScheduler`, and spawn the
+  loop when `[timers] enabled` is true. `PgTimerStore` has no caller in the binary before SMA-790,
+  so `main.rs` does not build it (an unused value is a hard error).
 - The four tools and `TimerWorkspace` exist and have tests, but nothing registers them for a run.
   No run exists until SMA-790. SMA-790 builds the workspace per run, registers the tools and
   calls `apply_in` in its commit. This is the same state as the memory tool after SMA-789.
@@ -687,7 +691,7 @@ The database clock cannot be moved, so the DST and outage proof is in the pure l
   - `30 2 * * *` in Berlin: one fire per day, at 03:00 local on the spring day (R1) and at the
     first 02:30 on the fall day (R2).
   - `30 1 * * *` in New York: one fire on the fall day, at the first 01:30.
-  - `0 * * * *` on a fall-back day: two fires in the repeated hour, at 01:00 CEST and 01:00 CET,
+  - `0 * * * *` on a fall-back day: two fires in the repeated hour, at 02:00 CEST and 02:00 CET in Berlin,
     with different event ids (R3). On a spring day: one fire at 03:00 for the gap (R4).
   - `*/15 * * * *` on a fall-back day: all eight slots of the repeated hour fire (R3).
   - `@hourly` is an interval pattern, and `@daily` is a fixed-hour pattern (R3).
