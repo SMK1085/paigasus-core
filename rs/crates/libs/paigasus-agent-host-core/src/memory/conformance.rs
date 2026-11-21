@@ -134,6 +134,7 @@ pub async fn run_all(store: &dyn MemoryStore) {
     a_guard_conflict_wins_over_a_cap_refusal(store).await;
     a_guard_ignores_files_of_another_scope(store).await;
     guards_report_the_first_outsider_in_byte_order(store).await;
+    guards_report_guard_order_before_path_order(store).await;
 }
 
 /// Check that scope `a` and scope `b` do not see or change each other.
@@ -550,4 +551,12 @@ pub async fn guards_report_the_first_outsider_in_byte_order(store: &dyn MemorySt
     let s = fresh_scope();
     write(store, &s, &[("/b/2", "2"), ("/b/1", "1"), ("/a/9", "9"), ("/a/1", "1")]).await;
     assert_conflict(store.apply(&guarded(&s, vec![], &["/b", "/a"]), &caps()).await, "/a/1");
+}
+
+/// The guard order comes before the path order. `/a-b/x` is the first path in byte order, but the
+/// guard `/a` comes before the guard `/a-b`.
+pub async fn guards_report_guard_order_before_path_order(store: &dyn MemoryStore) {
+    let s = fresh_scope();
+    write(store, &s, &[("/a-b/x", "x"), ("/a/z", "z")]).await;
+    assert_conflict(store.apply(&guarded(&s, vec![], &["/a-b", "/a"]), &caps()).await, "/a/z");
 }

@@ -176,8 +176,9 @@ pub trait MemoryStore: Send + Sync {
   no change and no guard.
 - **The guard rule (SMA-843).** `apply` refuses with `Conflict { path }` when, before the changes,
   the store holds a path that a guard covers and that no change of the set names. A guard covers
-  the directory path as a file path and every path under it. `path` is the first such path, in
-  byte order. Every adapter reports the same path. The rule does not depend on the time of the
+  the directory path as a file path and every path under it. The guards are taken in byte
+  order. Inside one guard, the paths are taken in byte order. `path` is the first such path in
+  that order. Every adapter reports the same path. The rule does not depend on the time of the
   check. Full text: [SMA-843 spec](./2026-11-21-sma-843-memory-dir-guard-design.md).
 - `MemoryApplyError::{Conflict { path }, CapExceeded(CapError), Partial { applied: usize, failed_at:
   MemoryPath, cause: Box<MemoryApplyError> }, Store(String)}`. `Partial` exists only on S3.

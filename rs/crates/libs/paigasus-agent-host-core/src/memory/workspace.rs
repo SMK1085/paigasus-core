@@ -238,6 +238,7 @@ impl MemoryWorkspace {
                 }
                 rows.push((e.path, e.size_bytes));
             }
+            self.end_absent_resights(dir, &rows);
             self.listed.insert(dir.clone());
             self.listings.insert(dir.as_str().to_string(), rows);
         }
@@ -305,9 +306,16 @@ impl MemoryWorkspace {
             });
             rows.push((e.path, e.size_bytes));
         }
+        self.end_absent_resights(dir, &rows);
         self.listed.insert(dir.clone());
         self.listings.insert(dir.as_str().to_string(), rows);
         Ok(())
+    }
+
+    /// A fresh listing of `dir` that does not hold a marked path ends the re-sight mark of that
+    /// path. The path is absent again, so a later store state with the path is a conflict.
+    fn end_absent_resights(&mut self, dir: &MemoryDir, rows: &[(MemoryPath, u64)]) {
+        self.resight.retain(|path| !dir.contains(path) || rows.iter().any(|(p, _)| p == path));
     }
 
     /// True when the directory holds a file. The root is always a directory.
@@ -1121,6 +1129,35 @@ mod tests {
         assert!(matches!(ws.check_dir(&d("/tasks")).await, Err(WorkspaceError::Conflict { .. })));
         assert_eq!(ws.list(&d("/tasks")).await.unwrap(), vec![(p("/tasks/a"), 1), (p("/tasks/b"), 1)]);
         ws.check_dir(&d("/tasks")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_re_sight_mark_ends_when_a_listing_shows_the_path_absent() {
+        let conflict_b = Err(WorkspaceError::Conflict {
+            path: p("/tasks/b"),
+            also: Vec::new(),
+        });
+        // A fresh listing shows the marked path absent.
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.list(&d("/tasks")).await.unwrap();
+        direct(&f, &s, "/tasks/b", "b").await;
+        assert!(ws.write(&p("/tasks/b"), "mine".into()).await.is_err());
+        direct_delete(&f, &s, "/tasks/b").await;
+        assert_eq!(ws.list(&d("/tasks")).await.unwrap(), vec![(p("/tasks/a"), 1)]);
+        direct(&f, &s, "/tasks/b", "b").await;
+        assert_eq!(ws.check_dir(&d("/tasks")).await, conflict_b);
+
+        // A `check_dir` that passes shows the marked path absent.
+        let (f, s, mut ws) = setup(MemoryCaps::default());
+        direct(&f, &s, "/tasks/a", "a").await;
+        ws.list(&d("/tasks")).await.unwrap();
+        direct(&f, &s, "/tasks/b", "b").await;
+        assert!(ws.check_dir(&d("/tasks")).await.is_err());
+        direct_delete(&f, &s, "/tasks/b").await;
+        ws.check_dir(&d("/tasks")).await.unwrap();
+        direct(&f, &s, "/tasks/b", "b").await;
+        assert_eq!(ws.check_dir(&d("/tasks")).await, conflict_b);
     }
 
     #[tokio::test]
