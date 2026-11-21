@@ -259,7 +259,6 @@ impl MemoryWorkspace {
     }
 
     /// List `dir` from the store again, with the rules of `list`. It does not use the cached rows.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) async fn list_fresh(&mut self, dir: &MemoryDir) -> Result<Vec<(MemoryPath, u64)>, WorkspaceError> {
         self.listings.remove(dir.as_str());
         self.list(dir).await
@@ -271,7 +270,6 @@ impl MemoryWorkspace {
     /// conflict. A stored path that the run never saw, or that has a re-sight mark and no `known`
     /// entry, becomes a first sight. It returns the first conflict in byte order. Buffered changes do not count as store
     /// state. When it passes, the fresh rows replace the cached rows of `dir`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) async fn check_dir(&mut self, dir: &MemoryDir) -> Result<(), WorkspaceError> {
         let entries = self.store.list(&self.scope, dir).await?;
         let stored: BTreeMap<MemoryPath, MemoryVersion> = entries.iter().map(|e| (e.path.clone(), e.version.clone())).collect();

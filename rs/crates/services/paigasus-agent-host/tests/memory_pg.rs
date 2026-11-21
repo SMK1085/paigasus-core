@@ -237,7 +237,6 @@ async fn a_guard_only_set_takes_the_scope_lock() {
 /// A directory rename conflicts when another writer adds a file under the directory after the
 /// model viewed it.
 #[tokio::test]
-#[ignore = "needs Task 5"]
 async fn a_directory_rename_conflicts_on_a_file_added_before_the_commit() {
     let Some((_node, _url, db)) = migrated().await else {
         eprintln!("skipping memory_pg: Docker unavailable");
