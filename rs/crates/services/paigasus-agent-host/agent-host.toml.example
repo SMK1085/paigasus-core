@@ -43,7 +43,7 @@
 # [nats]
 # url = "nats://nats.internal.example.com:4222"
 # creds_file = "/etc/agent-host/agent-host-consumer.creds"   # optional
-# ca_file = "/etc/agent-host/nats-ca.pem"                    # optional; CA bundle for TLS
+# ca_file = "/etc/agent-host/nats-ca.pem"                    # optional; replaces the system roots, so it must hold every root the server chain needs
 # stream = "IAM_EVENTS"            # must be "IAM_EVENTS"
 # durable = "agent-host-inbox"     # must be "agent-host-inbox"
 #

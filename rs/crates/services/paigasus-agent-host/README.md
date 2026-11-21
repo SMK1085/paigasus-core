@@ -33,7 +33,7 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `mid_run.policy` | `AGENT_HOST_MID_RUN__POLICY` | `queue` | Only `queue` is valid. The service refuses `fold` and `interrupt` at boot. |
 | `nats.url` | `AGENT_HOST_NATS__URL` | none | NATS server URL. Required when you set `[nats]`. |
 | `nats.creds_file` | `AGENT_HOST_NATS__CREDS_FILE` | none | Credentials file of the `agent-host-consumer` identity. |
-| `nats.ca_file` | `AGENT_HOST_NATS__CA_FILE` | none | CA bundle for the NATS TLS link. |
+| `nats.ca_file` | `AGENT_HOST_NATS__CA_FILE` | none | CA bundle for the NATS TLS link. The bundle replaces the system root certificates. It must hold every root that the server chain needs. |
 | `nats.stream` | `AGENT_HOST_NATS__STREAM` | none | Must be `IAM_EVENTS`. |
 | `nats.durable` | `AGENT_HOST_NATS__DURABLE` | none | Must be `agent-host-inbox`. |
 | `nats.channels` | none (TOML only) | none | List of `[[nats.channels]]` tables. At least one is required. See the NATS section. |
@@ -78,8 +78,10 @@ grows too large gives 413 after the authentication.
 
 The service sets these fields. It does not trust the caller for them. `source` becomes
 `urn:paigasus:agents:http:<principal PRN>`. `actorprn` becomes the PRN of the caller.
-The service keeps `threadid` only if the thread belongs to the inbox. Otherwise it drops the value,
-and the event starts a new thread.
+The service sets the relational column `inbox_event.thread_id` from `threadid` only if the thread
+belongs to the inbox. Otherwise the column is null, and the event starts a new thread. The original
+`threadid` extension stays in the stored `envelope` in both cases. The service sets `actorprn` in
+the envelope and replaces any value from the caller.
 
 `GET /v1/service-info` uses the same authentication and has no authorisation check.
 
@@ -107,7 +109,8 @@ belong to one inbox.
 
 `inbox_event.thread_id` has two states. Before the first claim, it is the thread that the ingress
 kept, or null. From the first claim, it is the thread of the run that claimed the event. The
-`threadid` that the caller sent stays in the `envelope` column.
+`threadid` that the HTTP caller sent stays in the `envelope` column. The NATS path removes `threadid`
+and `actorprn` from the envelope before the insert.
 
 An inbox has one lease row. The service takes the lease, claims a batch of events, and renews the
 lease with a heartbeat. SMA-787 starts no worker. `worker.enabled` is read and validated only.

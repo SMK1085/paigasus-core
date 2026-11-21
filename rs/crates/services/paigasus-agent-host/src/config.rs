@@ -121,7 +121,8 @@ pub struct NatsConfig {
     /// The credentials file of the `agent-host-consumer` identity.
     #[serde(default)]
     pub creds_file: Option<String>,
-    /// A CA bundle for the NATS TLS link.
+    /// A CA bundle for the NATS TLS link. The bundle replaces the system root certificates, so it
+    /// must hold every root that the server chain needs.
     #[serde(default)]
     pub ca_file: Option<String>,
     pub stream: String,
