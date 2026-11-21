@@ -506,9 +506,11 @@ The tool refuses, with a text that names the limit and the value:
   DST resolution, so a DST change does not make a normal schedule fail. The actual gap between
   two fires can differ from the civil gap by up to one DST step. The walk covers the next 366
   days and stops at the first gap below the minimum, so an every-minute pattern fails at once.
-  Measured: an every-minute pattern first took 1.24 s in a debug build. So the walk has an early
-  exit at the five-field floor of 60 s. A minimum of 60 s or less passes with no walk. The walk
-  also stops when the smallest gap seen equals 60 s, because no five-field gap is smaller;
+  Measured in a debug build (Task 6 and Task 16): `create_schedule("* * * * *", "UTC")` at a
+  minimum of 60 s took 1.24 s before the early exit and about 150 microseconds after it. The
+  early exit is at the five-field floor of 60 s: a minimum of 60 s or less passes with no walk.
+  For a larger minimum the walk runs until the first gap below the minimum, or until the window
+  ends;
 - a schedule with no slot in the next `max_horizon_days`;
 - a create that makes the active `agent` timers more than `max_active_per_inbox`. The count is a
   fresh read of `active_agent_ids`, minus the ids of buffered cancels that are in that set, plus
