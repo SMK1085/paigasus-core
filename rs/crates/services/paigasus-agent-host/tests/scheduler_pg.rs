@@ -723,9 +723,23 @@ async fn replica_a_backs_off_and_replica_b_fires_one_event_with_the_scheduled_sl
     // Replica A fails to fire and backs off. The row becomes due again.
     back_off_once(&a, &env, id).await;
     exec(&env, &format!("UPDATE timer SET next_fire_at = now() - interval '1 second' WHERE id = '{id}'")).await;
-    // Replica B fires the row. Replica A fires it again with a stale read: it finds a done row.
+    // Replica A read the row before replica B fired it.
+    let stale = support::timer::timer_state(&env.db, id).await;
+    // Replica B fires the row. A fresh pass of replica A finds a done row.
     assert_eq!(b.fire_due(10).await.expect("b"), 1);
     assert_eq!(a.fire_due(10).await.expect("a"), 0);
+    // Replica A now backs off with its stale values. The fence matches no row.
+    let fired = support::timer::timer_state(&env.db, id).await;
+    assert!(
+        !a.back_off_after_read(id, i64::from(stale.fire_attempts), stale.fire_count, stale.next_fire_at_us, "stale")
+            .await
+            .expect("stale back-off")
+    );
+    let after = support::timer::timer_state(&env.db, id).await;
+    assert_eq!(
+        (after.status.as_str(), after.fire_attempts, after.fire_count, after.next_fire_at_us, after.scheduled_at_us),
+        (fired.status.as_str(), fired.fire_attempts, fired.fire_count, fired.next_fire_at_us, fired.scheduled_at_us)
+    );
     let events = support::timer::timer_events(&env.db, ib.uuid).await;
     assert_eq!(events.len(), 1, "one event");
     let slot = Timestamp::from_microsecond(seeded.scheduled_at_us).expect("ts");

@@ -506,6 +506,8 @@ neither, give a refusal text.
   context it needs. When the due time is later than `claim.thread_ttl_secs` from now, the result
   text says so directly. An operator who wants longer threads raises `claim.thread_ttl_secs`.
   ADR (f) does not change.
+- `list_timers` shows the due time (`next_fire_at`). After a back-off, this is the retry time.
+  The `fireAt` of the fire event is the scheduled slot (`scheduled_at`), not the retry time.
 - `list_timers` shows only `agent` timers. `system` timers are host business.
 - `cancel_timer` gives the same refusal text for an unknown id, an id of another inbox and a
   `system` timer (AG4). It refuses a `done`, `cancelled` or `failed` timer with a clear text.
@@ -571,7 +573,8 @@ For each row, one transaction:
    also logs a warning, as `ingest()` does. The payload holds no per-attempt field (§11.2), so a
    real double fire has matching payloads.
 5. Update the row: `last_fired_at = now`, `fire_count + 1`, `fire_attempts = 0`,
-   `updated_at = now`, and either `status = 'done'` or the new `next_slot` and `next_fire_at`.
+   `updated_at = now`, and either `status = 'done'` or the new `next_slot`. On Advance,
+   `scheduled_at` and `next_fire_at` both become the new slot instant.
 6. Commit.
 
 **Errors.** Every error path rolls the transaction back explicitly. Then:
@@ -579,9 +582,9 @@ For each row, one transaction:
 - **Permanent-looking errors.** A row that cannot be read (for example an unknown zone or pattern
   after a rolling deploy to an older replica), a `PlanError`, a panic, or a database error of
   SQLSTATE class 22 (data exception) or 23 (integrity constraint). In a new short transaction,
-  the row gets `fire_attempts + 1` and `next_fire_at = now + backoff`. The back-off moves only the
-  due time: `scheduled_at` does not change (exponential from the poll
-  interval, at most 1 hour). When `fire_attempts` reaches `max_fire_attempts`, the row gets
+  the row gets `fire_attempts + 1` and `next_fire_at = now + backoff` (exponential from the poll
+  interval, at most 1 hour). The back-off moves only the due time: `scheduled_at` does not
+  change. When `fire_attempts` reaches `max_fire_attempts`, the row gets
   `status = 'failed'` and `failure = <reason>` instead. The reason has at most 500 characters,
   no control characters, and never the note. A metric is counted and a warning is logged with the
   timer id. The pass goes on with the next row (AG6).

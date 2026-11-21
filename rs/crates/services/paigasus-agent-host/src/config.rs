@@ -718,7 +718,7 @@ impl Config {
             ("statement_timeout_ms", t.statement_timeout_ms, 100, 60_000),
             ("min_schedule_interval_secs", t.min_schedule_interval_secs, 60, 86_400),
             ("max_active_per_inbox", u64::from(t.max_active_per_inbox), 1, 1000),
-            ("max_horizon_days", u64::from(t.max_horizon_days), 1, 366),
+            ("max_horizon_days", u64::from(t.max_horizon_days), 1, u64::from(paigasus_agent_host_core::timer::CIVIL_GAP_WINDOW_DAYS)),
             ("max_fire_attempts", u64::from(t.max_fire_attempts), 1, 1000),
             ("min_follow_up_delay_secs", t.min_follow_up_delay_secs, 1, 86_400),
             ("max_agent_timers_created_per_day", u64::from(t.max_agent_timers_created_per_day), 1, 10_000),

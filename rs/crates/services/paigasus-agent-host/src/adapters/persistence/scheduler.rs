@@ -357,7 +357,7 @@ impl PgScheduler {
                 "UPDATE timer SET fire_attempts = fire_attempts + 1, updated_at = now(), \
                  status = CASE WHEN fire_attempts + 1 >= $3 THEN 'failed' ELSE status END, \
                  failure = CASE WHEN fire_attempts + 1 >= $3 THEN $4::text ELSE failure END, \
-                 next_fire_at = CASE WHEN fire_attempts + 1 >= $3 THEN next_fire_at ELSE to_timestamp(ceil(EXTRACT(EPOCH FROM clock_timestamp()))::bigint + $2::bigint) END \
+                 next_fire_at = CASE WHEN fire_attempts + 1 >= $3 THEN next_fire_at ELSE GREATEST(to_timestamp(ceil(EXTRACT(EPOCH FROM clock_timestamp()))::bigint + $2::bigint), scheduled_at) END \
                  WHERE id = $1 AND status = 'active' AND fire_attempts = $5::bigint AND fire_count = $6::bigint \
                  AND (EXTRACT(EPOCH FROM next_fire_at) * 1000000)::bigint = $7::bigint RETURNING status",
                 vec![
