@@ -524,8 +524,9 @@ The tool refuses, with a text that names the limit and the value:
 - a schedule whose smallest **civil** gap between two consecutive civil slots is below
   `min_schedule_interval_secs`. The walk measures gaps on the civil slot sequence, before the
   DST resolution, so a DST change does not make a normal schedule fail. The actual gap between
-  two fires can differ from the civil gap by up to one DST step. The walk covers the next 366
-  days and stops at the first gap below the minimum, so an every-minute pattern fails at once.
+  two fires can differ from the civil gap by up to one DST step. The walk checks every gap whose
+  earlier slot is in the next 366 days, the end of the window included. The later slot of that gap can
+  be after the end. The walk stops at the first gap below the minimum, so an every-minute pattern fails at once.
   Measured in a debug build (Task 6 and Task 16): `create_schedule("* * * * *", "UTC")` at a
   minimum of 60 s took 1.24 s before the early exit and about 150 microseconds after it. The
   early exit is at the five-field floor of 60 s: a minimum of 60 s or less passes with no walk.

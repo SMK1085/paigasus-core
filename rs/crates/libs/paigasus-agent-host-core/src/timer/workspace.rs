@@ -771,6 +771,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schedule_with_a_gap_at_the_window_end_is_refused() {
+        let (mut ws, rig) = rig(TimerCaps::default());
+        at_time(&rig, "2027-02-28T00:00:00Z");
+        // The first slot is 2028-02-29T00:00:00Z, at the window end and at the horizon.
+        assert_eq!(
+            schedule_refusal(&mut ws, "* 0 29 2 *", "UTC").await,
+            TimerRefusal::IntervalTooShort {
+                cron: "* 0 29 2 *".into(),
+                gap: 60,
+                min: 900
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn schedule_shows_three_slots() {
         let (mut ws, rig) = rig(TimerCaps::default());
         at_time(&rig, "2026-03-28T10:00:00Z");

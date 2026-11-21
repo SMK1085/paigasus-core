@@ -20,7 +20,7 @@ use paigasus_agent_host::adapters::persistence::timer_store::PgTimerStore;
 use paigasus_agent_host::adapters::timer_event::{SOURCE_AGENT, TIMER_FIRED_TYPE, build_fire_event};
 use paigasus_agent_host_core::ids::{EventId, InboxId, TimerId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
-use paigasus_agent_host_core::ports::{InboxRepository, Scheduler, TzResolver};
+use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, Scheduler, TzResolver};
 use paigasus_agent_host_core::timer::{BundledTzResolver, CronSchedule, Note, Slot, Timer, TimerKind, TimerOrigin, TimerParts, TimerStatus, WALK_BOUND, format_fire_at};
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, Statement, TransactionTrait};
@@ -180,7 +180,7 @@ struct CrashHook(Mutex<Option<tokio::sync::oneshot::Sender<i64>>>);
 
 #[async_trait]
 impl AfterInsertHook for CrashHook {
-    async fn after_insert(&self, txn: &DatabaseTransaction) {
+    async fn after_insert(&self, txn: &DatabaseTransaction, _outcome: &InsertOutcome) {
         let row = txn
             .query_one_raw(Statement::from_string(DatabaseBackend::Postgres, "SELECT pg_backend_pid()::bigint AS n".to_string()))
             .await
@@ -270,7 +270,7 @@ struct HoldHook {
 
 #[async_trait]
 impl AfterInsertHook for HoldHook {
-    async fn after_insert(&self, _txn: &DatabaseTransaction) {
+    async fn after_insert(&self, _txn: &DatabaseTransaction, _outcome: &InsertOutcome) {
         if let Some(tx) = self.reached.lock().expect("lock").take() {
             let _ = tx.send(());
         }
@@ -312,6 +312,16 @@ async fn ingress_does_not_wait_for_a_fire() {
     outcome.expect("ingress waited for the fire transaction (AG7)").expect("insert");
 }
 
+/// Records the insert outcome of each fire.
+struct OutcomeHook(Mutex<Vec<InsertOutcome>>);
+
+#[async_trait]
+impl AfterInsertHook for OutcomeHook {
+    async fn after_insert(&self, _txn: &DatabaseTransaction, outcome: &InsertOutcome) {
+        self.0.lock().expect("lock").push(outcome.clone());
+    }
+}
+
 #[tokio::test]
 async fn a_double_fire_is_a_matching_duplicate() {
     let Some(env) = env().await else {
@@ -327,7 +337,8 @@ async fn a_double_fire_is_a_matching_duplicate() {
 
     let recorder = DebuggingRecorder::new();
     let _guard = metrics::set_default_local_recorder(&recorder);
-    let sched = scheduler(&env.db, settings());
+    let outcomes = Arc::new(OutcomeHook(Mutex::new(Vec::new())));
+    let sched = scheduler(&env.db, settings()).with_after_insert_hook(outcomes.clone());
     assert_eq!(sched.fire_due(10).await.expect("pass"), 1);
     assert_eq!(support::lease::counter(&recorder, names::AGENT_HOST_TIMER_FIRED_TOTAL, Some(("outcome", "inserted"))), 1);
 
@@ -346,6 +357,14 @@ async fn a_double_fire_is_a_matching_duplicate() {
     // The stored event is the first build. Build the event that the second fire made, from the same
     // row state, with the same function. Its type and data equal the stored ones, so the
     // duplicate is a matching one (`payload_matches = true`, the same comparison as the insert).
+    let seen = outcomes.0.lock().expect("lock").clone();
+    assert_eq!(seen.len(), 2, "one outcome for each pass");
+    assert!(matches!(seen[0], InsertOutcome::Inserted { .. }), "{:?}", seen[0]);
+    assert!(
+        matches!(seen[1], InsertOutcome::Duplicate { payload_matches: true, .. }),
+        "the replay is a matching duplicate: {:?}",
+        seen[1]
+    );
     let stored = support::timer::timer_events(&env.db, ib.uuid).await;
     assert_eq!(stored.len(), 1);
     let second_timer = Timer::new(TimerParts {
@@ -409,12 +428,24 @@ async fn the_back_off_deadline_counts_from_after_the_row_lock() {
     let id = due_follow_up(&env, &ib, 30).await;
     let sched = scheduler(&env.db, settings());
     let read = support::timer::timer_state(&env.db, id).await;
-    // Another transaction holds the row lock for 2 s. The back-off waits on it. Its deadline must
-    // count from the time after the lock, not from the start of its own transaction.
+    // Another transaction holds the row lock. The back-off waits on it. Its deadline must count
+    // from the time after the lock, not from the start of its own transaction.
     let holder = env.db.begin().await.expect("begin");
     holder.execute_unprepared(&format!("SELECT 1 FROM timer WHERE id = '{id}' FOR UPDATE")).await.expect("lock");
     let release = async {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Poll until a backend waits on a lock, so the test does not rely on a fixed sleep. The
+        // poll is bounded. Only the back-off statement can wait on the lock of the holder.
+        let mut waiting = 0;
+        for _ in 0..200 {
+            waiting = support::scalar_i64(&env.db, "SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock'").await;
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(waiting > 0, "the back-off waits on the row lock");
+        // Let the wait last, so the deadline of a wrong implementation would be older than the release.
+        tokio::time::sleep(Duration::from_millis(500)).await;
         let before_commit = db_now(&env).await;
         holder.commit().await.expect("commit");
         before_commit
@@ -585,9 +616,16 @@ async fn a_statement_timeout_is_transient_and_stops_the_pass() {
             ..settings()
         },
     );
-    let result = sched.fire_due(10).await;
+    // The outer deadline is longer than the statement timeout of 200 ms. It only guards the test
+    // against a hang. An elapsed outer deadline fails the test.
+    let outcome = tokio::time::timeout(Duration::from_secs(30), sched.fire_due(10)).await;
     blocker.rollback().await.expect("release");
-    assert!(result.is_err(), "a statement timeout stops the pass");
+    let result = outcome.expect("the outer deadline did not elapse: the statement timeout must stop the pass");
+    // `RepositoryError::Store` keeps only the text of the database error, not its SQLSTATE. So the
+    // test reads the PostgreSQL message of SQLSTATE 57014 (`statement timeout`), the unchanged row
+    // state and the `transient` label of the error counter.
+    let error = result.expect_err("a statement timeout stops the pass");
+    assert!(error.to_string().contains("canceling statement due to statement timeout"), "not a statement timeout: {error}");
     assert_eq!(support::timer::timer_state(&env.db, first).await, before_first);
     assert_eq!(support::timer::timer_state(&env.db, second).await, before_second);
     assert_eq!(support::lease::counter(&recorder, names::AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL, Some(("class", "transient"))), 1);

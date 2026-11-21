@@ -56,8 +56,8 @@ pub struct SchedulerSettings {
 /// It exists for tests that hold or crash a fire transaction.
 #[async_trait]
 pub trait AfterInsertHook: Send + Sync {
-    /// Called with the open fire transaction.
-    async fn after_insert(&self, txn: &DatabaseTransaction);
+    /// Called with the open fire transaction and the outcome of the insert.
+    async fn after_insert(&self, txn: &DatabaseTransaction, outcome: &InsertOutcome);
 }
 
 /// The class of a database error.
@@ -266,7 +266,8 @@ impl PgScheduler {
         })
         .map_err(fail)?;
 
-        let duplicate = match insert_event_in(txn, &event).await.map_err(|e| fail(Fail::db(&e)))? {
+        let outcome = insert_event_in(txn, &event).await.map_err(|e| fail(Fail::db(&e)))?;
+        let duplicate = match &outcome {
             InsertOutcome::Inserted { .. } => false,
             InsertOutcome::Duplicate { payload_matches, .. } => {
                 if !payload_matches {
@@ -276,7 +277,7 @@ impl PgScheduler {
             }
         };
         if let Some(hook) = &self.hook {
-            hook.after_insert(txn).await;
+            hook.after_insert(txn, &outcome).await;
         }
         update_fired(txn, &timer, &plan).await.map_err(|e| fail(Fail::db(&e)))?;
         Ok(Some(Fired {

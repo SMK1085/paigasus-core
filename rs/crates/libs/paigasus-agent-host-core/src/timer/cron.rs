@@ -270,8 +270,9 @@ impl CronSchedule {
         )
     }
 
-    /// The first gap in seconds between two consecutive civil slots in `[from, from + days)` that
-    /// is below `min_secs`, or `None`. The check uses civil times only and no zone.
+    /// The first gap in seconds between two consecutive civil slots that is below `min_secs`, or
+    /// `None`. The earlier slot of the gap is in `[from, from + days]`, the end included. The later
+    /// slot can be after the end. The check uses civil times only and no zone.
     ///
     /// # Errors
     /// `Cron` when the cron library finds no time. `Tz` when the end of the window is not valid.
@@ -288,14 +289,16 @@ impl CronSchedule {
         loop {
             // The first search includes `from`, so a slot exactly at `from` counts.
             let n = if prev.is_none() { self.next_civil_at_or_after(cur)? } else { self.next_civil_after(cur)? };
-            if n >= end {
-                return Ok(None);
-            }
+            // `prev` is at or before `end`, so the gap that starts at `prev` is in the window,
+            // even when `n` is after `end`.
             if let Some(p) = prev {
                 let gap = u64::try_from(p.duration_until(n).as_secs()).unwrap_or(0);
                 if gap < min_secs {
                     return Ok(Some(gap));
                 }
+            }
+            if n > end {
+                return Ok(None);
             }
             prev = Some(n);
             cur = n;
@@ -714,6 +717,20 @@ mod tests {
     fn civil_gap_check_counts_a_slot_exactly_at_the_start() {
         let from = civil("2027-03-01T00:00:00");
         assert_eq!(sched("0,1 0 1 3 *", "UTC").min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, 900), Ok(Some(60)));
+    }
+
+    #[test]
+    fn civil_gap_check_covers_a_gap_that_starts_at_the_window_end() {
+        // The first slot is exactly at the end of the 366-day window. Its successor is 60 s later.
+        let from = civil("2027-02-28T00:00:00");
+        assert_eq!(sched("* 0 29 2 *", "UTC").min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, 900), Ok(Some(60)));
+    }
+
+    #[test]
+    fn civil_gap_check_ignores_a_gap_that_starts_after_the_window_end() {
+        // The first slot is one day after the window end, so no earlier slot is in the window.
+        let from = civil("2027-02-27T00:00:00");
+        assert_eq!(sched("* 0 29 2 *", "UTC").min_civil_gap(from, CIVIL_GAP_WINDOW_DAYS, 900), Ok(None));
     }
 
     #[test]
