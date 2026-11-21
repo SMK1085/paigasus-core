@@ -16,9 +16,9 @@ use crate::ports::{TzError, TzResolver};
 pub const WALK_BOUND: u32 = 10_000;
 /// The number of days that the civil gap check covers.
 pub const CIVIL_GAP_WINDOW_DAYS: u32 = 366;
-/// A walk starts at most this many hours before `now`. An older slot is a long outage.
 /// The smallest gap in seconds between two slots of a five-field cron pattern.
 const FIELD_FLOOR_SECS: u64 = 60;
+/// A walk starts at most this many hours before `now`. An older slot is a long outage.
 const WALK_CLAMP_HOURS: i64 = 25;
 
 const FIELD_NAMES: [&str; 5] = ["minute", "hour", "day of month", "month", "day of week"];
@@ -275,7 +275,9 @@ impl CronSchedule {
     /// `Cron` when the cron library finds no time. `Tz` when the end of the window is not valid.
     pub fn min_civil_gap(&self, from: DateTime, days: u32, min_secs: u64) -> Result<Option<u64>, WalkError> {
         if min_secs <= FIELD_FLOOR_SECS {
-            // A five-field pattern has no gap below 60 s, so no gap can be below the minimum.
+            // A five-field pattern has no gap below 60 s, so no gap can be below the minimum. This
+            // exit is the whole fix: the walk below runs only for a minimum above 60 s, and it stops
+            // at the first gap below the minimum.
             return Ok(None);
         }
         let end = from.checked_add(Span::new().days(i64::from(days))).map_err(|e| WalkError::Tz(e.to_string()))?;
@@ -290,10 +292,6 @@ impl CronSchedule {
                 let gap = u64::try_from(p.duration_until(n).as_secs()).unwrap_or(0);
                 if gap < min_secs {
                     return Ok(Some(gap));
-                }
-                if gap <= FIELD_FLOOR_SECS {
-                    // The smallest gap that a five-field pattern can have is seen. No later gap is smaller.
-                    return Ok(None);
                 }
             }
             prev = Some(n);

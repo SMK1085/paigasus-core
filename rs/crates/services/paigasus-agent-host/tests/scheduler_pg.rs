@@ -17,11 +17,11 @@ use metrics_util::debugging::DebuggingRecorder;
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::scheduler::{AfterInsertHook, PgScheduler, SchedulerSettings};
 use paigasus_agent_host::adapters::persistence::timer_store::PgTimerStore;
-use paigasus_agent_host::adapters::timer_event::{SOURCE_AGENT, TIMER_FIRED_TYPE};
-use paigasus_agent_host_core::ids::{EventId, InboxId};
+use paigasus_agent_host::adapters::timer_event::{SOURCE_AGENT, TIMER_FIRED_TYPE, build_fire_event};
+use paigasus_agent_host_core::ids::{EventId, InboxId, TimerId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
 use paigasus_agent_host_core::ports::{InboxRepository, Scheduler, TzResolver};
-use paigasus_agent_host_core::timer::{BundledTzResolver, CronSchedule, Slot, WALK_BOUND, format_fire_at};
+use paigasus_agent_host_core::timer::{BundledTzResolver, CronSchedule, Note, Slot, Timer, TimerKind, TimerOrigin, TimerParts, TimerStatus, WALK_BOUND, format_fire_at};
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, Statement, TransactionTrait};
 use serde_json::json;
@@ -337,22 +337,28 @@ async fn a_double_fire_is_a_matching_duplicate() {
     assert_eq!(sched.fire_due(10).await.expect("pass"), 1);
     assert_eq!(events_like(&env, &ib, &format!("timer:{id}:{}", format_fire_at(at))).await, 1, "one event for the ce_id");
     assert_eq!(support::lease::counter(&recorder, names::AGENT_HOST_TIMER_FIRED_TOTAL, Some(("outcome", "duplicate"))), 1);
-    // A matching duplicate: the stored data equals the data of the second build, so the fire path
-    // takes the `payload_matches = true` branch and logs no warning.
+    // The stored event is the first build. Build the event that the second fire made, from the same
+    // row state, with the same function. Its type and data equal the stored ones, so the
+    // duplicate is a matching one (`payload_matches = true`, the same comparison as the insert).
     let stored = support::timer::timer_events(&env.db, ib.uuid).await;
     assert_eq!(stored.len(), 1);
-    assert_eq!(
-        stored[0].envelope["data"],
-        json!({
-            "timerId": id.hyphenated().to_string(),
-            "origin": "TIMER_ORIGIN_AGENT",
-            "kind": "TIMER_KIND_SCHEDULE",
-            "fireAt": format_fire_at(at),
-            "note": "",
-            "cron": "0 * * * *",
-            "tz": "UTC",
-        })
-    );
+    let second_timer = Timer::new(TimerParts {
+        id: TimerId::from_uuid(id),
+        inbox: ib.id.clone(),
+        kind: TimerKind::Schedule {
+            schedule: CronSchedule::parse("0 * * * *", "UTC", &BundledTzResolver::new()).expect("cron"),
+            next_slot: Slot { civil: slot, second: false },
+        },
+        thread: None,
+        note: Note::parse("").expect("note"),
+        origin: TimerOrigin::Agent,
+        status: TimerStatus::Active,
+        next_fire_at: at,
+    });
+    let second = build_fire_event(&second_timer, at, now, EventId::from_uuid(Uuid::new_v4())).expect("second build");
+    assert_eq!(stored[0].ce_id, second.ce_id);
+    assert_eq!(stored[0].ce_type, second.ce_type);
+    assert_eq!(stored[0].envelope["data"], second.envelope["data"]);
     let state = support::timer::timer_state(&env.db, id).await;
     assert_eq!(state.fire_count, 2);
     assert!(state.next_fire_at_us > now.as_microsecond(), "the row advanced again");
