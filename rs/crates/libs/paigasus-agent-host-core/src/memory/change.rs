@@ -133,7 +133,9 @@ pub struct MemoryCommitSet {
     pub scope: MemoryScope,
     /// The changes.
     pub changes: MemoryChangeSet,
-    /// The directories that the run read or listed. A store checks each one at commit time.
+    /// The directories of a directory `rename` or `delete`. A guard covers the directory path and
+    /// every path under it. At commit time, a store refuses the set when it holds a covered path
+    /// that no change names.
     pub guards: BTreeSet<MemoryDir>,
 }
 

@@ -24,6 +24,7 @@ Names: `cmd::` is `memory::commands::tests::`, `ws::` is `memory::workspace::tes
 | 13 | Remove the `check_dir` calls of `delete` and `rename` | cmd::dir_rename_and_delete_refuse_an_outsider_at_command_time, cmd::check_dir_catches_an_outsider_after_a_buffered_delete, cmd::a_directory_view_after_a_conflict_lets_the_retry_pass, cmd::a_stale_cached_row_gives_the_dir_missing_text | pass |
 | 14 | Remove the listing replace in `check_dir` | cmd::a_stale_cached_row_gives_the_dir_missing_text, ws::check_dir_records_a_never_seen_path_and_replaces_the_cache | pass |
 | 15 | Use the cached listing for the destination of `rename` | cmd::a_file_at_the_destination_gives_already_exists | pass |
+| 16 | Remove the join term for the groups that a new guard covers in `join_group` | cmd::a_dir_delete_after_a_buffered_move_drops_with_the_move, cmd::a_dir_rename_onto_a_moved_away_destination_drops_with_the_move | pass |
 
 Notes:
 
@@ -33,3 +34,7 @@ Notes:
   null check). The queries run, and the tests fail on the assertion, not on a SQL error.
 - Rows 1 to 4 need Docker. The core suite passes for those rows, as expected.
 - After the last row, `git diff --stat -- rs/` printed nothing.
+- Row 16 came from the final review. It ran on the core suite with 140 tests. The mutation
+  replaces the term with an empty `extend`, because a plain removal fails `unused_mut` under
+  `-D warnings`. The core suite gave 138 passed and 2 failed. The reverse edit restored the line,
+  and the core suite then gave 140 passed.

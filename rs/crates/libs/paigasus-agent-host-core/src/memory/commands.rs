@@ -364,6 +364,11 @@ async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Resul
     }
     // A single file that is not a directory moves as a file. Anything else moves as a directory.
     let as_file = old.file.as_ref().filter(|f| sources.len() == 1 && sources[0] == **f);
+    // This check reads nothing, so it comes before the store check of the source. A refused
+    // rename then gives no conflict and drops no buffered change.
+    if old.dir.contains_dir(&new.dir) && old.dir != new.dir {
+        return Err(MemoryCommandError::new(format!("Error: {new_shown} is inside {old_shown}.")));
+    }
     if as_file.is_none() {
         // A directory move checks the store listing first and then uses the checked rows.
         ws.check_dir(&old.dir).await?;
@@ -372,12 +377,15 @@ async fn rename(ws: &mut MemoryWorkspace, old_raw: &str, new_raw: &str) -> Resul
             return Err(missing_path(old_raw));
         }
     }
-    if old.dir.contains_dir(&new.dir) && old.dir != new.dir {
-        return Err(MemoryCommandError::new(format!("Error: {new_shown} is inside {old_shown}.")));
-    }
     // The destination check reads the store again, not the cached rows. A file under the
-    // destination or a file at the destination path itself stops the move.
-    let exists = new.dir.is_root() || !ws.list_fresh(&new.dir).await?.is_empty() || ws.exists(&MemoryPath::parse(new.dir.as_str())?).await?;
+    // destination or a file at the destination path itself stops the move. The checks run in
+    // this order, and each one runs only when the one before it passes.
+    let exists = if new.dir.is_root() {
+        true
+    } else {
+        let files_under = !ws.list_fresh(&new.dir).await?.is_empty();
+        files_under || ws.exists(&MemoryPath::parse(new.dir.as_str())?).await?
+    };
     if exists {
         return Err(MemoryCommandError::new(format!("Error: The destination {new_shown} already exists")));
     }
@@ -1122,5 +1130,75 @@ mod tests {
         assert_eq!(run(&mut fresh, json!({"command":"view","path":"/memories/tasks/sub"})).await.unwrap_err(), missing);
         assert_eq!(content(&mut fresh, "/done/a.md").await.as_deref(), Some("a"));
         assert_eq!(content(&mut fresh, "/done/sub/b.md").await.as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn a_dir_delete_after_a_buffered_move_drops_with_the_move() {
+        // The buffered delete of `/tasks/a.md` hides it from the directory delete, so the guard
+        // must join the group of the move.
+        let (store, scope, mut ws) = committed_parts(&[("/tasks/a.md", "a"), ("/tasks/c.md", "c")], MemoryCaps::default()).await;
+        run(&mut ws, rename_cmd("/memories/tasks/a.md", "/memories/keep/a.md")).await.unwrap();
+        run(&mut ws, json!({"command":"delete","path":"/memories/tasks"})).await.unwrap();
+        assert_eq!(ws.armed_guards(), vec![dir("/tasks")]);
+        other_writer(&store, &scope, "/keep/a.md", "other").await;
+        let err = run(&mut ws, json!({"command":"create","path":"/memories/keep/a.md","file_text":"mine"})).await.unwrap_err();
+        assert_eq!(
+            err,
+            "The file /memories/keep/a.md changed outside this run. Your changes to it in this run are gone. Your related changes to /memories/tasks/a.md, /memories/tasks/c.md are also gone. Use view to read it again."
+        );
+        assert!(ws.armed_guards().is_empty());
+        ws.commit().await.unwrap();
+        let mut fresh = fresh_ws(&store, &scope);
+        assert_eq!(content(&mut fresh, "/tasks/a.md").await.as_deref(), Some("a"));
+        assert_eq!(content(&mut fresh, "/tasks/c.md").await.as_deref(), Some("c"));
+        assert_eq!(content(&mut fresh, "/keep/a.md").await.as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn a_dir_rename_onto_a_moved_away_destination_drops_with_the_move() {
+        // The buffered delete of `/done/z.md` empties the merged destination view, so the guard of
+        // the destination must join the group of the move.
+        let (store, scope, mut ws) = committed_parts(&[("/tasks/a.md", "a"), ("/done/z.md", "z")], MemoryCaps::default()).await;
+        run(&mut ws, rename_cmd("/memories/done/z.md", "/memories/keep/z.md")).await.unwrap();
+        run(&mut ws, rename_cmd("/memories/tasks", "/memories/done")).await.unwrap();
+        assert_eq!(ws.armed_guards(), vec![dir("/done"), dir("/tasks")]);
+        other_writer(&store, &scope, "/keep/z.md", "other").await;
+        let err = run(&mut ws, json!({"command":"create","path":"/memories/keep/z.md","file_text":"mine"})).await.unwrap_err();
+        assert_eq!(
+            err,
+            "The file /memories/keep/z.md changed outside this run. Your changes to it in this run are gone. Your related changes to /memories/done/a.md, /memories/done/z.md, /memories/tasks/a.md are also gone. Use view to read it again."
+        );
+        assert!(ws.armed_guards().is_empty());
+        ws.commit().await.unwrap();
+        let mut fresh = fresh_ws(&store, &scope);
+        assert_eq!(content(&mut fresh, "/tasks/a.md").await.as_deref(), Some("a"));
+        assert_eq!(content(&mut fresh, "/done/z.md").await.as_deref(), Some("z"));
+        assert_eq!(content(&mut fresh, "/done/a.md").await, None);
+        assert_eq!(content(&mut fresh, "/keep/z.md").await.as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn an_inside_rename_refuses_before_the_store_check() {
+        let (store, scope, mut ws) = committed_parts(&[("/tasks/a.md", "a")], MemoryCaps::default()).await;
+        run(&mut ws, json!({"command":"view","path":"/memories/tasks"})).await.unwrap();
+        run(&mut ws, json!({"command":"create","path":"/memories/tasks/n.md","file_text":"n"})).await.unwrap();
+        // The store check of `/tasks` would see this file as a conflict and drop the create.
+        other_writer(&store, &scope, "/tasks/b.md", "b").await;
+        let err = run(&mut ws, rename_cmd("/memories/tasks", "/memories/tasks/sub")).await.unwrap_err();
+        assert_eq!(err, "Error: /memories/tasks/sub is inside /memories/tasks.");
+        assert_eq!(content(&mut ws, "/tasks/n.md").await.as_deref(), Some("n"));
+    }
+
+    #[tokio::test]
+    async fn a_directory_round_trip_commits() {
+        let (store, scope, mut ws) = committed_parts(&[("/a/x.md", "x"), ("/a/y.md", "y")], MemoryCaps::default()).await;
+        run(&mut ws, rename_cmd("/memories/a", "/memories/b")).await.unwrap();
+        run(&mut ws, rename_cmd("/memories/b", "/memories/a")).await.unwrap();
+        ws.commit().await.unwrap();
+        let mut fresh = fresh_ws(&store, &scope);
+        let all = fresh.list(&MemoryDir::root()).await.unwrap();
+        assert_eq!(all, vec![(MemoryPath::parse("/a/x.md").unwrap(), 1), (MemoryPath::parse("/a/y.md").unwrap(), 1)]);
+        assert_eq!(content(&mut fresh, "/a/x.md").await.as_deref(), Some("x"));
+        assert_eq!(content(&mut fresh, "/a/y.md").await.as_deref(), Some("y"));
     }
 }

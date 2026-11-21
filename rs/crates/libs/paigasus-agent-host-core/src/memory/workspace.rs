@@ -381,13 +381,16 @@ impl MemoryWorkspace {
         Ok(())
     }
 
-    /// Put the touched paths and the new guards, and every path and guard of a group that one of
-    /// the paths is in, into one new group. A path that has no buffered change any more leaves its
-    /// group. A guard does not leave its group.
+    /// Put the touched paths and the new guards into one new group. Every path and guard of a
+    /// group joins it too when one of the touched paths is in that group, or when a new guard
+    /// covers one of the paths of that group. A buffered change can hide its path from the command
+    /// that arms a guard, so the touched paths alone do not find every covered group. A path that
+    /// has no buffered change any more leaves its group. A guard does not leave its group.
     fn join_group(&mut self, touched: &[MemoryPath], guards: Vec<MemoryDir>) {
         let group = self.next_group;
         self.next_group += 1;
-        let joined: BTreeSet<u64> = touched.iter().filter_map(|p| self.groups.get(p).copied()).collect();
+        let mut joined: BTreeSet<u64> = touched.iter().filter_map(|p| self.groups.get(p).copied()).collect();
+        joined.extend(self.groups.iter().filter(|(p, _)| guards.iter().any(|d| d.covers(p))).map(|(_, g)| *g));
         for g in self.groups.values_mut().chain(self.dir_guards.iter_mut().map(|(_, g)| g)) {
             if joined.contains(g) {
                 *g = group;
