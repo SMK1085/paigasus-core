@@ -3565,6 +3565,10 @@ def self_test():
     wb_hook = "failures.extend(wrapper_behaviour_failures(repo))"
     if wb_hook not in [line.strip() for line in inspect.getsource(python_env_ban.self_test_failures).splitlines()]:
         failures.append("python_env_ban.self_test_failures does not run wrapper_behaviour_failures, so the wrapper cases never run")
+    # SMA-841: the same pin for the index fallback rows (a tracked file that is missing on disk).
+    if_hook = "failures.extend(_index_fallback_failures(read_utf8))"
+    if if_hook not in [line.strip() for line in inspect.getsource(python_env_ban.self_test_failures).splitlines()]:
+        failures.append("python_env_ban.self_test_failures does not run _index_fallback_failures, so the SMA-841 rows never run")
     if python_env_ban.MoonOutputError not in INFRA_ERRORS:
         failures.append("python_env_ban.MoonOutputError is not in INFRA_ERRORS, so a missing tracked file is rc 1, not rc 2")
     if (python_env_ban.SMOKE_PROJECT, python_env_ban.SMOKE_TASK) != (AFFECTED_SMOKE_PROJECT, AFFECTED_SMOKE_TASK):

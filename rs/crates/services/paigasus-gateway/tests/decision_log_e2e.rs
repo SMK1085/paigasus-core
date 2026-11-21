@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use support::MockOpenAi;
 use support::limits::*;
 use tempfile::TempDir;
-use testcontainers_modules::nats::{Nats, NatsServerCmd};
+use testcontainers_modules::nats::Nats;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::ImageExt;
@@ -91,10 +91,30 @@ struct Stack {
     js: jetstream::Context,
 }
 
+/// A broker for the gateway binary, which makes the stream itself. JetStream reserves the full `max_bytes` of a
+/// stream from the file store when it makes the stream. The binary sizes the stream from the ACCOUNT limit, which is
+/// `MAX_BYTES` (18 GiB) when there is none, and a broker with no config derives its store from the free disk of the
+/// host. On a small CI runner that create fails with 10047. So the store is fixed at 1 GiB, and the account `GW` has
+/// a file limit of 256 MiB. `no_auth_user` gives the binary and the assertion client, which send no credentials, the
+/// account `GW`.
+const ACCOUNT_CONF: &str = r#"
+port: 4222
+jetstream: { store_dir: "/tmp/js", max_file_store: 1073741824 }
+accounts {
+  GW: {
+    jetstream: { max_file: 268435456 }
+    users: [ { user: "gw", password: "gw" } ]
+  }
+}
+no_auth_user: gw
+"#;
+
 async fn stack(what: &str) -> Option<Stack> {
     let (redis, redis_url) = paigasus_test_docker::start_redis_image_or_skip("7.4-alpine", what).await?;
-    let cmd = NatsServerCmd::default().with_jetstream();
-    let nats = paigasus_test_docker::start_or_skip(Nats::default().with_cmd(&cmd), what).await?;
+    let image = Nats::default()
+        .with_cmd(["-c", "/etc/nats-test.conf"])
+        .with_copy_to("/etc/nats-test.conf", ACCOUNT_CONF.as_bytes().to_vec());
+    let nats = paigasus_test_docker::start_or_skip(image, what).await?;
     let port = paigasus_test_docker::mapped_port(&nats, 4222, what).await;
     let nats_url = format!("nats://127.0.0.1:{port}");
     let js = jetstream::new(async_nats::connect(&nats_url).await.expect("the assertion client connects"));
@@ -246,6 +266,12 @@ async fn a_blocked_call_through_the_router_reaches_gateway_decision_org() {
     let r = decode(&got[0].1);
     assert_eq!((r.side, r.applied, r.prevention), (Side::Response, AppliedEffect::Block, Prevention::Prevented));
     assert_eq!(r.tool.name, "floor_rm");
+    let mut stream = stack.js.get_stream(dl_js::STREAM).await.expect("the stream exists");
+    assert_eq!(
+        stream.info().await.expect("stream info").config.max_bytes,
+        dl_js::max_bytes_for(268_435_456),
+        "the stream has 90 % of the account limit"
+    );
     dl.tasks.expect("tasks").drain(Duration::from_secs(2)).await;
 }
 
