@@ -88,6 +88,9 @@ pub enum NatsBootError {
     /// The filters of the durable are not the configured channel subjects.
     #[error("nats: the durable filters {server:?} are not the configured channel subjects {configured:?}")]
     FilterMismatch { configured: Vec<String>, server: Vec<String> },
+    /// The durable is not a pull consumer, or it has no explicit ack, or it limits the deliveries.
+    #[error("nats: the durable {durable} must be a pull consumer with explicit ack and max_deliver -1: {problem}")]
+    DeliverySettings { durable: String, problem: String },
 }
 
 /// Read the inbox of each configured channel. An inbox with no row stops the boot.
@@ -129,6 +132,28 @@ pub fn check_filters(configured: &[String], filter_subject: &str, filter_subject
         configured: want.into_iter().map(str::to_owned).collect(),
         server: have.into_iter().map(str::to_owned).collect(),
     })
+}
+
+/// The delivery settings the host relies on (AG2): a pull consumer, explicit ack, and no limit on
+/// the deliveries. A limit would drop an event after the last delivery, with no row.
+///
+/// # Errors
+///
+/// [`NatsBootError::DeliverySettings`] that names the first wrong setting.
+pub fn check_delivery(durable: &str, config: &jetstream::consumer::Config) -> Result<(), NatsBootError> {
+    let problem = if config.deliver_subject.is_some() {
+        Some(format!("deliver_subject is {:?}, so it is a push consumer", config.deliver_subject))
+    } else if config.ack_policy != jetstream::consumer::AckPolicy::Explicit {
+        Some(format!("ack_policy is {:?}", config.ack_policy))
+    } else if config.max_deliver != -1 {
+        Some(format!("max_deliver is {}", config.max_deliver))
+    } else {
+        None
+    };
+    match problem {
+        None => Ok(()),
+        Some(problem) => Err(NatsBootError::DeliverySettings { durable: durable.to_owned(), problem }),
+    }
 }
 
 /// What the consumer does with a message.
@@ -246,6 +271,7 @@ pub async fn connect_and_check(cfg: &NatsConfig, channels: &[BoundChannel]) -> R
     let info = consumer.cached_info();
     let configured: Vec<String> = channels.iter().map(|c| c.filter.clone()).collect();
     check_filters(&configured, &info.config.filter_subject, &info.config.filter_subjects)?;
+    check_delivery(&cfg.durable, &info.config)?;
     tracing::info!(stream = %cfg.stream, durable = %cfg.durable, channels = channels.len(), "the NATS durable is checked");
     Ok(NatsSource {
         consumer,

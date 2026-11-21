@@ -66,6 +66,11 @@ struct Stack {
 /// NATS with JetStream, the stream and the durable with `filters`, and a migrated Postgres with
 /// the inbox `INBOX` of the org `org`.
 async fn stack(what: &str, org: u128, filters: &[&str]) -> Option<Stack> {
+    stack_with(what, org, filters, -1, consumer::AckPolicy::Explicit).await
+}
+
+/// `stack` with the delivery settings of the durable chosen by the caller.
+async fn stack_with(what: &str, org: u128, filters: &[&str], max_deliver: i64, ack_policy: consumer::AckPolicy) -> Option<Stack> {
     let cmd = NatsServerCmd::default().with_jetstream();
     let nats = paigasus_test_docker::start_or_skip(Nats::default().with_cmd(&cmd), what).await?;
     let port = paigasus_test_docker::mapped_port(&nats, 4222, what).await;
@@ -81,9 +86,9 @@ async fn stack(what: &str, org: u128, filters: &[&str]) -> Option<Stack> {
     js.create_consumer_on_stream(
         consumer::pull::Config {
             durable_name: Some(DURABLE_NAME.to_string()),
-            ack_policy: consumer::AckPolicy::Explicit,
+            ack_policy,
             deliver_policy: consumer::DeliverPolicy::New,
-            max_deliver: -1,
+            max_deliver,
             ack_wait: Duration::from_secs(30),
             filter_subjects: filters.iter().map(|s| (*s).to_string()).collect(),
             ..Default::default()
@@ -264,6 +269,72 @@ async fn boot_fails_on_a_filter_mismatch() {
         }
         other => panic!("want FilterMismatch, got {other:?}"),
     }
+}
+
+async fn boot_error_of(s: &Stack) -> NatsBootError {
+    let cfg = nats_config(&s.url, u(INBOX));
+    let channels = bind_channels(&cfg, &*s.repo).await.expect("bind");
+    connect_and_check(&cfg, &channels).await.err().expect("the boot check fails")
+}
+
+#[tokio::test]
+async fn boot_fails_on_a_limited_max_deliver() {
+    let Some(s) = stack_with("boot_fails_on_a_limited_max_deliver", 0x500, &[FILTER], 5, consumer::AckPolicy::Explicit).await else {
+        return;
+    };
+    match boot_error_of(&s).await {
+        NatsBootError::DeliverySettings { problem, .. } => assert!(problem.contains("max_deliver is 5"), "{problem}"),
+        other => panic!("want DeliverySettings, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn boot_fails_on_a_wrong_ack_policy() {
+    let Some(s) = stack_with("boot_fails_on_a_wrong_ack_policy", 0x500, &[FILTER], -1, consumer::AckPolicy::All).await else {
+        return;
+    };
+    match boot_error_of(&s).await {
+        NatsBootError::DeliverySettings { problem, .. } => assert!(problem.contains("ack_policy"), "{problem}"),
+        other => panic!("want DeliverySettings, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn boot_fails_on_a_push_consumer() {
+    let cmd = NatsServerCmd::default().with_jetstream();
+    let Some(nats) = paigasus_test_docker::start_or_skip(Nats::default().with_cmd(&cmd), "boot_fails_on_a_push_consumer").await else {
+        return;
+    };
+    let port = paigasus_test_docker::mapped_port(&nats, 4222, "boot_fails_on_a_push_consumer").await;
+    let url = format!("nats://127.0.0.1:{port}");
+    let js = jetstream::new(async_nats::connect(&url).await.expect("the test client connects"));
+    js.create_stream(jetstream::stream::Config {
+        name: STREAM_NAME.to_string(),
+        subjects: vec!["iam.>".to_string()],
+        ..Default::default()
+    })
+    .await
+    .expect("the stream is made");
+    js.create_consumer_on_stream(
+        consumer::push::Config {
+            durable_name: Some(DURABLE_NAME.to_string()),
+            deliver_subject: "deliver.here".to_string(),
+            ack_policy: consumer::AckPolicy::Explicit,
+            max_deliver: -1,
+            filter_subject: FILTER.to_string(),
+            ..Default::default()
+        },
+        STREAM_NAME,
+    )
+    .await
+    .expect("the push durable is made");
+    let Some((_pg, _pg_url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(0x500), u(INBOX), u(0x11), u(0x12)).await;
+    let repo = PgInboxRepository::new(db);
+    let cfg = nats_config(&url, u(INBOX));
+    let channels = bind_channels(&cfg, &repo).await.expect("bind");
+    let err = connect_and_check(&cfg, &channels).await.err().expect("the boot check fails");
+    assert!(matches!(err, NatsBootError::DeliverySettings { .. } | NatsBootError::ConsumerInfo { .. }), "got {err:?}");
 }
 
 #[tokio::test]
