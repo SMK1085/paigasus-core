@@ -4,6 +4,9 @@
 //! the proto, encodes it and puts it into a bounded queue. The writer task (`writer`) moves the queue into a
 //! Redis stream. The connect loop (`redis_conn`) makes the Redis connection without a block of the boot.
 
+pub mod gen_kv;
+pub mod gen_redis;
+pub mod generation;
 pub mod jetstream;
 pub mod proto;
 pub mod reader;
@@ -76,6 +79,9 @@ pub fn count_dropped(reason: DropReason, n: u64) {
     }
 }
 
+/// The `kind` label values of the generation check error counter. `CheckErrorKind::as_label` returns these strings.
+pub const CHECK_ERROR_KINDS: [&str; 6] = ["timeout", "permission", "no_bucket", "redis", "foreign_writer", "other"];
+
 /// Register every decision-log counter at zero, so that `increase()` sees the first event.
 pub fn prime_decision_log_metrics() {
     counter!(names::GATEWAY_DECISION_LOG_RECORDED_TOTAL).increment(0);
@@ -88,6 +94,9 @@ pub fn prime_decision_log_metrics() {
     }
     for task in ["writer", "relay"] {
         counter!(names::GATEWAY_DECISION_LOG_TASK_RESTARTS_TOTAL, "task" => task).increment(0);
+    }
+    for kind in CHECK_ERROR_KINDS {
+        counter!(names::GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL, "kind" => kind).increment(0);
     }
 }
 
@@ -229,7 +238,10 @@ mod tests {
         ] {
             assert_eq!(snapshot_counter(&snap, name, &[]), Some(0), "{name}");
         }
-        assert_eq!(snap.len(), 9 + 2 + 2 + 3);
+        for kind in CHECK_ERROR_KINDS {
+            assert_eq!(snapshot_counter(&snap, names::GATEWAY_DECISION_LOG_GENERATION_CHECK_ERRORS_TOTAL, &[("kind", kind)]), Some(0), "{kind}");
+        }
+        assert_eq!(snap.len(), 9 + 2 + 2 + 3 + 6, "the last-reset gauge is not primed");
     }
 
     #[test]
