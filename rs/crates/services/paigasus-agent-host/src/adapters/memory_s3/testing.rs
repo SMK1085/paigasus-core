@@ -4,8 +4,10 @@
 //!
 //! The store keeps each object as bytes and a quoted ETag, as S3 sends it. It honours
 //! `PutMode::Create` and `PutMode::Update`. A test can add a key to the next listing, make the
-//! next listing fail, or make the deletes do nothing. The store records each `PUT`, `HEAD` and
-//! `DELETE` in the order of the calls.
+//! next listing fail or stall, or make the deletes do nothing. A hook runs the code of another
+//! writer before the first `HEAD`, `PUT` or `DELETE`. A fault makes the nth `PUT` or `DELETE`
+//! fail, write and then fail, or stall. The store records each `PUT`, `HEAD` and `DELETE` in the
+//! order of the calls.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -29,14 +31,52 @@ pub enum EtagMode {
     ContentHash,
 }
 
+/// The moment when a hook runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hook {
+    /// Before the next `HEAD` request.
+    BeforeFirstHead,
+    /// Before the next `PUT` request, before its condition check.
+    BeforeFirstPut,
+    /// Before the next `DELETE` request.
+    BeforeFirstDelete,
+}
+
+/// What a fault does to one request.
+#[derive(Debug)]
+pub enum Fault {
+    /// The request fails with this error, and the store does not change.
+    Fail(Error),
+    /// The store does the request, and then the request fails with this error.
+    WriteThenFail(Error),
+    /// The request never ends.
+    Stall,
+}
+
+/// The code of the other writer.
+struct HookFn(Box<dyn FnOnce(&ScriptedStore) + Send>);
+
+impl fmt::Debug for HookFn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HookFn")
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     objects: BTreeMap<Path, (Vec<u8>, String)>,
     next_etag: u64,
     injected: Vec<Path>,
     fail_list: bool,
+    stall_list: bool,
+    fail_get: bool,
     ignore_deletes: bool,
     calls: Vec<String>,
+    hooks: Vec<(Hook, HookFn)>,
+    puts: usize,
+    deletes: usize,
+    put_faults: BTreeMap<usize, Fault>,
+    delete_faults: BTreeMap<usize, Fault>,
 }
 
 /// An in-memory `ObjectStore` with hooks for the tests.
@@ -113,21 +153,48 @@ impl ScriptedStore {
     pub fn ignore_deletes(&self) {
         lock(&self.state).ignore_deletes = true;
     }
-}
 
-impl fmt::Display for ScriptedStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ScriptedStore")
+    /// The next `list` never yields an item and never ends.
+    pub fn stall_list(&self) {
+        lock(&self.state).stall_list = true;
     }
-}
 
-#[async_trait]
-impl ObjectStore for ScriptedStore {
-    async fn put_opts(&self, location: &Path, payload: PutPayload, opts: PutOptions) -> Result<PutResult> {
-        let bytes: Vec<u8> = payload.iter().flat_map(|part| part.iter().copied()).collect();
+    /// The next `GET` (not a `HEAD`) fails with a generic error.
+    pub fn fail_next_get(&self) {
+        lock(&self.state).fail_get = true;
+    }
+
+    /// Run `f` once, at the moment `hook`. `f` acts as another writer on this store.
+    pub fn on(&self, hook: Hook, f: impl FnOnce(&ScriptedStore) + Send + 'static) {
+        lock(&self.state).hooks.push((hook, HookFn(Box::new(f))));
+    }
+
+    /// Apply `fault` to the `nth` `PUT` request (the first is 1).
+    pub fn fault_put(&self, nth: usize, fault: Fault) {
+        lock(&self.state).put_faults.insert(nth, fault);
+    }
+
+    /// Apply `fault` to the `nth` `DELETE` request (the first is 1).
+    pub fn fault_delete(&self, nth: usize, fault: Fault) {
+        lock(&self.state).delete_faults.insert(nth, fault);
+    }
+
+    /// Run the first hook for `at`, if there is one. The lock is free while the hook runs.
+    fn fire(&self, at: Hook) {
+        let hook = {
+            let mut state = lock(&self.state);
+            let found = state.hooks.iter().position(|(h, _)| *h == at);
+            found.map(|i| state.hooks.remove(i).1)
+        };
+        if let Some(HookFn(f)) = hook {
+            f(self);
+        }
+    }
+
+    /// Do a `PUT` with its condition check.
+    fn put_now(&self, location: &Path, bytes: Vec<u8>, mode: PutMode) -> Result<PutResult> {
         let mut state = lock(&self.state);
-        state.calls.push(format!("PUT {location}"));
-        match opts.mode {
+        match mode {
             PutMode::Overwrite => {}
             PutMode::Create => {
                 if state.objects.contains_key(location) {
@@ -155,6 +222,38 @@ impl ObjectStore for ScriptedStore {
             extensions: Default::default(),
         })
     }
+}
+
+impl fmt::Display for ScriptedStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ScriptedStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ScriptedStore {
+    async fn put_opts(&self, location: &Path, payload: PutPayload, opts: PutOptions) -> Result<PutResult> {
+        let bytes: Vec<u8> = payload.iter().flat_map(|part| part.iter().copied()).collect();
+        self.fire(Hook::BeforeFirstPut);
+        let fault = {
+            let mut state = lock(&self.state);
+            state.calls.push(format!("PUT {location}"));
+            state.puts += 1;
+            let nth = state.puts;
+            state.put_faults.remove(&nth)
+        };
+        let after = match fault {
+            None => None,
+            Some(Fault::Fail(e)) => return Err(e),
+            Some(Fault::WriteThenFail(e)) => Some(e),
+            Some(Fault::Stall) => return std::future::pending().await,
+        };
+        let result = self.put_now(location, bytes, opts.mode)?;
+        match after {
+            Some(e) => Err(e),
+            None => Ok(result),
+        }
+    }
 
     async fn put_multipart_opts(&self, _location: &Path, _opts: PutMultipartOptions) -> Result<Box<dyn MultipartUpload>> {
         Err(Error::NotImplemented {
@@ -164,10 +263,18 @@ impl ObjectStore for ScriptedStore {
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+        if options.head {
+            self.fire(Hook::BeforeFirstHead);
+        }
         let (bytes, etag) = {
             let mut state = lock(&self.state);
             if options.head {
                 state.calls.push(format!("HEAD {location}"));
+            } else if std::mem::take(&mut state.fail_get) {
+                return Err(Error::Generic {
+                    store: "ScriptedStore",
+                    source: generic("the get failed"),
+                });
             }
             state.objects.get(location).cloned().ok_or_else(|| Error::NotFound {
                 path: location.to_string(),
@@ -196,16 +303,39 @@ impl ObjectStore for ScriptedStore {
     }
 
     fn delete_stream(&self, locations: BoxStream<'static, Result<Path>>) -> BoxStream<'static, Result<Path>> {
-        let state = Arc::clone(&self.state);
+        let handle = ScriptedStore {
+            mode: self.mode,
+            state: Arc::clone(&self.state),
+        };
+        let handle = Arc::new(handle);
         locations
-            .map(move |location| {
-                let location = location?;
-                let mut state = lock(&state);
-                state.calls.push(format!("DELETE {location}"));
-                if !state.ignore_deletes {
-                    state.objects.remove(&location);
+            .then(move |location| {
+                let store = Arc::clone(&handle);
+                async move {
+                    let location = location?;
+                    store.fire(Hook::BeforeFirstDelete);
+                    let fault = {
+                        let mut state = lock(&store.state);
+                        state.calls.push(format!("DELETE {location}"));
+                        state.deletes += 1;
+                        let nth = state.deletes;
+                        state.delete_faults.remove(&nth)
+                    };
+                    let after = match fault {
+                        None => None,
+                        Some(Fault::Fail(e)) => return Err(e),
+                        Some(Fault::WriteThenFail(e)) => Some(e),
+                        Some(Fault::Stall) => return std::future::pending().await,
+                    };
+                    let mut state = lock(&store.state);
+                    if !state.ignore_deletes {
+                        state.objects.remove(&location);
+                    }
+                    match after {
+                        Some(e) => Err(e),
+                        None => Ok(location),
+                    }
                 }
-                Ok(location)
             })
             .boxed()
     }
@@ -214,6 +344,9 @@ impl ObjectStore for ScriptedStore {
         let root = Path::default();
         let prefix = prefix.unwrap_or(&root);
         let mut state = lock(&self.state);
+        if std::mem::take(&mut state.stall_list) {
+            return futures::stream::pending().boxed();
+        }
         if std::mem::take(&mut state.fail_list) {
             let e = Error::InvalidPath {
                 source: object_store::path::Error::EmptySegment { path: "a//b".to_owned() },

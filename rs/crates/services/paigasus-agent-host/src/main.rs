@@ -373,6 +373,10 @@ fn describe_agent_host_metrics() {
         names::AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
         "Objects under a memory scope that a read skipped or refused, labeled by reason. It counts events at each read, not distinct objects."
     );
+    describe_counter!(
+        names::AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL,
+        "S3 memory change sets that were partly applied. The store may hold part of the set."
+    );
     // The name is provisional until SMA-798 moves it to `names::`.
     describe_counter!(
         "agent_host_memory_refusals_total",

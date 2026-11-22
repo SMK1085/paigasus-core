@@ -149,6 +149,8 @@ pub const AGENT_HOST_TIMER_TOOL_CALLS_TOTAL: &str = "agent_host_timer_tool_calls
 /// Objects under a memory scope that a read skipped or refused. Label: `reason` (`key`, `size`,
 /// `header` or `unparsable`). It counts events at each read, not distinct objects.
 pub const AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL: &str = "agent_host_memory_s3_skipped_objects_total";
+/// S3 memory change sets that were partly applied. The store may hold part of the set. No label.
+pub const AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL: &str = "agent_host_memory_s3_partial_applies_total";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -410,6 +412,7 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
     AGENT_HOST_TIMER_TOOL_CALLS_TOTAL,
     AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
+    AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,
@@ -518,6 +521,7 @@ mod tests {
     #[test]
     fn the_agent_host_memory_s3_families_are_registered() {
         assert!(ALL.contains(&AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL), "the S3 skipped counter is missing from ALL");
+        assert!(ALL.contains(&AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL), "the S3 partial counter is missing from ALL");
     }
 
     #[test]

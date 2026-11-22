@@ -3,6 +3,21 @@
 //! The S3-compatible `MemoryStore` adapter (SMA-829).
 //!
 //! The adapter keeps each memory file as one object. The object key comes from `keys`.
+//!
+//! # The races (spec §6.7)
+//!
+//! The adapter is correct for one writer at a time. These races remain when two writers write
+//! one scope at the same moment:
+//!
+//! 1. The guard rule: a writer can add a file under a guarded directory between the pre-check
+//!    and the writes, and that file then stays.
+//! 2. The store caps: two writers can both pass the cap check, so the store can go over a cap.
+//! 3. The delete: a writer that changes an object between the `HEAD` and the `DELETE` loses its
+//!    change, because the delete removes the newer object.
+//! 4. Partial sets: a conflict between the pre-check and the writes gives `Partial`.
+//! 5. The erasure: a write that lands after the last listing of `delete_scope` survives.
+//!
+//! A `Put` has no race: the store checks its condition.
 
 use std::fmt;
 use std::sync::Arc;
@@ -10,16 +25,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use object_store::path::Path;
 use object_store::{Attribute, Attributes, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion};
 use paigasus_agent_host_core::memory::{Expected, MemoryCaps, MemoryChange, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use paigasus_agent_host_core::ports::{MemoryApplyError, MemoryEntry, MemoryFile, MemoryStore, MemoryStoreError, MemoryUsage};
 use paigasus_observability::names;
+use tokio::time::Instant;
 
 use self::envelope::{WriteId, content_size, decode, encode};
-use self::errors::{class, store_text};
+use self::errors::{TIMEOUT_CLASS, class, is_refusal, store_text};
 use self::keys::{KeyPrefix, ListedKey, dir_path, file_path, listed_key, scope_path};
-use self::plan::{Outcome, Snapshot, precheck, result_of};
+use self::plan::{Outcome, Seen, SeenAfterDelete, Snapshot, delete_outcome, precheck, put_outcome, result_of};
 
 pub mod envelope;
 pub mod errors;
@@ -48,6 +65,11 @@ fn version_of(e_tag: Option<&str>) -> Option<MemoryVersion> {
     e_tag.map(MemoryVersion::new)
 }
 
+/// The text of the error when the apply deadline expired.
+fn deadline_text() -> String {
+    format!("the apply deadline expired ({TIMEOUT_CLASS})")
+}
+
 /// The text of the error for an object that has no ETag.
 const NO_ETAG: &str = "the object has no ETag";
 
@@ -57,6 +79,17 @@ fn listing_error(e: &Error) -> MemoryStoreError {
         count_skipped("unparsable");
     }
     MemoryStoreError::Store(store_text("the memory listing failed", e))
+}
+
+/// The class of the cause of a `Partial` result, for the log line. A `Store` text of this
+/// adapter is a fixed sentence and a class, so it holds no path, key or content.
+fn cause_class(e: &MemoryApplyError) -> &str {
+    match e {
+        MemoryApplyError::Conflict { .. } => "conflict",
+        MemoryApplyError::CapExceeded(_) => "cap",
+        MemoryApplyError::Partial { .. } => "partial",
+        MemoryApplyError::Store(text) => text,
+    }
 }
 
 /// The memory store over an object store.
@@ -114,22 +147,57 @@ impl S3MemoryStore {
 
     /// Run the writes of one phase. At most `WRITE_CONCURRENCY` writes run at the same time, in
     /// the calling task. `outcomes[i]` gets the outcome of change `i`.
-    async fn run_phase(&self, scope: &MemoryScope, set: &MemoryCommitSet, indexes: &[usize], outcomes: &mut [Outcome]) {
+    ///
+    /// After the first `Failed` or `Unknown` outcome, no new write starts. The writes in flight
+    /// finish, and the rest stay `NotStarted`. When the deadline expires, no new write starts: each
+    /// write in flight is dropped and becomes `Unknown`, and each write that did not start becomes
+    /// `Failed`.
+    async fn run_phase(&self, scope: &MemoryScope, set: &MemoryCommitSet, indexes: &[usize], outcomes: &mut [Outcome], deadline: Instant) {
         let changes = set.changes.changes();
-        let mut writes = futures::stream::iter(indexes.iter().copied())
-            .map(|i| async move { (i, self.write(scope, &changes[i]).await) })
-            .buffer_unordered(WRITE_CONCURRENCY);
-        while let Some((i, outcome)) = writes.next().await {
-            outcomes[i] = outcome;
+        let mut waiting = indexes.iter().copied();
+        let mut running = FuturesUnordered::new();
+        let mut in_flight = Vec::new();
+        let mut stopped = false;
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+            while !stopped && running.len() < WRITE_CONCURRENCY {
+                let Some(i) = waiting.next() else { break };
+                in_flight.push(i);
+                running.push(async move { (i, self.write(scope, &changes[i]).await) });
+            }
+            if running.is_empty() {
+                return;
+            }
+            match tokio::time::timeout_at(deadline, running.next()).await {
+                Ok(Some((i, outcome))) => {
+                    in_flight.retain(|&j| j != i);
+                    stopped |= matches!(outcome, Outcome::Failed(_) | Outcome::Unknown(_));
+                    outcomes[i] = outcome;
+                }
+                Ok(None) => return,
+                Err(_) => break,
+            }
+        }
+        // The deadline expired. Drop the writes in flight: their outcome is not known.
+        drop(running);
+        for i in in_flight {
+            outcomes[i] = Outcome::Unknown(MemoryApplyError::Store(deadline_text()));
+        }
+        if !stopped {
+            for i in waiting {
+                outcomes[i] = Outcome::Failed(MemoryApplyError::Store(deadline_text()));
+            }
         }
     }
 
     /// Write one change. A `Put` is a conditional `PUT`. A `Delete` is a `HEAD` that checks the
-    /// version, then a `DELETE`.
+    /// version, then a `DELETE`. Each failed write is checked with a read (spec §6.5).
     async fn write(&self, scope: &MemoryScope, change: &MemoryChange) -> Outcome {
         let key = file_path(&self.prefix, scope, change.path());
         match change {
-            MemoryChange::Put { content, expected, .. } => {
+            MemoryChange::Put { path, content, expected } => {
                 let mode = match expected {
                     Expected::Absent => PutMode::Create,
                     Expected::Version(v) => PutMode::Update(UpdateVersion {
@@ -145,7 +213,10 @@ impl S3MemoryStore {
                 let id = WriteId::random();
                 match self.store.put_opts(&key, PutPayload::from(encode(&id, content)), opts).await {
                     Ok(_) => Outcome::Confirmed,
-                    Err(e) => Outcome::Failed(MemoryApplyError::Store(store_text("the memory write failed", &e))),
+                    Err(e) => {
+                        let cause = MemoryApplyError::Store(store_text("the memory write failed", &e));
+                        put_outcome(is_refusal(&e), cause, self.seen_after_put(&key, &id).await, path)
+                    }
                 }
             }
             MemoryChange::Delete { path, expected } => {
@@ -158,9 +229,37 @@ impl S3MemoryStore {
                 }
                 match self.store.delete(&key).await {
                     Ok(()) => Outcome::Confirmed,
-                    Err(e) => Outcome::Failed(MemoryApplyError::Store(store_text("the memory delete failed", &e))),
+                    Err(e) => {
+                        let cause = MemoryApplyError::Store(store_text("the memory delete failed", &e));
+                        delete_outcome(cause, self.seen_after_delete(&key, expected).await)
+                    }
                 }
             }
+        }
+    }
+
+    /// Read the object after a failed `PUT`: does it hold the write ID of this `PUT`?
+    async fn seen_after_put(&self, key: &Path, id: &WriteId) -> Seen {
+        let got = match self.store.get(key).await {
+            Ok(got) => got,
+            Err(Error::NotFound { .. }) => return Seen::Absent,
+            Err(_) => return Seen::ReadFailed,
+        };
+        let Ok(bytes) = got.bytes().await else { return Seen::ReadFailed };
+        match decode(&bytes) {
+            Ok((found, _)) if &found == id => Seen::Mine,
+            Ok(_) => Seen::Other,
+            Err(_) => Seen::Foreign,
+        }
+    }
+
+    /// Read the object after a failed `DELETE`: is it absent, or does it have the expected version?
+    async fn seen_after_delete(&self, key: &Path, expected: &MemoryVersion) -> SeenAfterDelete {
+        match self.store.head(key).await {
+            Err(Error::NotFound { .. }) => SeenAfterDelete::Absent,
+            Err(_) => SeenAfterDelete::ReadFailed,
+            Ok(meta) if version_of(meta.e_tag.as_deref()).as_ref() == Some(expected) => SeenAfterDelete::Expected,
+            Ok(_) => SeenAfterDelete::Other,
         }
     }
 
@@ -218,18 +317,27 @@ impl MemoryStore for S3MemoryStore {
         if set.is_empty() {
             return Ok(());
         }
+        let deadline = Instant::now() + self.apply_deadline;
         let base = scope_path(&self.prefix, &set.scope);
-        let entries = self.listing(&base, &base).await.map_err(|MemoryStoreError::Store(text)| MemoryApplyError::Store(text))?;
+        let entries = match tokio::time::timeout_at(deadline, self.listing(&base, &base)).await {
+            Ok(listed) => listed.map_err(|MemoryStoreError::Store(text)| MemoryApplyError::Store(text))?,
+            Err(_) => return Err(MemoryApplyError::Store(deadline_text())),
+        };
         let snapshot = Snapshot {
             files: entries.into_iter().map(|e| (e.path, (e.size_bytes, e.version))).collect(),
         };
         let plan = precheck(set, &snapshot, caps)?;
         let mut outcomes = vec![Outcome::NotStarted; set.changes.len()];
-        self.run_phase(&set.scope, set, &plan.puts, &mut outcomes).await;
+        self.run_phase(&set.scope, set, &plan.puts, &mut outcomes, deadline).await;
         if plan.puts.iter().all(|&i| outcomes[i] == Outcome::Confirmed) {
-            self.run_phase(&set.scope, set, &plan.deletes, &mut outcomes).await;
+            self.run_phase(&set.scope, set, &plan.deletes, &mut outcomes, deadline).await;
         }
-        result_of(set, &outcomes)
+        let result = result_of(set, &outcomes);
+        if let Err(MemoryApplyError::Partial { applied, cause, .. }) = &result {
+            tracing::warn!(applied, cause = cause_class(cause), "the S3 memory change set was partly applied");
+            metrics::counter!(names::AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL).increment(1);
+        }
+        result
     }
 
     async fn delete_scope(&self, scope: &MemoryScope) -> Result<(), MemoryStoreError> {
@@ -257,7 +365,7 @@ impl MemoryStore for S3MemoryStore {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{EtagMode, ScriptedStore};
+    use super::testing::{EtagMode, Fault, Hook, ScriptedStore};
     use super::*;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use object_store::memory::InMemory;
@@ -546,6 +654,352 @@ mod tests {
         assert!(bytes.starts_with(b"paigasus-memory/1 "), "{bytes:?}");
         assert_eq!(bytes.len(), 52);
         assert!(bytes.ends_with(b"\nx"), "{bytes:?}");
+    }
+
+    fn fixture_with(mode: EtagMode, deadline: Duration) -> (Arc<ScriptedStore>, S3MemoryStore) {
+        let scripted = ScriptedStore::new(mode);
+        let store = S3MemoryStore::new(scripted.clone(), prefix(), deadline);
+        (scripted, store)
+    }
+
+    fn hashed() -> (Arc<ScriptedStore>, S3MemoryStore) {
+        fixture_with(EtagMode::ContentHash, Duration::from_secs(5))
+    }
+
+    fn put_change(path: &str, content: &str, expected: Expected) -> MemoryChange {
+        MemoryChange::Put {
+            path: mp(path),
+            content: content.into(),
+            expected,
+        }
+    }
+
+    fn delete_change(path: &str, expected: MemoryVersion) -> MemoryChange {
+        MemoryChange::Delete { path: mp(path), expected }
+    }
+
+    async fn version(store: &S3MemoryStore, path: &str) -> MemoryVersion {
+        store.get(&scope(), &mp(path)).await.unwrap().expect("the file").version
+    }
+
+    async fn content(store: &S3MemoryStore, path: &str) -> Option<String> {
+        store.get(&scope(), &mp(path)).await.unwrap().map(|f| f.content)
+    }
+
+    /// A hook that writes `content` at `path` as another writer.
+    fn other_writer(path: &str, content: &'static str) -> impl FnOnce(&ScriptedStore) + Send + 'static {
+        let key = key_of(&scope(), path);
+        move |s: &ScriptedStore| s.insert_raw(&key, &encode(&WriteId::random(), content))
+    }
+
+    fn generic_error() -> Error {
+        Error::Generic {
+            store: "S3",
+            source: "the request failed".into(),
+        }
+    }
+
+    fn timeout_error() -> Error {
+        Error::Generic {
+            store: "S3",
+            source: Box::new(object_store::client::HttpError::new(
+                object_store::client::HttpErrorKind::Timeout,
+                std::io::Error::other("the request timed out"),
+            )),
+        }
+    }
+
+    fn already_exists() -> Error {
+        Error::AlreadyExists {
+            path: "x".into(),
+            source: "exists".into(),
+        }
+    }
+
+    fn partial_parts(r: Result<(), MemoryApplyError>) -> (usize, MemoryPath, MemoryApplyError) {
+        match r {
+            Err(MemoryApplyError::Partial { applied, failed_at, cause }) => (applied, failed_at, *cause),
+            other => panic!("not a Partial: {other:?}"),
+        }
+    }
+
+    fn cause_text(cause: &MemoryApplyError) -> &str {
+        match cause {
+            MemoryApplyError::Store(text) => text,
+            other => panic!("not a Store cause: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_racing_create_is_a_conflict() {
+        let (scripted, store) = hashed();
+        scripted.on(Hook::BeforeFirstPut, other_writer("/a", "other"));
+        let set = set_of(&scope(), vec![put_change("/a", "mine", Expected::Absent)]);
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Err(MemoryApplyError::Conflict { path: mp("/a") }));
+        assert_eq!(content(&store, "/a").await.as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn a_racing_update_is_a_conflict() {
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/a", "old");
+        let v = version(&store, "/a").await;
+        scripted.on(Hook::BeforeFirstPut, other_writer("/a", "other"));
+        let set = set_of(&scope(), vec![put_change("/a", "mine", Expected::Version(v))]);
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Err(MemoryApplyError::Conflict { path: mp("/a") }));
+        assert_eq!(content(&store, "/a").await.as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn a_racing_change_before_the_delete_head_is_a_conflict() {
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/a", "old");
+        let v = version(&store, "/a").await;
+        scripted.on(Hook::BeforeFirstHead, other_writer("/a", "newer"));
+        let set = set_of(&scope(), vec![delete_change("/a", v)]);
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Err(MemoryApplyError::Conflict { path: mp("/a") }));
+        assert_eq!(content(&store, "/a").await.as_deref(), Some("newer"));
+    }
+
+    #[tokio::test]
+    async fn a_racing_change_between_head_and_delete_is_lost() {
+        // Spec §6.7 item 3: the HEAD and the DELETE are two requests. A change between them is
+        // lost. This test documents the race; it is not a wanted result.
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/a", "old");
+        let v = version(&store, "/a").await;
+        scripted.on(Hook::BeforeFirstDelete, other_writer("/a", "newer"));
+        let set = set_of(&scope(), vec![delete_change("/a", v)]);
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Ok(()));
+        assert_eq!(content(&store, "/a").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_later_racing_write_gives_partial() {
+        let (scripted, store) = hashed();
+        scripted.on(Hook::BeforeFirstPut, other_writer("/b", "other"));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent), put_change("/b", "2", Expected::Absent)]);
+        let r = store.apply(&set, &MemoryCaps::default()).await;
+        assert_eq!(
+            r,
+            Err(MemoryApplyError::Partial {
+                applied: 1,
+                failed_at: mp("/b"),
+                cause: Box::new(MemoryApplyError::Conflict { path: mp("/b") }),
+            })
+        );
+        assert_eq!(content(&store, "/b").await.as_deref(), Some("other"));
+    }
+
+    /// `[Put /a, Put /b, Delete /c]` with a failed second `PUT`.
+    async fn the_second_put_fails_on(scripted: &ScriptedStore, store: &S3MemoryStore) -> Result<(), MemoryApplyError> {
+        put(scripted, &scope(), "/c", "c");
+        let v = version(store, "/c").await;
+        scripted.fault_put(2, Fault::Fail(generic_error()));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent), put_change("/b", "2", Expected::Absent), delete_change("/c", v)]);
+        store.apply(&set, &MemoryCaps::default()).await
+    }
+
+    #[tokio::test]
+    async fn the_second_put_fails() {
+        let (scripted, store) = hashed();
+        let (applied, failed_at, _) = partial_parts(the_second_put_fails_on(&scripted, &store).await);
+        assert_eq!((applied, failed_at), (1, mp("/b")));
+        assert_eq!(content(&store, "/a").await.as_deref(), Some("1"));
+        assert_eq!(content(&store, "/b").await, None);
+        assert_eq!(content(&store, "/c").await.as_deref(), Some("c"));
+        assert!(!scripted.calls().iter().any(|c| c.starts_with("DELETE ")), "{:?}", scripted.calls());
+    }
+
+    /// `[Put /new, Delete /old]`, a rename of `/old`.
+    async fn rename(store: &S3MemoryStore) -> MemoryCommitSet {
+        let v = version(store, "/old").await;
+        set_of(&scope(), vec![put_change("/new", "x", Expected::Absent), delete_change("/old", v)])
+    }
+
+    #[tokio::test]
+    async fn a_refused_rename_put_keeps_the_old_file() {
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/old", "x");
+        let set = rename(&store).await;
+        scripted.fault_put(1, Fault::Fail(already_exists()));
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Err(MemoryApplyError::Conflict { path: mp("/new") }));
+        assert_eq!(content(&store, "/old").await.as_deref(), Some("x"));
+        assert_eq!(content(&store, "/new").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_rename_delete_keeps_both() {
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/old", "x");
+        let set = rename(&store).await;
+        scripted.fault_delete(1, Fault::Fail(generic_error()));
+        let (applied, failed_at, _) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (1, mp("/old")));
+        assert_eq!(content(&store, "/new").await.as_deref(), Some("x"));
+        assert_eq!(content(&store, "/old").await.as_deref(), Some("x"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_delete_that_landed_is_ok() {
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/old", "x");
+        let set = rename(&store).await;
+        scripted.fault_delete(1, Fault::WriteThenFail(generic_error()));
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Ok(()));
+        assert_eq!(content(&store, "/old").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_delete_with_another_etag_after_it_is_partial() {
+        // A failed DELETE whose check HEAD shows another ETag is an unknown outcome.
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/old", "x");
+        let set = rename(&store).await;
+        scripted.fault_delete(1, Fault::Fail(generic_error()));
+        scripted.on(Hook::BeforeFirstDelete, other_writer("/old", "newer"));
+        let (applied, failed_at, _) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (1, mp("/old")));
+    }
+
+    #[tokio::test]
+    async fn a_retried_put_that_landed_is_ok() {
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::WriteThenFail(already_exists()));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Ok(()));
+        assert_eq!(content(&store, "/a").await.as_deref(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_put_that_landed_is_ok() {
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::WriteThenFail(timeout_error()));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_put_with_a_failed_check_is_partial() {
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::WriteThenFail(timeout_error()));
+        scripted.fail_next_get();
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        let (applied, failed_at, cause) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+        assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_object_after_a_failed_put_is_partial() {
+        let (scripted, store) = hashed();
+        let key = key_of(&scope(), "/a");
+        scripted.on(Hook::BeforeFirstPut, move |s: &ScriptedStore| s.insert_raw(&key, b"plain text"));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        let (applied, failed_at, _) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_put_that_did_not_land_is_a_bare_store_error() {
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::Fail(timeout_error()));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        match store.apply(&set, &MemoryCaps::default()).await {
+            Err(MemoryApplyError::Store(text)) => assert!(text.contains("timeout"), "{text}"),
+            other => panic!("not a bare Store: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_stops_new_writes_in_the_phase() {
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::Fail(generic_error()));
+        let changes = (0..WRITE_CONCURRENCY + 2).map(|n| put_change(&format!("/f{n:02}"), "x", Expected::Absent)).collect();
+        let set = set_of(&scope(), changes);
+        let r = store.apply(&set, &MemoryCaps::default()).await;
+        let puts = scripted.calls().iter().filter(|c| c.starts_with("PUT ")).count();
+        // The first batch starts at once. After the failure no new write starts.
+        assert_eq!(puts, WRITE_CONCURRENCY, "{:?}", scripted.calls());
+        let (applied, failed_at, _) = partial_parts(r);
+        assert_eq!((applied, failed_at), (WRITE_CONCURRENCY - 1, mp("/f00")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_bounds_apply() {
+        let (scripted, store) = fixture_with(EtagMode::ContentHash, Duration::from_secs(2));
+        scripted.fault_put(2, Fault::Stall);
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent), put_change("/b", "2", Expected::Absent)]);
+        let start = tokio::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(60), store.apply(&set, &MemoryCaps::default()))
+            .await
+            .expect("the apply deadline must end the call before the outer timeout");
+        let elapsed = start.elapsed();
+        let (applied, failed_at, cause) = partial_parts(r);
+        assert_eq!((applied, failed_at), (1, mp("/b")));
+        assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
+        assert!(elapsed >= Duration::from_secs(2) && elapsed < Duration::from_millis(2100), "{elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_deadline_before_the_first_write_is_a_bare_store_error() {
+        let (scripted, store) = fixture_with(EtagMode::ContentHash, Duration::from_secs(1));
+        scripted.stall_list();
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        let r = tokio::time::timeout(Duration::from_secs(60), store.apply(&set, &MemoryCaps::default()))
+            .await
+            .expect("the apply deadline must end the call before the outer timeout");
+        match r {
+            Err(MemoryApplyError::Store(text)) => assert!(text.contains("timeout"), "{text}"),
+            other => panic!("not a bare Store: {other:?}"),
+        }
+        assert!(!scripted.calls().iter().any(|c| c.starts_with("PUT ")), "{:?}", scripted.calls());
+    }
+
+    fn partial_count(snap: &Snapshotter) -> u64 {
+        snap.snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == names::AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL)
+            .map(|(_, _, _, value)| match value {
+                DebugValue::Counter(n) => n,
+                _ => panic!("not a counter"),
+            })
+            .sum()
+    }
+
+    #[tokio::test]
+    async fn partial_increments_the_counter() {
+        {
+            let recorder = DebuggingRecorder::new();
+            let snap = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            let (scripted, store) = hashed();
+            partial_parts(the_second_put_fails_on(&scripted, &store).await);
+            assert_eq!(partial_count(&snap), 1);
+        }
+        let recorder = DebuggingRecorder::new();
+        let snap = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let (scripted, store) = hashed();
+        scripted.on(Hook::BeforeFirstPut, other_writer("/a", "other"));
+        let set = set_of(&scope(), vec![put_change("/a", "mine", Expected::Absent)]);
+        assert_eq!(store.apply(&set, &MemoryCaps::default()).await, Err(MemoryApplyError::Conflict { path: mp("/a") }));
+        assert_eq!(partial_count(&snap), 0);
+    }
+
+    #[test]
+    fn the_cause_classes() {
+        assert_eq!(cause_class(&MemoryApplyError::Conflict { path: mp("/a") }), "conflict");
+        let cap = MemoryApplyError::CapExceeded(paigasus_agent_host_core::memory::CapError::StoreFiles { after: 2, limit: 1, now: 1 });
+        assert_eq!(cause_class(&cap), "cap");
+        let partial = MemoryApplyError::Partial {
+            applied: 1,
+            failed_at: mp("/a"),
+            cause: Box::new(MemoryApplyError::Conflict { path: mp("/a") }),
+        };
+        assert_eq!(cause_class(&partial), "partial");
+        assert_eq!(cause_class(&MemoryApplyError::Store("the memory write failed (timeout)".into())), "the memory write failed (timeout)");
     }
 
     #[test]
