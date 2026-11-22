@@ -276,6 +276,8 @@ struct WorkerA {
     task: tokio::task::JoinHandle<LeaseEnd>,
     token: LeaseToken,
     commits: Arc<RecordingCommitter>,
+    /// The backend pid of A's commit connection (pinned, so one backend).
+    commit_pid: i64,
 }
 
 /// Take the inbox for A and start A's serve in a task, with `double` at `site`. Then wait until A
@@ -283,6 +285,7 @@ struct WorkerA {
 async fn start_a(w: &World, double: &Arc<StageDouble>, site: Site) -> WorkerA {
     let store = Arc::new(PgLeaseStore::new(support::connect_pinned(&w.url).await, HB_TIMEOUT));
     let commit_db = support::connect_pinned(&w.url).await;
+    let commit_pid = support::scalar_i64(&commit_db, "SELECT pg_backend_pid()::bigint AS n").await;
     let as_fault: Arc<dyn FaultPoint> = double.clone();
     let (worker_faults, committer_faults): (Arc<dyn FaultPoint>, Arc<dyn FaultPoint>) = match site {
         Site::Worker => (as_fault, Arc::new(NoFaults)),
@@ -300,7 +303,7 @@ async fn start_a(w: &World, double: &Arc<StageDouble>, site: Site) -> WorkerA {
     timeout(REACH_BUDGET, double.reached.notified())
         .await
         .unwrap_or_else(|_| panic!("worker A did not reach {:?} within {REACH_BUDGET:?}", double.stage));
-    WorkerA { task, token, commits }
+    WorkerA { task, token, commits, commit_pid }
 }
 
 /// Abort A's task while it waits at its stage.
@@ -556,6 +559,15 @@ async fn stage_4_heartbeat_partition() {
         .expect("lock the lease row");
     assert!(locked.is_some(), "no lease row");
     double.gate.add_permits(1);
+    // Guard: A's commit waits on the row lock of the test before the lease expires. A commit that
+    // starts after the release reads an expired lease with no wait, and `ended[0] >= released`
+    // below cannot tell the two apart. The pid is of A's commit connection, not of its heartbeat.
+    let waiting = format!("SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE pid = {} AND wait_event_type = 'Lock'", a.commit_pid);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while n(&w, &waiting).await == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "A's commit did not wait on the lease row lock within 2 s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     tokio::time::sleep(TTL + Duration::from_secs(1)).await;
     let released = std::time::Instant::now();
     txn.commit().await.expect("commit the lock");
@@ -600,5 +612,9 @@ async fn a_late_commit_after_a_takeover_is_lease_lost() {
     let record = a_record(&w, a_claim.lease_token).await;
     assert_eq!(record.run, a_claim.run);
     assert_late_commit_is_lost(&w, &mut a, record).await;
+    // B has no heartbeat, so a lease that is live now was live during the late commit. Then the
+    // `LeaseLost` came from the token term, not from the expiry.
+    let still_live = support::scalar_bool(&w.db, &format!("SELECT expires_at > clock_timestamp() AS v FROM inbox_lease WHERE inbox_id = '{}'", w.inbox)).await;
+    assert!(still_live, "B's lease expired before the late commit ended, so the commit did not test the token term");
     store_b.release(b).await.expect("B release");
 }

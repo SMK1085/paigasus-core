@@ -29,8 +29,17 @@ impl RetryPolicy {
     /// The delay before retry number `attempts`. The jitter applies before the cap.
     pub fn delay(&self, attempts: u32, jitter: Jitter, retry_after: Option<Duration>) -> Duration {
         let n = attempts.max(1);
-        let factor = 2u32.checked_pow(n - 1).unwrap_or(u32::MAX);
-        let raw = self.base.saturating_mul(factor);
+        // Double the duration, not a `u32` factor: a factor that saturates at `u32::MAX` can stay
+        // below the cap for a small base. Once `raw` reaches `2 * max`, a jitter of at least 0.8
+        // still gives the cap, so the loop stops there. It also stops on a zero base.
+        let limit = self.max.saturating_mul(2);
+        let mut raw = self.base;
+        for _ in 1..n {
+            if raw.is_zero() || raw >= limit {
+                break;
+            }
+            raw = raw.saturating_mul(2);
+        }
         let jittered = Duration::try_from_secs_f64(raw.as_secs_f64() * jitter.0).unwrap_or(self.max);
         let delay = jittered.min(self.max);
         match retry_after {
@@ -80,6 +89,24 @@ mod tests {
     #[test]
     fn attempt_100_does_not_overflow() {
         assert_eq!(p().delay(100, Jitter::new(1.2), None), Duration::from_secs(1800));
+    }
+    #[test]
+    fn a_small_base_still_reaches_the_cap() {
+        let tiny = RetryPolicy {
+            base: Duration::from_nanos(1),
+            max: Duration::from_secs(30),
+        };
+        assert_eq!(tiny.delay(36, one(), None), Duration::from_secs(30));
+        assert_eq!(tiny.delay(u32::MAX, Jitter::new(0.8), None), Duration::from_secs(30));
+        assert_eq!(tiny.delay(3, one(), None), Duration::from_nanos(4));
+    }
+    #[test]
+    fn a_zero_base_gives_zero() {
+        let zero = RetryPolicy {
+            base: Duration::ZERO,
+            max: Duration::from_secs(30),
+        };
+        assert_eq!(zero.delay(u32::MAX, Jitter::new(1.2), None), Duration::ZERO);
     }
     #[test]
     fn the_jitter_is_clamped() {

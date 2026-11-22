@@ -363,22 +363,50 @@ pub(crate) fn resolved_agent(agent: AgentId, principal: PrincipalId) -> Resolved
     }
 }
 
-/// The sum of a counter, with one label value or with any label.
+/// One snapshot of the counters of a recorder. A snapshot of a `DebuggingRecorder` resets every
+/// counter to 0. So a test that reads two counters of one run must read both from one snapshot.
+pub(crate) struct Counters(Vec<CounterValue>);
+
+/// One counter series of a snapshot: its name, its labels and its value.
+struct CounterValue {
+    name: String,
+    labels: Vec<(String, String)>,
+    value: u64,
+}
+
+impl Counters {
+    /// Take one snapshot. This resets every counter of `recorder`.
+    pub fn take(recorder: &DebuggingRecorder) -> Self {
+        let counters = recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, v)| {
+                let DebugValue::Counter(n) = v else { return None };
+                let labels = key.key().labels().map(|l| (l.key().to_owned(), l.value().to_owned())).collect();
+                Some(CounterValue {
+                    name: key.key().name().to_owned(),
+                    labels,
+                    value: n,
+                })
+            })
+            .collect();
+        Self(counters)
+    }
+
+    /// The sum of a counter, with one label value or with any label.
+    pub fn get(&self, name: &str, label: Option<(&str, &str)>) -> u64 {
+        self.0
+            .iter()
+            .filter(|c| c.name == name && label.is_none_or(|(k, want)| c.labels.iter().any(|(lk, lv)| lk == k && lv == want)))
+            .map(|c| c.value)
+            .sum()
+    }
+}
+
+/// The sum of a counter, with one label value or with any label. It takes a new snapshot, so it
+/// resets every counter: read two counters with one `Counters::take`.
 pub(crate) fn counter(recorder: &DebuggingRecorder, name: &str, label: Option<(&str, &str)>) -> u64 {
-    recorder
-        .snapshotter()
-        .snapshot()
-        .into_vec()
-        .into_iter()
-        .filter_map(|(key, _, _, v)| {
-            let DebugValue::Counter(n) = v else { return None };
-            if key.key().name() != name {
-                return None;
-            }
-            match label {
-                Some((k, want)) => key.key().labels().any(|l| l.key() == k && l.value() == want).then_some(n),
-                None => Some(n),
-            }
-        })
-        .sum()
+    Counters::take(recorder).get(name, label)
 }

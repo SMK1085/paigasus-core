@@ -80,8 +80,11 @@ Paths in this plan use two short names:
   the crate is used by a test, so it needs no allowlist entry. The `test-model` cargo feature adds no
   dependency. The holder name uses the `HOSTNAME` environment variable (fallback `unknown-host`) so
   that no hostname crate is needed.
-- All correctness times use the database clock (`clock_timestamp()` in a statement that can wait on
-  a lock). Lock order in a run commit: the lease row first, then the memory scope row.
+- All correctness times use the database clock (`clock_timestamp()`). Read the clock in a new
+  statement after the lock is held, never in the statement that waits for the lock. Task 15 proved
+  the single-statement form unsafe: READ COMMITTED evaluates its `WHERE` before the wait, so a
+  waiter on an unchanged row acts on an expired lease. Use `lock_live_lease` (rs/CLAUDE.md,
+  "Postgres fences"). Lock order in a run commit: the lease row first, then the memory scope row.
 - Call `apply_in` when `MemoryCommitSet::is_empty()` is false, never on `changes.is_empty()`.
 - Metric names are provisional (spec §6.14, SMA-798 owns the final names). Follow the SMA-788
   pattern: each name is a `pub const AGENT_HOST_…` in
@@ -698,7 +701,9 @@ The step order of one attempt (spec §6.8). Write it in this order:
 
 ```text
 BEGIN; SET LOCAL lock_timeout = '5s'
-1  LOCK_SQL (lease row FOR UPDATE, token = $t AND expires_at > clock_timestamp())  -> no row: rollback, lost("commit"), LeaseLost
+1  lock_live_lease: LOCK_TOKEN_SQL (lease row FOR UPDATE, token = $t), then LIVE_SQL in a new statement
+   (expires_at > clock_timestamp())  -> no row or not live: rollback, lost("commit"), LeaseLost
+   (Task 15 corrected this step. The first form, one LOCK_SQL with both terms, is unsafe after a lock wait.)
 2  Completed/Stopped: RUN_DONE_SQL (status, finished_at, final_output, 4 token columns)
    Deterministic:     RUN_FAILED_SQL (status 'failed', error_class 'deterministic', error)
    both: WHERE id = $run AND status = 'running' AND lease_token = $t RETURNING thread_id
@@ -817,7 +822,7 @@ Expected: PASS (14 tests).
 - [ ] **Step 5: Mutation proofs** (each one compiles; run with `--no-fail-fast`, then delete it):
   - Replace `!r.memory.is_empty()` with `!r.memory.changes.is_empty()`. Expected:
     `a_guard_with_no_change_still_reaches_apply_in` FAILS.
-  - Delete the step-1 `expires_at > clock_timestamp()` term. Expected:
+  - Make the step-1 `LIVE_SQL` check of `lock_live_lease` always true. Expected:
     `a_stale_commit_is_lease_lost_and_changes_no_row` FAILS.
   - Delete the retry loop (one attempt only). Expected: `a_store_error_retries_the_whole_transaction`
     FAILS.
@@ -1759,8 +1764,8 @@ Run: `cargo nextest run -p paigasus-agent-host --test worker_crash_pg`
 Expected: PASS. (The code exists. This task proves it with mutations.)
 
 - [ ] **Step 3: Mutation proofs** (each one compiles; `--no-fail-fast`; delete each one after):
-  - Stages 1, 2 and 4: delete the `token = $2 AND expires_at > clock_timestamp()` check of the commit
-    step 1 (`LOCK_SQL` matches on `inbox_id` only). Expected: `stage_1_after_the_tool_call`,
+  - Stages 1, 2 and 4: delete the token term of `LOCK_TOKEN_SQL` and make the `LIVE_SQL` check of
+    `lock_live_lease` always true, so that the commit step 1 matches on `inbox_id` only. Expected: `stage_1_after_the_tool_call`,
     `stage_2_inside_the_commit` and `stage_4_heartbeat_partition` FAIL. In stages 1 and 2 the stale
     commit of A succeeds (A's run row is still `running` with A's token). In stage 4 the live commit
     of A succeeds, so `/a.md` exists.

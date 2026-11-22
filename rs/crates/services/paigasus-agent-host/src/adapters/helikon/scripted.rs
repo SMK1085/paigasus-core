@@ -5,7 +5,8 @@
 //! in the model loop until the run token is cancelled.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -59,13 +60,25 @@ impl Model for ScriptedModel {
 
 /// A model that waits on each `invoke` until the run token is cancelled, then fails with
 /// `ModelError::Other`. A test uses it to hold a run in the model loop until a shutdown or a lost
-/// lease cancels the run (SMA-790 §6.1).
-#[derive(Debug, Default)]
-pub struct CancelWaitingModel;
+/// lease cancels the run (SMA-790 §6.1). A clone shares the count of `invoke` calls, so a test
+/// can wait until the run is in the model loop.
+#[derive(Debug, Default, Clone)]
+pub struct CancelWaitingModel {
+    invocations: Arc<AtomicUsize>,
+}
+
+impl CancelWaitingModel {
+    /// The number of `invoke` calls that started.
+    #[must_use]
+    pub fn invocations(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
+    }
+}
 
 #[async_trait]
 impl Model for CancelWaitingModel {
     async fn invoke(&self, _request: ModelRequest, cancel: CancellationToken) -> Result<BoxStream<'static, Result<ModelEvent, ModelError>>, ModelError> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
         cancel.cancelled().await;
         Err(ModelError::Other(anyhow::anyhow!("the run token was cancelled")))
     }

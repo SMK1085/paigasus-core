@@ -216,12 +216,20 @@ async fn a_pool_shutdown_in_the_model_loop_refunds_the_attempt() {
     let event = Uuid::new_v4();
     insert_pending_event(&db, t.x, event, 5).await;
     let store = Arc::new(PgLeaseStore::new(db.clone(), HB_TIMEOUT).serving(vec![AgentId::new(t.org, t.a)]));
-    let w = worker(&db, store.clone(), vec![definition(t.org, t.a)], SharedModel::new(CancelWaitingModel), 20, 8);
+    let model = CancelWaitingModel::default();
+    let w = worker(&db, store.clone(), vec![definition(t.org, t.a)], SharedModel::new(model.clone()), 20, 8);
     let (tx, rx) = watch::channel(());
     let pool = tokio::spawn(run_worker_pool(Arc::new(w), store, pool_settings(), "test".to_owned(), rx));
 
     let running = format!("SELECT count(*) = 1 AS v FROM run WHERE inbox_id = '{}' AND status = 'running'", t.x);
     wait_until(&db, &running, Duration::from_secs(30)).await;
+    // The run row commits with the claim, before the model call. Wait for the model call, so the
+    // shutdown reaches the run in the model loop.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while model.invocations() == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "the run did not reach the model within 30 s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     tx.send(()).expect("send the shutdown");
     tokio::time::timeout(Duration::from_secs(10), pool)
         .await
@@ -235,6 +243,7 @@ async fn a_pool_shutdown_in_the_model_loop_refunds_the_attempt() {
     assert!(refunded, "the attempt is not refunded");
     let (_, live) = lease_state(&db, t.x).await.expect("a lease row");
     assert!(!live, "the lease is still live");
+    assert_eq!(model.invocations(), 1, "one model call, and none after the shutdown");
 }
 
 #[tokio::test]

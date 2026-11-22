@@ -63,7 +63,8 @@ pub enum LeaseEnd {
     /// The worker dropped the keeper with no release: an error, a lost lease or an unknown
     /// outcome. The lease expires.
     Dropped,
-    /// The shutdown token stopped a run. The worker released the lease after the shutdown.
+    /// The shutdown token stopped the worker before a claim or during a run. The worker released
+    /// the lease after the shutdown.
     Shutdown,
 }
 
@@ -86,6 +87,10 @@ impl RunWorker {
         let keeper = LeaseKeeper::start(handle, p.leases.clone(), p.claims.clone(), p.committer.clone(), self.settings.timing);
         let mut runs: u32 = 0;
         loop {
+            // A shutdown takes no new claim. Nothing is claimed, so a plain release is enough.
+            if shutdown.is_cancelled() {
+                return release(keeper, &inbox, LeaseEnd::Shutdown).await;
+            }
             let claim = match keeper.claim(&self.settings.claim).await {
                 Ok(Some(claim)) => claim,
                 Ok(None) => return release(keeper, &inbox, if runs > 0 { LeaseEnd::Released } else { LeaseEnd::NothingToClaim }).await,
@@ -168,6 +173,13 @@ impl RunWorker {
         // Review Focus 3: the lease can be lost during the run start. No model call on a lost lease.
         if keeper.is_lost() {
             return Step::Drop;
+        }
+
+        // A shutdown during the run start sends no model request. The biased select below polls the
+        // run first, so it cannot stop a run that has not started.
+        if shutdown.is_cancelled() {
+            count_run("shutdown");
+            return Step::Shutdown;
         }
 
         let cancel = keeper.cancellation();
@@ -378,7 +390,7 @@ mod tests {
     use super::{LeaseEnd, RunWorker, WorkerPorts, WorkerSettings};
     use crate::application::lease_keeper::KeeperTiming;
     use crate::application::worker::ports::{RunEnd, RunLimits, RunOutput};
-    use crate::application::worker::test_fakes::{CommitterCall, FakeClaims, FakeCommitter, FakeLeases, FakeResolver, FakeRunner, FakeScreen, TestMemoryStore, counter, resolved_agent};
+    use crate::application::worker::test_fakes::{CommitterCall, Counters, FakeClaims, FakeCommitter, FakeLeases, FakeResolver, FakeRunner, FakeScreen, TestMemoryStore, counter, resolved_agent};
 
     const NONCE: &str = "N1";
 
@@ -908,8 +920,10 @@ mod tests {
         });
         assert_eq!(bounded(r.serve()).await, LeaseEnd::Dropped);
         assert!(r.committer.calls().is_empty(), "{:?}", r.committer.calls());
-        assert_eq!(counter(&recorder, names::AGENT_HOST_RUNS_TOTAL, Some(("class", "discarded"))), 1);
-        assert_eq!(counter(&recorder, names::AGENT_HOST_RUNS_TOTAL, Some(("class", "completed"))), 0);
+        // One snapshot for both reads: a snapshot resets every counter.
+        let runs = Counters::take(&recorder);
+        assert_eq!(runs.get(names::AGENT_HOST_RUNS_TOTAL, Some(("class", "discarded"))), 1);
+        assert_eq!(runs.get(names::AGENT_HOST_RUNS_TOTAL, Some(("class", "completed"))), 0);
     }
 
     /// Review Focus 3 (F14): the lease is lost during the run start. The memory read sleeps past
@@ -970,6 +984,43 @@ mod tests {
         let (end, ()) = bounded(async { tokio::join!(r.worker.serve(handle(), &shutdown), stop) }).await;
         assert_eq!(end, LeaseEnd::Shutdown);
         assert_eq!(r.committer.calls(), vec![CommitterCall::ReleaseAfterShutdown]);
+    }
+
+    /// A shutdown before the first claim takes no claim and sends no model request.
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_before_the_claim_claims_nothing() {
+        let r = rig(Parts::default());
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        assert_eq!(bounded(r.worker.serve(handle(), &shutdown)).await, LeaseEnd::Shutdown);
+        assert_eq!(r.runner.calls(), 0, "the model ran after the shutdown");
+        assert!(r.committer.calls().is_empty(), "{:?}", r.committer.calls());
+        assert_eq!(r.leases.releases(), 1);
+    }
+
+    /// A shutdown during the run start (the memory read) sends no model request. The worker takes
+    /// the shutdown path and refunds the attempt.
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_during_the_run_start_makes_no_model_call() {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let r = rig(Parts {
+            memory: TestMemoryStore {
+                get_delay: Duration::from_secs(2),
+                ..TestMemoryStore::default()
+            },
+            ..Parts::default()
+        });
+        let shutdown = CancellationToken::new();
+        let stop = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            shutdown.cancel();
+        };
+        let (end, ()) = bounded(async { tokio::join!(r.worker.serve(handle(), &shutdown), stop) }).await;
+        assert_eq!(end, LeaseEnd::Shutdown);
+        assert_eq!(r.runner.calls(), 0, "the model ran after the shutdown");
+        assert_eq!(r.committer.calls(), vec![CommitterCall::ReleaseAfterShutdown]);
+        assert_eq!(counter(&recorder, names::AGENT_HOST_RUNS_TOTAL, Some(("class", "shutdown"))), 1);
     }
 
     #[tokio::test(start_paused = true)]
