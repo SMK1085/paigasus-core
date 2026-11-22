@@ -500,6 +500,9 @@ Before the code, the plan updates ADR-0028 in Notion (status stays Proposed) wit
   from a file another writer added during the run. No re-check at later commands.
 - 2026-11-22: scope A; screen per event and dead-letter only the flagged event; crash tests in
   both forms.
+- 2026-11-22 (Gate 1): spec approved. Accepted risk for v1: a memory file that makes every run
+  fail deterministically sends every later event of that inbox to `dead`. This change adds no
+  guard against it.
 
 ## 9. Calls made by the coordinator (check these)
 
@@ -519,11 +522,11 @@ Before the code, the plan updates ADR-0028 in Notion (status stays Proposed) wit
 - The exact jitter source and the exact error text formats.
 - The module layout inside `application/` and `adapters/`.
 
-## 11. Follow-up issues (to create at Gate 1)
+## 11. Follow-up issues (made at Gate 1, 2026-11-22)
 
-- A real model provider, with a resolution of the `aws-lc-rs` ban.
-- An agent-definition registry (table or IAM), replacing `[[agents]]` in the config file.
-- Connect the SMA-754 detectors to `EventScreen`.
+- SMA-851: a real model provider, with a resolution of the `aws-lc-rs` ban.
+- SMA-852: an agent-definition registry (table or IAM), replacing `[[agents]]` in the config file.
+- SMA-853: connect the SMA-754 detectors to `EventScreen`.
 
 ## 12. Challenge changelog (Stage 2, 2026-11-22)
 
