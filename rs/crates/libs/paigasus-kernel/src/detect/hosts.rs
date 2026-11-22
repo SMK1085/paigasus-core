@@ -218,35 +218,33 @@ fn leaf_hosts(key: Option<&str>, text: &str) -> HostSet {
     set
 }
 
-/// Call `f` with the hosts of each leaf and the JSON pointer of that leaf.
-fn for_each_leaf(input: &ToolInput, f: &mut dyn FnMut(&HostSet, &str)) {
-    walk_strings(input, &mut |leaf| f(&leaf_hosts(leaf.key, leaf.text), leaf.pointer));
+/// Call `f` with the hosts of each leaf and the JSON pointer of that leaf. Free text has no
+/// pointer. The pointer is borrowed, so a caller copies it only when it needs to.
+pub(crate) fn scan_hosts(input: &ToolInput, f: &mut dyn FnMut(&HostSet, Option<&str>)) {
+    let is_text = matches!(input, ToolInput::Text(_));
+    walk_strings(input, &mut |leaf| f(&leaf_hosts(leaf.key, leaf.text), (!is_text).then_some(leaf.pointer)));
 }
 
 /// Every host in the arguments of one call.
 #[must_use]
 pub fn call_hosts(input: &ToolInput) -> HostSet {
     let mut set = HostSet::new();
-    for_each_leaf(input, &mut |hosts, _| set.extend(hosts));
+    scan_hosts(input, &mut |hosts, _| set.extend(hosts));
     set
-}
-
-/// Each host with the JSON pointer of the leaf that holds it. Free text has no pointer.
-// Only its test calls it for now. The `unseen_host` detector takes it over, then the gate goes.
-#[cfg(test)]
-pub(crate) fn hosts_with_pointers(input: &ToolInput) -> Vec<(String, Option<String>)> {
-    let is_text = matches!(input, ToolInput::Text(_));
-    let mut out = Vec::new();
-    for_each_leaf(input, &mut |hosts, pointer| {
-        out.extend(hosts.iter().map(|h| (h.to_owned(), (!is_text).then(|| pointer.to_owned()))));
-    });
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::detect::ToolInput;
+
+    fn hosts_with_pointers(input: &ToolInput) -> Vec<(String, Option<String>)> {
+        let mut out = Vec::new();
+        scan_hosts(input, &mut |hosts, pointer| {
+            out.extend(hosts.iter().map(|h| (h.to_owned(), pointer.map(str::to_owned))));
+        });
+        out
+    }
 
     fn hosts(raw: &str) -> Vec<String> {
         call_hosts(&ToolInput::Json(raw.to_owned())).iter().map(str::to_owned).collect()

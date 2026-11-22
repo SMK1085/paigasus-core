@@ -2,6 +2,7 @@
 //! The tool call detectors (SMA-855). Feature `detectors`, off by default. This module has no
 //! Cedar type, so a build with only this feature never gets Cedar.
 
+mod call;
 mod hosts;
 mod injection;
 pub(crate) mod input;
@@ -10,6 +11,7 @@ mod secrets;
 mod types;
 mod walk;
 
+pub use call::{CallDetection, detect_call, undeclared_tool, unseen_host};
 pub use hosts::{HOSTS_CAP, HOSTS_OVERFLOW, HostSet, call_hosts, hosts_in_text};
 pub use injection::{INJECTION_MARKERS_VERSION, injection_markers};
 pub use schema::invalid_args;
