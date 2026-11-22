@@ -198,14 +198,14 @@ pub fn build_refusal(h: RecordHeader, ctx: &DecisionContext, mode: Option<Tenant
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
+    use paigasus_kernel::detect::Severity;
     use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, Facts, RequestInfo, ToolPolicies};
 
     use super::*;
-    use crate::decision_log::record::{ArgumentDigest, CallFacts, CedarDetail, DecisionDetail};
+    use crate::decision_log::record::{ArgumentDigest, CallFacts, CedarDetail, DecisionDetail, FindingRecord};
     use crate::policy::{OnUnavailable, PolicySnapshot, TenantPart};
     use crate::report::{ReportEntry, RequestReason};
     use crate::types::ToolCall;
@@ -273,7 +273,8 @@ mod tests {
             vec![],
             vec![],
             false,
-            BTreeSet::from(["f".to_owned()]),
+            vec![FindingRecord::new("f", Some(Severity::Low), "kernel", "")],
+            Some(Severity::Low),
             Declared::Yes,
             ActionGroup::Catalog,
             Duration::from_millis(2),

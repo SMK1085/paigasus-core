@@ -4,11 +4,12 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use paigasus_kernel::tool_policy::{Effect, Verdict, decide};
+use paigasus_kernel::detect::Finding;
+use paigasus_kernel::tool_policy::{Effect, Findings, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
 use super::snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
-use crate::decision_log::CedarDetail;
+use crate::decision_log::{CedarDetail, records_of};
 use crate::turn::ToolTurn;
 use crate::types::{BlockCode, Decision, ToolCall};
 
@@ -54,6 +55,15 @@ fn unavailable(on: OnUnavailable) -> Decision {
     }
 }
 
+/// The kernel finding set of the gateway findings: each kind with its highest severity.
+fn kernel_findings(given: &[Finding]) -> Findings {
+    let mut set = Findings::new();
+    for f in given {
+        set.add(&f.kind, f.severity);
+    }
+    set
+}
+
 fn basis_of(v: &Verdict) -> PolicyBasis {
     if v.errored_forbid { PolicyBasis::ErroredForbid } else { PolicyBasis::Policy }
 }
@@ -90,7 +100,8 @@ fn outcome(v: Verdict, cedar: CedarDetail, tenant: TenantPart, mode: TenantMode,
 }
 
 /// One outcome per call, in order. The findings of a call are its request-level findings
-/// (`name_collision`); the kernel adds `unparsed_arguments` itself.
+/// (`name_collision`); the kernel adds `unparsed_arguments` itself. The Cedar detail records
+/// both, with their severities, and the `max_severity` of the verdict.
 ///
 /// `now` is the only time source (P-7): it is read before and after each kernel `decide`, and the
 /// difference is the `decide_duration` of the call. The core reads no clock of its own.
@@ -117,14 +128,16 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
         .map(|c| {
             let inv = invocation(c, turn);
             let started = now();
-            let v = decide(&inv, facts, &call_findings(c, &collisions), policies);
+            let given = call_findings(c, &collisions);
+            let v = decide(&inv, facts, &kernel_findings(&given), policies);
             let duration = now().saturating_duration_since(started);
             let cedar = CedarDetail::new(
                 v.decision,
                 v.determining.clone(),
                 v.errored.clone(),
                 v.floor_denied,
-                v.findings.clone(),
+                records_of(&given, &v),
+                v.max_severity,
                 inv.declared,
                 v.action_group,
                 duration,
@@ -138,6 +151,7 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
 mod tests {
     use std::sync::Arc;
 
+    use paigasus_kernel::detect::Severity;
     use paigasus_kernel::tool_policy::{Declared, Facts, RequestInfo, SessionInfo, ToolPolicies};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
@@ -323,6 +337,61 @@ mod tests {
         assert_eq!(out.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY, Decision::Allow]);
     }
 
+    fn colliding_turn() -> ToolTurn {
+        let def = |name: &str| ToolDefinition {
+            name: name.to_owned(),
+            namespace: None,
+            kind: ToolCallKind::Function,
+            schema: None,
+        };
+        ToolTurn::Parsed(TurnFacts {
+            definitions: vec![def("send"), def("Send")],
+            definitions_complete: true,
+            ..TurnFacts::default()
+        })
+    }
+
+    fn kinds_and_severities(o: &CallOutcome) -> Vec<(&str, Option<Severity>, &str)> {
+        let c = o.cedar.as_ref().expect("cedar");
+        c.findings.iter().map(|f| (f.kind.as_str(), f.severity, f.detector.as_str())).collect()
+    }
+
+    #[test]
+    fn the_response_record_keeps_the_name_collision_and_the_kernel_findings() {
+        let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
+        let mut bad = call("send");
+        bad.arguments = "[1]".to_owned();
+        let out = decide_calls(&snap, &colliding_turn(), &[bad], &Instant::now);
+        assert_eq!(
+            kinds_and_severities(&out[0]),
+            [("name_collision", Some(Severity::High), "kernel"), ("unparsed_arguments", Some(Severity::Medium), "kernel")]
+        );
+        assert_eq!(out[0].cedar.as_ref().expect("cedar").max_severity, Some(Severity::High));
+    }
+
+    #[test]
+    fn with_detection_off_the_record_keeps_the_severities_and_no_max_severity() {
+        let PolicySet::Available { policies, tenant, facts } = available(FLOOR, TenantPart::Evaluated) else {
+            unreachable!("available() is always Available")
+        };
+        let set = PolicySet::Available {
+            policies,
+            tenant,
+            facts: facts.with_detection(false),
+        };
+        let snap = PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed);
+        let mut bad = call("send");
+        bad.arguments = "[1]".to_owned();
+        let out = decide_calls(&snap, &colliding_turn(), &[bad], &Instant::now);
+        let c = out[0].cedar.as_ref().expect("cedar");
+        assert_eq!(c.max_severity, out[0].verdict.as_ref().expect("verdict").max_severity);
+        assert_eq!(c.max_severity, None);
+        assert_eq!(
+            kinds_and_severities(&out[0]),
+            [("name_collision", Some(Severity::High), "kernel"), ("unparsed_arguments", Some(Severity::Medium), "kernel")]
+        );
+    }
+
     #[test]
     fn decide_calls_attaches_the_cedar_detail_and_the_duration() {
         use std::cell::Cell;
@@ -356,7 +425,8 @@ mod tests {
         for o in &out {
             let v = o.verdict.as_ref().expect("verdict");
             let c = o.cedar.as_ref().expect("cedar");
-            assert_eq!(c.findings, v.findings);
+            assert_eq!(c.findings.iter().map(|f| f.kind.clone()).collect::<BTreeSet<_>>(), v.findings);
+            assert_eq!(c.max_severity, v.max_severity);
             assert_eq!((c.effect, c.floor_denied, c.action_group), (v.decision, v.floor_denied, v.action_group));
             assert_eq!((&c.determining, &c.errored), (&v.determining, &v.errored));
         }

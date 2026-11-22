@@ -8,4 +8,7 @@ mod record;
 pub mod trace;
 
 pub use build::{MAX_FIELD_BYTES, build_refusal, build_request, build_response, cap, response_org};
-pub use record::{AppliedEffect, ArgumentDigest, CallFacts, CedarDetail, DecisionDetail, DecisionRecord, Prevention, RecordBasis, RecordHeader, RecordedAction, ReportedCall, Side, ToolRef};
+pub use record::{
+    AppliedEffect, ArgumentDigest, CallFacts, CedarDetail, DecisionDetail, DecisionRecord, FindingRecord, Prevention, RecordBasis, RecordHeader, RecordedAction, ReportedCall, Side, ToolRef,
+    derive_max_severity, records_of,
+};

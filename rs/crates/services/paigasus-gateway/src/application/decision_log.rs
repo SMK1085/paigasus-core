@@ -284,6 +284,51 @@ mod tests {
     }
 
     #[test]
+    fn the_line_lists_the_finding_kinds_and_severities_and_no_evidence() {
+        use paigasus_gateway_core::decision_log::{CedarDetail, FindingRecord};
+        use paigasus_kernel::detect::{Evidence, Finding, Severity};
+        use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect};
+        const CANARY: &str = "canary-91c2.example";
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let host = Finding::new("unseen_host", "unseen_host", Severity::Medium, "v1").with_evidence(Evidence::host("r", Some("/u"), CANARY.to_owned()));
+        let cedar = CedarDetail::new(
+            Effect::Deny,
+            vec![],
+            vec![],
+            false,
+            vec![FindingRecord::from_finding(&host), FindingRecord::new("name_collision", None, "", "")],
+            Some(Severity::High),
+            Declared::Yes,
+            ActionGroup::Catalog,
+            std::time::Duration::ZERO,
+        );
+        let call = ReportedCall::new(
+            entry_of(ReportDecision::Block, Some(Basis::Decider), Some(BlockCode::Policy), Some(true)),
+            None,
+            Some(Arc::new(DecisionDetail::new(RecordBasis::Policy, Some(cedar), None))),
+        );
+        rec.record_response(&ctx(&scope(ORG_A)), &call);
+        let text = logs.text();
+        let lines = decision_lines(&text);
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(has_field(&lines[0], "findings", "name_collision:unknown,unseen_host:medium"), "{text}");
+        assert!(!text.contains(CANARY), "{text}");
+    }
+
+    #[test]
+    fn a_line_without_findings_has_an_empty_findings_field() {
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let c = with_detail(entry_of(ReportDecision::Allow, Some(Basis::Decider), None, None), RecordBasis::Policy);
+        rec.record_response(&ctx(&scope(ORG_A)), &c);
+        let text = logs.text();
+        assert!(decision_lines(&text)[0].contains("findings="), "{text}");
+    }
+
+    #[test]
     fn an_observed_hold_writes_one_line_with_verdict_observe() {
         let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
         let log = Arc::new(MemoryDecisionLog::new(false));

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The record types (SMA-755 § 5.1). A record never holds raw arguments (A1).
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use paigasus_kernel::CedarUid;
-use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, PolicyRef, SessionInfo};
+use paigasus_kernel::detect::{Finding, Severity};
+use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, NAME_COLLISION, PolicyRef, SessionInfo, UNPARSED_ARGUMENTS, Verdict};
 use uuid::Uuid;
 
 use crate::policy::{PolicyBasis, TenantMode};
@@ -81,6 +81,8 @@ pub enum RecordedAction {
     ReplaceResult,
     ResetToolChoice,
     Refuse,
+    /// A tool result with findings that the gateway did not replace (SMA-855 § 6.11.2).
+    ScreenResult,
 }
 
 /// The tool of a record. `kind` and `call_id` are empty when the core did not know the call.
@@ -113,6 +115,72 @@ impl ArgumentDigest {
     }
 }
 
+/// One finding of a decision, for the record: the kind, the severity and the detector. It holds
+/// no evidence, now or later (SMA-855 D3), so the derived `Debug` prints no content.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingRecord {
+    pub kind: String,
+    /// `None` is an unknown severity: an event that a gateway older than SMA-855 wrote.
+    pub severity: Option<Severity>,
+    /// The detector name. Empty for an event older than SMA-855.
+    pub detector: String,
+    /// The version of the detector rules. Empty when the detector has no version.
+    pub version: String,
+}
+
+impl FindingRecord {
+    #[must_use]
+    pub fn new(kind: impl Into<String>, severity: Option<Severity>, detector: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            severity,
+            detector: detector.into(),
+            version: version.into(),
+        }
+    }
+
+    /// The record of a finding. The evidence of the finding stays behind (D3).
+    #[must_use]
+    pub fn from_finding(f: &Finding) -> Self {
+        Self::new(f.kind.clone(), Some(f.severity), f.detector.clone(), f.version.clone())
+    }
+}
+
+fn sort_records(records: &mut [FindingRecord]) {
+    records.sort_by(|a, b| (a.kind.as_str(), a.detector.as_str()).cmp(&(b.kind.as_str(), b.detector.as_str())));
+}
+
+/// The finding records of one decision: the findings that the gateway gave (`given`) and the
+/// findings that the kernel added (`v.added`), sorted by kind and then by detector.
+#[must_use]
+pub fn records_of(given: &[Finding], v: &Verdict) -> Vec<FindingRecord> {
+    let mut records: Vec<FindingRecord> = given.iter().chain(&v.added).map(FindingRecord::from_finding).collect();
+    sort_records(&mut records);
+    records
+}
+
+/// The fixed severity of a kind, for a finding of unknown severity (SMA-855 § 6.11.2, P-8). Only
+/// `name_collision` and `unparsed_arguments` existed before SMA-855. Any other kind is `High`.
+pub(crate) fn inferred_severity(kind: &str) -> Severity {
+    match kind {
+        NAME_COLLISION => Severity::High,
+        UNPARSED_ARGUMENTS => Severity::Info,
+        _ => Severity::High,
+    }
+}
+
+/// The `max_severity` of a decoded record, from its findings (§ 6.11.2): `None` with no
+/// findings; the highest severity when every severity is known; else the highest over the known
+/// severities and the [`inferred_severity`] of each unknown one. The flag is `true` exactly when
+/// a severity was inferred. The proto decode and the trace encoder both use this one rule.
+#[must_use]
+pub fn derive_max_severity(findings: &[FindingRecord]) -> (Option<Severity>, bool) {
+    let inferred = findings.iter().any(|f| f.severity.is_none());
+    let max = findings.iter().map(|f| f.severity.unwrap_or_else(|| inferred_severity(&f.kind))).max();
+    (max, inferred)
+}
+
 /// The Cedar detail of one decision.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,14 +190,27 @@ pub struct CedarDetail {
     pub determining: Vec<PolicyRef>,
     pub errored: Vec<PolicyRef>,
     pub floor_denied: bool,
-    /// The final finding set, from the kernel.
-    pub findings: BTreeSet<String>,
+    /// The findings of the decision, sorted by kind and then by detector: the gateway findings
+    /// and the kernel-added ones (`Verdict.added`).
+    pub findings: Vec<FindingRecord>,
+    /// The value that the kernel wrote into `context.max_severity` (`None` is -1).
+    ///
+    /// With the detectors off (`Facts.detection` false), the kernel writes -1 although the
+    /// findings can hold severities (for example `unparsed_arguments`). The record keeps both as
+    /// the verdict gives them, so this field is then `None` while `findings` is not empty. The
+    /// proto has no field for this value: a decode derives it from the findings
+    /// ([`derive_max_severity`]), so such a record decodes with a `Some` value.
+    pub max_severity: Option<Severity>,
+    /// `max_severity` was derived on decode from a finding of unknown severity (an event older
+    /// than SMA-855). Always `false` on the write path.
+    pub severity_inferred: bool,
     pub declared: Declared,
     pub action_group: ActionGroup,
     pub decide_duration: Duration,
 }
 
 impl CedarDetail {
+    /// The detail of a decision. The findings are sorted by kind and then by detector.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -137,17 +218,21 @@ impl CedarDetail {
         determining: Vec<PolicyRef>,
         errored: Vec<PolicyRef>,
         floor_denied: bool,
-        findings: BTreeSet<String>,
+        mut findings: Vec<FindingRecord>,
+        max_severity: Option<Severity>,
         declared: Declared,
         action_group: ActionGroup,
         decide_duration: Duration,
     ) -> Self {
+        sort_records(&mut findings);
         Self {
             effect,
             determining,
             errored,
             floor_denied,
             findings,
+            max_severity,
+            severity_inferred: false,
             declared,
             action_group,
             decide_duration,
@@ -265,7 +350,90 @@ pub struct DecisionRecord {
 
 #[cfg(test)]
 mod tests {
+    use paigasus_kernel::detect::{Finding, Severity};
+    use paigasus_kernel::tool_policy::Verdict;
+
     use super::*;
+
+    fn verdict_with_added(added: Vec<Finding>) -> Verdict {
+        let mut v = paigasus_kernel::tool_policy::decide(
+            &paigasus_kernel::tool_policy::ToolInvocation::new("t", paigasus_kernel::tool_policy::ToolInput::Text("x".into()), Declared::Yes),
+            &paigasus_kernel::tool_policy::Facts::new(
+                CedarUid {
+                    entity_type: "Pgs::Iam::Principal".into(),
+                    entity_id: "p".into(),
+                },
+                Uuid::nil(),
+                paigasus_kernel::tool_policy::RequestInfo::new("s", "chat_completions", "m"),
+                SessionInfo::placeholder(),
+            ),
+            &paigasus_kernel::tool_policy::Findings::new(),
+            &paigasus_kernel::tool_policy::ToolPolicies::compile(Arc::new(paigasus_kernel::tool_policy::ToolPolicies::compile_floor("").unwrap()), "", &[]).unwrap(),
+        );
+        v.added = added;
+        v
+    }
+
+    #[test]
+    fn records_are_sorted_and_hold_the_kernel_findings() {
+        let given = [
+            Finding::new("unseen_host", "unseen_host", Severity::Medium, "v1"),
+            Finding::new("secret_in_args", "secret_in_args", Severity::High, "v1"),
+        ];
+        let v = verdict_with_added(vec![Finding::new("kernel", "unparsed_arguments", Severity::Info, "")]);
+        let r = records_of(&given, &v);
+        let got: Vec<_> = r.iter().map(|f| (f.kind.as_str(), f.severity, f.detector.as_str(), f.version.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("secret_in_args", Some(Severity::High), "secret_in_args", "v1"),
+                ("unparsed_arguments", Some(Severity::Info), "kernel", ""),
+                ("unseen_host", Some(Severity::Medium), "unseen_host", "v1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn records_of_one_kind_are_sorted_by_detector() {
+        let given = [Finding::new("judge", "other", Severity::Low, ""), Finding::new("built_in", "other", Severity::High, "")];
+        let r = records_of(&given, &verdict_with_added(Vec::new()));
+        assert_eq!(r.iter().map(|f| f.detector.as_str()).collect::<Vec<_>>(), ["built_in", "judge"]);
+    }
+
+    #[test]
+    fn a_new_detail_sorts_its_findings() {
+        let findings = vec![FindingRecord::new("b", Some(Severity::Low), "kernel", ""), FindingRecord::new("a", None, "kernel", "")];
+        let c = CedarDetail::new(Effect::Allow, vec![], vec![], false, findings, Some(Severity::Low), Declared::Yes, ActionGroup::Catalog, Duration::ZERO);
+        assert_eq!(c.findings.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!((c.max_severity, c.severity_inferred), (Some(Severity::Low), false));
+    }
+
+    #[test]
+    fn inferred_severities() {
+        assert_eq!(
+            [inferred_severity("name_collision"), inferred_severity("unparsed_arguments"), inferred_severity("zzz")],
+            [Severity::High, Severity::Info, Severity::High]
+        );
+    }
+
+    #[test]
+    fn the_derived_max_severity_follows_the_read_path_rule() {
+        let known = |k: &str, s| FindingRecord::new(k, Some(s), "kernel", "");
+        let unknown = |k: &str| FindingRecord::new(k, None, "", "");
+        assert_eq!(derive_max_severity(&[]), (None, false));
+        assert_eq!(derive_max_severity(&[known("a", Severity::Low), known("b", Severity::Medium)]), (Some(Severity::Medium), false));
+        assert_eq!(derive_max_severity(&[unknown("unparsed_arguments")]), (Some(Severity::Info), true));
+        assert_eq!(derive_max_severity(&[unknown("unparsed_arguments"), known("b", Severity::Low)]), (Some(Severity::Low), true));
+        assert_eq!(derive_max_severity(&[unknown("name_collision"), unknown("unparsed_arguments")]), (Some(Severity::High), true));
+        assert_eq!(derive_max_severity(&[unknown("zzz")]), (Some(Severity::High), true));
+    }
+
+    #[test]
+    fn a_finding_record_debug_has_no_evidence() {
+        let f = Finding::new("secret_in_args", "secret_in_args", Severity::High, "v1").with_evidence(paigasus_kernel::detect::Evidence::host("r", Some("/CANARY"), "CANARY-host.example".into()));
+        let d = format!("{:?}", FindingRecord::from_finding(&f));
+        assert!(!d.contains("CANARY"), "{d}");
+    }
 
     #[test]
     fn a_policy_basis_maps_to_the_record_basis_with_the_same_label() {

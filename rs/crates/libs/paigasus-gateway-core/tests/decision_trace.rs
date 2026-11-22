@@ -3,16 +3,16 @@
 //! the policy-compiler workspace replays with the real Dogwood parser (Task 6, P-12).
 //! `PAIGASUS_WRITE_FIXTURES=1` rewrites the fixture files.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use paigasus_gateway_core::decision_log::trace::{Encoded, SkipReason, encode, escape, is_safe_action_id, order_key};
-use paigasus_gateway_core::decision_log::{CedarDetail, DecisionRecord, RecordHeader, ReportedCall, Side, build_response};
+use paigasus_gateway_core::decision_log::{CedarDetail, DecisionRecord, FindingRecord, RecordHeader, ReportedCall, Side, build_response};
 use paigasus_gateway_core::{DecisionContext, ReportDecision, ReportEntry};
 use paigasus_kernel::CedarUid;
+use paigasus_kernel::detect::Severity;
 use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect};
 use uuid::Uuid;
 
@@ -57,7 +57,8 @@ fn record_a() -> DecisionRecord {
         vec![],
         vec![],
         false,
-        BTreeSet::from(["name_collision".to_owned()]),
+        vec![FindingRecord::new("name_collision", Some(Severity::High), "kernel", "")],
+        Some(Severity::High),
         Declared::Yes,
         ActionGroup::Catalog,
         Duration::ZERO,
@@ -100,7 +101,7 @@ fn no_cedar_detail_gives_empty_findings_and_unknown_declared() {
 #[test]
 fn several_findings_are_listed_in_order() {
     let mut r = record_a();
-    r.cedar.as_mut().unwrap().findings = BTreeSet::from(["b".to_owned(), "a".to_owned()]);
+    r.cedar.as_mut().unwrap().findings = vec![FindingRecord::new("b", Some(Severity::Low), "kernel", ""), FindingRecord::new("a", Some(Severity::Low), "kernel", "")];
     assert!(line(&r).contains(r#"findings: ["a", "b"]"#));
 }
 
@@ -255,7 +256,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
         vec![],
         vec![],
         false,
-        BTreeSet::from(["name_collision".to_owned(), "unparsed_arguments".to_owned()]),
+        vec![
+            FindingRecord::new("name_collision", Some(Severity::High), "kernel", ""),
+            FindingRecord::new("unparsed_arguments", Some(Severity::Info), "kernel", ""),
+        ],
+        Some(Severity::High),
         Declared::Yes,
         ActionGroup::Catalog,
         Duration::ZERO,

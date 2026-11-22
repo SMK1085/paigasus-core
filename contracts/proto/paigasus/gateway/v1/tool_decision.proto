@@ -67,7 +67,10 @@ message PolicyRef {
 
 message Finding {
   string kind = 1;
-  // Field 2 is kept for the severity (SMA-754). Do not use it for anything else.
+  FindingSeverity severity = 2; // SMA-855: the field that SMA-755 kept free
+  string detector = 3; // "kernel", "built_in", "undeclared_tool", ..., later a webhook name or "judge"
+  string detector_version = 4; // for example "v1"; empty when the detector has no version
+  // No evidence field, now or later (SMA-855 D3).
 }
 
 message ArgumentDigest {
@@ -116,6 +119,17 @@ enum RequestAction {
   REQUEST_ACTION_REPLACE_RESULT = 2;
   REQUEST_ACTION_RESET_TOOL_CHOICE = 3;
   REQUEST_ACTION_REFUSE = 4;
+  REQUEST_ACTION_SCREEN_RESULT = 5;
+}
+
+// The severity of a finding: the Cedar level plus 1, because proto3 needs 0 for UNSPECIFIED.
+// An event written before SMA-855 holds UNSPECIFIED (an unknown severity).
+enum FindingSeverity {
+  FINDING_SEVERITY_UNSPECIFIED = 0;
+  FINDING_SEVERITY_INFO = 1;
+  FINDING_SEVERITY_LOW = 2;
+  FINDING_SEVERITY_MEDIUM = 3;
+  FINDING_SEVERITY_HIGH = 4;
 }
 
 enum PolicyOrigin {

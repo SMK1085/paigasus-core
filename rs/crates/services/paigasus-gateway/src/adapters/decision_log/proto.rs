@@ -4,13 +4,15 @@
 //! never fails. `from_event` is for the relay and for the tests: it ignores a field that it does not know
 //! (prost drops unknown fields on decode), and it rejects a value that it cannot map.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::time::SystemTime;
 
-use paigasus_gateway_core::decision_log::{AppliedEffect, ArgumentDigest, CedarDetail, DecisionRecord, Prevention, RecordBasis, RecordHeader, RecordedAction, Side, ToolRef, build_refusal};
+use paigasus_gateway_core::decision_log::{
+    AppliedEffect, ArgumentDigest, CedarDetail, DecisionRecord, FindingRecord, Prevention, RecordBasis, RecordHeader, RecordedAction, Side, ToolRef, build_refusal, derive_max_severity,
+};
 use paigasus_gateway_core::{BlockCode, DecisionContext, TenantMode};
 use paigasus_kernel::CedarUid;
+use paigasus_kernel::detect::Severity;
 use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, PolicyOrigin, PolicyRef, SessionInfo};
 use paigasus_proto::paigasus::common::v1::{Actor, AuditMetadata};
 use paigasus_proto::paigasus::gateway::v1 as pb;
@@ -55,6 +57,46 @@ fn policy_ref(r: &PolicyRef) -> pb::PolicyRef {
     pb::PolicyRef { origin: i(origin), id: r.id.clone() }
 }
 
+/// The proto value of a severity: the Cedar level plus 1, and `UNSPECIFIED` for an unknown one
+/// (SMA-855 § 6.11.1). A later level that this adapter does not know is written as unknown, so
+/// that a decode infers the fixed severity of its kind.
+fn severity_to_pb(s: Option<Severity>) -> pb::FindingSeverity {
+    match s {
+        Some(Severity::Info) => pb::FindingSeverity::Info,
+        Some(Severity::Low) => pb::FindingSeverity::Low,
+        Some(Severity::Medium) => pb::FindingSeverity::Medium,
+        Some(Severity::High) => pb::FindingSeverity::High,
+        None | Some(_) => pb::FindingSeverity::Unspecified,
+    }
+}
+
+/// The severity of a proto value. `UNSPECIFIED` is an unknown severity (an event older than SMA-855).
+fn severity_from_pb(s: pb::FindingSeverity) -> Option<Severity> {
+    match s {
+        pb::FindingSeverity::Unspecified => None,
+        pb::FindingSeverity::Info => Some(Severity::Info),
+        pb::FindingSeverity::Low => Some(Severity::Low),
+        pb::FindingSeverity::Medium => Some(Severity::Medium),
+        pb::FindingSeverity::High => Some(Severity::High),
+    }
+}
+
+/// The proto finding of a record: the kind, the severity and the detector. A record has no
+/// evidence, so none can reach the event (SMA-855 D3).
+fn finding_to_pb(f: &FindingRecord) -> pb::Finding {
+    pb::Finding {
+        kind: f.kind.clone(),
+        severity: i(severity_to_pb(f.severity)),
+        detector: f.detector.clone(),
+        detector_version: f.version.clone(),
+    }
+}
+
+fn finding_from(f: pb::Finding) -> Result<FindingRecord, MapError> {
+    let severity = pb::FindingSeverity::try_from(f.severity).map_err(|_| MapError::BadEnum("cedar.findings.severity"))?;
+    Ok(FindingRecord::new(f.kind, severity_from_pb(severity), f.detector, f.detector_version))
+}
+
 fn cedar_to_pb(c: &CedarDetail) -> pb::CedarDetail {
     let effect = match c.effect {
         Effect::Allow => pb::DecisionEffect::Allow,
@@ -71,7 +113,7 @@ fn cedar_to_pb(c: &CedarDetail) -> pb::CedarDetail {
         determining: c.determining.iter().map(policy_ref).collect(),
         errored: c.errored.iter().map(policy_ref).collect(),
         floor_denied: c.floor_denied,
-        findings: c.findings.iter().map(|k| pb::Finding { kind: k.clone() }).collect(),
+        findings: c.findings.iter().map(finding_to_pb).collect(),
         declared: c.declared.as_str().to_owned(),
         action_group: i(group),
         decide_duration: Some(prost_types::Duration {
@@ -122,6 +164,7 @@ pub fn to_event(r: &DecisionRecord) -> pb::ToolDecisionEvent {
         Some(RecordedAction::ReplaceResult) => pb::RequestAction::ReplaceResult,
         Some(RecordedAction::ResetToolChoice) => pb::RequestAction::ResetToolChoice,
         Some(RecordedAction::Refuse) => pb::RequestAction::Refuse,
+        Some(RecordedAction::ScreenResult) => pb::RequestAction::ScreenResult,
         Some(_) => pb::RequestAction::Unspecified,
     };
     pb::ToolDecisionEvent {
@@ -212,16 +255,23 @@ fn cedar_from(c: pb::CedarDetail) -> Result<CedarDetail, MapError> {
             std::time::Duration::new(secs, nanos)
         }
     };
-    Ok(CedarDetail::new(
+    // The proto has no `max_severity`: it is derived from the findings (§ 6.11.2). A finding of
+    // an event older than SMA-855 has no severity, so its kind's fixed severity is inferred.
+    let findings = c.findings.into_iter().map(finding_from).collect::<Result<Vec<_>, _>>()?;
+    let (max_severity, severity_inferred) = derive_max_severity(&findings);
+    let mut detail = CedarDetail::new(
         effect,
         c.determining.iter().map(policy_ref_from).collect::<Result<_, _>>()?,
         c.errored.iter().map(policy_ref_from).collect::<Result<_, _>>()?,
         c.floor_denied,
-        c.findings.into_iter().map(|f| f.kind).collect::<BTreeSet<_>>(),
+        findings,
+        max_severity,
         declared,
         action_group,
         decide_duration,
-    ))
+    );
+    detail.severity_inferred = severity_inferred;
+    Ok(detail)
 }
 
 /// Map an event back to a record.
@@ -272,6 +322,7 @@ pub fn from_event(e: pb::ToolDecisionEvent) -> Result<DecisionRecord, MapError> 
         Ok(pb::RequestAction::ReplaceResult) => Some(RecordedAction::ReplaceResult),
         Ok(pb::RequestAction::ResetToolChoice) => Some(RecordedAction::ResetToolChoice),
         Ok(pb::RequestAction::Refuse) => Some(RecordedAction::Refuse),
+        Ok(pb::RequestAction::ScreenResult) => Some(RecordedAction::ScreenResult),
         Err(_) => return Err(MapError::BadEnum("request_action")),
     };
     let block_code = if e.block_code.is_empty() {
@@ -375,7 +426,12 @@ mod tests {
             vec![PolicyRef::new(PolicyOrigin::Floor, "f1")],
             vec![PolicyRef::new(PolicyOrigin::Tenant, "t1")],
             true,
-            ["name_collision".to_owned(), "other".to_owned()].into_iter().collect(),
+            vec![
+                FindingRecord::new("name_collision", Some(Severity::High), "kernel", ""),
+                FindingRecord::new("secret_in_args", Some(Severity::Medium), "secret_in_args", "v1"),
+                FindingRecord::new("unparsed_arguments", Some(Severity::Info), "kernel", ""),
+            ],
+            Some(Severity::High),
             Declared::Unknown,
             ActionGroup::Unregistered,
             Duration::new(0, 1_500_000),
@@ -434,6 +490,100 @@ mod tests {
         bytes.extend_from_slice(&[0x98, 0x06, 0x01]);
         let e = pb::ToolDecisionEvent::decode(bytes.as_slice()).unwrap();
         assert_eq!(from_event(e).unwrap(), response_record());
+    }
+
+    fn round_trip_cedar(e: pb::ToolDecisionEvent) -> CedarDetail {
+        let bytes = e.encode_to_vec();
+        from_event(pb::ToolDecisionEvent::decode(bytes.as_slice()).unwrap()).unwrap().cedar.expect("cedar")
+    }
+
+    #[test]
+    fn each_severity_maps_both_ways() {
+        for s in [None, Some(Severity::Info), Some(Severity::Low), Some(Severity::Medium), Some(Severity::High)] {
+            assert_eq!(severity_from_pb(severity_to_pb(s)), s);
+        }
+        assert_eq!(severity_to_pb(None) as i32, 0);
+        assert_eq!(severity_to_pb(Some(Severity::Info)) as i32, 1);
+        assert_eq!(severity_to_pb(Some(Severity::Low)) as i32, 2);
+        assert_eq!(severity_to_pb(Some(Severity::Medium)) as i32, 3);
+        assert_eq!(severity_to_pb(Some(Severity::High)) as i32, 4);
+    }
+
+    #[test]
+    fn a_record_with_findings_survives_the_round_trip() {
+        let r = response_record();
+        let e = to_event(&r);
+        let f = &e.cedar.as_ref().expect("cedar").findings;
+        let got: Vec<_> = f.iter().map(|f| (f.kind.as_str(), f.severity, f.detector.as_str(), f.detector_version.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("name_collision", 4, "kernel", ""),
+                ("secret_in_args", 3, "secret_in_args", "v1"),
+                ("unparsed_arguments", 1, "kernel", "")
+            ]
+        );
+        let c = round_trip_cedar(e);
+        assert_eq!(c.findings, r.cedar.as_ref().unwrap().findings);
+        assert_eq!((c.max_severity, c.severity_inferred), (Some(Severity::High), false));
+    }
+
+    fn old_event() -> pb::ToolDecisionEvent {
+        let mut e = to_event(&response_record());
+        e.cedar.as_mut().unwrap().findings = vec![
+            pb::Finding {
+                kind: "name_collision".into(),
+                ..Default::default()
+            },
+            pb::Finding {
+                kind: "unparsed_arguments".into(),
+                ..Default::default()
+            },
+        ];
+        e
+    }
+
+    #[test]
+    fn a_pre_sma_855_event_decodes_with_inferred_severities() {
+        let c = round_trip_cedar(old_event());
+        assert_eq!(c.findings.len(), 2);
+        assert!(c.findings.iter().all(|f| f.severity.is_none() && f.detector.is_empty() && f.version.is_empty()));
+        assert_eq!((c.max_severity, c.severity_inferred), (Some(Severity::High), true));
+        let mut only_unparsed = old_event();
+        only_unparsed.cedar.as_mut().unwrap().findings.remove(0);
+        assert_eq!(round_trip_cedar(only_unparsed).max_severity, Some(Severity::Info));
+        let mut none = old_event();
+        none.cedar.as_mut().unwrap().findings.clear();
+        let c = round_trip_cedar(none);
+        assert_eq!((c.max_severity, c.severity_inferred), (None, false));
+    }
+
+    #[test]
+    fn an_unknown_severity_value_is_rejected() {
+        let mut e = to_event(&response_record());
+        e.cedar.as_mut().unwrap().findings[0].severity = 9;
+        assert_eq!(from_event(e), Err(MapError::BadEnum("cedar.findings.severity")));
+    }
+
+    #[test]
+    fn screen_result_maps_both_ways() {
+        let mut r = request_record();
+        r.request_action = Some(RecordedAction::ScreenResult);
+        let e = to_event(&r);
+        assert_eq!(e.request_action, i(pb::RequestAction::ScreenResult));
+        assert_eq!(round_trip(&r).request_action, Some(RecordedAction::ScreenResult));
+    }
+
+    #[test]
+    fn the_event_holds_no_evidence() {
+        const CANARY: &str = "canary-7f3a.example";
+        let finding =
+            paigasus_kernel::detect::Finding::new("unseen_host", "unseen_host", Severity::Medium, "v1").with_evidence(paigasus_kernel::detect::Evidence::host("r", Some("/url"), CANARY.to_owned()));
+        let mut r = response_record();
+        r.cedar.as_mut().unwrap().findings = vec![FindingRecord::from_finding(&finding)];
+        let bytes = to_event(&r).encode_to_vec();
+        assert!(!bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()), "the event holds the evidence host");
+        assert!(!bytes.windows(4).any(|w| w == b"/url"), "the event holds the evidence pointer");
     }
 
     #[test]

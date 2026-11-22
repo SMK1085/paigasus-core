@@ -137,7 +137,8 @@ impl Decision {
 pub enum BlockCode {
     /// A policy refused it (SMA-752).
     Policy,
-    /// A detector finding refused it (SMA-754).
+    /// Unused on purpose: a finding is a signal and never blocks a call by itself (SMA-855 D2).
+    /// Only a policy that reads the findings blocks, with `Policy`.
     Detector,
     /// A hold exceeded `max_held_bytes` or `max_hold_secs` (D13, D14).
     HoldLimit,

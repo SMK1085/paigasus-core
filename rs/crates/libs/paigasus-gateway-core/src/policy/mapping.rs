@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use paigasus_kernel::detect::Severity;
-use paigasus_kernel::tool_policy::{Declared, Findings, NAME_COLLISION, ToolInput, ToolInvocation, normalise};
+use paigasus_kernel::detect::{DETECTOR_KERNEL, Finding, Severity};
+use paigasus_kernel::tool_policy::{Declared, NAME_COLLISION, ToolInput, ToolInvocation, normalise};
 use serde_json::Value;
 
 use crate::turn::{ToolDefinition, ToolTurn};
@@ -93,21 +93,22 @@ pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
     ToolInvocation::new(raw, input, declared)
 }
 
-/// The request-level findings for one call: `name_collision` when its normalised name is in the set.
+/// The request-level findings for one call: `name_collision` (detector `kernel`, `high`, no
+/// version) when its normalised name is in the set.
 #[must_use]
-pub fn call_findings(call: &ToolCall, collisions: &BTreeSet<String>) -> Findings {
-    let mut f = Findings::new();
+pub fn call_findings(call: &ToolCall, collisions: &BTreeSet<String>) -> Vec<Finding> {
     if collisions.contains(&normalise(&call.display_name())) {
-        f.add(NAME_COLLISION, Severity::High);
+        vec![Finding::new(DETECTOR_KERNEL, NAME_COLLISION, Severity::High, "")]
+    } else {
+        Vec::new()
     }
-    f
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use paigasus_kernel::tool_policy::{Effect, Facts, RequestInfo, SessionInfo, ToolPolicies, decide};
+    use paigasus_kernel::tool_policy::{Effect, Facts, Findings, RequestInfo, SessionInfo, ToolPolicies, decide};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
 
@@ -247,8 +248,13 @@ mod tests {
     #[test]
     fn collision_finding_per_call() {
         let set = name_collisions(&[def("a", None), def("A", None), def("b", None)]);
-        assert!(call_findings(&call(" A", ToolCallKind::Function), &set).contains(NAME_COLLISION));
-        assert!(!call_findings(&call("b", ToolCallKind::Function), &set).contains(NAME_COLLISION));
+        let found = call_findings(&call(" A", ToolCallKind::Function), &set);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (found[0].kind.as_str(), found[0].severity, found[0].detector.as_str(), found[0].version.as_str()),
+            (NAME_COLLISION, Severity::High, DETECTOR_KERNEL, "")
+        );
+        assert!(call_findings(&call("b", ToolCallKind::Function), &set).is_empty());
     }
 
     #[test]

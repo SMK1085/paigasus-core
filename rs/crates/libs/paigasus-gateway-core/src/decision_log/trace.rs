@@ -117,7 +117,11 @@ pub fn encode(record: &DecisionRecord) -> Encoded {
     let p = format!("{}::\"{}\"", principal.entity_type, escape(&principal.entity_id));
     let o = format!("Pgs::Iam::Organization::\"{}\"", org.as_hyphenated());
     let (findings, declared) = match &record.cedar {
-        Some(c) => (c.findings.iter().map(|k| format!("\"{}\"", escape(k))).collect::<Vec<_>>().join(", "), c.declared.as_str()),
+        Some(c) => {
+            // `context.findings` is a set of kinds: one kind of two detectors is listed once.
+            let kinds: std::collections::BTreeSet<&str> = c.findings.iter().map(|f| f.kind.as_str()).collect();
+            (kinds.iter().map(|k| format!("\"{}\"", escape(k))).collect::<Vec<_>>().join(", "), c.declared.as_str())
+        }
         None => (String::new(), "unknown"),
     };
     let session = escape(&record.session.id);

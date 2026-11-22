@@ -92,7 +92,7 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
         counter!(names::GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, "side" => "response", "mode" => mode, "effect" => effect, "basis" => basis).increment(1);
         if let Some(c) = &o.cedar {
             for f in &c.findings {
-                counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "response", "kind" => finding_label(f)).increment(1);
+                counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "response", "kind" => finding_label(&f.kind)).increment(1);
             }
         }
     }
