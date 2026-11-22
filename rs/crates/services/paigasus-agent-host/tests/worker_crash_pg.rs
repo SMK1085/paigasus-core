@@ -178,11 +178,17 @@ fn committer_with(db: &DatabaseConnection, faults: Arc<dyn FaultPoint>) -> Arc<P
 struct RecordingCommitter {
     inner: Arc<PgRunCommitter>,
     commits: std::sync::Mutex<Vec<Result<(), CommitError>>>,
+    /// The time at which each store commit returned.
+    ended: std::sync::Mutex<Vec<std::time::Instant>>,
 }
 
 impl RecordingCommitter {
     fn results(&self) -> Vec<Result<(), CommitError>> {
         self.commits.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn ended(&self) -> Vec<std::time::Instant> {
+        self.ended.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
@@ -190,6 +196,7 @@ impl RecordingCommitter {
 impl RunCommitter for RecordingCommitter {
     async fn commit(&self, h: &mut LeaseHandle, r: RunRecord) -> Result<Committed, CommitError> {
         let result = self.inner.commit(h, r).await;
+        self.ended.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(std::time::Instant::now());
         self.commits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -284,6 +291,7 @@ async fn start_a(w: &World, double: &Arc<StageDouble>, site: Site) -> WorkerA {
     let commits = Arc::new(RecordingCommitter {
         inner: committer_with(&commit_db, committer_faults),
         commits: std::sync::Mutex::new(Vec::new()),
+        ended: std::sync::Mutex::new(Vec::new()),
     });
     let a = worker(w, store.clone(), commits.clone(), "a.md", worker_faults);
     let handle = store.acquire(&w.inbox_id(), "a", TTL).await.expect("A acquire").expect("A takes the lease");
@@ -549,9 +557,15 @@ async fn stage_4_heartbeat_partition() {
     assert!(locked.is_some(), "no lease row");
     double.gate.add_permits(1);
     tokio::time::sleep(TTL + Duration::from_secs(1)).await;
+    let released = std::time::Instant::now();
     txn.commit().await.expect("commit the lock");
 
     let a_end = timeout(END_BUDGET, a.task).await.expect("A ends after the partition").expect("the task of A");
+    // Guard: A's commit waited for the lock of the test. A commit that ended before the release did
+    // not wait, so it would not test the expiry check after a lock wait.
+    let ended = a.commits.ended();
+    assert_eq!(ended.len(), 1, "A made one store commit");
+    assert!(ended[0] >= released, "A's commit ended before the test released the lock, so it did not wait");
     assert_eq!(a_end, LeaseEnd::Dropped, "A's commit after the expiry is not LeaseLost");
     assert_eq!(
         a.commits.results(),

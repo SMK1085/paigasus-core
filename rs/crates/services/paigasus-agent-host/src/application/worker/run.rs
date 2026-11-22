@@ -884,7 +884,7 @@ mod tests {
             runner,
             ..Parts::default()
         });
-        assert_eq!(r.serve().await, LeaseEnd::Dropped);
+        assert_eq!(bounded(r.serve()).await, LeaseEnd::Dropped);
         assert_eq!(r.runner.calls(), 1);
         assert!(r.committer.calls().is_empty(), "{:?}", r.committer.calls());
         assert_eq!(r.leases.releases(), 0);
@@ -906,7 +906,7 @@ mod tests {
             runner,
             ..Parts::default()
         });
-        assert_eq!(r.serve().await, LeaseEnd::Dropped);
+        assert_eq!(bounded(r.serve()).await, LeaseEnd::Dropped);
         assert!(r.committer.calls().is_empty(), "{:?}", r.committer.calls());
         assert_eq!(counter(&recorder, names::AGENT_HOST_RUNS_TOTAL, Some(("class", "discarded"))), 1);
         assert_eq!(counter(&recorder, names::AGENT_HOST_RUNS_TOTAL, Some(("class", "completed"))), 0);
