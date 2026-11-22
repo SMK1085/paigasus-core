@@ -275,6 +275,16 @@ async fn exhausted_events_move_to_dead() {
 }
 
 #[tokio::test]
+async fn a_dead_move_keeps_an_earlier_error() {
+    let Some((_node, db, store, mut handle)) = setup().await else { return };
+    insert_pending_event(&db, u(INBOX), u(10), 10).await;
+    exec(&db, &format!("UPDATE inbox_event SET attempts = 5, last_error = 'model unavailable' WHERE id = '{}'", u(10))).await;
+    assert_eq!(store.claim_events(&mut handle, &cfg()).await, Ok(None));
+    let sql = format!("SELECT count(*) AS n FROM inbox_event WHERE id = '{}' AND status = 'dead' AND last_error = 'model unavailable'", u(10));
+    assert_eq!(count(&db, &sql).await, 1);
+}
+
+#[tokio::test]
 async fn a_claim_marks_events_and_writes_run_event_rows() {
     let Some((_node, db, store, mut handle)) = setup().await else { return };
     insert_pending_event(&db, u(INBOX), u(10), 20).await;

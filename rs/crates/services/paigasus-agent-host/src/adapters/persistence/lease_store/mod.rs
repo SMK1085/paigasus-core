@@ -44,11 +44,11 @@ const HEARTBEAT_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp
 
 /// `$1` = inbox, `$2` = token. A release expires the lease one microsecond in the past. The row
 /// stays, so the next token is larger.
-const RELEASE_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp() - interval '1 microsecond' \
+pub(crate) const RELEASE_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp() - interval '1 microsecond' \
      WHERE inbox_id = $1 AND token = $2 AND expires_at > clock_timestamp()";
 
 /// `$1` = run, `$2` = token. A release discards the open run of the handle.
-const DISCARD_RUN_SQL: &str = "UPDATE run SET status = 'discarded', finished_at = now() \
+pub(crate) const DISCARD_RUN_SQL: &str = "UPDATE run SET status = 'discarded', finished_at = now() \
      WHERE id = $1 AND status = 'running' AND lease_token = $2";
 
 /// Await the commit of the transaction of `claim`, `complete` or a run commit (spec §8.4, §8.5).

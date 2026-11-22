@@ -32,7 +32,7 @@ use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseTransaction, TransactionTrait};
 use uuid::Uuid;
 
-use super::{LOCK_SQL, LOCK_TIMEOUT_SQL, PgRunCommitter, db_err, stmt};
+use super::{PgRunCommitter, check_handle, db_err, lock_lease, retry_events, stmt};
 use crate::adapters::memory_commit::MemoryCommit;
 use crate::adapters::persistence::lease_store::{commit_or_poison, lost};
 use crate::adapters::persistence::session_store::write_session;
@@ -68,10 +68,6 @@ const SCOPE_SQL: &str = "SELECT id FROM inbox WHERE id = $1 AND org_id = $2 AND 
 const DONE_SQL: &str = "UPDATE inbox_event SET status = 'done' \
      WHERE id = ANY($2) AND claimed_run_id = $1 AND status = 'pending' RETURNING id, attempts";
 
-/// `$1` = event, `$2` = run, `$3` = delay in microseconds, `$4` = error. The event stays pending.
-const RETRY_SQL: &str = "UPDATE inbox_event SET not_before = clock_timestamp() + ($3::bigint * interval '1 microsecond'), last_error = $4 \
-     WHERE id = $1 AND claimed_run_id = $2 AND status = 'pending'";
-
 /// The text of the scope refusal.
 const SCOPE_REFUSED: &str = "the memory scope is not the scope of the inbox";
 
@@ -82,15 +78,7 @@ impl PgRunCommitter {
     /// `MemoryRejected`, an unencodable text and `OutcomeUnknown` are never retried. The keeper,
     /// not this method, calls `record_complete` on the handle.
     pub async fn commit_record(&self, h: &mut LeaseHandle, r: RunRecord) -> Result<Committed, CommitError> {
-        // A poisoned handle sends no SQL and counts nothing.
-        if h.is_poisoned() {
-            return Err(CommitError::LeaseLost);
-        }
-        // A record of another run or of another token is not the claim of this handle.
-        if h.open_claim().as_ref() != Some(&r.run) || h.token() != r.token {
-            lost("commit");
-            return Err(CommitError::LeaseLost);
-        }
+        check_handle(h, &r.run, r.token, "commit")?;
         let r = without_nul(r);
         let mut attempt = 1;
         loop {
@@ -136,10 +124,9 @@ impl PgRunCommitter {
         let inbox = inbox.uuid();
         let run = r.run.uuid();
         let token = r.token.0;
-        txn.execute_unprepared(LOCK_TIMEOUT_SQL).await.map_err(db_err)?;
 
         // Step 1: lock the lease row and check the token and the expiry.
-        if txn.query_one_raw(stmt(LOCK_SQL, [inbox.into(), token.into()])).await.map_err(db_err)?.is_none() {
+        if !lock_lease(txn, inbox, r.token).await? {
             return Err(CommitError::LeaseLost);
         }
 
@@ -186,12 +173,7 @@ impl PgRunCommitter {
                     .collect()
             }
             RunClass::Deterministic { error, retry } => {
-                for delay in retry {
-                    let micros = i64::try_from(delay.delay.as_micros()).unwrap_or(i64::MAX);
-                    txn.execute_raw(stmt(RETRY_SQL, [delay.event.uuid().into(), run.into(), micros.into(), error.clone().into()]))
-                        .await
-                        .map_err(db_err)?;
-                }
+                retry_events(txn, run, retry, error).await?;
                 Ok(Vec::new())
             }
         }

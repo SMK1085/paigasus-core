@@ -7,7 +7,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use metrics_util::debugging::DebuggingRecorder;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
@@ -15,14 +15,14 @@ use paigasus_agent_host_core::claim::{Claim, ClaimConfig};
 use paigasus_agent_host_core::ids::{EventId, InboxId};
 use paigasus_agent_host_core::lease::LeaseHandle;
 use paigasus_agent_host_core::memory::{Expected, MemoryCaps, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
-use paigasus_agent_host_core::ports::{LeaseRepository, MemoryApplyError, MemoryStore};
-use paigasus_agent_host_core::run::{CommitError, EventDelay, RunClass, RunRecord, RunUsage, SessionRow};
+use paigasus_agent_host_core::ports::{LeaseRepository, MemoryApplyError, MemoryStore, RunCommitter};
+use paigasus_agent_host_core::run::{BackOff, CommitError, EventDelay, FlaggedEvent, RunClass, RunRecord, RunUsage, ScreenOut, ScreenResult, SessionRow};
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use serde_json::json;
 use support::commit::{committer, completed_record, scope_of};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{counter, expire, insert_pending_event, insert_thread, snapshot};
+use support::lease::{counter, expire, insert_pending_event, insert_thread, lease_state, snapshot};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(30);
@@ -426,4 +426,295 @@ async fn a_stale_commit_is_lease_lost_and_changes_no_row() {
     assert_eq!(snapshot(&s.db, u(INBOX)).await, before);
     assert_eq!(n(&s.db, "SELECT count(*) AS n FROM session_event").await, 0);
     assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, Some(("operation", "commit"))), 1);
+}
+
+fn flag(event: EventId) -> FlaggedEvent {
+    FlaggedEvent {
+        event,
+        detector: "pii".into(),
+        reason: "an email".into(),
+    }
+}
+
+/// The claimed events, sorted by id (`u(10)` first).
+fn events(s: &Setup) -> Vec<EventId> {
+    claimed(&s.claim)
+}
+
+fn screen_all(s: &Setup) -> ScreenOut {
+    ScreenOut {
+        run: s.claim.run.clone(),
+        token: s.claim.lease_token,
+        flagged: events(s).into_iter().map(flag).collect(),
+        all: true,
+    }
+}
+
+fn back_off_of(s: &Setup, delay: Duration) -> BackOff {
+    BackOff {
+        run: s.claim.run.clone(),
+        token: s.claim.lease_token,
+        error: "model unavailable".into(),
+        retry: s.claim.events.iter().map(|e| EventDelay { event: e.id, delay }).collect(),
+    }
+}
+
+/// A deferred constraint trigger that raises at COMMIT after any `inbox_event` update.
+async fn refuse_event_update_at_commit(db: &DatabaseConnection) {
+    exec(
+        db,
+        "CREATE FUNCTION refuse_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused at commit'; END $$",
+    )
+    .await;
+    exec(
+        db,
+        "CREATE CONSTRAINT TRIGGER refuse_event AFTER UPDATE ON inbox_event DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_event()",
+    )
+    .await;
+}
+
+/// Every value that the histogram `name` recorded in one snapshot of the recorder.
+fn histogram(recorder: &DebuggingRecorder, name: &str) -> Vec<f64> {
+    recorder
+        .snapshotter()
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(k, _, _, _)| k.key().name() == name)
+        .flat_map(|(_, _, _, v)| match v {
+            DebugValue::Histogram(h) => h.into_iter().map(|x| x.into_inner()).collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn screen_out_of_some_events_keeps_the_run_running() {
+    let Some(mut s) = setup().await else { return };
+    let run = s.claim.run.uuid();
+    let e = events(&s);
+    let out = ScreenOut {
+        run: s.claim.run.clone(),
+        token: s.claim.lease_token,
+        flagged: vec![flag(e[0])],
+        all: false,
+    };
+    let res = s.committer.screen_out(&mut s.handle, out).await;
+    assert_eq!(res, Ok(ScreenResult::Continue));
+    let (e1, e2) = (e[0].uuid(), e[1].uuid());
+    assert_eq!(
+        n(
+            &s.db,
+            &format!("SELECT count(*) AS n FROM inbox_event WHERE id = '{e1}' AND status = 'dead' AND last_error = 'screened: pii: an email'")
+        )
+        .await,
+        1
+    );
+    assert_eq!(n(&s.db, &format!("SELECT count(*) AS n FROM inbox_event WHERE id = '{e2}' AND status = 'pending'")).await, 1);
+    assert_eq!(
+        n(&s.db, &format!("SELECT count(*) AS n FROM run WHERE id = '{run}' AND status = 'running' AND finished_at IS NULL")).await,
+        1
+    );
+    assert_eq!(n(&s.db, &format!("SELECT count(*) AS n FROM run_event WHERE run_id = '{run}'")).await, 2);
+    assert!(!s.handle.is_poisoned());
+}
+
+#[tokio::test]
+async fn screen_out_of_every_event_screens_the_run() {
+    let Some(mut s) = setup().await else { return };
+    let run = s.claim.run.uuid();
+    let thread = s.claim.thread.uuid();
+    let out = screen_all(&s);
+    let dead = DebuggingRecorder::new();
+    let res = {
+        let _guard = metrics::set_default_local_recorder(&dead);
+        s.committer.screen_out(&mut s.handle, out).await
+    };
+    assert_eq!(res, Ok(ScreenResult::AllScreened));
+    assert_eq!(
+        n(&s.db, &format!("SELECT count(*) AS n FROM run WHERE id = '{run}' AND status = 'screened' AND finished_at IS NOT NULL")).await,
+        1
+    );
+    assert_eq!(
+        n(
+            &s.db,
+            &format!("SELECT count(*) AS n FROM thread WHERE id = '{thread}' AND last_run_at IS NULL AND successor_id IS NULL")
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE status = 'dead' AND last_error = 'screened: pii: an email'").await,
+        2
+    );
+    // A snapshot drains the recorder, so the three metrics read one snapshot.
+    let snap = dead.snapshotter().snapshot().into_vec();
+    let total = |name: &str| -> u64 {
+        snap.iter()
+            .filter(|(k, _, _, _)| k.key().name() == name)
+            .map(|(_, _, _, v)| match v {
+                DebugValue::Counter(n) => *n,
+                _ => 0,
+            })
+            .sum()
+    };
+    assert_eq!(total(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL), 2);
+    assert_eq!(total(names::AGENT_HOST_EVENTS_SCREENED_TOTAL), 2);
+    let attempts: Vec<f64> = snap
+        .iter()
+        .filter(|(k, _, _, _)| k.key().name() == names::AGENT_HOST_EVENT_ATTEMPTS)
+        .flat_map(|(_, _, _, v)| match v {
+            DebugValue::Histogram(h) => h.iter().map(|x| x.into_inner()).collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    assert_eq!(attempts, vec![1.0, 1.0]);
+}
+
+#[tokio::test]
+async fn a_failed_commit_of_screen_out_is_outcome_unknown() {
+    let Some(mut s) = setup().await else { return };
+    refuse_event_update_at_commit(&s.db).await;
+    let out = screen_all(&s);
+    let res = s.committer.screen_out(&mut s.handle, out).await;
+    assert_eq!(res, Err(CommitError::OutcomeUnknown));
+    assert!(s.handle.is_poisoned());
+}
+
+#[tokio::test]
+async fn a_stale_screen_out_is_lease_lost_and_changes_no_row() {
+    let Some(mut s) = setup().await else { return };
+    expire(&s.db, u(INBOX)).await;
+    let before = snapshot(&s.db, u(INBOX)).await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let out = screen_all(&s);
+    assert_eq!(s.committer.screen_out(&mut s.handle, out).await, Err(CommitError::LeaseLost));
+    assert_eq!(snapshot(&s.db, u(INBOX)).await, before);
+    assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, Some(("operation", "screen_out"))), 1);
+}
+
+#[tokio::test]
+async fn back_off_fails_the_run_and_delays_the_events() {
+    let Some(mut s) = setup().await else { return };
+    let run = s.claim.run.uuid();
+    let b = back_off_of(&s, Duration::from_secs(30));
+    assert_eq!(s.committer.back_off(&mut s.handle, b).await, Ok(()));
+    assert_eq!(
+        n(
+            &s.db,
+            &format!(
+                "SELECT count(*) AS n FROM run WHERE id = '{run}' AND status = 'failed' AND finished_at IS NOT NULL \
+                 AND error_class = 'transient' AND error = 'model unavailable'"
+            )
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        n(
+            &s.db,
+            "SELECT count(*) AS n FROM inbox_event WHERE status = 'pending' AND last_error = 'model unavailable' \
+             AND not_before > now() + interval '25 seconds'"
+        )
+        .await,
+        2
+    );
+    assert!(!s.handle.is_poisoned());
+}
+
+#[tokio::test]
+async fn a_failed_commit_of_back_off_is_outcome_unknown() {
+    let Some(mut s) = setup().await else { return };
+    refuse_event_update_at_commit(&s.db).await;
+    let b = back_off_of(&s, Duration::from_secs(30));
+    assert_eq!(s.committer.back_off(&mut s.handle, b).await, Err(CommitError::OutcomeUnknown));
+    assert!(s.handle.is_poisoned());
+}
+
+#[tokio::test]
+async fn a_stale_back_off_is_lease_lost_and_changes_no_row() {
+    let Some(mut s) = setup().await else { return };
+    expire(&s.db, u(INBOX)).await;
+    let before = snapshot(&s.db, u(INBOX)).await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let b = back_off_of(&s, Duration::from_secs(30));
+    assert_eq!(s.committer.back_off(&mut s.handle, b).await, Err(CommitError::LeaseLost));
+    assert_eq!(snapshot(&s.db, u(INBOX)).await, before);
+    assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, Some(("operation", "back_off"))), 1);
+}
+
+#[tokio::test]
+async fn back_off_then_the_claim_moves_to_dead_with_the_kept_error() {
+    let Some(mut s) = setup().await else { return };
+    let b = back_off_of(&s, Duration::ZERO);
+    s.committer.back_off(&mut s.handle, b).await.expect("back_off");
+    // F8: the adapter does not clear the open claim of a raw handle; the keeper does.
+    s.handle.record_complete();
+    let store = PgLeaseStore::new(s.db.clone(), HB_TIMEOUT);
+    let one = ClaimConfig { max_attempts: 1, ..cfg() };
+    let recorder = DebuggingRecorder::new();
+    let res = {
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        store.claim_events(&mut s.handle, &one).await
+    };
+    assert_eq!(res, Ok(None));
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE status = 'dead' AND last_error = 'model unavailable'").await, 2);
+    // The claim observes the attempts of each dead row.
+    assert_eq!(histogram(&recorder, names::AGENT_HOST_EVENT_ATTEMPTS), vec![1.0, 1.0]);
+}
+
+#[tokio::test]
+async fn release_after_shutdown_refunds_the_attempt() {
+    let Some(s) = setup().await else { return };
+    let run = s.claim.run.uuid();
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE attempts = 1").await, 2);
+    assert_eq!(s.committer.release_after_shutdown(s.handle).await, Ok(()));
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE attempts = 0 AND status = 'pending'").await, 2);
+    assert_eq!(
+        n(&s.db, &format!("SELECT count(*) AS n FROM run WHERE id = '{run}' AND status = 'discarded' AND finished_at IS NOT NULL")).await,
+        1
+    );
+    assert_eq!(lease_state(&s.db, u(INBOX)).await.map(|(_, live)| live), Some(false));
+}
+
+/// A run that is no longer `running` is not an open run: a shutdown refunds no attempt of it.
+#[tokio::test]
+async fn a_shutdown_after_back_off_refunds_nothing() {
+    let Some(mut s) = setup().await else { return };
+    let b = back_off_of(&s, Duration::from_secs(30));
+    s.committer.back_off(&mut s.handle, b).await.expect("back_off");
+    // The open claim stays on the handle (no `record_complete`).
+    assert_eq!(s.committer.release_after_shutdown(s.handle).await, Ok(()));
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE attempts = 1").await, 2);
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM run WHERE status = 'failed'").await, 1);
+    assert_eq!(lease_state(&s.db, u(INBOX)).await.map(|(_, live)| live), Some(false));
+}
+
+#[tokio::test]
+async fn a_poisoned_release_after_shutdown_sends_no_sql() {
+    let Some(mut s) = setup().await else { return };
+    let before = snapshot(&s.db, u(INBOX)).await;
+    s.handle.poison();
+    assert_eq!(s.committer.release_after_shutdown(s.handle).await, Ok(()));
+    assert_eq!(snapshot(&s.db, u(INBOX)).await, before);
+}
+
+#[tokio::test]
+async fn a_stale_worker_changes_no_attempt_of_the_new_holder() {
+    let Some(s) = setup().await else { return };
+    let a_handle = s.handle;
+    expire(&s.db, u(INBOX)).await;
+    let store = PgLeaseStore::new(s.db.clone(), HB_TIMEOUT);
+    let mut b = store.acquire(&InboxId::new(u(ORG), u(INBOX)), "w2", TTL).await.expect("acquire").expect("some");
+    let b_claim = store.claim_events(&mut b, &cfg()).await.expect("claim").expect("some");
+    let b_run = b_claim.run.uuid();
+    assert_eq!(n(&s.db, &format!("SELECT count(*) AS n FROM inbox_event WHERE attempts = 2 AND claimed_run_id = '{b_run}'")).await, 2);
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let before = snapshot(&s.db, u(INBOX)).await;
+    assert_eq!(s.committer.release_after_shutdown(a_handle).await, Err(CommitError::LeaseLost));
+    assert_eq!(before, snapshot(&s.db, u(INBOX)).await);
+    assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, Some(("operation", "release_after_shutdown"))), 1);
 }

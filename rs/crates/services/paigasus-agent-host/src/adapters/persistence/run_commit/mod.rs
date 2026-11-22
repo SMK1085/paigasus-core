@@ -7,16 +7,25 @@
 //! `commit_or_poison`. The `Drop` of a `DatabaseTransaction` can panic (see `migration_lock.rs`),
 //! so every error path rolls back explicitly.
 
+mod back_off;
 mod commit;
+mod screen;
+mod shutdown;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use paigasus_agent_host_core::fault::FaultPoint;
+use paigasus_agent_host_core::ids::RunId;
+use paigasus_agent_host_core::lease::LeaseHandle;
 use paigasus_agent_host_core::memory::MemoryCaps;
-use paigasus_agent_host_core::run::{CommitError, UNENCODABLE_PREFIX};
-use sea_orm::{DatabaseBackend, DatabaseConnection, DbErr, RuntimeErr, Statement, Value};
+use paigasus_agent_host_core::ports::RunCommitter;
+use paigasus_agent_host_core::run::{BackOff, CommitError, Committed, EventDelay, LeaseToken, RunRecord, ScreenOut, ScreenResult, UNENCODABLE_PREFIX};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbErr, RuntimeErr, Statement, Value};
+use uuid::Uuid;
 
 use crate::adapters::memory_commit::MemoryCommit;
+use crate::adapters::persistence::lease_store::lost;
 
 /// `$1` = inbox, `$2` = token. The first statement of a commit that locks a row. No row means
 /// that the lease is lost.
@@ -29,6 +38,10 @@ const LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '5s'";
 /// The SQLSTATEs of a text that Postgres cannot store: `22P05` (untranslatable character) and
 /// `22021` (a byte sequence that is not valid in the encoding).
 const UNENCODABLE_CODES: [&str; 2] = ["22P05", "22021"];
+
+/// `$1` = event, `$2` = run, `$3` = delay in microseconds, `$4` = error. The event stays pending.
+const RETRY_SQL: &str = "UPDATE inbox_event SET not_before = clock_timestamp() + ($3::bigint * interval '1 microsecond'), last_error = $4 \
+     WHERE id = $1 AND claimed_run_id = $2 AND status = 'pending'";
 
 /// The run committer on a Postgres pool.
 pub struct PgRunCommitter {
@@ -44,6 +57,67 @@ impl PgRunCommitter {
     pub fn new(db: DatabaseConnection, memory: MemoryCommit, caps: MemoryCaps, faults: Arc<dyn FaultPoint>) -> Self {
         PgRunCommitter { db, memory, caps, faults }
     }
+}
+
+#[async_trait]
+impl RunCommitter for PgRunCommitter {
+    async fn commit(&self, h: &mut LeaseHandle, r: RunRecord) -> Result<Committed, CommitError> {
+        self.commit_record(h, r).await
+    }
+
+    async fn screen_out(&self, h: &mut LeaseHandle, s: ScreenOut) -> Result<ScreenResult, CommitError> {
+        self.screen_out_events(h, s).await
+    }
+
+    async fn back_off(&self, h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
+        self.back_off_run(h, b).await
+    }
+
+    async fn release_after_shutdown(&self, h: LeaseHandle) -> Result<(), CommitError> {
+        self.release_shutdown(h).await
+    }
+}
+
+/// The check of a handle before a fenced write of `operation`. A poisoned handle sends no SQL and
+/// counts nothing. A run or a token that is not the open claim of the handle is a lost lease.
+fn check_handle(h: &LeaseHandle, run: &RunId, token: LeaseToken, operation: &'static str) -> Result<(), CommitError> {
+    if h.is_poisoned() {
+        return Err(CommitError::LeaseLost);
+    }
+    if h.open_claim().as_ref() != Some(run) || h.token() != token {
+        lost(operation);
+        return Err(CommitError::LeaseLost);
+    }
+    Ok(())
+}
+
+/// Step 1 of every fenced transaction: set the lock wait, then lock the lease row and check the
+/// token and the expiry. `false` means that the lease is lost.
+async fn lock_lease(txn: &DatabaseTransaction, inbox: Uuid, token: LeaseToken) -> Result<bool, CommitError> {
+    txn.execute_unprepared(LOCK_TIMEOUT_SQL).await.map_err(db_err)?;
+    Ok(txn.query_one_raw(stmt(LOCK_SQL, [inbox.into(), token.0.into()])).await.map_err(db_err)?.is_some())
+}
+
+/// Roll back after a failed step of `operation`, and return its error. A `LeaseLost` counts one
+/// lost lease.
+async fn abort(txn: DatabaseTransaction, e: CommitError, operation: &'static str) -> CommitError {
+    let _ = txn.rollback().await;
+    if matches!(e, CommitError::LeaseLost) {
+        lost(operation);
+    }
+    e
+}
+
+/// The back-off of each event of `retry`: it stays pending, is due after its delay and keeps
+/// `error` as its `last_error`.
+async fn retry_events(txn: &DatabaseTransaction, run: Uuid, retry: &[EventDelay], error: &str) -> Result<(), CommitError> {
+    for delay in retry {
+        let micros = i64::try_from(delay.delay.as_micros()).unwrap_or(i64::MAX);
+        txn.execute_raw(stmt(RETRY_SQL, [delay.event.uuid().into(), run.into(), micros.into(), error.into()]))
+            .await
+            .map_err(db_err)?;
+    }
+    Ok(())
 }
 
 fn stmt(sql: &str, values: impl IntoIterator<Item = Value>) -> Statement {

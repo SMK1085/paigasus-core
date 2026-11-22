@@ -40,12 +40,13 @@ macro_rules! free {
     };
 }
 
-/// `$1` = inbox, `$2` = token, `$3` = max attempts, `$4` = `DEAD_REASON` (§8.4.1).
+/// `$1` = inbox, `$2` = token, `$3` = max attempts, `$4` = `DEAD_REASON` (§8.4.1). The error of
+/// the last failure stays; `DEAD_REASON` fills only an empty `last_error` (SMA-790 §6.9).
 const DEAD_SQL: &str = concat!(
-    "UPDATE inbox_event e SET status = 'dead', last_error = $4 \
+    "UPDATE inbox_event e SET status = 'dead', last_error = COALESCE(e.last_error, $4) \
      WHERE e.inbox_id = $1 AND e.status = 'pending' AND e.not_before <= now() AND e.attempts >= $3 AND ",
     free!(),
-    " RETURNING e.id"
+    " RETURNING e.id, e.attempts"
 );
 
 /// `$1` = inbox, `$2` = token, `$3` = max attempts. The claimable events, the oldest first.
@@ -100,8 +101,8 @@ fn stmt(sql: &str, values: impl IntoIterator<Item = Value>) -> Statement {
 enum Step {
     /// The lease is lost. Roll back.
     Lost,
-    /// Commit. `token` is the current token, `dead` the number of dead moves.
-    Commit { token: LeaseToken, dead: u64, claim: Option<Claim> },
+    /// Commit. `token` is the current token, `dead` the attempts of each event moved to `dead`.
+    Commit { token: LeaseToken, dead: Vec<i32>, claim: Option<Claim> },
 }
 
 impl PgLeaseStore {
@@ -123,8 +124,11 @@ impl PgLeaseStore {
                 // open claim, so it is poisoned (as in `complete`).
                 commit_or_poison(handle, txn.commit()).await.map_err(store)?;
                 handle.record_claim(token, claim.as_ref().map(|c| c.run.clone()));
-                if dead > 0 {
-                    metrics::counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL).increment(dead);
+                if !dead.is_empty() {
+                    metrics::counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL).increment(u64::try_from(dead.len()).unwrap_or(u64::MAX));
+                }
+                for attempts in dead {
+                    metrics::histogram!(names::AGENT_HOST_EVENT_ATTEMPTS).record(f64::from(attempts));
                 }
                 if claim.is_some() {
                     metrics::counter!(names::AGENT_HOST_CLAIMS_TOTAL).increment(1);
@@ -159,8 +163,9 @@ async fn claim_in(txn: &DatabaseTransaction, handle: &LeaseHandle, cfg: &ClaimCo
         .query_all_raw(stmt(DEAD_SQL, [inbox.into(), token.0.into(), max_attempts.into(), DEAD_REASON.into()]))
         .await
         .map_err(store)?
-        .len();
-    let dead = u64::try_from(dead).unwrap_or(u64::MAX);
+        .iter()
+        .map(|row| row.try_get::<i32>("", "attempts").map_err(store))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Step 4: the claimable events, the oldest first.
     let rows = txn.query_all_raw(stmt(CLAIMABLE_SQL, [inbox.into(), token.0.into(), max_attempts.into()])).await.map_err(store)?;
