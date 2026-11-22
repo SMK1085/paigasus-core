@@ -94,6 +94,11 @@ proptest = { workspace = true }
 # `tests/memory_pg.rs` runs the conformance suite of `MemoryStore` against Postgres.
 paigasus-agent-host-core = { workspace = true, features = ["test-support"] }
 
+# `tests/run_session_pg.rs` runs the Helikon sessions conformance suite against `PgRunSession`
+# and a write-through wrapper of `write_session` (spec §6.6). Exact pin: a 0.1 patch release can
+# add a sub-test or move the core requirement.
+paigasus-helikon-sessions-testkit = "=0.1.2"
+
 # `adapters::timer_event` tests decode the `agents/v1` descriptor set.
 prost = { workspace = true }
 prost-types = { workspace = true }
