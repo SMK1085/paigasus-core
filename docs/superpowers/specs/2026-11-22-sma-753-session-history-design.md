@@ -480,7 +480,10 @@ The builder can add metrics. These names are the minimum.
   linking with its writes, an append-only reserve, settle and the links, the `ref=` notice, the
   findings, `session_id` and `turn` in the decision log, the Redis requirement check. So PR 1 has
   working links and real findings. A store error in PR 1 is counted, and the request continues.
-  The R5 refusal and the IAM setting stay as they are.
+  The R5 refusal and the IAM setting stay as they are. "No policy effect" means that PR 1
+  evaluates no temporal history conditions. The history findings (`mixed_sessions`,
+  `forged_history`) and `context.session` do reach response-side Cedar in PR 1
+  (RUNBOOK-tool-policies.md).
 - **PR 2, the policy effect.** The kernel evaluator and slots, the window read in the reserve, the
   load validation, the R5 removal, the IAM setting, the corpus cases, the parity test, the cap test
   and the p99 test.
