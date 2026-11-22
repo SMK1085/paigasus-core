@@ -580,6 +580,8 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
   `formerly(...::response)` false.
 - R10. `on_failure = allow` weakens A2 and A3 for decide timeouts (D10). A truncated or oversized
   hold that passes through under `on_failure = allow` is not counted at all (D8).
+  A decide timeout under `on_failure = allow` after the reserve ran counts the call twice: the
+  pending event stays, and the report site appends an allowed event. A count can grow, never drop.
 
 ## 13. Changes after Gate 1
 
