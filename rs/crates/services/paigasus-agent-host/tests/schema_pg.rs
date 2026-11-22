@@ -161,8 +161,9 @@ async fn down_drops_every_table_of_m0003_in_dependency_order() {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
-    // m0004 (the timer table, SMA-788) is newer than m0003, so two steps down reach m0003.
-    Migrator::down(&db, Some(2)).await.expect("down of m0004 and m0003");
+    // m0004 (the timer table, SMA-788) and m0005 (the session table, SMA-790) are newer than
+    // m0003, so three steps down reach m0003.
+    Migrator::down(&db, Some(3)).await.expect("down of m0005, m0004 and m0003");
     for table in ["thread", "inbox_lease", "run", "run_event", "inbox_event"] {
         assert!(support::scalar_bool(&db, &format!("SELECT to_regclass('{table}') IS NULL AS v")).await, "{table} must be gone");
     }
@@ -315,7 +316,56 @@ async fn m0004_down_drops_only_the_timer_table() {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
-    Migrator::down(&db, Some(1)).await.expect("down of m0004");
+    Migrator::down(&db, Some(2)).await.expect("down of m0005 and m0004");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('timer') IS NULL AS v").await, "timer must be gone");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox_event') IS NOT NULL AS v").await, "m0003 must stay");
+}
+
+#[tokio::test]
+async fn m0005_adds_session_event_and_the_run_columns() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('session_event') IS NOT NULL AS v").await);
+    for col in ["final_output", "error", "error_class", "input_tokens", "output_tokens", "cached_input_tokens", "reasoning_tokens"] {
+        let sql = format!("SELECT count(*) = 1 AS v FROM information_schema.columns WHERE table_name = 'run' AND column_name = '{col}'");
+        assert!(support::scalar_bool(&db, &sql).await, "{col}");
+    }
+    two_inboxes(&db).await;
+    insert_thread(&db, id(500), id(1)).await;
+    insert_run(&db, id(600), id(1), id(500)).await.expect("insert run");
+    let row = |inbox: Uuid, seq: i64| {
+        format!(
+            "INSERT INTO session_event (inbox_id, thread_id, sequence, run_id, kind, payload) VALUES ('{inbox}', '{}', {seq}, '{}', 'user_message', '{{}}')",
+            id(500),
+            id(600)
+        )
+    };
+    // A session row that names another inbox is refused by the composite keys.
+    let err = db.execute_unprepared(&row(id(2), 0)).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+    // The primary key refuses a second row with the same (thread, sequence).
+    db.execute_unprepared(&row(id(1), 0)).await.expect("first row");
+    let err = db.execute_unprepared(&row(id(1), 0)).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))), "expected 23505, got {err:?}");
+}
+
+#[tokio::test]
+async fn down_of_m0005_drops_session_event_and_the_run_columns() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    Migrator::down(&db, Some(1)).await.expect("down of m0005");
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('session_event') IS NULL AS v").await);
+    assert!(
+        support::scalar_bool(
+            &db,
+            "SELECT count(*) = 0 AS v FROM information_schema.columns WHERE table_name = 'run' AND column_name = 'final_output'"
+        )
+        .await
+    );
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('run') IS NOT NULL AS v").await, "m0003 must stay");
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('timer') IS NOT NULL AS v").await, "m0004 must stay");
 }
