@@ -76,10 +76,16 @@ const HEARTBEAT_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp
 
 /// `$1` = inbox, `$2` = token. A release expires the lease one microsecond in the past. The row
 /// stays, so the next token is larger.
+///
+/// The expiry term can be evaluated before a lock wait. That is harmless here: a release only moves
+/// `expires_at` into the past, so a late release changes nothing that a fence reads. A take changes
+/// the row, so Postgres checks the token term again after the wait.
 pub(crate) const RELEASE_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp() - interval '1 microsecond' \
      WHERE inbox_id = $1 AND token = $2 AND expires_at > clock_timestamp()";
 
-/// `$1` = run, `$2` = token. A release discards the open run of the handle.
+/// `$1` = run, `$2` = token. A release discards the open run of the handle. It has no expiry term.
+/// The token term is checked again after a lock wait, because a take changes the row (see
+/// `RELEASE_SQL`).
 pub(crate) const DISCARD_RUN_SQL: &str = "UPDATE run SET status = 'discarded', finished_at = now() \
      WHERE id = $1 AND status = 'running' AND lease_token = $2";
 

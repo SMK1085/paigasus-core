@@ -22,7 +22,7 @@ pub enum ClaimError {
     /// The lease is lost.
     #[error("lease lost")]
     LeaseLost,
-    /// The handle has an open claim. Complete it before the next claim.
+    /// The handle has an open claim. Commit it before the next claim.
     #[error("a claim is open")]
     ClaimOpen,
     /// The handle is poisoned. A failed claim or commit left its state unknown.

@@ -14,6 +14,10 @@
 # [worker]
 # enabled = true
 # concurrency = 4           # runs at the same time. Range 1 to 64
+#                           # One replica opens 2 x concurrency + 8 main connections and
+#                           # concurrency + 1 lease connections (201 at the maximum of 64).
+#                           # The sum over all replicas must stay below the Postgres
+#                           # max_connections (default 100).
 # poll_interval_ms = 1000   # the time between two claim polls. Range 100 to 60000
 # max_runs_per_lease = 8    # the most runs that one lease serves. Range 1 to 1000
 
