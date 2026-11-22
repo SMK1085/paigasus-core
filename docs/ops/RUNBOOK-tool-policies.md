@@ -441,8 +441,8 @@ Do these steps before you deploy this build.
 1. Read the floor (`GET /v1/tool-policy-floor`) and the set of each tenant
    (`GET /v1/organizations/{id}/tool-policy-set`), as in section 5.
 2. Look for a temporal block (a history condition) in each set.
-3. For each set that has one, tell the tenant about the change above. Or publish a version with no
-   temporal block before the deploy.
+3. For each set that has one, tell the tenant about the change above. Or publish a condition-free
+   version (see "Gateway rollback" for the definition) before the deploy.
 
 ### Gateway rollback
 
@@ -458,17 +458,34 @@ The effect of one history rule is its action scope, not one tool:
 - A floor forbid over `InvokeTool`, or with no action constraint, that reads a slot denies every
   call of every tenant, in every mode.
 
-Before a rollback from PR 2 to this build, list each history rule whose scope is `InvokeTool` or
-has no action constraint. Treat the sets that hold such a rule as for a rollback to an older build
-(the steps below).
-
 A gateway build older than SMA-753 PR 1 refuses the whole set (section 5). A refused tenant set
 under `fail_mode = closed` blocks every tool call of that tenant. A refused floor under a global
-`closed` blocks every tool call of every tenant. Before a rollback to such a build, do one of these
-steps for each set that holds a history rule:
+`closed` blocks every tool call of every tenant. Before a rollback to such a build, run the procedure
+below for each set that has a temporal block.
 
-1. Publish a version of the set with no history rule. For the floor, this step is mandatory.
-2. Or set the tenant to mode `log_only`. Then the tenant set blocks no call.
+A condition-free set is a new published version whose source has no temporal block. Its compiled
+Cedar has no condition, and no policy reads a `context.<slot>` attribute. Removing only the condition
+definitions is not enough: a policy that still reads a slot errors, and an errored forbid denies every
+call in its scope.
+
+Procedure for a gateway rollback to this build or to an older build:
+
+1. Set `tool_policies.history_conditions = false` in IAM. IAM then refuses each save with a condition.
+   Wait until every in-flight save has finished. For a rollback to this build, this step is already
+   true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1. Confirm the
+   setting value anyway.
+2. Prepare the floor and the tenant sets. For a rollback from PR 2 to this build, replace each history
+   policy whose scope is `InvokeTool` or has no action constraint with a reviewed replacement that has
+   no temporal block. For a rollback to a build before SMA-753 PR 1, publish a condition-free version
+   of each set with a condition. A tenant set may move to mode `log_only` instead. Then the tenant set
+   blocks no call. The floor has no `log_only` alternative, so the floor must be condition-free.
+3. Read the floor (`GET /v1/tool-policy-floor`) and each tenant set
+   (`GET /v1/organizations/{id}/tool-policy-set`) again. Verify that no compiled set has a condition,
+   and that no policy reads a `context.<slot>` attribute.
+4. Only then roll back the gateway.
+
+Step 1 comes first. While saves are enabled, another writer can save a new condition after you
+prepared a set.
 
 To find these decisions after a rollback, look at the basis. A call that a history forbid denies
 has the basis `errored_forbid` in `gateway_tool_policy_decisions_total`. The decision log line

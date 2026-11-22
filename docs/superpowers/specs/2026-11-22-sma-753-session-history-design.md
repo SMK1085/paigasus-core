@@ -526,11 +526,11 @@ refusal, a rollback would make each such tenant set unavailable (a `closed` tena
 call), and a floor with a condition would fail for every tenant.
 
 **Limit.** A gateway build older than PR 1 still refuses the whole set. Before a rollback to such a
-build, the floor MUST have no condition. The operator publishes a floor version with no condition.
-For each tenant set, the operator publishes a version with no condition, or moves that tenant to
-`log_only` (RUNBOOK-tool-policies.md section 10). The `log_only` option applies to tenant sets only.
-A rollback from PR 2 to PR 1 needs the same step for each history policy whose scope is `InvokeTool`
-or has no action constraint (see "Blast radius").
+build, the floor MUST be condition-free, and each tenant set with a condition MUST be condition-free
+or moved to `log_only`. The steps and the definition of "condition-free" are in § 8 ("Procedure for
+either rollback"), and RUNBOOK-tool-policies.md section 10 states the same steps. A rollback from PR 2
+to PR 1 replaces each history policy whose scope is `InvokeTool` or has no action constraint (see
+"Blast radius").
 
 **Effect at deploy.** IAM keeps `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` unchanged in PR 1, so IAM
 refuses each new save with a condition. But older live rows can hold conditions: SMA-774 (PR 478,
@@ -569,15 +569,32 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
   condition and leaves its slots empty (D16). So only the history policies fail closed, and the
   other policies of the set work. A history policy over `InvokeTool` or with no action constraint
   fails closed for every call of its tenant (a floor one: of every tenant). Before such a rollback,
-  the operator treats those sets as for a rollback to a build before PR 1 (D16). After PR 2, the removal of `[tool_history]` also only makes the
+  the operator runs the procedure below. After PR 2, the removal of `[tool_history]` also only makes the
   history slots missing (D10).
 - **Gateway rollback to a build before PR 1.** Such a build refuses a set with a condition. A
   `closed` tenant then loses its tool calls, and a floor with a condition fails for every tenant.
-  Before such a rollback, the floor MUST have no condition: the operator publishes a floor version
-  with no condition. For each tenant set with a condition, the operator publishes a version with no
-  condition, or moves that tenant to `log_only`. The `log_only` option applies to tenant sets only.
-  Then the operator sets `tool_policies.history_conditions = false` and tells the tenants that have
+  Before such a rollback, the operator runs the procedure below and tells the tenants that have
   conditions.
+- **Procedure for either rollback.** A condition-free set is a new published version whose source has
+  no temporal block. Its compiled Cedar has no condition, and no policy reads a `context.<slot>`
+  attribute. Removing only the condition definitions is not enough: a policy that still reads a slot
+  errors, and an errored forbid denies every call in its scope.
+
+  1. Set `tool_policies.history_conditions = false` in IAM. IAM then refuses each save with a
+     condition. Wait until every in-flight save has finished. For a rollback to PR 1, this step is
+     already true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1.
+     Confirm the setting value anyway.
+  2. Prepare the floor and the tenant sets. For a rollback from PR 2 to PR 1, replace each history
+     policy whose scope is `InvokeTool` or has no action constraint with a reviewed replacement that
+     has no temporal block. For a rollback to a build before PR 1, publish a condition-free version of
+     each set with a condition. A tenant set may move to `log_only` instead. The floor has no
+     `log_only` alternative, so the floor must be condition-free.
+  3. Read the floor and each tenant set again. Verify that no compiled set has a condition, and that
+     no policy reads a `context.<slot>` attribute.
+  4. Only then roll back the gateway.
+
+  Step 1 comes first. While saves are enabled, another writer can save a new condition after the
+  operator prepared a set.
 - **IAM setting back to `false`.** IAM then refuses every save with a condition. Existing compiled
   sets stay in force. A later catalog write that recompiles such a set is refused
   (`sets.rs:21-24`). The runbook states this.
