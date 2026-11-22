@@ -151,6 +151,7 @@ pub(crate) fn strict_entries(text: &str) -> Result<Vec<(String, &RawValue)>, Unp
 pub(crate) fn elements(text: &str) -> Result<Vec<&RawValue>, Unparsed> {
     serde_json::from_str::<Vec<&RawValue>>(text).map_err(|_| Unparsed)
 }
+
 /// Whether the brackets of one valid JSON text nest at most `MAX_NESTING` levels. Iterative, so a
 /// deep text cannot overflow the stack. A bracket inside a string does not count.
 pub(crate) fn nesting_ok(text: &str) -> bool {

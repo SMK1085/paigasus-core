@@ -29,6 +29,7 @@ fn validate(raw: &RawValue) -> Result<(), Unparsed> {
         _ => Ok(()),
     }
 }
+
 fn walk(raw: &RawValue, depth: usize) -> Walk {
     let text = raw.get();
     let first = first_byte(text);
@@ -72,6 +73,7 @@ fn walk(raw: &RawValue, depth: usize) -> Walk {
 fn empty_record() -> RestrictedExpression {
     RestrictedExpression::new_record(std::iter::empty()).expect("an empty record has no duplicate key")
 }
+
 fn parse_object(raw: &str) -> Option<RestrictedExpression> {
     let value: &RawValue = serde_json::from_str(raw).ok()?;
     if first_byte(value.get()) != b'{' || !nesting_ok(value.get()) {
@@ -108,6 +110,7 @@ pub(crate) fn map_input(input: &ToolInput) -> MappedInput {
         },
     }
 }
+
 #[cfg(test)]
 mod tests {
     use cedar_policy::{Authorizer, Context, Decision, Entities, EntityUid, PolicySet, Request};

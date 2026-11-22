@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use paigasus_kernel::CedarUid;
+use paigasus_kernel::detect::Severity;
 use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, ToolVerdict, decide, decide_tool};
 use proptest::prelude::*;
 use proptest::sample::{select, subsequence};
@@ -112,7 +113,7 @@ fn input() -> impl Strategy<Value = ToolInput> {
 fn findings() -> impl Strategy<Value = Findings> {
     subsequence(FINDINGS.to_vec(), 0..=FINDINGS.len()).prop_map(|ks| {
         let mut f = Findings::new();
-        ks.iter().for_each(|k| f.insert(k));
+        ks.iter().for_each(|k| f.add(k, if *k == "name_collision" { Severity::High } else { Severity::Medium }));
         f
     })
 }

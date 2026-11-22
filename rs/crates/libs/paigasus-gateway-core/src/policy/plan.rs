@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use paigasus_kernel::detect::Severity;
 use paigasus_kernel::tool_policy::{Facts, Findings, NAME_COLLISION, ToolPolicies, ToolVerdict, decide_tool, normalise};
 
 use super::mapping::{definition_call_name, name_collisions};
@@ -131,7 +132,7 @@ impl Judge<'_> {
         }
         let mut findings = Findings::new();
         if self.collisions.contains(&n) {
-            findings.insert(NAME_COLLISION);
+            findings.add(NAME_COLLISION, Severity::High);
         }
         let v = match decide_tool(&n, self.facts, &findings, self.policies) {
             ToolVerdict::DeniedForAllInputs { by_floor } if by_floor || !self.floor_only => Some(by_floor || self.mode == TenantMode::Enforce),

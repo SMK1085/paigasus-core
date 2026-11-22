@@ -240,6 +240,7 @@ mod tests {
 
     use super::*;
     use crate::CedarUid;
+    use crate::detect::Severity;
     use crate::tool_policy::{Declared, Effect as Outcome, NAME_COLLISION, RequestInfo, SessionInfo, ToolInput, ToolInvocation, decide};
 
     const ALLOW_ALL: &str = r#"@id("all") permit(principal, action, resource);"#;
@@ -261,7 +262,7 @@ mod tests {
 
     fn findings(kinds: &[&str]) -> Findings {
         let mut f = Findings::new();
-        kinds.iter().for_each(|k| f.insert(k));
+        kinds.iter().for_each(|k| f.add(k, if *k == "name_collision" { Severity::High } else { Severity::Medium }));
         f
     }
 

@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use paigasus_kernel::detect::Severity;
 use paigasus_kernel::tool_policy::{
     ActionGroup, Declared, Effect, Facts, Findings, PolicyOrigin, PolicyRef, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, UNPARSED_ARGUMENTS, decide,
 };
@@ -134,7 +135,7 @@ fn context_shape() {
     );
     let p = policies("", &tenant, &["t"]);
     let mut findings = Findings::new();
-    findings.insert("name_collision");
+    findings.add("name_collision", Severity::High);
     let v = decide(&call("t", r#"{"a": 1}"#), &facts(), &findings, &p);
     assert_eq!(v.decision, Effect::Allow, "{v:?}");
     let v = decide(&call("t", r#"{"a": 1}"#), &facts(), &Findings::new(), &p);
@@ -222,7 +223,7 @@ fn bad_facts() -> Facts {
 fn findings(kinds: &[&str]) -> Findings {
     let mut f = Findings::new();
     for k in kinds {
-        f.insert(k);
+        f.add(k, if *k == "name_collision" { Severity::High } else { Severity::Medium });
     }
     f
 }

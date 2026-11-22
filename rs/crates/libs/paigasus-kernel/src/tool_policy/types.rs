@@ -2,12 +2,13 @@
 //! The public types of the tool policy decision. Every public type is `#[non_exhaustive]`, so a
 //! caller makes a value with its `new` constructor.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
 use crate::CedarUid;
 
+use crate::detect::Severity;
 pub use crate::detect::{Declared, NAME_COLLISION, ToolInput, UNPARSED_ARGUMENTS};
 
 /// One tool call to decide.
@@ -100,32 +101,45 @@ impl Facts {
     }
 }
 
-/// The set of finding kinds that the gateway saw about a request or a call.
+/// The finding kinds that the gateway saw about a request or a call, each with its highest severity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Findings(BTreeSet<String>);
+pub struct Findings(BTreeMap<String, Severity>);
 
 impl Findings {
     /// Make an empty set.
     #[must_use]
     pub fn new() -> Self {
-        Self(BTreeSet::new())
+        Self(BTreeMap::new())
     }
 
-    /// Add a finding kind.
-    pub fn insert(&mut self, kind: &str) {
-        self.0.insert(kind.to_owned());
+    /// Add a finding kind. If the kind is present, the higher severity stays.
+    pub fn add(&mut self, kind: &str, severity: Severity) {
+        let entry = self.0.entry(kind.to_owned()).or_insert(severity);
+        *entry = (*entry).max(severity);
+    }
+
+    /// The highest severity in the set, or `None` if the set is empty.
+    #[must_use]
+    pub fn max_severity(&self) -> Option<Severity> {
+        self.0.values().copied().max()
+    }
+
+    /// The severity of a kind, or `None` if the set does not hold the kind.
+    #[must_use]
+    pub fn severity(&self, kind: &str) -> Option<Severity> {
+        self.0.get(kind).copied()
     }
 
     /// Whether the set holds the kind.
     #[must_use]
     pub fn contains(&self, kind: &str) -> bool {
-        self.0.contains(kind)
+        self.0.contains_key(kind)
     }
 
     /// The kinds, in sorted order.
     pub fn iter(&self) -> impl Iterator<Item = &str> {
-        self.0.iter().map(String::as_str)
+        self.0.keys().map(String::as_str)
     }
 }
 
@@ -147,14 +161,16 @@ mod tests {
     }
 
     #[test]
-    fn findings_keep_sorted_unique_kinds() {
+    fn findings_keep_the_highest_severity_per_kind() {
         let mut f = Findings::new();
-        assert!(!f.contains(NAME_COLLISION));
-        f.insert(UNPARSED_ARGUMENTS);
-        f.insert(NAME_COLLISION);
-        f.insert(NAME_COLLISION);
-        assert!(f.contains(NAME_COLLISION) && f.contains(UNPARSED_ARGUMENTS));
+        assert_eq!(f.max_severity(), None);
+        f.add(UNPARSED_ARGUMENTS, Severity::Info);
+        f.add(NAME_COLLISION, Severity::High);
+        f.add(UNPARSED_ARGUMENTS, Severity::Medium);
+        f.add(UNPARSED_ARGUMENTS, Severity::Low);
         assert_eq!(f.iter().collect::<Vec<_>>(), [NAME_COLLISION, UNPARSED_ARGUMENTS]);
+        assert_eq!(f.max_severity(), Some(Severity::High));
+        assert_eq!(f.severity(UNPARSED_ARGUMENTS), Some(Severity::Medium));
     }
 
     #[test]

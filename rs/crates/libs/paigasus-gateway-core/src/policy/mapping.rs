@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use paigasus_kernel::detect::Severity;
 use paigasus_kernel::tool_policy::{Declared, Findings, NAME_COLLISION, ToolInput, ToolInvocation, normalise};
 
 use crate::turn::{ToolDefinition, ToolTurn};
@@ -76,7 +77,7 @@ pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
 pub fn call_findings(call: &ToolCall, collisions: &BTreeSet<String>) -> Findings {
     let mut f = Findings::new();
     if collisions.contains(&normalise(&call.display_name())) {
-        f.insert(NAME_COLLISION);
+        f.add(NAME_COLLISION, Severity::High);
     }
     f
 }
