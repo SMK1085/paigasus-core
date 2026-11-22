@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use paigasus_gateway_core::{
     ChoiceRewrite, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestPlan, RequestReason, TenantMode, TenantPart, ToolChoice, ToolTurn, TurnFacts, ingress, parse_request,
@@ -60,7 +61,7 @@ fn turn(format: Format, body: &[u8]) -> TurnFacts {
 }
 
 fn plan(snap: &PolicySnapshot, format: Format, body: &[u8]) -> RequestPlan {
-    plan_request(snap, format, &turn(format, body))
+    plan_request(snap, format, &turn(format, body), &[], &Instant::now)
 }
 
 fn rewrite(format: Format, body: &[u8], plan: &RequestPlan) -> String {
@@ -117,7 +118,7 @@ fn the_output_parses_back_to_the_planned_turn() {
     for (name, format, tools) in CASES {
         let input = fixture(name, "in");
         let before = turn(*format, input.as_bytes());
-        let p = plan_request(&enforce(*format, tools), *format, &before);
+        let p = plan_request(&enforce(*format, tools), *format, &before, &[], &Instant::now);
         let after = turn(*format, rewrite(*format, input.as_bytes(), &p).as_bytes());
         let gone: Vec<&str> = p.removed.iter().filter(|i| i.enforced).map(|i| i.target.as_str()).collect();
         let names = |t: &TurnFacts| t.definitions.iter().map(|d| d.display_name()).collect::<Vec<_>>();

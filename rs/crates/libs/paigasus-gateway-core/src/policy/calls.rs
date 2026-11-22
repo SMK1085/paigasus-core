@@ -2,10 +2,10 @@
 //! The decisions of the calls of one hold, from a policy snapshot (§ 6.4, D33, D34, P-4 to P-6).
 
 use std::collections::BTreeSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, Finding, HostSet, Severity};
-use paigasus_kernel::tool_policy::{Effect, Findings, Verdict, decide};
+use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
 use super::snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
@@ -56,12 +56,31 @@ fn unavailable(on: OnUnavailable) -> Decision {
 }
 
 /// The kernel finding set of the gateway findings: each kind with its highest severity.
-fn kernel_findings(given: &[Finding]) -> Findings {
+pub(super) fn kernel_findings(given: &[Finding]) -> Findings {
     let mut set = Findings::new();
     for f in given {
         set.add(&f.kind, f.severity);
     }
     set
+}
+
+/// The Cedar detail of one kernel verdict: the findings that the gateway gave (`given`) and the
+/// kernel-added ones. This is the one place that builds a detail from a verdict, so
+/// `detection_disabled` always comes from `facts.detection` (the default `false` is fail-wrong).
+pub(super) fn cedar_detail(v: &Verdict, given: &[Finding], declared: Declared, facts: &Facts, duration: Duration) -> CedarDetail {
+    let mut cedar = CedarDetail::new(
+        v.decision,
+        v.determining.clone(),
+        v.errored.clone(),
+        v.floor_denied,
+        records_of(given, v),
+        v.max_severity,
+        declared,
+        v.action_group,
+        duration,
+    );
+    cedar.detection_disabled = !facts.detection;
+    cedar
 }
 
 fn basis_of(v: &Verdict) -> PolicyBasis {
@@ -193,18 +212,7 @@ fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], s
             let started = now();
             let v = decide(&inv, facts, &kernel_findings(&given), policies);
             let duration = now().saturating_duration_since(started);
-            let mut cedar = CedarDetail::new(
-                v.decision,
-                v.determining.clone(),
-                v.errored.clone(),
-                v.floor_denied,
-                records_of(&given, &v),
-                v.max_severity,
-                inv.declared,
-                v.action_group,
-                duration,
-            );
-            cedar.detection_disabled = !facts.detection;
+            let cedar = cedar_detail(&v, &given, inv.declared, facts, duration);
             outcome(v, cedar, *tenant, snapshot.mode, snapshot.on_unavailable)
         })
         .collect()
@@ -215,7 +223,7 @@ mod tests {
     use std::sync::Arc;
 
     use paigasus_kernel::detect::SECRET_IN_ARGS;
-    use paigasus_kernel::tool_policy::{Declared, Facts, RequestInfo, SessionInfo, ToolPolicies};
+    use paigasus_kernel::tool_policy::{RequestInfo, SessionInfo, ToolPolicies};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
 

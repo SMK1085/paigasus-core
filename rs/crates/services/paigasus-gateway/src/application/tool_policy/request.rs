@@ -274,7 +274,7 @@ impl RequestToolPolicy {
             for _ in name_collisions(&facts.definitions) {
                 counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "request", "kind" => finding_label("name_collision")).increment(1);
             }
-            let plan = plan_request(&snapshot, format, facts);
+            let plan = plan_request(&snapshot, format, facts, &[], &Instant::now);
             if let Some(cause) = plan.refusal() {
                 let refusal = Refusal::from_cause(cause);
                 refusal_event(ctx, mode, &refusal, refusal.label(), true);
