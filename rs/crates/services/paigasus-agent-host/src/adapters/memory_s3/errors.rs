@@ -12,6 +12,9 @@ use object_store::client::{HttpError, HttpErrorKind};
 /// The text that comes before the status code in the `Display` text of a failed request.
 const STATUS_MARKER: &str = "non-2xx status code: ";
 
+/// The class text of a request that ran out of time.
+pub const TIMEOUT_CLASS: &str = "timeout";
+
 /// The class of an error, as a fixed text. The text never holds a path or a URL.
 pub fn class(e: &Error) -> String {
     match e {
@@ -34,7 +37,7 @@ fn generic_class(source: &(dyn std::error::Error + 'static)) -> String {
     while let Some(err) = link {
         if let Some(http) = err.downcast_ref::<HttpError>() {
             match http.kind() {
-                HttpErrorKind::Timeout => return "timeout".to_owned(),
+                HttpErrorKind::Timeout => return TIMEOUT_CLASS.to_owned(),
                 HttpErrorKind::Connect | HttpErrorKind::Request | HttpErrorKind::Interrupted | HttpErrorKind::Decode => return "transport".to_owned(),
                 _ => {}
             }

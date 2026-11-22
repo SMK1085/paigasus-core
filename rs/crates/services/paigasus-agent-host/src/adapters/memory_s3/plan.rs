@@ -12,8 +12,10 @@ use paigasus_agent_host_core::ports::{MemoryApplyError, MemoryUsage};
 
 /// The text of the refusal of content with a NUL character. It is the text of the fake store.
 const NUL_TEXT: &str = "the content contains a NUL character";
-/// The text when no change failed, but not every change is confirmed. This cannot happen.
-const NO_FAILURE_TEXT: &str = "the change set did not finish";
+/// The text when no change failed, but a write did not start: the deadline ended the apply.
+fn unfinished_text() -> String {
+    format!("the change set did not finish ({})", super::errors::TIMEOUT_CLASS)
+}
 
 /// The files of a scope: the path, the content size in bytes and the version.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -118,7 +120,17 @@ pub fn result_of(set: &MemoryCommitSet, outcomes: &[Outcome]) -> Result<(), Memo
     });
     let any_unknown = outcomes.iter().any(|o| matches!(o, Outcome::Unknown(_)));
     match first {
-        None => Err(MemoryApplyError::Store(NO_FAILURE_TEXT.to_owned())),
+        // No failure and no unknown outcome, but a write did not start. The store holds the
+        // confirmed writes, so the result is partial. With none confirmed, it holds nothing.
+        None if confirmed == 0 => Err(MemoryApplyError::Store(unfinished_text())),
+        None => {
+            let i = outcomes.iter().position(|o| !matches!(o, Outcome::Confirmed)).unwrap_or(0);
+            Err(MemoryApplyError::Partial {
+                applied: confirmed,
+                failed_at: set.changes.changes()[i].path().clone(),
+                cause: Box::new(MemoryApplyError::Store(unfinished_text())),
+            })
+        }
         Some((_, cause)) if confirmed == 0 && !any_unknown => Err(cause.clone()),
         Some((i, cause)) => Err(MemoryApplyError::Partial {
             applied: confirmed,
@@ -376,6 +388,10 @@ mod tests {
             })
         };
         assert_eq!(result_of(&set, &[Confirmed, Confirmed, Confirmed]), Ok(()));
+        let timeout = || store("the change set did not finish (timeout)");
+        assert_eq!(result_of(&set, &[Confirmed, NotStarted, NotStarted]), partial(1, "/b", timeout()));
+        assert_eq!(result_of(&set, &[Confirmed, Confirmed, NotStarted]), partial(2, "/c", timeout()));
+        assert_eq!(result_of(&set, &[NotStarted, NotStarted, NotStarted]), Err(timeout()));
         assert_eq!(result_of(&set, &[Failed(conflict("/a")), NotStarted, NotStarted]), Err(conflict("/a")));
         assert_eq!(result_of(&set, &[Confirmed, Failed(store("s")), NotStarted]), partial(1, "/b", store("s")));
         assert_eq!(result_of(&set, &[Unknown(store("t")), NotStarted, NotStarted]), partial(0, "/a", store("t")));
