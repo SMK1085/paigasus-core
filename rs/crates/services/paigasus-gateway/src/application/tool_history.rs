@@ -67,6 +67,8 @@ pub fn settle_plan(reported: &[ReportedCall], mint: &mut dyn FnMut() -> Uuid) ->
     };
     for r in reported {
         let allow = matches!(r.entry.decision, ReportDecision::Allow);
+        // `normalise(&r.entry.name)` equals `history_tool(call)` only because `report.rs` sets `name`
+        // from `ToolCall::display_name()`. Keep the two in step.
         match (r.decision_id, &r.call) {
             (Some(event_id), call) => {
                 let (call_id, item_id) = match call {
@@ -175,13 +177,21 @@ impl ToolHistory {
         self.finish(budget, op, out)
     }
 
-    /// One store call off the latency path: its own deadline, and no charge on the budget.
-    async fn off_path<T>(&self, budget: &StoreBudget, op: &'static str, call: impl Future<Output = Result<T, HistoryStoreError>>) -> Option<T> {
-        if budget.is_failed() {
-            return None;
+    /// One store call off the latency path (ruling T10-a). It always runs, under its own deadline,
+    /// whatever the budget says. It does not charge the budget and an error does not fail it. The
+    /// error is counted.
+    async fn off_path<T>(&self, op: &'static str, call: impl Future<Output = Result<T, HistoryStoreError>>) -> Option<T> {
+        match tokio::time::timeout(self.deadline, call).await {
+            Ok(Ok(v)) => Some(v),
+            Ok(Err(e)) => {
+                count_error(op, error_label(&e));
+                None
+            }
+            Err(_) => {
+                count_error(op, "deadline");
+                None
+            }
         }
-        let out = tokio::time::timeout(self.deadline, call).await;
-        self.finish(budget, op, out)
     }
 
     fn finish<T>(&self, budget: &StoreBudget, op: &'static str, out: Result<Result<T, HistoryStoreError>, tokio::time::error::Elapsed>) -> Option<T> {
@@ -263,7 +273,7 @@ impl ToolHistory {
                 histories,
                 turn: touch,
                 results,
-                now_ms: self.now_ms(),
+                now_ms: 0,
             },
         });
         Some(LinkedRequest { session, pending })
@@ -271,7 +281,8 @@ impl ToolHistory {
 
     /// After the admission. A store error is counted (op `write`); the request continues.
     pub async fn commit(&self, pending: PendingWrite) {
-        let PendingWrite { session, request } = pending;
+        let PendingWrite { session, mut request } = pending;
+        request.now_ms = self.now_ms();
         if let Some(reply) = self.timed(&session.budget, "write", self.store.write(&request)).await {
             count_trimmed(&reply);
         }
@@ -284,6 +295,7 @@ impl ToolHistory {
         if calls.is_empty() {
             return findings;
         }
+        debug_assert_eq!(calls.len(), ids.len(), "one id per call");
         let req = ReserveRequest {
             histories: Histories {
                 org: session.org,
@@ -309,7 +321,8 @@ impl ToolHistory {
     /// At the report site. Spawns one task on the tracker for the settle and, when needed, the append.
     pub fn settle(&self, ctx: &DecisionContext, reported: &[ReportedCall]) {
         let Some(session) = ctx.session.clone() else { return };
-        if session.budget.is_failed() || self.tasks.is_closed() {
+        // Settle and append are off the latency path: a failed budget does not skip them (T10-a, T10-b).
+        if self.tasks.is_closed() {
             return;
         }
         let plan = settle_plan(reported, &mut || self.mint());
@@ -332,9 +345,8 @@ impl ToolHistory {
                 items: plan.settle,
                 now_ms,
             };
-            if self.off_path(&session.budget, "settle", self.store.settle(&req)).await.is_none() {
-                return;
-            }
+            // An error is counted. It does not stop the append: the two are independent (spec D8).
+            self.off_path("settle", self.store.settle(&req)).await;
         }
         if !plan.append.is_empty() {
             let req = AppendRequest {
@@ -348,7 +360,7 @@ impl ToolHistory {
                 calls: plan.append,
                 now_ms,
             };
-            if let Some(reply) = self.off_path(&session.budget, "append", self.store.append(&req)).await {
+            if let Some(reply) = self.off_path("append", self.store.append(&req)).await {
                 count_trimmed(&reply);
             }
         }
@@ -392,6 +404,8 @@ mod tests {
     enum Mode {
         Pass,
         Fail,
+        /// Only `settle` fails.
+        FailSettle,
         Sleep(Duration),
     }
 
@@ -420,7 +434,7 @@ mod tests {
         async fn gate(&self) -> Result<(), HistoryStoreError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.mode {
-                Mode::Pass => Ok(()),
+                Mode::Pass | Mode::FailSettle => Ok(()),
                 Mode::Fail => Err(HistoryStoreError::Unavailable {
                     kind: UnavailableKind::Io,
                     detail: "down".into(),
@@ -452,6 +466,12 @@ mod tests {
         }
         async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
             self.gate().await?;
+            if matches!(self.mode, Mode::FailSettle) {
+                return Err(HistoryStoreError::Unavailable {
+                    kind: UnavailableKind::Io,
+                    detail: "down".into(),
+                });
+            }
             self.inner.settle(req).await
         }
         async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
@@ -813,7 +833,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settle_after_a_store_error_or_a_closed_tracker_makes_no_call() {
+    async fn a_closed_tracker_makes_no_settle_call() {
         let reported = reported_of(&[("c-1", "a")], &[(Decision::Allow, Some(u(1)))]);
         let (store, h) = setup();
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
@@ -822,31 +842,62 @@ mod tests {
         h.settle(&ctx().with_session(session), &reported);
         h.tasks().wait().await;
         assert_eq!(store.count(), before, "the tracker is closed");
+    }
 
+    /// T10-a and T10-b: a request whose `reserve` failed has a failed budget, and settle and append
+    /// still run. The latency-path calls stay skipped.
+    #[tokio::test]
+    async fn settle_and_append_run_after_a_failed_reserve() {
         let (store, h) = setup();
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
         session.budget.fail();
+        let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, Some(u(1))), (Decision::Allow, None)]);
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
         let before = store.count();
-        h.settle(&ctx().with_session(session), &reported);
+        h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
         h.tasks().wait().await;
-        assert_eq!(store.count(), before, "the budget failed");
+        assert_eq!(store.count(), before + 2, "settle and append both ran");
+        let events = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "b");
+        assert_eq!(events.len(), 1, "the forwarded call without a decision is written");
+        assert_eq!(events[0].verdict, EventVerdict::Allow);
+        assert!(session.budget.is_failed());
     }
 
     #[tokio::test]
-    async fn a_settle_error_is_counted_and_skips_the_append() {
+    async fn a_real_reserve_error_does_not_stop_settle_and_append() {
         let (rec, snap) = metrics();
         let _local = metrics::set_default_local_recorder(&rec);
         let store = Fake::new(Mode::Fail);
         let h = history(&store, Duration::from_secs(1));
         let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), StoreBudget::new(Duration::from_secs(1))));
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
+        assert!(session.budget.is_failed());
         let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, Some(u(1))), (Decision::Allow, None)]);
-        h.settle(&ctx().with_session(session), &reported);
+        h.settle(&ctx().with_session(session.clone()), &reported);
+        h.tasks().close();
+        h.tasks().wait().await;
+        assert_eq!(store.count(), 3, "reserve, settle and append");
+        let m = crate::application::tool_policy::testing::Snap::take(&snap);
+        let e = |op: &str| m.counter(names::GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL, &[("op", op), ("kind", "io")]);
+        assert_eq!((e("reserve"), e("settle"), e("append")), (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_settle_error_is_counted_and_the_append_is_still_written() {
+        let (rec, snap) = metrics();
+        let _local = metrics::set_default_local_recorder(&rec);
+        let store = Fake::new(Mode::FailSettle);
+        let h = history(&store, Duration::from_secs(1));
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, Some(u(1))), (Decision::Allow, None)]);
+        h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
         h.tasks().wait().await;
         assert_eq!(errors(&snap, "settle", "io"), Some(1));
-        assert_eq!(errors(&snap, "append", "io").unwrap_or(0), 0);
-        assert_eq!(store.count(), 1);
+        assert!(!session.budget.is_failed(), "an off-path error does not fail the budget");
+        let events = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "b");
+        assert_eq!(events.len(), 1, "the append was written");
     }
 
     #[tokio::test]
