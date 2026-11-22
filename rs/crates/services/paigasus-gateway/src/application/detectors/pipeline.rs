@@ -41,6 +41,26 @@ fn record_stage(side: Side, stage: &'static str, started: std::time::Instant) {
     histogram!(names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS, "side" => side_label(side), "stage" => stage).record(started.elapsed().as_secs_f64());
 }
 
+/// The timer of an async stage. It records the time on drop, so a stage that the deadline stops
+/// (its future is dropped) still gives a sample of about the time it ran. It holds no task.
+struct StageTimer {
+    side: Side,
+    stage: &'static str,
+    started: Instant,
+}
+
+impl StageTimer {
+    fn start(side: Side, stage: &'static str) -> Self {
+        Self { side, stage, started: Instant::now() }
+    }
+}
+
+impl Drop for StageTimer {
+    fn drop(&mut self) {
+        histogram!(names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS, "side" => side_label(self.side), "stage" => self.stage).record(self.started.elapsed().as_secs_f64());
+    }
+}
+
 /// The findings per subject that a detector returned.
 type Found = Result<Vec<Vec<Finding>>, DetectorError>;
 
@@ -149,9 +169,8 @@ impl DetectorPipeline {
             join_all(self.webhooks.iter().zip(&hooks).map(|(d, slot)| {
                 let b = Arc::clone(&call_batch);
                 async move {
-                    let started = std::time::Instant::now();
+                    let _timer = StageTimer::start(side, "webhook");
                     let got = guarded("webhook", d.detect(b)).await;
-                    record_stage(side, "webhook", started);
                     *lock(slot) = Some(self.accept("webhook", d.name(), got, m));
                 }
             }))
@@ -176,9 +195,8 @@ impl DetectorPipeline {
                         call_batch.seen_hosts.clone(),
                     )
                 });
-                let started = std::time::Instant::now();
+                let _timer = StageTimer::start(side, "judge");
                 let got = guarded("judge", judge.detect(judge_batch)).await;
-                record_stage(side, "judge", started);
                 *lock(&judged) = Some(self.accept("judge", judge.name(), got, m));
             }
         };
@@ -400,6 +418,67 @@ mod tests {
         let out = p.run(batch(vec![call(0, "{}")]), far()).await;
         assert_eq!(start.elapsed(), Duration::from_millis(500));
         assert_eq!(pairs(&out.findings[0]), [("hook_fast", "fast_kind"), ("hook_slow", DETECTOR_ERROR)]);
+    }
+
+    /// The samples of the stage timer of `stage`, side `response`. One snapshot drains them.
+    fn stage_samples(snapshotter: &metrics_util::debugging::Snapshotter, stage: &str) -> Vec<f64> {
+        let mut found = Vec::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            let has = |k: &str, v: &str| key.labels().any(|l| l.key() == k && l.value() == v);
+            if key.name() == names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS
+                && has("side", "response")
+                && has("stage", stage)
+                && let metrics_util::debugging::DebugValue::Histogram(h) = value
+            {
+                found.extend(h.iter().map(|v| v.into_inner()));
+            }
+        }
+        found
+    }
+
+    fn near_deadline(samples: &[f64]) -> bool {
+        samples.len() == 1 && (0.49..0.6).contains(&samples[0])
+    }
+
+    /// A webhook that the deadline stops still gives one sample of about the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_webhook_cut_at_the_deadline_still_gives_a_sample() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_secs(10)));
+        let p = pipeline(built_ins(), vec![slow], None, Duration::from_millis(500));
+        p.run(batch(vec![call(0, "{}")]), far()).await;
+        let samples = stage_samples(&snapshotter, "webhook");
+        assert!(near_deadline(&samples), "{samples:?}");
+    }
+
+    /// A judge that runs at the deadline gives one sample. A judge that never started gives none.
+    #[tokio::test(start_paused = true)]
+    async fn a_judge_at_the_deadline_gives_a_sample_and_a_never_started_judge_gives_none() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let judge: Arc<dyn Detector> = Arc::new(SlowDetector("judge", Duration::from_secs(10)));
+        let p = pipeline(built_ins(), vec![], Some(judge), Duration::from_millis(500));
+        p.run(batch(vec![call(0, "{}")]), far()).await;
+        let samples = stage_samples(&snapshotter, "judge");
+        assert!(near_deadline(&samples), "{samples:?}");
+        // The webhooks use the whole budget, so the judge never starts and has no timer.
+        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_secs(10)));
+        let judge: Arc<dyn Detector> = Arc::new(SlowDetector("judge", Duration::from_secs(10)));
+        let p = pipeline(built_ins(), vec![slow], Some(judge), Duration::from_millis(500));
+        p.run(batch(vec![call(0, "{}")]), far()).await;
+        // Each snapshot drains every histogram, so read the webhook samples first, from one snapshot.
+        let hook = stage_samples(&snapshotter, "webhook");
+        assert!(near_deadline(&hook), "{hook:?}");
+        // The drained snapshot is empty, so check the judge with a second run on its own.
+        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_secs(10)));
+        let judge: Arc<dyn Detector> = Arc::new(SlowDetector("judge", Duration::from_secs(10)));
+        let p = pipeline(built_ins(), vec![slow], Some(judge), Duration::from_millis(500));
+        p.run(batch(vec![call(0, "{}")]), far()).await;
+        assert!(stage_samples(&snapshotter, "judge").is_empty());
     }
 
     #[tokio::test(start_paused = true)]
