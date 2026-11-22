@@ -46,6 +46,15 @@ async fn an_agent_of_another_org_with_the_same_uuid_does_not_match() {
 }
 
 #[tokio::test]
+async fn an_inbox_id_with_the_wrong_org_does_not_load_the_row() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    // The inbox row is in org 1. The caller names it under org 9, and org 9 has the agent.
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let resolver = ConfigAgentResolver::new(db, vec![definition(9, 3)]);
+    assert_eq!(resolver.resolve(&InboxId::new(u(9), u(2))).await, Err(RepositoryError::NotFound));
+}
+
+#[tokio::test]
 async fn an_unknown_inbox_is_not_found() {
     let Some((_node, _url, db)) = migrated_postgres().await else { return };
     let resolver = ConfigAgentResolver::new(db, vec![definition(1, 3)]);
