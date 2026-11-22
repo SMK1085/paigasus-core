@@ -12,8 +12,8 @@ use std::time::Instant;
 use bytes::Bytes;
 use metrics::{counter, histogram};
 use paigasus_gateway_core::{
-    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, name_collisions, plan_request,
-    rewrite_request,
+    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, SessionContext, TenantMode, TenantPart, ToolTurn, ingress, name_collisions,
+    plan_request, rewrite_request,
 };
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
 use paigasus_kernel::{Prn, to_cedar_uid};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 use super::cache::{Lookup, PolicyCache};
 use super::decider::finding_label;
 use crate::application::decision_log::DecisionRecorder;
+use crate::application::tool_history::{PendingWrite, ToolHistory};
 use crate::config::ToolPolicySettings;
 use crate::domain::org_of;
 use crate::domain::tool_policy::TenantSettings;
@@ -77,6 +78,11 @@ pub struct RequestOutcome {
     pub body: Bytes,
     pub entries: Vec<RequestEntry>,
     pub snapshot: Arc<PolicySnapshot>,
+    /// The session of the request (SMA-753). The pipeline puts it into the `DecisionContext`,
+    /// because `apply` takes the context by reference (spec § 13).
+    pub session: Option<Arc<SessionContext>>,
+    /// The write that runs after the limits admission (spec D4). `None` when there is nothing to write.
+    pub history: Option<PendingWrite>,
 }
 
 /// The request-side tool-policy service (D19).
@@ -84,6 +90,7 @@ pub struct RequestToolPolicy {
     cache: Arc<PolicyCache>,
     settings: ToolPolicySettings,
     recorder: Arc<DecisionRecorder>,
+    history: Option<Arc<ToolHistory>>,
 }
 
 /// Count and log a refusal, or a refusal that enforce mode would make (P-10, D17: log-only is
@@ -127,7 +134,26 @@ impl RequestToolPolicy {
     /// `settings` must come from a config that passed `GatewayConfig::validate`.
     #[must_use]
     pub fn new(cache: Arc<PolicyCache>, settings: ToolPolicySettings, recorder: Arc<DecisionRecorder>) -> Self {
-        RequestToolPolicy { cache, settings, recorder }
+        RequestToolPolicy {
+            cache,
+            settings,
+            recorder,
+            history: None,
+        }
+    }
+
+    /// Keep a session history (SMA-753): `apply` then links each request to a session.
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<ToolHistory>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// The write after the limits admission (spec D4). A store error is counted and the request goes on.
+    pub async fn commit_history(&self, pending: PendingWrite) {
+        if let Some(h) = &self.history {
+            h.commit(pending).await;
+        }
     }
 
     /// The shared decision recorder (P-8).
@@ -246,7 +272,7 @@ impl RequestToolPolicy {
 
     async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refused> {
         let org = org_of(&ctx.scope);
-        let (set, mode, on) = match org {
+        let (mut set, mode, on) = match org {
             // The source returns the tenant settings: they decide the mode and the fail mode. The
             // turn check follows the lookup, because the lookup can change the mode.
             Some(o) if self.settings.settings_from_source => {
@@ -266,6 +292,28 @@ impl RequestToolPolicy {
                 self.check_turn(ctx, turn, mode)?;
                 (self.policy_set(ctx, org, mode, on, model, format).await, mode, on)
             }
+        };
+        // Spec D4, D5, F14: link only when the history is on, the org is known and the mode is
+        // `log_only` or `enforce`. The lookup is read only; the write waits for the admission.
+        let linked = match (&self.history, org) {
+            (Some(h), Some(o)) if mode != TenantMode::Off => h.link(&ctx.principal, o, ctx.api_key_id.as_deref(), turn).await,
+            _ => None,
+        };
+        let (session, pending) = match linked {
+            Some(l) => (Some(l.session), l.pending),
+            None => (None, None),
+        };
+        if let (Some(s), PolicySet::Available { facts, .. }) = (&session, &mut set) {
+            // The same `SessionContext` feeds the facts and the records, so they agree (Task 5).
+            facts.session = s.info.clone();
+        }
+        // The request records carry `session_id` and `turn`.
+        let session_ctx;
+        let ctx = if let Some(s) = &session {
+            session_ctx = ctx.clone().with_session(Arc::clone(s));
+            &session_ctx
+        } else {
+            ctx
         };
         let snapshot = PolicySnapshot::new(set, mode, on);
 
@@ -314,7 +362,13 @@ impl RequestToolPolicy {
 
         self.record_entries(ctx, mode, &entries);
         let snapshot = Arc::new(snapshot.with_request_elapsed(started.elapsed()));
-        Ok(RequestOutcome { body, entries, snapshot })
+        Ok(RequestOutcome {
+            body,
+            entries,
+            snapshot,
+            session,
+            history: pending,
+        })
     }
 }
 
@@ -987,5 +1041,163 @@ mod tests {
         let log_only = testing::policy(&source, settings_from_source(TenantMode::Enforce));
         let out = run(&log_only, body.clone()).await.expect("log_only forwards");
         assert_eq!(out.body.as_ptr(), body.as_ptr());
+    }
+
+    // --- SMA-753: linking and the write after the admission ---------------------------------
+
+    use paigasus_gateway_core::decision_log::Side;
+    use uuid::Uuid;
+
+    use crate::adapters::history::memory::MemorySessionStore;
+    use crate::domain::decision_log::OsEntropy;
+    use crate::domain::tool_history::{EventKind, Histories, ReserveRequest, Scope, SessionStore, SettleItem, SettleRequest};
+    use crate::test_support::{FixedClock, ORG_A, at};
+
+    const NOW: &str = "2026-11-22T10:00:00Z";
+    const LINKED: &str = r#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"x","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"out"}],"tools":[{"type":"function","function":{"name":"x","parameters":{}}},{"type":"function","function":{"name":"y","parameters":{}}}]}"#;
+
+    fn now_ms() -> u64 {
+        u64::try_from(at(NOW).duration_since(std::time::UNIX_EPOCH).expect("after the epoch").as_millis()).expect("fits")
+    }
+
+    fn with_store(policy: RequestToolPolicy, store: &Arc<MemorySessionStore>) -> RequestToolPolicy {
+        let store: Arc<dyn SessionStore> = store.clone();
+        policy.with_history(Arc::new(ToolHistory::new(store, Arc::new(FixedClock(at(NOW))), Arc::new(OsEntropy), Duration::from_secs(1))))
+    }
+
+    /// The `c:` link of call `c1` of tool `tool` in a session, as an earlier response leaves it.
+    async fn seed(store: &MemorySessionStore, session: Uuid, tool: &str) {
+        let histories = Histories {
+            org: ORG_A,
+            principal: PRINCIPAL.to_owned(),
+            key: None,
+            session,
+        };
+        let event_id = Uuid::from_u128(0x77);
+        let calls = vec![crate::domain::tool_history::CallEvent { id: event_id, tool: tool.to_owned() }];
+        store
+            .reserve(&ReserveRequest {
+                histories,
+                turn: 1,
+                calls,
+                now_ms: now_ms(),
+                window_from_ms: None,
+            })
+            .await
+            .expect("reserve");
+        store
+            .settle(&SettleRequest {
+                org: ORG_A,
+                principal: PRINCIPAL.to_owned(),
+                session,
+                items: vec![SettleItem {
+                    event_id,
+                    verdict: crate::domain::tool_history::EventVerdict::Allow,
+                    tool: tool.to_owned(),
+                    call_id: Some("c1".to_owned()),
+                    item_id: None,
+                }],
+                now_ms: now_ms(),
+            })
+            .await
+            .expect("settle");
+    }
+
+    fn results(store: &MemorySessionStore, session: Uuid, tool: &str) -> usize {
+        store.events(ORG_A, Scope::Session, &session.to_string(), tool).iter().filter(|e| e.kind == EventKind::Result).count()
+    }
+
+    fn facts_session(set: &PolicySet) -> SessionInfo {
+        match set {
+            PolicySet::Available { facts, .. } => facts.session.clone(),
+            _ => panic!("an available set"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_links_the_request_and_fills_facts_session() {
+        let store = Arc::new(MemorySessionStore::new());
+        let session = Uuid::from_u128(0x5e55);
+        seed(&store, session, "x").await;
+        let policy = with_store(testing::policy(&FakeSource::new(testing::FLOOR, testing::PERMIT_ALL), settings(TenantMode::Enforce)), &store);
+        let out = run(&policy, Bytes::from(LINKED)).await.expect("forwarded");
+        let linked = out.session.clone().expect("a session");
+        assert_eq!((linked.session_id, linked.info.turn), (session, 2));
+        assert_eq!(facts_session(&out.snapshot.set), linked.info, "the Cedar session and the context session agree");
+        assert_eq!(linked.info, SessionInfo::new(session.to_string(), 2));
+        // The lookup is read only: nothing is written before the commit.
+        assert_eq!(results(&store, session, "x"), 0);
+        policy.commit_history(out.history.expect("a pending write")).await;
+        assert_eq!(results(&store, session, "x"), 1, "the result event is written after the commit");
+    }
+
+    #[tokio::test]
+    async fn mode_off_links_nothing() {
+        let store = Arc::new(MemorySessionStore::new());
+        let session = Uuid::from_u128(0x5e55);
+        seed(&store, session, "x").await;
+        let policy = with_store(testing::policy(&FakeSource::new(testing::FLOOR, testing::PERMIT_ALL), settings(TenantMode::Off)), &store);
+        let out = run(&policy, Bytes::from(LINKED)).await.expect("forwarded");
+        assert!(out.session.is_none() && out.history.is_none());
+        assert_eq!(facts_session(&out.snapshot.set), SessionInfo::placeholder());
+    }
+
+    #[tokio::test]
+    async fn an_org_less_scope_links_nothing() {
+        let store = Arc::new(MemorySessionStore::new());
+        seed(&store, Uuid::from_u128(0x5e55), "x").await;
+        let policy = with_store(testing::policy(&FakeSource::new(testing::FLOOR, testing::PERMIT_ALL), settings(TenantMode::Enforce)), &store);
+        let body = Bytes::from(LINKED);
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let org_less = DecisionContext::new(PRINCIPAL, PRINCIPAL, Some("req-1".into()));
+        let out = policy.apply(&org_less, "m", Format::OpenAiChat, &turn, body).await.expect("forwarded");
+        assert!(out.session.is_none() && out.history.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_returns_no_pending_write() {
+        let store = Arc::new(MemorySessionStore::new());
+        let session = Uuid::from_u128(0x5e55);
+        seed(&store, session, "computer").await;
+        let policy = with_store(testing::policy(&FakeSource::new(testing::FLOOR, FORBID_COMPUTER), settings(TenantMode::Enforce)), &store);
+        // `Err` holds no `PendingWrite`: the refusal drops it. The store holds no result event.
+        let refused = run_responses_with("c1", &policy).await.expect_err("refused");
+        assert_eq!(refused.refusal, Refusal::UnreplaceableResult);
+        assert_eq!(results(&store, session, "computer"), 0);
+    }
+
+    async fn run_responses_with(call_id: &str, policy: &RequestToolPolicy) -> Result<RequestOutcome, Refused> {
+        let body = Bytes::from(format!(
+            r#"{{"model":"m","input":[{{"type":"computer_call","id":"cu_1","call_id":"{call_id}","actions":[{{"type":"screenshot"}}],"status":"completed"}},{{"type":"computer_call_output","call_id":"{call_id}","output":{{"type":"computer_screenshot","image_url":"data:image/png;base64,SECRET"}}}}]}}"#
+        ));
+        run_responses(policy, body).await
+    }
+
+    #[tokio::test]
+    async fn request_records_carry_the_session() {
+        let store = Arc::new(MemorySessionStore::new());
+        let session = Uuid::from_u128(0x5e55);
+        seed(&store, session, "x").await;
+        let (log, rec) = testing::memory_recorder();
+        let policy = with_store(testing::policy_with(&FakeSource::new(testing::FLOOR, FORBID_X), settings(TenantMode::Enforce), rec), &store);
+        let out = run(&policy, Bytes::from(LINKED)).await.expect("forwarded");
+        assert_eq!(tool_names(&out.body), ["y"]);
+        // The removal of `x` and the replacement of its result.
+        let records = log.records();
+        assert_eq!(records.len(), 2, "{records:?}");
+        for r in &records {
+            assert_eq!(r.side, Side::Request);
+            assert_eq!(r.session, SessionInfo::new(session.to_string(), 2));
+            // Carry from Task 5: `ctx.session` wins over `facts.session`, so the two must agree.
+            assert_eq!(r.session, facts_session(&out.snapshot.set));
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_history_the_session_stays_the_placeholder() {
+        let policy = testing::policy(&FakeSource::new(testing::FLOOR, testing::PERMIT_ALL), settings(TenantMode::Enforce));
+        let out = run(&policy, Bytes::from(LINKED)).await.expect("forwarded");
+        assert!(out.session.is_none() && out.history.is_none());
+        assert_eq!(facts_session(&out.snapshot.set), SessionInfo::placeholder());
     }
 }

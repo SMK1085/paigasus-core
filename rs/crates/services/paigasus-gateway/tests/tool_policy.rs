@@ -16,12 +16,16 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use paigasus_gateway::adapters::history::memory::MemorySessionStore;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
 use paigasus_gateway::adapters::policy_source::file::FilePolicySource;
 use paigasus_gateway::application::limits::Limits;
+use paigasus_gateway::application::tool_history::ToolHistory;
 use paigasus_gateway::application::tool_policy::{CacheSettings, CedarDecider, Lookup, PolicyCache, RequestToolPolicy};
 use paigasus_gateway::config::ToolPolicySettings;
+use paigasus_gateway::domain::decision_log::OsEntropy;
+use paigasus_gateway::domain::tool_history::{CallEvent, EventKind, EventVerdict, Histories, ReserveRequest, Scope, SessionStore, SettleItem, SettleRequest};
 use paigasus_gateway::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies};
 use paigasus_gateway::service_info::Capabilities;
 use paigasus_gateway_core::{AllowAll, Limits as CoreLimits, OnUnavailable, TenantMode, ToolCallDecider};
@@ -726,6 +730,118 @@ async fn a_limit_refusal_after_the_request_side_carries_the_request_entries_head
         assert_eq!(request_entries(&header_entries(&sent)), [req("blocked_rm", "remove-definition", true)], "stream {stream}");
     }
     assert_eq!(mock.request_count(), 1, "the refused requests never went upstream");
+}
+
+/// SMA-753 D4: the request side over the file source in `dir`, with a memory session history.
+fn tool_policy_with_history(dir: &TempDir, store: &Arc<MemorySessionStore>) -> Option<Arc<RequestToolPolicy>> {
+    let settings = tp_settings(TenantMode::Enforce);
+    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
+    let store: Arc<dyn SessionStore> = store.clone();
+    let history = ToolHistory::new(store, Arc::new(FixedClock(at(NOON))), Arc::new(OsEntropy), Duration::from_secs(1));
+    Some(Arc::new(
+        RequestToolPolicy::new(cache, settings, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing())).with_history(Arc::new(history)),
+    ))
+}
+
+/// The `c:` link of call `c1` of `read_file` in `session`, as an earlier response leaves it (F10).
+async fn seed_link(store: &MemorySessionStore, session: Uuid) {
+    let now_ms = u64::try_from(at(NOON).duration_since(std::time::UNIX_EPOCH).expect("after the epoch").as_millis()).expect("fits");
+    let histories = Histories {
+        org: org_a(),
+        principal: PRINCIPAL_1.to_owned(),
+        key: None,
+        session,
+    };
+    let event_id = Uuid::from_u128(0x77);
+    let calls = vec![CallEvent {
+        id: event_id,
+        tool: "read_file".to_owned(),
+    }];
+    store
+        .reserve(&ReserveRequest {
+            histories,
+            turn: 1,
+            calls,
+            now_ms,
+            window_from_ms: None,
+        })
+        .await
+        .expect("reserve");
+    let items = vec![SettleItem {
+        event_id,
+        verdict: EventVerdict::Allow,
+        tool: "read_file".to_owned(),
+        call_id: Some("c1".to_owned()),
+        item_id: None,
+    }];
+    store
+        .settle(&SettleRequest {
+            org: org_a(),
+            principal: PRINCIPAL_1.to_owned(),
+            session,
+            items,
+            now_ms,
+        })
+        .await
+        .expect("settle");
+}
+
+/// A follow-up chat request: a result for call `c1`.
+fn linked_chat_body() -> String {
+    json!({"model":"gpt-4o-mini","messages":[
+        {"role":"user","content":"hi"},
+        {"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
+        {"role":"tool","tool_call_id":"c1","content":"out"}],
+        "tools":chat_tools(&["read_file"])})
+    .to_string()
+}
+
+fn result_events(store: &MemorySessionStore, session: Uuid) -> usize {
+    store
+        .events(org_a(), Scope::Session, &session.to_string(), "read_file")
+        .iter()
+        .filter(|e| e.kind == EventKind::Result)
+        .count()
+}
+
+/// SMA-753 D4 (control): an admitted request with a linked result writes the result event.
+#[tokio::test]
+async fn an_admitted_request_writes_its_result_event() {
+    let dir = policy_dir(FLOOR, TENANT);
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, USAGE_BODY).await;
+    let store = Arc::new(MemorySessionStore::new());
+    let session = Uuid::from_u128(0x5e55);
+    seed_link(&store, session).await;
+    let app = full_app(
+        &mock.base_url,
+        Some(limits(rules(Some(5), None, None), RecordingStore::new())),
+        cedar(),
+        tool_policy_with_history(&dir, &store),
+    );
+    assert_eq!(send(&app, &linked_chat_body()).await.status, StatusCode::OK);
+    assert_eq!(result_events(&store, session), 1);
+}
+
+/// SMA-753 D4, F10: a rate-limited request writes no history. The `c:` link is seeded first, so
+/// the result event would be written if the write ran before the admission.
+#[tokio::test]
+async fn a_rate_limited_request_writes_no_history() {
+    let dir = policy_dir(FLOOR, TENANT);
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, USAGE_BODY).await;
+    let store = Arc::new(MemorySessionStore::new());
+    let session = Uuid::from_u128(0x5e55);
+    seed_link(&store, session).await;
+    let app = full_app(
+        &mock.base_url,
+        Some(limits(rules(Some(1), None, None), RecordingStore::new())),
+        cedar(),
+        tool_policy_with_history(&dir, &store),
+    );
+    // The first request uses the only admission. It has no result to link.
+    assert_eq!(send(&app, &chat_body(&["read_file"], false)).await.status, StatusCode::OK);
+    let sent = send(&app, &linked_chat_body()).await;
+    assert_eq!(sent.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(result_events(&store, session), 0, "a refused request writes no result event");
 }
 
 /// § 7.2 "Mode `off` everywhere": with every mode off and an empty floor, the tool policy changes

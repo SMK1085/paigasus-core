@@ -42,6 +42,7 @@ pub struct LinkedRequest {
 }
 
 /// The write that runs after the admission (spec D4).
+#[derive(Debug)]
 pub struct PendingWrite {
     session: Arc<SessionContext>,
     request: WriteRequest,
