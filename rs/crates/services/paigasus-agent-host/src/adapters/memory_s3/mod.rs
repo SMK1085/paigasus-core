@@ -38,6 +38,7 @@ use self::errors::{TIMEOUT_CLASS, class, is_refusal, store_text};
 use self::keys::{KeyPrefix, ListedKey, dir_path, file_path, listed_key, scope_path};
 use self::plan::{Outcome, Seen, SeenAfterDelete, Snapshot, delete_outcome, precheck, put_outcome, result_of};
 
+pub mod client;
 pub mod envelope;
 pub mod errors;
 pub mod keys;

@@ -101,6 +101,9 @@ paigasus-agent-host-core = { workspace = true, features = ["test-support"] }
 # `adapters::timer_event` tests decode the `agents/v1` descriptor set.
 prost = { workspace = true }
 prost-types = { workspace = true }
+# `adapters::memory_s3::client` tests write a throwaway CA bundle (SMA-829), as the gateway does.
+tempfile = "3"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [lints]
 workspace = true
