@@ -16,7 +16,7 @@ use paigasus_agent_host::adapters::helikon::session::{PgRunSession, to_session_r
 use paigasus_agent_host::adapters::persistence::session_store::write_session;
 use paigasus_agent_host_core::ids::ThreadId;
 use paigasus_agent_host_core::run::SessionRow;
-use paigasus_helikon::core::{ConversationSnapshot, SequenceId, Session, SessionError, SessionEvent};
+use paigasus_helikon::core::{ContentPart, ConversationSnapshot, SequenceId, Session, SessionError, SessionEvent};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, SqlErr, Statement, TransactionTrait};
 use serde_json::json;
 use support::inbox::{insert_inbox, migrated_postgres};
@@ -205,4 +205,50 @@ async fn an_unreadable_row_is_a_session_error() {
     .expect("insert row");
     let err = PgRunSession::new(db, ThreadId::from_uuid(fx.thread), false).events(None).await.unwrap_err();
     assert!(matches!(err, SessionError::Backend(_)), "{err:?}");
+}
+
+fn buffered(text: &str) -> SessionEvent {
+    SessionEvent::UserMessage {
+        content: vec![ContentPart::Text { text: text.into() }],
+        ts: jiff::Timestamp::from_second(1_700_000_000).expect("ts"),
+    }
+}
+
+fn texts(events: &[SessionEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| match e {
+            SessionEvent::UserMessage { content, .. } => match content.first() {
+                Some(ContentPart::Text { text }) => text.clone(),
+                other => panic!("expected a text part, got {other:?}"),
+            },
+            other => panic!("expected a user message, got {other:?}"),
+        })
+        .collect()
+}
+
+/// The path of every run after the first on a thread: committed rows and a buffer together.
+/// Positions start at 0 over the combined list and `since` is exclusive, so `SequenceId(1)` (the
+/// last committed row) gives the two buffered events.
+#[tokio::test]
+async fn the_buffer_follows_the_committed_events() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping run_session_pg: Docker unavailable");
+        return;
+    };
+    let fx = fixture(&db).await;
+    let txn = db.begin().await.expect("begin");
+    write_session(&txn, fx.inbox, fx.thread, fx.run, "N", &[row(0), row(1)]).await.expect("write");
+    txn.commit().await.expect("commit");
+
+    let session = PgRunSession::new(db, ThreadId::from_uuid(fx.thread), false);
+    session.append(&[buffered("b0"), buffered("b1")]).await.expect("append");
+
+    assert_eq!(texts(&session.events(None).await.expect("events")), ["m0", "m1", "b0", "b1"]);
+    assert_eq!(texts(&session.events(Some(SequenceId(1))).await.expect("events since 1")), ["b0", "b1"]);
+    assert_eq!(texts(&session.events(Some(SequenceId(2))).await.expect("events since 2")), ["b1"]);
+    assert_eq!(session.snapshot().await.expect("snapshot").messages.len(), 4);
+
+    assert_eq!(texts(&session.take_buffer()), ["b0", "b1"]);
+    assert_eq!(texts(&session.events(None).await.expect("events after take")), ["m0", "m1"]);
 }
