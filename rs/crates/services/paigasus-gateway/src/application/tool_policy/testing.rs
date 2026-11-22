@@ -303,6 +303,19 @@ impl Detector for RecordingDetector {
     }
 }
 
+/// A detector that panics with the canary as its payload.
+pub(crate) struct PanicDetector(pub(crate) &'static str, pub(crate) &'static str);
+
+#[async_trait]
+impl Detector for PanicDetector {
+    fn name(&self) -> &str {
+        self.0
+    }
+    async fn detect(&self, _batch: Arc<DetectBatch>) -> Found {
+        std::panic::panic_any(self.1.to_owned())
+    }
+}
+
 /// A built-in stage that panics with the canary as its payload.
 pub(crate) struct PanicStage(pub(crate) &'static str);
 

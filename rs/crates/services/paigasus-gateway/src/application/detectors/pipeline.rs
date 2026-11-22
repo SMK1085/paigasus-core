@@ -2,8 +2,9 @@
 
 //! The detector pipeline (SMA-855 § 6.6.2). It runs the built-in stage, then the webhooks at the
 //! same time, then the judge, all inside the one future of its caller: no task is spawned (A8,
-//! D30). It never fails. An error, a timeout, a panic of the built-in stage and a finding that fails
-//! the D37 check each become a `detector_error` finding (D22).
+//! D30). It never fails. An error, a timeout, a panic of any detector (the built-in stage, a
+//! webhook or the judge) and a finding that fails the D37 check each become a `detector_error`
+//! finding (D22). A panic of one webhook does not drop the findings of the other webhooks.
 
 use std::fmt;
 use std::panic::AssertUnwindSafe;
@@ -66,7 +67,8 @@ impl DetectorPipeline {
         BUILT_IN_NAMES.contains(&name) || self.webhooks.iter().any(|d| d.name() == name) || self.judge.as_ref().is_some_and(|d| d.name() == name)
     }
 
-    /// One vector of findings and one host set per subject. It never fails (D22).
+    /// One vector of findings and one host set per subject. It never fails and never unwinds: each
+    /// stage runs under `catch_unwind` (D22).
     ///
     /// The webhook and judge stages end at `min(deadline, run start + timeout)`. The built-in stage
     /// is synchronous, so the deadline cannot stop it (§ 6.10 bounds its work).
@@ -128,7 +130,7 @@ impl DetectorPipeline {
             join_all(self.webhooks.iter().zip(&hooks).map(|(d, slot)| {
                 let b = Arc::clone(&call_batch);
                 async move {
-                    let got = d.detect(b).await;
+                    let got = guarded("webhook", d.detect(b)).await;
                     *lock(slot) = Some(self.accept("webhook", d.name(), got, m));
                 }
             }))
@@ -153,7 +155,7 @@ impl DetectorPipeline {
                         call_batch.seen_hosts.clone(),
                     )
                 });
-                let got = judge.detect(judge_batch).await;
+                let got = guarded("judge", judge.detect(judge_batch)).await;
                 *lock(&judged) = Some(self.accept("judge", judge.name(), got, m));
             }
         };
@@ -192,6 +194,18 @@ impl DetectorPipeline {
     }
 }
 
+/// Poll the future of one async detector of `stage` and catch a panic (D22). A panic gives
+/// `Panicked` and one event that names the stage only. The payload is dropped unread (A2).
+async fn guarded(stage: &'static str, detect: impl Future<Output = Found>) -> Found {
+    match AssertUnwindSafe(detect).catch_unwind().await {
+        Ok(got) => got,
+        Err(_payload) => {
+            tracing::warn!(stage, "a detector stage panicked");
+            Err(DetectorError::Panicked)
+        }
+    }
+}
+
 /// One `detector_error` of `name` per subject. The event names the stage and the error variant,
 /// never the detector name or any content.
 fn failed(stage: &'static str, name: &str, error: DetectorError, n: usize) -> Vec<Vec<Finding>> {
@@ -210,7 +224,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::adapters::detectors::BuiltInDetector;
-    use crate::application::tool_policy::testing::{ErrDetector, FixedDetector, PanicStage, RecordingDetector, SlowDetector};
+    use crate::application::tool_policy::testing::{ErrDetector, FixedDetector, PanicDetector, PanicStage, RecordingDetector, SlowDetector};
     use crate::domain::detectors::{Side, Subject};
     use metrics_util::debugging::DebuggingRecorder;
     use paigasus_kernel::detect::{DETECTOR_ERROR, Declared, Severity, ToolInput};
@@ -298,6 +312,23 @@ mod tests {
             let key = key.key();
             assert!(!key.name().contains(CANARY) && key.labels().all(|l| !l.value().contains(CANARY)), "{key:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_webhook_or_judge_gives_its_named_detector_error() {
+        let (logs, _guard) = capture_logs();
+        let fixed: Arc<dyn Detector> = Arc::new(FixedDetector("hook_fixed", vec![other("hook_fixed", "fixed_kind")]));
+        let panicking: Arc<dyn Detector> = Arc::new(PanicDetector("hook_panic", CANARY));
+        let judge: Arc<dyn Detector> = Arc::new(PanicDetector("judge", CANARY));
+        let p = pipeline(built_ins(), vec![panicking, fixed], Some(judge), Duration::from_millis(500));
+        let out = p.run(batch(vec![call(0, "{}"), result(1, "x"), call(2, "{}")]), far()).await;
+        let want = [("hook_panic", DETECTOR_ERROR), ("hook_fixed", "fixed_kind"), ("judge", DETECTOR_ERROR)];
+        assert_eq!(pairs(&out.findings[0]), want);
+        assert_eq!(pairs(&out.findings[1]), Vec::<(&str, &str)>::new());
+        assert_eq!(pairs(&out.findings[2]), want);
+        let text = logs.text();
+        assert!(text.contains("stage=\"webhook\"") && text.contains("stage=\"judge\""), "{text}");
+        assert!(!text.contains(CANARY), "{text}");
     }
 
     /// A built-in stage that gives no output, whatever the batch.
