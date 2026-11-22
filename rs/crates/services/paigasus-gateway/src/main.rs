@@ -318,7 +318,11 @@ fn describe_gateway_metrics() {
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
-        "Tool-policy findings, labeled by side (request, response) and kind (name_collision, unparsed_arguments, other)."
+        "Tool-policy findings, labeled by side (request, response), kind, detector and severity. The labels come from a closed table of triples; the rest is other."
+    );
+    describe_histogram!(
+        names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS,
+        "Seconds one detector stage takes, labeled by side (request, response) and stage (built_in, webhook, judge)."
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,

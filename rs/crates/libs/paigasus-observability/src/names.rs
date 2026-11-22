@@ -74,9 +74,14 @@ pub const GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS: &str = "gateway_tool_policy_over
 pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_policy_nats_invalidations_total";
 /// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
 pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";
-/// Tool-policy findings (SMA-755 § 5.9). `side` = `request` | `response`; `kind` = `name_collision` |
-/// `unparsed_arguments` | `other` (a kind that this service does not know).
+/// Tool-policy findings (SMA-755 § 5.9, SMA-855 § 6.11.3). `side` = `request` | `response`; the
+/// labels `kind`, `detector` and `severity` come from a closed table of 13 valid triples. A finding
+/// outside the table counts as `kind="other", detector="other"` with its severity.
 pub const GATEWAY_TOOL_POLICY_FINDINGS_TOTAL: &str = "gateway_tool_policy_findings_total";
+/// Seconds one detector stage of the tool-call detector pipeline takes (SMA-855 § 6.11.3).
+/// `side` = `request` | `response`; `stage` = `built_in` | `webhook` | `judge`. No label carries a
+/// detector name, a host or any content.
+pub const GATEWAY_TOOL_POLICY_DETECTOR_SECONDS: &str = "gateway_tool_policy_detector_seconds";
 // Gateway tool decision log (SMA-755 § 5.9). No label carries a tool name, an org or an argument.
 /// Records that the decision log accepted from the recorder (counted before the queue).
 pub const GATEWAY_DECISION_LOG_RECORDED_TOTAL: &str = "gateway_decision_log_recorded_total";
@@ -435,6 +440,7 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
     GATEWAY_TOOL_POLICY_NATS_CONNECTED,
     GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+    GATEWAY_TOOL_POLICY_DETECTOR_SECONDS,
     GATEWAY_DECISION_LOG_RECORDED_TOTAL,
     GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
     GATEWAY_DECISION_LOG_DROPPED_TOTAL,
@@ -558,6 +564,7 @@ mod tests {
             GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
             GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
             GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+            GATEWAY_TOOL_POLICY_DETECTOR_SECONDS,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

@@ -456,24 +456,30 @@ mod tool_policy_tests {
     }
 
     #[test]
-    fn prime_tool_policy_metrics_primes_six_series_at_zero() {
+    fn prime_tool_policy_metrics_primes_every_triple_at_zero() {
+        use crate::application::tool_policy::FINDING_TRIPLES;
         let debugging = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = debugging.snapshotter();
         let _local = metrics::set_default_local_recorder(&debugging);
         build_tool_policy(&enabled_config(), rec()).expect("builds");
+        let others = ["info", "low", "medium", "high"].map(|s| ("other", "other", s));
+        let mut n = 0;
         for side in ["request", "response"] {
-            for kind in ["name_collision", "unparsed_arguments", "other"] {
-                let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
-                assert_eq!(v, Some(0), "{side}/{kind} is primed at 0");
+            for (kind, detector, severity) in FINDING_TRIPLES.into_iter().chain(others) {
+                let labels = [("side", side), ("kind", kind), ("detector", detector), ("severity", severity)];
+                let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &labels);
+                assert_eq!(v, Some(0), "{side}/{kind}/{detector}/{severity} is primed at 0");
+                n += 1;
             }
         }
+        assert_eq!(n, 34);
         let series = snapshotter
             .snapshot()
             .into_vec()
             .into_iter()
             .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL)
             .count();
-        assert_eq!(series, 6);
+        assert_eq!(series, 34);
     }
 
     /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.

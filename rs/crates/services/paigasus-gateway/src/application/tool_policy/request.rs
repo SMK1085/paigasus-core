@@ -11,17 +11,19 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use metrics::{counter, histogram};
+use paigasus_gateway_core::decision_log::FindingRecord;
 use paigasus_gateway_core::{
     DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, TenantMode, TenantPart, ToolTurn, ingress, name_collisions, plan_request,
     rewrite_request,
 };
+use paigasus_kernel::detect::{DETECTOR_KERNEL, NAME_COLLISION, Severity};
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
 use paigasus_kernel::{Prn, to_cedar_uid};
 use paigasus_observability::names;
 use uuid::Uuid;
 
 use super::cache::{Lookup, PolicyCache};
-use super::decider::finding_label;
+use super::decider::count_finding;
 use crate::application::decision_log::DecisionRecorder;
 use crate::config::ToolPolicySettings;
 use crate::domain::org_of;
@@ -272,7 +274,7 @@ impl RequestToolPolicy {
         let (body, entries) = if let ToolTurn::Parsed(facts) = turn {
             // One finding per colliding tool name (SMA-755 § 5.9).
             for _ in name_collisions(&facts.definitions) {
-                counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "request", "kind" => finding_label("name_collision")).increment(1);
+                count_finding("request", &FindingRecord::new(NAME_COLLISION, Some(Severity::High), DETECTOR_KERNEL, ""), false);
             }
             let plan = plan_request(&snapshot, format, facts, &[], &Instant::now);
             if let Some(cause) = plan.refusal() {
@@ -449,12 +451,20 @@ mod tests {
         // Two definitions with one normal form, and one that is alone.
         run(&enforce, chat_request(&["a", "A", "b"], "")).await.expect("forwarded");
         let m = Snap::take(&snapshotter);
-        let finding = |side: &str, kind: &str| m.counter(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
+        let finding = |side: &str, kind: &str| {
+            m.counter(
+                names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+                &[("side", side), ("kind", kind), ("detector", "kernel"), ("severity", "high")],
+            )
+        };
         assert_eq!((finding("request", "name_collision"), finding("response", "name_collision")), (1, 0));
         // No collision, no finding.
         run(&enforce, chat_request(&["a", "b"], "")).await.expect("forwarded");
         assert_eq!(
-            Snap::take(&snapshotter).counter(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", "request"), ("kind", "name_collision")]),
+            Snap::take(&snapshotter).counter(
+                names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+                &[("side", "request"), ("kind", "name_collision"), ("detector", "kernel"), ("severity", "high")]
+            ),
             0
         );
     }

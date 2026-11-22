@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use metrics::counter;
-use paigasus_gateway_core::decision_log::{DecisionDetail, RecordBasis};
+use paigasus_gateway_core::decision_log::{DecisionDetail, FindingRecord, RecordBasis};
 use paigasus_gateway_core::{DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls};
 use paigasus_observability::names;
 
@@ -38,24 +38,92 @@ impl CedarDecider {
     }
 }
 
-/// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9).
-pub const FINDING_KINDS: [&str; 3] = ["name_collision", "unparsed_arguments", "other"];
+/// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9, SMA-855 § 6.11.3).
+pub const FINDING_KINDS: [&str; 9] = [
+    "name_collision",
+    "unparsed_arguments",
+    "undeclared_tool",
+    "invalid_args",
+    "unseen_host",
+    "secret_in_args",
+    "injection_markers",
+    "detector_error",
+    "other",
+];
+
+/// The detector labels of the same metric. A webhook has one label, `webhook`, whatever its name (A2).
+pub const DETECTOR_LABELS: [&str; 10] = [
+    "kernel",
+    "built_in",
+    "undeclared_tool",
+    "invalid_args",
+    "unseen_host",
+    "secret_in_args",
+    "injection_markers",
+    "webhook",
+    "judge",
+    "other",
+];
+
+/// The valid `(kind, detector, severity)` triples (SMA-855 P-9). It is the one source of the label
+/// mapping and of the prime. A finding outside the table counts as `other`.
+pub const FINDING_TRIPLES: [(&str, &str, &str); 13] = [
+    ("name_collision", "kernel", "high"),
+    ("unparsed_arguments", "kernel", "info"),
+    ("unparsed_arguments", "kernel", "medium"),
+    ("undeclared_tool", "undeclared_tool", "medium"),
+    ("invalid_args", "invalid_args", "low"),
+    ("unseen_host", "unseen_host", "medium"),
+    ("secret_in_args", "secret_in_args", "high"),
+    ("injection_markers", "injection_markers", "medium"),
+    ("injection_markers", "injection_markers", "high"),
+    ("detector_error", "kernel", "high"),
+    ("detector_error", "built_in", "high"),
+    ("detector_error", "webhook", "high"),
+    ("detector_error", "judge", "high"),
+];
+
+/// The severity labels, for the `other` triples.
+const SEVERITY_LABELS: [&str; 4] = ["info", "low", "medium", "high"];
 
 /// The `kind` metric label of a finding. An unknown kind is `other`.
 #[must_use]
 pub fn finding_label(kind: &str) -> &'static str {
-    match kind {
-        "name_collision" => FINDING_KINDS[0],
-        "unparsed_arguments" => FINDING_KINDS[1],
-        _ => FINDING_KINDS[2],
-    }
+    FINDING_KINDS.iter().find(|k| **k == kind).copied().unwrap_or("other")
 }
 
-/// Prime `gateway_tool_policy_findings_total` at zero for every label pair.
+/// The `(kind, detector, severity)` labels of a finding. `webhook` says that the finding came from a
+/// configured webhook, so the name of the detector is not a label (A2). A finding outside
+/// [`FINDING_TRIPLES`] is `(other, other, <severity>)`. No severity counts as `high`.
+#[must_use]
+pub fn finding_labels(f: &FindingRecord, webhook: bool) -> (&'static str, &'static str, &'static str) {
+    let severity = f.severity.map_or("high", |s| s.as_str());
+    let severity = SEVERITY_LABELS.iter().find(|s| **s == severity).copied().unwrap_or("high");
+    let detector = if webhook {
+        "webhook"
+    } else {
+        DETECTOR_LABELS.iter().find(|d| **d == f.detector).copied().unwrap_or("other")
+    };
+    FINDING_TRIPLES
+        .iter()
+        .find(|(k, d, s)| *k == f.kind && *d == detector && *s == severity)
+        .copied()
+        .unwrap_or(("other", "other", severity))
+}
+
+/// Increment `gateway_tool_policy_findings_total` for a finding.
+pub(crate) fn count_finding(side: &'static str, f: &FindingRecord, webhook: bool) {
+    let (kind, detector, severity) = finding_labels(f, webhook);
+    counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind, "detector" => detector, "severity" => severity).increment(1);
+}
+
+/// Prime `gateway_tool_policy_findings_total` at zero for every valid triple and the four `other`
+/// triples, on each side: 2 x 17 = 34 series.
 pub fn prime_tool_policy_metrics() {
     for side in ["request", "response"] {
-        for kind in FINDING_KINDS {
-            counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind).absolute(0);
+        let others = SEVERITY_LABELS.map(|s| ("other", "other", s));
+        for (kind, detector, severity) in FINDING_TRIPLES.into_iter().chain(others) {
+            counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind, "detector" => detector, "severity" => severity).absolute(0);
         }
     }
 }
@@ -93,7 +161,8 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
         counter!(names::GATEWAY_TOOL_POLICY_DECISIONS_TOTAL, "side" => "response", "mode" => mode, "effect" => effect, "basis" => basis).increment(1);
         if let Some(c) = &o.cedar {
             for f in &c.findings {
-                counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "response", "kind" => finding_label(&f.kind)).increment(1);
+                // No pipeline reaches the decider yet, so no finding is a webhook finding here.
+                count_finding("response", f, false);
             }
         }
     }
@@ -220,24 +289,52 @@ mod tests {
             .expect("decide");
         assert_eq!(decided.len(), 2);
         let m = testing::Snap::take(&snapshotter);
-        let finding = |side: &str, kind: &str| m.counter(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
+        let finding = |side: &str, kind: &str, detector: &str, severity: &str| {
+            m.counter(
+                names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+                &[("side", side), ("kind", kind), ("detector", detector), ("severity", severity)],
+            )
+        };
+        // `a_finding_increments_its_triple`: the bad-JSON call counts under its own triple only.
         assert_eq!(
             (
-                finding("response", "unparsed_arguments"),
-                finding("response", "name_collision"),
-                finding("request", "unparsed_arguments")
+                finding("response", "unparsed_arguments", "kernel", "medium"),
+                finding("response", "name_collision", "kernel", "high"),
+                finding("request", "unparsed_arguments", "kernel", "medium")
             ),
             (1, 0, 0)
         );
     }
 
     #[test]
+    fn labels_follow_the_table() {
+        use paigasus_kernel::detect::Severity;
+        let rec = |kind: &str, sev: Option<Severity>, detector: &str| FindingRecord::new(kind, sev, detector, "v1");
+        assert_eq!(
+            finding_labels(&rec("secret_in_args", Some(Severity::High), "secret_in_args"), false),
+            ("secret_in_args", "secret_in_args", "high")
+        );
+        assert_eq!(finding_labels(&rec("detector_error", Some(Severity::High), "slow"), true), ("detector_error", "webhook", "high"));
+        assert_eq!(finding_labels(&rec("detector_error", Some(Severity::High), "judge"), false), ("detector_error", "judge", "high"));
+        // A kind outside the table, and a severity that the table does not hold for the kind.
+        assert_eq!(finding_labels(&rec("custom_x", Some(Severity::Medium), "kernel"), false), ("other", "other", "medium"));
+        assert_eq!(finding_labels(&rec("secret_in_args", Some(Severity::Info), "secret_in_args"), false), ("other", "other", "info"));
+        // No severity (an old event) counts as high. A host-like detector name never reaches a label.
+        assert_eq!(finding_labels(&rec("custom_x", None, "evil.example.com"), false), ("other", "other", "high"));
+        for t in FINDING_TRIPLES {
+            assert!(FINDING_KINDS.contains(&t.0) && DETECTOR_LABELS.contains(&t.1), "{t:?}");
+        }
+        assert_eq!(FINDING_TRIPLES.len(), 13);
+    }
+
+    #[test]
     fn an_unknown_finding_kind_is_other() {
         assert_eq!(finding_label("zz"), "other");
-        for k in ["name_collision", "unparsed_arguments"] {
+        for k in FINDING_KINDS {
             assert_eq!(finding_label(k), k);
         }
-        assert_eq!(FINDING_KINDS, ["name_collision", "unparsed_arguments", "other"]);
+        assert_eq!(FINDING_KINDS.len(), 9);
+        assert_eq!(DETECTOR_LABELS.len(), 10);
     }
 
     #[tokio::test]

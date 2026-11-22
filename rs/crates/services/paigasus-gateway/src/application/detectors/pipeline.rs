@@ -13,10 +13,12 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::join_all;
+use metrics::histogram;
 use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_KERNEL, Finding, INJECTION_MARKERS, INVALID_ARGS, SECRET_IN_ARGS, UNDECLARED_TOOL, UNSEEN_HOST, detector_error};
+use paigasus_observability::names;
 use tokio::time::Instant;
 
-use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput};
+use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, Side};
 
 /// The detector names that are always known (D37): the kernel, the built-in stage and the five
 /// built-ins.
@@ -24,6 +26,20 @@ const BUILT_IN_NAMES: [&str; 7] = [DETECTOR_KERNEL, DETECTOR_BUILT_IN, UNDECLARE
 
 /// The longest kind that the pipeline accepts (D37).
 const MAX_KIND: usize = 64;
+
+/// The `side` label of the stage timer. The `stage` label is `built_in`, `webhook` or `judge`: no
+/// detector name, host or content reaches a label (A2).
+fn side_label(side: Side) -> &'static str {
+    match side {
+        Side::Request => "request",
+        _ => "response",
+    }
+}
+
+/// Record the time of one stage that ran, from `started` until now.
+fn record_stage(side: Side, stage: &'static str, started: std::time::Instant) {
+    histogram!(names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS, "side" => side_label(side), "stage" => stage).record(started.elapsed().as_secs_f64());
+}
 
 /// The findings per subject that a detector returned.
 type Found = Result<Vec<Vec<Finding>>, DetectorError>;
@@ -75,6 +91,7 @@ impl DetectorPipeline {
     pub async fn run(&self, batch: DetectBatch, deadline: Instant) -> PipelineOutput {
         let run_start = Instant::now();
         let n = batch.subjects.len();
+        let stage_start = std::time::Instant::now();
         let built = match AssertUnwindSafe(async { self.built_in.run(&batch) }).catch_unwind().await {
             Ok(out) if out.findings.len() == n && out.hosts.len() == n => Ok(out),
             Ok(_) => Err(DetectorError::WrongShape),
@@ -84,6 +101,7 @@ impl DetectorPipeline {
                 Err(DetectorError::Panicked)
             }
         };
+        record_stage(batch.side, "built_in", stage_start);
         let mut out = match built {
             Ok(out) => PipelineOutput {
                 findings: out.findings.into_iter().map(|f| self.check(DETECTOR_BUILT_IN, f)).collect(),
@@ -112,6 +130,7 @@ impl DetectorPipeline {
     /// holds one entry per webhook, then one for the judge, each with one vector per call subject.
     async fn late_stages(&self, batch: &DetectBatch, calls: &[usize], built: &[Vec<Finding>], cut: Instant) -> Vec<Vec<Vec<Finding>>> {
         let m = calls.len();
+        let side = batch.side;
         let call_batch = Arc::new(DetectBatch {
             earlier: Vec::new(),
             ..DetectBatch::new(
@@ -130,7 +149,9 @@ impl DetectorPipeline {
             join_all(self.webhooks.iter().zip(&hooks).map(|(d, slot)| {
                 let b = Arc::clone(&call_batch);
                 async move {
+                    let started = std::time::Instant::now();
                     let got = guarded("webhook", d.detect(b)).await;
+                    record_stage(side, "webhook", started);
                     *lock(slot) = Some(self.accept("webhook", d.name(), got, m));
                 }
             }))
@@ -155,7 +176,9 @@ impl DetectorPipeline {
                         call_batch.seen_hosts.clone(),
                     )
                 });
+                let started = std::time::Instant::now();
                 let got = guarded("judge", judge.detect(judge_batch)).await;
+                record_stage(side, "judge", started);
                 *lock(&judged) = Some(self.accept("judge", judge.name(), got, m));
             }
         };
@@ -230,6 +253,7 @@ mod tests {
     use paigasus_kernel::detect::{DETECTOR_ERROR, Declared, Severity, ToolInput};
     use paigasus_kernel::tool_policy::ToolInvocation;
     use paigasus_logging::test_support::capture_logs;
+    use paigasus_observability::names;
 
     const CANARY: &str = "canary-5d1a-panic-payload";
 
@@ -308,10 +332,22 @@ mod tests {
         let text = logs.text();
         assert!(text.contains("a detector stage panicked") && text.contains("stage=\"built_in\""), "{text}");
         assert!(!text.contains(CANARY), "{text}");
-        for (key, _, _, _) in snapshotter.snapshot().into_vec() {
+        // One snapshot: reading it drains the histogram samples.
+        let has = |key: &metrics::Key, k: &str, v: &str| key.labels().any(|l| l.key() == k && l.value() == v);
+        // The check is not vacuous: the stage that panicked still gives one sample.
+        let mut samples = 0;
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
             let key = key.key();
             assert!(!key.name().contains(CANARY) && key.labels().all(|l| !l.value().contains(CANARY)), "{key:?}");
+            if key.name() == names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS
+                && has(key, "side", "response")
+                && has(key, "stage", "built_in")
+                && let metrics_util::debugging::DebugValue::Histogram(h) = value
+            {
+                samples += h.len();
+            }
         }
+        assert_eq!(samples, 1);
     }
 
     #[tokio::test]
