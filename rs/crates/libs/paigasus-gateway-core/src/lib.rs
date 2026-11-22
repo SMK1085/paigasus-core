@@ -26,7 +26,7 @@ pub use interceptor::{Action, DeciderError, Interceptor, Metric};
 pub use json::Malformed;
 pub use limits::{Limits, OnFailure};
 pub use policy::{
-    CallOutcome, ChoiceRewrite, OnUnavailable, PlanItem, PolicyBasis, PolicySet, PolicySnapshot, RefusalCause, RequestPlan, ResultTarget, TenantMode, TenantPart, call_findings, call_schema,
+    CallOutcome, CallScan, ChoiceRewrite, OnUnavailable, PlanItem, PolicyBasis, PolicySet, PolicySnapshot, RefusalCause, RequestPlan, ResultTarget, TenantMode, TenantPart, call_findings, call_schema,
     decide_calls, ingress, invocation, name_collisions, plan_request, result_notice, rewrite_request,
 };
 pub use report::{ReportDecision, ReportEntry, RequestAction, RequestEntry, RequestReason, notice_line, reason_label, report_header, request_comments, sanitize_name};

@@ -54,15 +54,25 @@ pub(crate) fn input_for(kind: ToolCallKind, arguments: &str) -> ToolInput {
     }
 }
 
+/// Whether a call of this kind carries JSON arguments that a definition's JSON schema describes.
+fn has_json_schema(kind: ToolCallKind) -> bool {
+    matches!(kind, ToolCallKind::Function | ToolCallKind::LegacyFunctionCall | ToolCallKind::AnthropicToolUse)
+}
+
 /// The schema of the one definition that declares this call. `None` for zero or two matching
-/// definitions, and for a schema that is not an object.
+/// definitions, for a schema that is not an object, for incomplete definitions (the declaring
+/// definition can be one that is not visible), and unless the call is a JSON-schema kind equal
+/// to the definition's kind: a `custom` call never gets a `function` schema (A7).
 #[must_use]
 pub fn call_schema(call: &ToolCall, turn: &ToolTurn) -> Option<Arc<Value>> {
     let ToolTurn::Parsed(f) = turn else { return None };
+    if !f.definitions_complete || !has_json_schema(call.kind) {
+        return None;
+    }
     let n = normalise(&call.display_name());
     let mut hits = f.definitions.iter().filter(|d| definition_call_name(d) == n);
     let first = hits.next()?;
-    if hits.next().is_some() {
+    if hits.next().is_some() || first.kind != call.kind {
         return None;
     }
     first.schema.clone().filter(|s| s.is_object())
@@ -264,7 +274,13 @@ mod tests {
             d.schema = schema.map(Arc::new);
             d
         };
-        let turn_of = |definitions: Vec<ToolDefinition>| ToolTurn::Parsed(TurnFacts { definitions, ..TurnFacts::default() });
+        let turn_of = |definitions: Vec<ToolDefinition>| {
+            ToolTurn::Parsed(TurnFacts {
+                definitions,
+                definitions_complete: true,
+                ..TurnFacts::default()
+            })
+        };
         let c = call("read", ToolCallKind::Function);
         let obj = serde_json::json!({"type": "object"});
         let one = turn_of(vec![with("read", Some(obj.clone())), with("other", None)]);
@@ -274,6 +290,38 @@ mod tests {
         let boolean = turn_of(vec![with("read", Some(serde_json::json!(true)))]);
         assert_eq!(call_schema(&c, &boolean), None);
         assert_eq!(call_schema(&c, &turn_of(vec![with("other", Some(obj))])), None);
+    }
+
+    #[test]
+    fn call_schema_needs_a_json_call_of_the_definition_kind() {
+        let obj = serde_json::json!({"type": "object"});
+        let with_kind = |kind: ToolCallKind| {
+            let mut d = def("read", None);
+            d.kind = kind;
+            d.schema = Some(Arc::new(obj.clone()));
+            d
+        };
+        let complete = |d: ToolDefinition| turn(vec![d], true);
+        // A custom (text) call gets no schema, also from a function definition of the same name.
+        assert_eq!(call_schema(&call("read", ToolCallKind::Custom), &complete(with_kind(ToolCallKind::Function))), None);
+        assert_eq!(call_schema(&call("read", ToolCallKind::Custom), &complete(with_kind(ToolCallKind::Custom))), None);
+        // A JSON call of another kind than the definition gets no schema.
+        assert_eq!(call_schema(&call("read", ToolCallKind::Function), &complete(with_kind(ToolCallKind::Custom))), None);
+        assert_eq!(call_schema(&call("read", ToolCallKind::Function), &complete(with_kind(ToolCallKind::LegacyFunctionCall))), None);
+        // Each JSON-schema kind matches its own definition kind.
+        for k in [ToolCallKind::Function, ToolCallKind::LegacyFunctionCall, ToolCallKind::AnthropicToolUse] {
+            assert_eq!(call_schema(&call("read", k), &complete(with_kind(k))).as_deref(), Some(&obj), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn call_schema_is_none_for_incomplete_definitions() {
+        let mut d = def("read", None);
+        d.schema = Some(Arc::new(serde_json::json!({"type": "object"})));
+        let c = call("read", ToolCallKind::Function);
+        assert!(call_schema(&c, &turn(vec![d.clone()], true)).is_some());
+        assert_eq!(call_schema(&c, &turn(vec![d], false)), None);
+        assert_eq!(call_schema(&c, &ToolTurn::Unavailable("malformed")), None);
     }
 
     #[test]

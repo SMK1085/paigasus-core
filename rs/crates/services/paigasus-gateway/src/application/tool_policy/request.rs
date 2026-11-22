@@ -826,7 +826,7 @@ mod tests {
             let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
             let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
             let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
-            let outcomes = decide_calls(&out.snapshot, &turn, &calls, &Instant::now);
+            let outcomes = decide_calls(&out.snapshot, &turn, &calls, &[], &Instant::now);
             let want = if global == OnUnavailable::Closed {
                 Decision::Block { code: BlockCode::PolicyUnavailable }
             } else {
@@ -937,7 +937,7 @@ mod tests {
         let body = r#"{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"y","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
         let calls = parse_body(Fmt::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls;
         let turn = parse_request(Format::OpenAiChat, &chat_request(&["y"], ""));
-        let outcomes = decide_calls(snapshot, &turn, &calls, &Instant::now);
+        let outcomes = decide_calls(snapshot, &turn, &calls, &[], &Instant::now);
         assert_eq!(outcomes.len(), 1);
         outcomes[0].decision
     }

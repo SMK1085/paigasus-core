@@ -82,7 +82,8 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
             &fallback
         }
     };
-    let outcomes = decide_calls(snapshot, turn, calls, &Instant::now);
+    // No detector scan runs here yet, so the kernel reads the hosts of each call itself.
+    let outcomes = decide_calls(snapshot, turn, calls, &[], &Instant::now);
     let mode = snapshot.mode.as_str();
     // The digest is computed inside the timed region, so it is part of the overhead sample (§ 5.3).
     let digests: Vec<_> = calls.iter().map(|c| recorder.digest(&c.arguments)).collect();
