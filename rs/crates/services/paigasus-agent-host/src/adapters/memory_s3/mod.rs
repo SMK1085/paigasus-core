@@ -776,6 +776,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_later_racing_write_gives_partial() {
+        // The writes of a phase start in set order: `FuturesUnordered` polls new futures in the
+        // order of the push. So PUT number n is the nth Put of the set.
         let (scripted, store) = hashed();
         scripted.on(Hook::BeforeFirstPut, other_writer("/b", "other"));
         let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent), put_change("/b", "2", Expected::Absent)]);
@@ -791,7 +793,8 @@ mod tests {
         assert_eq!(content(&store, "/b").await.as_deref(), Some("other"));
     }
 
-    /// `[Put /a, Put /b, Delete /c]` with a failed second `PUT`.
+    /// `[Put /a, Put /b, Delete /c]` with a failed second `PUT`. The PUTs start in set order,
+    /// because `FuturesUnordered` polls new futures in the order of the push.
     async fn the_second_put_fails_on(scripted: &ScriptedStore, store: &S3MemoryStore) -> Result<(), MemoryApplyError> {
         put(scripted, &scope(), "/c", "c");
         let v = version(store, "/c").await;
@@ -850,16 +853,33 @@ mod tests {
         assert_eq!(content(&store, "/old").await, None);
     }
 
+    /// `[Delete /a v]` with a failed `DELETE`. `newer` makes another writer change `/a` first.
+    async fn a_failed_delete_of_a(newer: bool) -> Result<(), MemoryApplyError> {
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/a", "old");
+        let v = version(&store, "/a").await;
+        scripted.fault_delete(1, Fault::Fail(generic_error()));
+        if newer {
+            scripted.on(Hook::BeforeFirstDelete, other_writer("/a", "newer"));
+        }
+        let set = set_of(&scope(), vec![delete_change("/a", v)]);
+        store.apply(&set, &MemoryCaps::default()).await
+    }
+
     #[tokio::test]
     async fn a_failed_delete_with_another_etag_after_it_is_partial() {
-        // A failed DELETE whose check HEAD shows another ETag is an unknown outcome.
-        let (scripted, store) = hashed();
-        put(&scripted, &scope(), "/old", "x");
-        let set = rename(&store).await;
-        scripted.fault_delete(1, Fault::Fail(generic_error()));
-        scripted.on(Hook::BeforeFirstDelete, other_writer("/old", "newer"));
-        let (applied, failed_at, _) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
-        assert_eq!((applied, failed_at), (1, mp("/old")));
+        // A failed DELETE whose check HEAD shows another ETag is an unknown outcome. No write is
+        // confirmed, so only an unknown outcome gives Partial here.
+        let (applied, failed_at, _) = partial_parts(a_failed_delete_of_a(true).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+    }
+
+    #[tokio::test]
+    async fn a_failed_delete_with_the_expected_etag_after_it_is_a_bare_store_error() {
+        match a_failed_delete_of_a(false).await {
+            Err(MemoryApplyError::Store(text)) => assert_eq!(text, "the memory delete failed (other)"),
+            other => panic!("not a bare Store: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -913,6 +933,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_failure_stops_new_writes_in_the_phase() {
+        // The writes of a phase start in set order: `FuturesUnordered` polls new futures in the
+        // order of the push. So PUT number n is the nth Put of the set.
         let (scripted, store) = hashed();
         scripted.fault_put(1, Fault::Fail(generic_error()));
         let changes = (0..WRITE_CONCURRENCY + 2).map(|n| put_change(&format!("/f{n:02}"), "x", Expected::Absent)).collect();
@@ -927,6 +949,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_deadline_bounds_apply() {
+        // The writes of a phase start in set order: `FuturesUnordered` polls new futures in the
+        // order of the push. So PUT number n is the nth Put of the set.
         let (scripted, store) = fixture_with(EtagMode::ContentHash, Duration::from_secs(2));
         scripted.fault_put(2, Fault::Stall);
         let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent), put_change("/b", "2", Expected::Absent)]);
