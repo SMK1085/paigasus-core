@@ -41,8 +41,10 @@ adapter makes the sequential case correct and documents each race.
   CGI); and, on Linux,
   `SSL_CERT_FILE` and `SSL_CERT_DIR`, which change the system trust roots (through
   `rustls-native-certs`). `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it
-  names. Sven decided on 2026-11-22 to keep the proxy variables and to document them. The
-  `SSL_CERT_*` roots are documented, not locked: Sven did not decide them.
+  names. Sven decided on 2026-11-22 to keep the proxy variables and to document them. He also
+  decided on 2026-11-22 that the `SSL_CERT_*` roots are documented, not locked. On Linux,
+  `async-nats` and `tonic` in the same process also read these variables, so a lock in the S3
+  client alone does not close the risk.
 - G6. The new dependency passes `:deny`, `:osv` and `:machete`, with no `aws-lc-rs`, no second
   `reqwest` major and no second `rustls` major.
 - G7. A pinned S3-compatible test image, a fallback image, and a negative image for the boot probe.
