@@ -30,5 +30,5 @@ pub use policy::{
     invocation, name_collisions, plan_request, result_notice, rewrite_request,
 };
 pub use report::{ReportDecision, ReportEntry, RequestAction, RequestEntry, RequestReason, notice_line, notice_ref, reason_label, report_header, request_comments, sanitize_name};
-pub use turn::{PriorCall, ResultShape, ToolChoice, ToolDefinition, ToolResultRef, ToolTurn, TurnFacts, parse_request};
+pub use turn::{LatestTurn, MAX_LINK_IDS, PriorCall, ResultShape, ToolChoice, ToolDefinition, ToolResultRef, ToolTurn, TurnFacts, parse_request};
 pub use types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall, ToolCallKind};

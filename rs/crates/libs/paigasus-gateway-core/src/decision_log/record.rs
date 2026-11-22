@@ -179,6 +179,8 @@ pub struct CallFacts {
     pub id: Option<String>,
     pub namespace: Option<String>,
     pub name: String,
+    /// The item `id` of a Responses `local_shell_call`. `None` for every other call.
+    pub item_id: Option<String>,
 }
 
 impl CallFacts {
@@ -189,6 +191,7 @@ impl CallFacts {
             id: call.id.clone(),
             namespace: call.namespace.clone(),
             name: call.name.clone(),
+            item_id: call.item_id(),
         }
     }
 }
