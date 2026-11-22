@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use super::compile::{ActionGroup, PolicyOrigin, PolicyRef, RESOURCE_TYPE, ToolPolicies, action_entity};
 use super::input::map_input;
 use super::normalise::normalise;
-use super::types::{Facts, Findings, ToolInvocation, UNPARSED_ARGUMENTS};
+use super::types::{Facts, Findings, ToolInput, ToolInvocation, UNPARSED_ARGUMENTS};
+use crate::detect::{DETECTOR_KERNEL, Finding, HostSet, NO_SEVERITY, Severity, call_hosts, detector_error};
 
 /// The effect of a decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,10 +37,18 @@ pub struct Verdict {
     pub errored_forbid: bool,
     /// Whether the decision is `Deny` and a floor `forbid` is determining or errored (P-3, D33).
     pub floor_denied: bool,
-    /// The final finding kinds that Cedar saw: the caller set, plus `unparsed_arguments` when the kernel added it.
+    /// The final finding kinds that Cedar saw: the caller set, plus the kinds of `added`.
     pub findings: BTreeSet<String>,
     /// The action group of the tool name.
     pub action_group: ActionGroup,
+    /// The value of `context.max_severity`: the highest severity of the caller findings and of
+    /// `added`. `None` (-1 in the context) with no finding, or with the detectors off.
+    pub max_severity: Option<Severity>,
+    /// The findings that the kernel added itself, detector `kernel`: `unparsed_arguments` (`info`
+    /// for free text, `medium` for bad JSON, D21) and the hosts-cap `detector_error` (D36).
+    pub added: Vec<Finding>,
+    /// The policies of `errored` whose effect is `forbid`, sorted the same way (D12).
+    pub errored_forbids: Vec<PolicyRef>,
 }
 
 impl Verdict {
@@ -54,8 +63,33 @@ impl Verdict {
             floor_denied: true,
             findings: findings.iter().map(str::to_owned).collect(),
             action_group,
+            max_severity: findings.max_severity(),
+            added: Vec::new(),
+            errored_forbids: Vec::new(),
         }
     }
+}
+
+/// What the kernel put into the context besides the Cedar value: the final finding kinds, the
+/// findings that it added itself and the severity that it wrote.
+pub(crate) struct Seen {
+    pub kinds: BTreeSet<String>,
+    pub added: Vec<Finding>,
+    pub max_severity: Option<Severity>,
+}
+
+/// The findings that the kernel adds for one call: `unparsed_arguments` when the arguments are
+/// not one strict JSON object, and `detector_error` when the host set overflowed.
+fn kernel_findings(input: &ToolInput, unparsed: bool, hosts_overflowed: bool) -> Vec<Finding> {
+    let mut added = Vec::new();
+    if unparsed {
+        let severity = if matches!(input, ToolInput::Text(_)) { Severity::Info } else { Severity::Medium };
+        added.push(Finding::new(DETECTOR_KERNEL, UNPARSED_ARGUMENTS, severity, ""));
+    }
+    if hosts_overflowed {
+        added.push(detector_error(DETECTOR_KERNEL));
+    }
+    added
 }
 
 fn string(s: &str) -> RestrictedExpression {
@@ -67,23 +101,42 @@ fn record<const N: usize>(pairs: [(&str, RestrictedExpression); N]) -> Restricte
 }
 
 /// The Cedar context of a call. `None` is the optimistic context of `decide_tool`:
-/// `input` is `{}` and `call.declared` is `"yes"`.
-pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &Findings) -> (Context, BTreeSet<String>) {
+/// `input` is `{}`, `call.declared` is `"yes"`, `call.hosts` is `[]` and `max_severity` is -1.
+///
+/// The hosts come from `call.hosts` when the caller gave them, else from one `call_hosts` scan.
+/// With `facts.detection` false, `max_severity` is -1, `call.hosts` is `[]` and the kernel adds
+/// no hosts-cap finding.
+pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &Findings) -> (Context, Seen) {
     let mut kinds: BTreeSet<String> = findings.iter().map(str::to_owned).collect();
-    let (input, input_text, declared) = match call {
+    let empty = HostSet::new();
+    let scanned: HostSet;
+    let (input, input_text, declared, hosts, added) = match call {
         Some(c) => {
             let mapped = map_input(&c.input);
-            if mapped.unparsed {
-                kinds.insert(UNPARSED_ARGUMENTS.to_owned());
-            }
-            (mapped.input, mapped.input_text, c.declared.as_str())
+            let hosts = match (&c.hosts, facts.detection) {
+                (_, false) => &empty,
+                (Some(given), true) => given,
+                (None, true) => {
+                    scanned = call_hosts(&c.input);
+                    &scanned
+                }
+            };
+            let added = kernel_findings(&c.input, mapped.unparsed, hosts.overflowed());
+            (mapped.input, mapped.input_text, c.declared.as_str(), hosts, added)
         }
-        None => (record([]), None, "yes"),
+        None => (record([]), None, "yes", &empty, Vec::new()),
     };
+    kinds.extend(added.iter().map(|f| f.kind.clone()));
+    let max_severity = match call {
+        Some(_) if facts.detection => findings.max_severity().max(added.iter().map(|f| f.severity).max()),
+        _ => None,
+    };
+    let hosts = RestrictedExpression::new_set(hosts.iter().map(string));
     let mut pairs = vec![
         ("input".to_owned(), input),
         ("findings".to_owned(), RestrictedExpression::new_set(kinds.iter().map(|k| string(k)))),
-        ("call".to_owned(), record([("declared", string(declared))])),
+        ("max_severity".to_owned(), RestrictedExpression::new_long(max_severity.map_or(NO_SEVERITY, Severity::as_long))),
+        ("call".to_owned(), record([("declared", string(declared)), ("hosts", hosts)])),
         (
             "request".to_owned(),
             record([
@@ -100,7 +153,7 @@ pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &F
     if let Some(text) = input_text {
         pairs.push(("input_text".to_owned(), RestrictedExpression::new_string(text)));
     }
-    (Context::from_pairs(pairs).expect("the context keys are distinct"), kinds)
+    (Context::from_pairs(pairs).expect("the context keys are distinct"), Seen { kinds, added, max_severity })
 }
 
 fn uid(entity_type: &str, id: &str) -> Option<EntityUid> {
@@ -113,15 +166,15 @@ fn sorted(mut refs: Vec<PolicyRef>) -> Vec<PolicyRef> {
 }
 
 /// The Cedar request and the entities for the tool `name`, with the context of `call` (or the
-/// optimistic context for `None`), the final finding kinds and the action group. `None` if Cedar cannot build the request.
-pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Option<(Request, Entities, BTreeSet<String>, ActionGroup)> {
+/// optimistic context for `None`), what the kernel added to it, and the action group. `None` if Cedar cannot build the request.
+pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Option<(Request, Entities, Seen, ActionGroup)> {
     let (action, entities, group) = action_entity(policies, &normalise(name));
     let org = facts.org.as_hyphenated().to_string();
     let principal = uid(&facts.principal.entity_type, &facts.principal.entity_id)?;
     let resource = uid(RESOURCE_TYPE, &org)?;
-    let (context, kinds) = context(call, facts, findings);
+    let (context, seen) = context(call, facts, findings);
     let request = Request::new(principal, action, resource, context, None).ok()?;
-    Some((request, entities, kinds, group))
+    Some((request, entities, seen, group))
 }
 
 /// Decide one tool call. Pure: no I/O, no clock, no random numbers, no global state.
@@ -131,7 +184,7 @@ pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, 
 /// `errored_forbid` true.
 #[must_use]
 pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Verdict {
-    let Some((request, entities, kinds, action_group)) = request(Some(call), &call.name, facts, findings, policies) else {
+    let Some((request, entities, seen, action_group)) = request(Some(call), &call.name, facts, findings, policies) else {
         return Verdict::unevaluable(findings, action_entity(policies, &normalise(&call.name)).2);
     };
     let response = Authorizer::new().is_authorized(&request, policies.set(), &entities);
@@ -148,7 +201,9 @@ pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policie
             AuthorizationError::PolicyEvaluationError(pe) => pe.policy_id(),
         })
         .collect();
-    let errored_forbid = errored_ids.iter().any(|id| policies.set().policy(id).is_some_and(|p| p.effect() == cedar_policy::Effect::Forbid));
+    let is_forbid = |id: &&PolicyId| policies.set().policy(id).is_some_and(|p| p.effect() == cedar_policy::Effect::Forbid);
+    let errored_forbid = errored_ids.iter().any(is_forbid);
+    let errored_forbids = sorted(errored_ids.iter().copied().filter(is_forbid).filter_map(lookup).collect());
     let errored = sorted(errored_ids.into_iter().filter_map(lookup).collect());
     let decision = if response.decision() == Decision::Allow && !errored_forbid { Effect::Allow } else { Effect::Deny };
     // Floor policies are forbids only: `compile_floor` rejects a floor permit.
@@ -159,7 +214,10 @@ pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policie
         errored,
         errored_forbid,
         floor_denied,
-        findings: kinds,
+        findings: seen.kinds,
         action_group,
+        max_severity: seen.max_severity,
+        added: seen.added,
+        errored_forbids,
     }
 }

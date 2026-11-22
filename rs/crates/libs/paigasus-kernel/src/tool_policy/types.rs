@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::CedarUid;
-use crate::detect::Severity;
+use crate::detect::{HostSet, Severity};
 
 pub use crate::detect::{Declared, NAME_COLLISION, ToolInput, UNPARSED_ARGUMENTS};
 
@@ -21,13 +21,29 @@ pub struct ToolInvocation {
     pub input: ToolInput,
     /// Whether the name is among the request definitions.
     pub declared: Declared,
+    /// The hosts of the arguments, when the caller has them already (`CallDetection.hosts`).
+    /// `None`: `decide` reads them from `input` with `call_hosts`.
+    pub hosts: Option<HostSet>,
 }
 
 impl ToolInvocation {
-    /// Make an invocation.
+    /// Make an invocation with no precomputed hosts.
     #[must_use]
     pub fn new(name: impl Into<String>, input: ToolInput, declared: Declared) -> Self {
-        Self { name: name.into(), input, declared }
+        Self {
+            name: name.into(),
+            input,
+            declared,
+            hosts: None,
+        }
+    }
+
+    /// Set the hosts of the arguments, so that `decide` does not read the input again. The set
+    /// must come from `call_hosts` of the same input.
+    #[must_use]
+    pub fn with_hosts(mut self, hosts: HostSet) -> Self {
+        self.hosts = Some(hosts);
+        self
     }
 }
 
@@ -91,13 +107,29 @@ pub struct Facts {
     pub request: RequestInfo,
     /// The session facts.
     pub session: SessionInfo,
+    /// Whether the detectors are on. With `false`, the context holds `max_severity: -1` and
+    /// `call.hosts: []`, and the kernel adds no hosts-cap finding (§ 6.10).
+    pub detection: bool,
 }
 
 impl Facts {
-    /// Make the facts.
+    /// Make the facts, with the detectors on.
     #[must_use]
     pub fn new(principal: CedarUid, org: Uuid, request: RequestInfo, session: SessionInfo) -> Self {
-        Self { principal, org, request, session }
+        Self {
+            principal,
+            org,
+            request,
+            session,
+            detection: true,
+        }
+    }
+
+    /// Set whether the detectors are on.
+    #[must_use]
+    pub fn with_detection(mut self, on: bool) -> Self {
+        self.detection = on;
+        self
     }
 }
 
@@ -181,10 +213,16 @@ mod tests {
         };
         let org = Uuid::nil();
         let f = Facts::new(uid.clone(), org, RequestInfo::new("s", "responses", "m"), SessionInfo::new("sid", 3));
-        assert_eq!((f.principal, f.org), (uid, org));
+        assert_eq!((f.principal.clone(), f.org), (uid, org));
         assert_eq!((f.request.scope.as_str(), f.request.ingress.as_str(), f.request.model.as_str()), ("s", "responses", "m"));
         assert_eq!((f.session.id.as_str(), f.session.turn), ("sid", 3));
+        assert!(f.detection, "the detectors are on by default");
+        assert!(!f.with_detection(false).detection);
         let c = ToolInvocation::new("n", ToolInput::Text("t".into()), Declared::No);
+        assert_eq!(c.hosts, None);
+        let mut h = HostSet::new();
+        h.insert("a.example");
+        assert_eq!(c.clone().with_hosts(h.clone()).hosts, Some(h));
         assert_eq!((c.name.as_str(), c.input, c.declared), ("n", ToolInput::Text("t".into()), Declared::No));
     }
 }
