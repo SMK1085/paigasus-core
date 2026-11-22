@@ -101,6 +101,7 @@ local function hkey(t, i)
 end
 
 local written = 0
+local seen_guard, guard_sets = {}, {}
 local k, a = 1 + H + T * H, 13 + 2 * T
 for j = 1, N do
   local id, body, t, nlinks = ARGV[a + 1], ARGV[a + 2], tonumber(ARGV[a + 3]), tonumber(ARGV[a + 4])
@@ -108,18 +109,19 @@ for j = 1, N do
   k = k + 1
   local ekey = KEYS[k]
   local skip = false
+  local gkey = nil
   if guard == '1' then
     k = k + 1
-    local gkey = KEYS[k]
+    gkey = KEYS[k]
     -- F5: a call event that is gone gets no result and no new key.
     if redis.call('EXISTS', gkey) == 0 then
       skip = true
     -- The result is already written: write it once per call event. Both aliases of a local
     -- shell call name the same event, and a relink after the lookup does not move the guard.
-    elseif redis.call('HSETNX', gkey, 'r', id) == 0 then
+    -- The guard is only READ here and is set LAST (below), so a script that stops half way
+    -- (an ACL error on a later write) leaves no guard and a retry writes the result.
+    elseif seen_guard[gkey] or redis.call('HEXISTS', gkey, 'r') == 1 then
       skip = true
-    else
-      redis.call('EXPIRE', gkey, ttl)
     end
   end
   local lbase = k
@@ -135,6 +137,10 @@ for j = 1, N do
       elseif link == 'c' then
         put_call_link(lkey, session, names[t], id, ttl)
       end
+    end
+    if gkey then
+      seen_guard[gkey] = true
+      guard_sets[#guard_sets + 1] = {gkey, id}
     end
     written = written + 1
   end
@@ -196,6 +202,12 @@ if tools_touched then
   for i = 1, H do
     redis.call('EXPIRE', KEYS[1 + i], ttl)
   end
+end
+
+-- The result guards go LAST, after the bodies, the links and the history writes.
+for _, g in ipairs(guard_sets) do
+  redis.call('HSET', g[1], 'r', g[2])
+  redis.call('EXPIRE', g[1], ttl)
 end
 
 if turn ~= '' then
