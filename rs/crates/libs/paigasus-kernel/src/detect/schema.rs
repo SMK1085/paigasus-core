@@ -210,7 +210,7 @@ impl State {
     /// the whole call, but it keeps no more evidence.
     fn violate(&mut self, rule: &'static str, pointer: &str) {
         if self.evidence.len() < MAX_EVIDENCE {
-            self.evidence.push(Evidence::argument(rule, pointer.to_owned()));
+            self.evidence.push(Evidence::argument(rule, pointer));
         }
     }
 }

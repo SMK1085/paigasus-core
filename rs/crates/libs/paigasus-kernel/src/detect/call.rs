@@ -6,7 +6,8 @@ use std::fmt;
 
 use super::hosts::scan_hosts;
 use super::schema::invalid_args;
-use super::secrets::secret_in_args;
+use super::secrets::{safe_pointer, secret_in_args};
+use super::types::prefix_on_boundary;
 use super::{CallSubject, Declared, Evidence, Finding, HOSTS_OVERFLOW, HostSet, Severity, UNDECLARED_TOOL, UNSEEN_HOST};
 
 /// The version of the `unseen_host` rule.
@@ -58,14 +59,7 @@ impl Unseen {
         if self.found.len() >= MAX_EVIDENCE && self.found.last_key_value().is_some_and(|(last, _)| host > last.as_str()) {
             return;
         }
-        let pointer = pointer.map(|p| {
-            let mut end = p.len().min(MAX_POINTER_COPY);
-            while !p.is_char_boundary(end) {
-                end -= 1;
-            }
-            p[..end].to_owned()
-        });
-        self.found.insert(host.to_owned(), pointer);
+        self.found.insert(host.to_owned(), pointer.map(|p| prefix_on_boundary(p, MAX_POINTER_COPY).to_owned()));
         if self.found.len() > MAX_EVIDENCE {
             self.found.pop_last();
         }
@@ -77,7 +71,7 @@ impl Unseen {
         }
         let mut finding = Finding::new(UNSEEN_HOST, UNSEEN_HOST, Severity::Medium, UNSEEN_HOST_VERSION);
         for (host, pointer) in self.found {
-            finding = finding.with_evidence(Evidence::host(UNSEEN_HOST, pointer, host));
+            finding = finding.with_evidence(Evidence::host(UNSEEN_HOST, pointer.as_deref(), host));
         }
         Some(finding)
     }
@@ -104,7 +98,10 @@ pub fn detect_call(subject: &CallSubject<'_>) -> CallDetection {
     scan_hosts(subject.input, &mut |leaf_hosts, pointer| {
         hosts.extend(leaf_hosts);
         if let Some(seen) = subject.seen_hosts {
-            for host in leaf_hosts.iter() {
+            // The secret cut runs once per leaf with an unseen host, before any pointer is copied.
+            let mut safe: Option<Option<&str>> = None;
+            for host in leaf_hosts.iter().filter(|h| *h != HOSTS_OVERFLOW && !seen.contains(h)) {
+                let pointer = *safe.get_or_insert_with(|| pointer.map(safe_pointer));
                 unseen.offer(seen, host, pointer);
             }
         }
@@ -178,6 +175,59 @@ mod tests {
         assert!(unseen_host(&hosts, &hosts).is_none());
         let f = unseen_host(&HostSet::new(), &hosts).expect("finding");
         assert!(f.evidence.iter().all(|e| e.host.as_deref() != Some(crate::detect::HOSTS_OVERFLOW)));
+    }
+
+    fn pointers(f: &Finding) -> Vec<String> {
+        f.evidence
+            .iter()
+            .map(|e| match &e.location {
+                Location::Argument { pointer } => pointer.clone(),
+                other => panic!("unexpected location {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_evidence_pointer_holds_a_secret_key() {
+        let token = aws();
+        let secret_part = &token[4..];
+        let schema = json!({"type":"object","properties":{token.clone():{"type":"object","properties":{"v":{"type":"integer"}}}}});
+        let input = ToolInput::Json(format!(r#"{{"{token}":{{"v":"x","u":"https://x.example"}}}}"#));
+        let seen = HostSet::new();
+        let subject = CallSubject::new("t", &input, Declared::Yes).with_schema(&schema).with_seen_hosts(&seen);
+        let d = detect_call(&subject);
+        assert_eq!(kinds(&d), [INVALID_ARGS, UNSEEN_HOST, SECRET_IN_ARGS]);
+        for f in &d.findings {
+            for p in pointers(f) {
+                assert!(!p.contains(secret_part), "{} {p}", f.kind);
+            }
+        }
+        // The pointer is cut before the key: the pointer of the object that holds it.
+        assert_eq!(pointers(&d.findings[1]), [""]);
+        // The same holds for the escaped form of the key.
+        let escaped = token.replace('A', "\\u0041");
+        let input = ToolInput::Json(format!(r#"{{"{escaped}":{{"u":"https://x.example"}}}}"#));
+        let d = detect_call(&CallSubject::new("t", &input, Declared::Yes).with_seen_hosts(&seen));
+        assert!(pointers(&d.findings[0]).iter().all(|p| !p.contains(secret_part)));
+    }
+
+    #[test]
+    fn a_sentinel_only_call_gives_no_unseen_host_finding() {
+        let input = ToolInput::Json(format!(r#"{{"u":"https://{}.example/"}}"#, "a".repeat(1100)));
+        let seen = HostSet::new();
+        let d = detect_call(&CallSubject::new("t", &input, Declared::Yes).with_seen_hosts(&seen));
+        assert!(d.findings.iter().all(|f| f.kind != UNSEEN_HOST));
+        assert_eq!(d.hosts.iter().collect::<Vec<_>>(), [crate::detect::HOSTS_OVERFLOW]);
+    }
+
+    #[test]
+    fn a_seen_host_matches_after_normalising() {
+        let input = ToolInput::Json(r#"{"u":"http://BÜCHER.example.:8443/x"}"#.into());
+        let mut seen = HostSet::new();
+        seen.insert("xn--bcher-kva.example");
+        let d = detect_call(&CallSubject::new("t", &input, Declared::Yes).with_seen_hosts(&seen));
+        assert!(d.findings.is_empty(), "{d:?}");
+        assert_eq!(d.hosts.iter().collect::<Vec<_>>(), ["xn--bcher-kva.example"]);
     }
 
     #[test]

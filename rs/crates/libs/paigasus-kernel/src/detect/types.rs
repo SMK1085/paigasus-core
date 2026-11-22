@@ -8,6 +8,7 @@
 use std::fmt;
 
 use super::hosts::HostSet;
+use super::secrets::safe_pointer;
 
 /// The finding that two tool names have the same normal form in one request.
 pub const NAME_COLLISION: &str = "name_collision";
@@ -117,25 +118,22 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    /// A match in the arguments. A pointer over 256 bytes is cut on a character boundary.
+    /// A match in the arguments. The pointer is cut before the first token that is a secret (a key
+    /// can be one), then to 256 bytes on a character boundary.
     #[must_use]
-    pub fn argument(rule: &'static str, mut pointer: String) -> Self {
-        truncate_on_boundary(&mut pointer, MAX_POINTER);
+    pub fn argument(rule: &'static str, pointer: &str) -> Self {
         Self {
             rule,
-            location: Location::Argument { pointer },
+            location: Location::Argument { pointer: stored_pointer(pointer) },
             host: None,
         }
     }
 
     /// A match of a host. `pointer` is `None` when the host is in free text.
     #[must_use]
-    pub fn host(rule: &'static str, pointer: Option<String>, host: String) -> Self {
+    pub fn host(rule: &'static str, pointer: Option<&str>, host: String) -> Self {
         let location = match pointer {
-            Some(mut pointer) => {
-                truncate_on_boundary(&mut pointer, MAX_POINTER);
-                Location::Argument { pointer }
-            }
+            Some(pointer) => Location::Argument { pointer: stored_pointer(pointer) },
             None => Location::TextInput,
         };
         Self { rule, location, host: Some(host) }
@@ -168,16 +166,19 @@ impl fmt::Debug for Evidence {
     }
 }
 
-/// Cut `s` to at most `max` bytes, on a character boundary.
-fn truncate_on_boundary(s: &mut String, max: usize) {
-    if s.len() <= max {
-        return;
-    }
-    let mut end = max;
+/// The first `max` bytes of `s` or less, cut on a character boundary.
+pub(super) fn prefix_on_boundary(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
     while !s.is_char_boundary(end) {
         end -= 1;
     }
-    s.truncate(end);
+    &s[..end]
+}
+
+/// The pointer that an evidence entry stores. The secret cut runs first, on the whole pointer, so
+/// that the length cut cannot split a secret key and leave a part of it.
+fn stored_pointer(pointer: &str) -> String {
+    prefix_on_boundary(safe_pointer(pointer), MAX_POINTER).to_owned()
 }
 
 /// One finding of one detector. A finding never blocks a call by itself.
@@ -353,10 +354,10 @@ mod tests {
 
     #[test]
     fn a_long_pointer_is_cut_on_a_char_boundary() {
-        let e = Evidence::argument("r", format!("/{}", "é".repeat(200)));
+        let e = Evidence::argument("r", &format!("/{}", "é".repeat(200)));
         let Location::Argument { pointer } = &e.location else { panic!("not an argument") };
         assert!(pointer.len() <= 256 && pointer.len() > 250);
-        let h = Evidence::host("r", Some(format!("/{}", "é".repeat(200))), "h".into());
+        let h = Evidence::host("r", Some(&format!("/{}", "é".repeat(200))), "h".into());
         let Location::Argument { pointer } = &h.location else { panic!("not an argument") };
         assert!(pointer.len() <= 256);
     }
@@ -380,8 +381,8 @@ mod tests {
     fn debug_prints_no_content() {
         const CANARY: &str = "CANARY-7f3a";
         let f = Finding::new("unseen_host", "unseen_host", Severity::Medium, "v1")
-            .with_evidence(Evidence::host("url", Some(format!("/{CANARY}")), format!("{CANARY}.example")))
-            .with_evidence(Evidence::argument("type", format!("/{CANARY}")));
+            .with_evidence(Evidence::host("url", Some(&format!("/{CANARY}")), format!("{CANARY}.example")))
+            .with_evidence(Evidence::argument("type", &format!("/{CANARY}")));
         for s in [format!("{f:?}"), format!("{:?}", f.evidence[0]), format!("{:?}", f.evidence[0].location)] {
             assert!(!s.contains(CANARY), "{s}");
         }

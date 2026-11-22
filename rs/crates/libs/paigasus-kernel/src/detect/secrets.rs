@@ -54,11 +54,13 @@ fn rule_ids() -> Vec<&'static str> {
     PATTERNS.iter().map(|(rule, _)| *rule).collect()
 }
 
-/// The pointer cut before the first reference token that is itself a secret. A key that is a
-/// secret would else appear in the pointer of the key and of every value below it. The cut
-/// pointer is the pointer of the object that holds that key. It runs once per evidence entry, and
-/// the walk makes at most 16, so the cost stays linear.
-fn safe_pointer<'p>(set: &RegexSet, pointer: &'p str) -> &'p str {
+/// The pointer cut before the first reference token that is itself a secret (RFC 6901: `~1` is
+/// decoded before `~0`). A key that is a secret would else appear in the pointer of the key and
+/// of every value below it. The cut pointer is the pointer of the object that holds that key.
+/// `Evidence` calls it for every argument pointer it stores, at most 16 per finding, so the cost
+/// stays linear.
+pub(super) fn safe_pointer(pointer: &str) -> &str {
+    let Some(set) = SET.as_ref() else { return pointer };
     let mut start = 0;
     while start < pointer.len() {
         let rest = &pointer[start + 1..];
@@ -91,7 +93,6 @@ pub fn secret_in_args(subject: &CallSubject<'_>) -> Option<Finding> {
         if !matched.matched_any() {
             return;
         }
-        let pointer = safe_pointer(set, leaf.pointer);
         let mut last = None;
         for index in matched.iter() {
             let rule = PATTERNS[index].0;
@@ -99,7 +100,7 @@ pub fn secret_in_args(subject: &CallSubject<'_>) -> Option<Finding> {
                 continue;
             }
             last = Some(rule);
-            evidence.push(if is_text { Evidence::text_input(rule) } else { Evidence::argument(rule, pointer.to_owned()) });
+            evidence.push(if is_text { Evidence::text_input(rule) } else { Evidence::argument(rule, leaf.pointer) });
         }
     });
     if evidence.is_empty() {
