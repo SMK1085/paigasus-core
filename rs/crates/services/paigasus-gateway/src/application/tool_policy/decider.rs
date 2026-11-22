@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn an_unknown_finding_kind_is_other() {
         assert_eq!(finding_label("zz"), "other");
-        for k in ["name_collision", "unparsed_arguments"] {
+        for k in ["name_collision", "unparsed_arguments", "mixed_sessions", "forged_history", "history_truncated"] {
             assert_eq!(finding_label(k), k);
         }
         assert_eq!(

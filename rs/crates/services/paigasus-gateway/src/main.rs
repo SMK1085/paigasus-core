@@ -318,7 +318,7 @@ fn describe_gateway_metrics() {
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
-        "Tool-policy findings, labeled by side (request, response) and kind (name_collision, unparsed_arguments, other)."
+        "Tool-policy findings, labeled by side (request, response) and kind (name_collision, unparsed_arguments, mixed_sessions, forged_history, history_truncated, other). Primed at 0 for all twelve pairs."
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
