@@ -72,8 +72,53 @@ impl Choices {
     }
 }
 
+/// Long number texts, as (text, integral). `serde_json` with no `float_roundtrip` and
+/// `str::parse` can read such a text to two different doubles. A `Value` cannot hold the text, so
+/// the generator puts the placeholder `"#D<k>#"` in the value and in the schema, and the text
+/// replaces it after both are serialised.
+fn long_numbers() -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = [
+        ("0.20082962974712488058302", false),
+        ("0.334274685957130011297", false),
+        ("1e300", true),
+        ("123456789012345678901234567890", true),
+        ("9007199254740993", true),
+        ("18446744073709551616", true),
+        ("1.00000000000000000000000000001", false),
+        ("5.000000000000000000000000", true),
+        ("-0.000000000000000000000000000000017", false),
+        ("0.1000000000000000055511151231257827", false),
+    ]
+    .iter()
+    .map(|(t, i)| ((*t).to_owned(), *i))
+    .collect();
+    out.push((format!("{:.0}", 1e300_f64), true));
+    out
+}
+
+/// The placeholder of the `k`-th long number.
+fn placeholder(k: usize) -> String {
+    format!("#D{k}#")
+}
+
+/// Whether `v` is a long number placeholder, and if so whether its number is integral.
+fn long_number(v: &Value) -> Option<bool> {
+    let k: usize = v.as_str()?.strip_prefix("#D")?.strip_suffix('#')?.parse().ok()?;
+    long_numbers().get(k).map(|(_, integral)| *integral)
+}
+
+/// The JSON text of `v` with each placeholder replaced by its long number.
+fn with_long_numbers(v: &Value) -> String {
+    let mut text = v.to_string();
+    for (k, (number, _)) in long_numbers().iter().enumerate() {
+        text = text.replace(&format!("\"{}\"", placeholder(k)), number);
+    }
+    text
+}
+
 fn json_value() -> impl Strategy<Value = Value> {
     let leaf = prop_oneof![
+        (0..long_numbers().len()).prop_map(|k| Value::from(placeholder(k))),
         Just(Value::Null),
         any::<bool>().prop_map(Value::Bool),
         (-1000i64..1000).prop_map(Value::from),
@@ -92,7 +137,7 @@ fn json_value() -> impl Strategy<Value = Value> {
 
 /// A type name that `v` does not have.
 fn wrong_type(v: &Value) -> &'static str {
-    if v.is_null() { "string" } else { "null" }
+    if v.is_null() || long_number(v).is_some() { "string" } else { "null" }
 }
 
 /// A type name that `v` has. An integer-valued number can be `integer` or `number`.
@@ -100,7 +145,11 @@ fn type_of(v: &Value, c: &mut Choices) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
-        Value::String(_) => "string",
+        Value::String(_) => match long_number(v) {
+            Some(true) if c.one_in(2) => "integer",
+            Some(_) => "number",
+            None => "string",
+        },
         Value::Array(_) => "array",
         Value::Object(_) => "object",
         Value::Number(n) => {
@@ -225,14 +274,17 @@ fn derive(v: &Value, c: &mut Choices) -> Value {
 }
 
 /// A random object as the arguments, and a schema derived from it that it satisfies.
-fn value_and_satisfied_schema() -> impl Strategy<Value = (Value, Value)> {
+/// The arguments as JSON text, and the schema read back from its text, as in production.
+fn value_and_satisfied_schema() -> impl Strategy<Value = (String, Value)> {
     let root = prop::collection::btree_map("[a-d~/]{1,2}", json_value(), 0..6).prop_map(|m| Value::Object(m.into_iter().collect()));
     (root, any::<u64>()).prop_map(|(value, seed)| {
         let mut schema = derive(&value, &mut Choices(seed));
         if let Value::Object(s) = &mut schema {
             s.insert("$defs".into(), json!({ "any": true }));
         }
-        (value, schema)
+        let schema_text = with_long_numbers(&schema);
+        let schema = serde_json::from_str(&schema_text).unwrap_or(Value::Null);
+        (with_long_numbers(&value), schema)
     })
 }
 
@@ -240,7 +292,8 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 1024, ..ProptestConfig::default() })]
     #[test]
     fn no_false_invalid_args((value, schema) in value_and_satisfied_schema()) {
-        let input = ToolInput::Json(value.to_string());
+        prop_assert!(schema.is_object(), "the schema text did not read back");
+        let input = ToolInput::Json(value.clone());
         let subject = CallSubject::new("t", &input, Declared::Yes).with_schema(&schema);
         let finding = invalid_args(&subject);
         prop_assert!(finding.is_none(), "{value} {schema} {finding:?}");

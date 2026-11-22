@@ -25,8 +25,12 @@ use super::{CallSubject, Evidence, Finding, INVALID_ARGS, Severity, ToolInput};
 
 /// The most steps that one call of the validator takes. One step is one schema node visit, one
 /// `enum` element or `type` entry compared (plus one per member of a compared value), or one
-/// `required` entry.
+/// `required` entry. Each such step also costs one step per `BYTES_PER_STEP` bytes of the string,
+/// key, type name or `required` name that it reads, so the budget bounds the bytes too.
 pub(crate) const WORK_BUDGET: u32 = 100_000;
+
+/// The bytes that one extra step pays for.
+const BYTES_PER_STEP: usize = 64;
 
 /// The version of the validator rules.
 const VERSION: &str = "v1";
@@ -37,14 +41,35 @@ const MAX_EVIDENCE: usize = 16;
 /// The rule of an evidence entry for the boolean schema `false`.
 const FALSE_SCHEMA: &str = "false";
 
-/// One value of the arguments. A number keeps its original text.
-enum Inst<'t> {
+/// A number of the arguments, read once by value from its original text.
+#[derive(Clone, Copy)]
+enum NumValue {
+    /// An integer that fits an `i64`.
+    Int(i64),
+    /// A value with a fraction that is not zero.
+    Fraction,
+    /// A value that the reader cannot classify exactly.
+    Unknown,
+}
+
+impl NumValue {
+    fn read(text: &str) -> Self {
+        match classify_number(text) {
+            NumberClass::Long(n) => Self::Int(n),
+            NumberClass::Decimal(_) => Self::Fraction,
+            NumberClass::Text(_) => Self::Unknown,
+        }
+    }
+}
+
+/// One value of the arguments.
+enum Inst {
     Null,
     Bool(bool),
-    Num(&'t str),
+    Num(NumValue),
     Str(String),
-    Arr(Vec<Inst<'t>>),
-    Obj(Vec<(String, Inst<'t>)>),
+    Arr(Vec<Inst>),
+    Obj(Vec<(String, Inst)>),
 }
 
 /// The text of every number in a valid JSON text, in document order.
@@ -86,10 +111,10 @@ struct Seed<'a, 't> {
 }
 
 impl<'t> Seed<'_, 't> {
-    fn number<E: serde::de::Error>(&self) -> Result<Inst<'t>, E> {
+    fn number<E: serde::de::Error>(&self) -> Result<Inst, E> {
         let i = self.next.get();
         self.next.set(i + 1);
-        self.numbers.get(i).map(|t| Inst::Num(t)).ok_or_else(|| E::custom("number count"))
+        self.numbers.get(i).map(|t| Inst::Num(NumValue::read(t))).ok_or_else(|| E::custom("number count"))
     }
     fn child(&self) -> Self {
         Seed {
@@ -100,46 +125,46 @@ impl<'t> Seed<'_, 't> {
 }
 
 impl<'de, 't> DeserializeSeed<'de> for Seed<'_, 't> {
-    type Value = Inst<'t>;
-    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Inst<'t>, D::Error> {
+    type Value = Inst;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Inst, D::Error> {
         d.deserialize_any(self)
     }
 }
 
 impl<'de, 't> Visitor<'de> for Seed<'_, 't> {
-    type Value = Inst<'t>;
+    type Value = Inst;
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("any JSON value")
     }
-    fn visit_bool<E>(self, v: bool) -> Result<Inst<'t>, E> {
+    fn visit_bool<E>(self, v: bool) -> Result<Inst, E> {
         Ok(Inst::Bool(v))
     }
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Inst<'t>, E> {
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Inst, E> {
         self.number()
     }
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Inst<'t>, E> {
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Inst, E> {
         self.number()
     }
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Inst<'t>, E> {
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Inst, E> {
         self.number()
     }
-    fn visit_unit<E>(self) -> Result<Inst<'t>, E> {
+    fn visit_unit<E>(self) -> Result<Inst, E> {
         Ok(Inst::Null)
     }
-    fn visit_str<E>(self, v: &str) -> Result<Inst<'t>, E> {
+    fn visit_str<E>(self, v: &str) -> Result<Inst, E> {
         Ok(Inst::Str(v.to_owned()))
     }
-    fn visit_string<E>(self, v: String) -> Result<Inst<'t>, E> {
+    fn visit_string<E>(self, v: String) -> Result<Inst, E> {
         Ok(Inst::Str(v))
     }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Inst<'t>, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Inst, A::Error> {
         let mut out = Vec::new();
         while let Some(n) = seq.next_element_seed(self.child())? {
             out.push(n);
         }
         Ok(Inst::Arr(out))
     }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Inst<'t>, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Inst, A::Error> {
         let mut out = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             out.push((key, map.next_value_seed(self.child())?));
@@ -150,7 +175,7 @@ impl<'de, 't> Visitor<'de> for Seed<'_, 't> {
 
 /// The arguments as a tree, or `None`. The caller has checked the mode, so the text is valid JSON
 /// with unique keys and at most 128 levels.
-fn parse(text: &str) -> Option<Inst<'_>> {
+fn parse(text: &str) -> Option<Inst> {
     let numbers = number_texts(text);
     let next = Cell::new(0);
     let mut de = serde_json::Deserializer::from_str(text);
@@ -165,14 +190,21 @@ fn parse(text: &str) -> Option<Inst<'_>> {
 struct Stop;
 
 struct State {
-    steps: u32,
+    steps: u64,
     evidence: Vec<Evidence>,
 }
 
 impl State {
     fn step(&mut self) -> Result<(), Stop> {
-        self.steps += 1;
-        if self.steps > WORK_BUDGET { Err(Stop) } else { Ok(()) }
+        self.charge_steps(1)
+    }
+    /// One step per `BYTES_PER_STEP` bytes that the check reads.
+    fn charge(&mut self, bytes: usize) -> Result<(), Stop> {
+        self.charge_steps(u64::try_from(bytes / BYTES_PER_STEP).unwrap_or(u64::MAX))
+    }
+    fn charge_steps(&mut self, steps: u64) -> Result<(), Stop> {
+        self.steps = self.steps.saturating_add(steps);
+        if self.steps > u64::from(WORK_BUDGET) { Err(Stop) } else { Ok(()) }
     }
     /// Keep one violation. Past the sixteenth, the check goes on, so that the budget still bounds
     /// the whole call, but it keeps no more evidence.
@@ -185,7 +217,7 @@ impl State {
 
 /// Whether `inst` has the type `name`. `None`: the name is unknown, or the number cannot be read
 /// by value, so the caller skips the keyword.
-fn type_matches(name: &str, inst: &Inst<'_>) -> Option<bool> {
+fn type_matches(name: &str, inst: &Inst) -> Option<bool> {
     Some(match name {
         "null" => matches!(inst, Inst::Null),
         "boolean" => matches!(inst, Inst::Bool(_)),
@@ -194,11 +226,9 @@ fn type_matches(name: &str, inst: &Inst<'_>) -> Option<bool> {
         "object" => matches!(inst, Inst::Obj(_)),
         "number" => matches!(inst, Inst::Num(_)),
         "integer" => match inst {
-            Inst::Num(text) => match classify_number(text) {
-                NumberClass::Long(_) => true,
-                NumberClass::Decimal(_) => false,
-                NumberClass::Text(_) => return None,
-            },
+            Inst::Num(NumValue::Int(_)) => true,
+            Inst::Num(NumValue::Fraction) => false,
+            Inst::Num(NumValue::Unknown) => return None,
             _ => false,
         },
         _ => return None,
@@ -206,7 +236,7 @@ fn type_matches(name: &str, inst: &Inst<'_>) -> Option<bool> {
 }
 
 /// The `type` keyword. `Ok(None)`: skip.
-fn check_type(keyword: &Value, inst: &Inst<'_>, st: &mut State) -> Result<Option<bool>, Stop> {
+fn check_type(keyword: &Value, inst: &Inst, st: &mut State) -> Result<Option<bool>, Stop> {
     let names: &[Value] = match keyword {
         Value::String(_) => std::slice::from_ref(keyword),
         Value::Array(names) if !names.is_empty() => names,
@@ -216,6 +246,7 @@ fn check_type(keyword: &Value, inst: &Inst<'_>, st: &mut State) -> Result<Option
     for name in names {
         st.step()?;
         let Value::String(name) = name else { return Ok(None) };
+        st.charge(name.len())?;
         match type_matches(name, inst) {
             None => return Ok(None),
             Some(m) => matched |= m,
@@ -224,23 +255,31 @@ fn check_type(keyword: &Value, inst: &Inst<'_>, st: &mut State) -> Result<Option
     Ok(Some(matched))
 }
 
-/// Whether two numbers can be equal by value. A comparison of the nearest doubles never says
-/// "not equal" for two equal values, because equal values round to the same double.
-fn numbers_equal(text: &str, n: &serde_json::Number) -> bool {
-    match (text.parse::<f64>(), n.as_f64()) {
-        (Ok(a), Some(b)) => a == b,
+/// Whether two numbers can be equal by value. "Not equal" only when it is provable (A7): the
+/// schema number is an exact integer, and the instance is another integer or has a fraction.
+/// `serde_json` keeps a number with no fraction and no exponent exactly, as `i64` or `u64`. It
+/// reads every other number to a double, which can differ from the double of the same text in
+/// another reader, so such a number never gives a signal.
+fn numbers_equal(inst: NumValue, n: &serde_json::Number) -> bool {
+    let exact = n.as_i64().map(i128::from).or_else(|| n.as_u64().map(i128::from));
+    match (inst, exact) {
+        (NumValue::Int(a), Some(b)) => i128::from(a) == b,
+        (NumValue::Fraction, Some(_)) => false,
         _ => true,
     }
 }
 
 /// JSON equality of an instance and a schema value, one step per compared value.
-fn equal(inst: &Inst<'_>, value: &Value, st: &mut State) -> Result<bool, Stop> {
+fn equal(inst: &Inst, value: &Value, st: &mut State) -> Result<bool, Stop> {
     st.step()?;
     Ok(match (inst, value) {
         (Inst::Null, Value::Null) => true,
         (Inst::Bool(a), Value::Bool(b)) => a == b,
-        (Inst::Num(a), Value::Number(b)) => numbers_equal(a, b),
-        (Inst::Str(a), Value::String(b)) => a == b,
+        (Inst::Num(a), Value::Number(b)) => numbers_equal(*a, b),
+        (Inst::Str(a), Value::String(b)) => {
+            st.charge(a.len())?;
+            a == b
+        }
         (Inst::Arr(a), Value::Array(b)) => {
             if a.len() != b.len() {
                 return Ok(false);
@@ -258,6 +297,7 @@ fn equal(inst: &Inst<'_>, value: &Value, st: &mut State) -> Result<bool, Stop> {
                 return Ok(false);
             }
             for (k, x) in a {
+                st.charge(k.len())?;
                 match b.get(k) {
                     Some(y) if equal(x, y, st)? => {}
                     _ => return Ok(false),
@@ -270,7 +310,7 @@ fn equal(inst: &Inst<'_>, value: &Value, st: &mut State) -> Result<bool, Stop> {
 }
 
 /// The `enum` keyword. `Ok(None)`: skip.
-fn check_enum(keyword: &Value, inst: &Inst<'_>, st: &mut State) -> Result<Option<bool>, Stop> {
+fn check_enum(keyword: &Value, inst: &Inst, st: &mut State) -> Result<Option<bool>, Stop> {
     let Value::Array(choices) = keyword else { return Ok(None) };
     for choice in choices {
         if equal(inst, choice, st)? {
@@ -281,14 +321,17 @@ fn check_enum(keyword: &Value, inst: &Inst<'_>, st: &mut State) -> Result<Option
 }
 
 /// The object keywords of one node.
-fn check_object(node: &Map<String, Value>, members: &[(String, Inst<'_>)], pointer: &mut String, st: &mut State) -> Result<(), Stop> {
+fn check_object(node: &Map<String, Value>, members: &[(String, Inst)], pointer: &mut String, st: &mut State) -> Result<(), Stop> {
     if let Some(Value::Array(required)) = node.get("required") {
         let keys: HashSet<&str> = members.iter().map(|(k, _)| k.as_str()).collect();
         let (mut missing, mut valid) = (false, true);
         for name in required {
             st.step()?;
             match name {
-                Value::String(name) => missing |= !keys.contains(name.as_str()),
+                Value::String(name) => {
+                    st.charge(name.len())?;
+                    missing |= !keys.contains(name.as_str());
+                }
                 _ => valid = false,
             }
         }
@@ -318,7 +361,7 @@ fn check_object(node: &Map<String, Value>, members: &[(String, Inst<'_>)], point
 }
 
 /// One schema node against one instance.
-fn check(schema: &Value, inst: &Inst<'_>, pointer: &mut String, st: &mut State) -> Result<(), Stop> {
+fn check(schema: &Value, inst: &Inst, pointer: &mut String, st: &mut State) -> Result<(), Stop> {
     st.step()?;
     let node = match schema {
         Value::Bool(false) => {
@@ -532,6 +575,68 @@ mod tests {
         }
         let deep = format!(r#"{{"a":{}1{}}}"#, "[".repeat(200), "]".repeat(200));
         assert!(validate_args(&ToolInput::Json(deep), &schema).is_none());
+    }
+
+    /// The schema comes from text, as in production. `serde_json` with no `float_roundtrip` can
+    /// read the same long decimal to another double than `str::parse` does.
+    #[test]
+    fn enum_numbers_from_schema_text_never_give_a_false_finding() {
+        let exact_1e300 = format!("{:.0}", 1e300_f64);
+        let same = [
+            "0.20082962974712488058302",
+            "0.334274685957130011297",
+            "1e300",
+            exact_1e300.as_str(),
+            "123456789012345678901234567890",
+            "9007199254740993",
+            "18446744073709551616",
+            "1.00000000000000000000000000001",
+            "-0.000000000000000000000000000000017",
+        ];
+        for text in same {
+            assert!(!bad_text(&format!(r#"{{"enum":[{text}]}}"#), text), "{text}");
+            assert!(!bad_text(&format!(r#"{{"enum":[[{text}],{{"k":{text}}}]}}"#), &format!(r#"{{"k":{text}}}"#)), "{text}");
+        }
+        assert!(!bad_text(&format!(r#"{{"enum":[{exact_1e300}]}}"#), "1e300"));
+        // Provably different: an integer schema number and an instance of another value.
+        assert!(bad_text(r#"{"enum":[2]}"#, "1") && bad_text(r#"{"enum":[2]}"#, "2.5") && bad_text(r#"{"enum":[-3]}"#, "3"));
+        assert!(bad_text(r#"{"enum":[18446744073709551615]}"#, "9223372036854775807"));
+        assert!(!bad_text(r#"{"enum":[18446744073709551615]}"#, "18446744073709551615"));
+        assert!(!bad_text(r#"{"enum":[2]}"#, "2.0") && !bad_text(r#"{"enum":[2]}"#, "20e-1"));
+        // The same class of input for `integer`: the reading is exact, so no false finding.
+        for text in ["123456789012345678901234567890", "1.000000000000000000000000000000", "1e300", exact_1e300.as_str()] {
+            assert!(!bad_text(r#"{"type":"integer"}"#, text), "{text}");
+        }
+        assert!(bad_text(r#"{"type":"integer"}"#, "0.5") && bad_text(r#"{"type":"integer"}"#, "-1.25"));
+    }
+
+    /// One step must not cost an unbounded number of bytes. Each case took 0.17 s to 160 s
+    /// (release) before the byte cost counted against the budget.
+    #[test]
+    fn large_tokens_count_against_the_budget() {
+        let mib = 1 << 20;
+        let elements: Vec<Value> = (0..50_000).map(|_| json!({"b": 0})).collect();
+        let cases: Vec<(Value, String)> = vec![
+            (json!({"items": {"required": ["x".repeat(mib)]}}), json!(elements).to_string()),
+            (json!({"type": vec!["integer"; 99_990]}), format!("1.{}", "0".repeat(mib))),
+            (json!({"enum": vec![2; 99_990]}), format!("1.{}", "0".repeat(mib))),
+            (json!({"enum": vec!["a".repeat(53_000); 300]}), json!(format!("{}b", "a".repeat(52_999))).to_string()),
+            (json!({"enum": vec![json!({"k".repeat(53_000): 1}); 300]}), json!({format!("{}j", "k".repeat(52_999)): 1}).to_string()),
+            (json!({"type": vec!["x".repeat(53_000); 300]}), "1".to_owned()),
+        ];
+        for (i, (schema, value)) in cases.into_iter().enumerate() {
+            let input = ToolInput::Json(format!(r#"{{"v":{value}}}"#));
+            let schema = json!({ "properties": { "v": schema } });
+            let start = Instant::now();
+            let found = validate_args(&input, &schema);
+            let took = start.elapsed();
+            // Cases 1 and 2 stay in the budget: 1.000... is an integer, and it is not 2. The other
+            // cases spend the budget on bytes, so they give no finding.
+            assert_eq!(found.is_some(), i == 2, "case {i}");
+            // Measured: at most 140 ms in a debug build, 16 ms in release. Before the byte cost,
+            // cases 0 to 2 took 14 s to 160 s in release.
+            assert!(took < Duration::from_secs(2), "case {i}: {took:?}");
+        }
     }
 
     #[test]
