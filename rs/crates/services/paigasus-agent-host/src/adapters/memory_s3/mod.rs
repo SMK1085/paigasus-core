@@ -75,15 +75,19 @@ impl S3MemoryStore {
         S3MemoryStore { store, prefix, apply_deadline }
     }
 
-    /// List the files under a base key. A key that is not a memory file, or is too short, is
+    /// List the files under `list_base`, a scope path or a directory path inside the scope. Each
+    /// path is the full path in the scope. A key that is not a memory file, or is too short, is
     /// skipped and counted. The result is in byte order of the path.
-    async fn listing(&self, base: &Path) -> Result<Vec<MemoryEntry>, MemoryStoreError> {
-        let mut stream = self.store.list(Some(base));
+    async fn listing(&self, scope_base: &Path, list_base: &Path) -> Result<Vec<MemoryEntry>, MemoryStoreError> {
+        let mut stream = self.store.list(Some(list_base));
         let mut entries = Vec::new();
         while let Some(item) = stream.next().await {
             let meta = item.map_err(|e| listing_error(&e))?;
-            let path = match listed_key(base, &meta.location) {
-                Err(_) => return Err(MemoryStoreError::Store("the store listed a key outside the scope".into())),
+            let outside = || MemoryStoreError::Store("the store listed a key outside the scope".into());
+            // The key must be under the directory. The path rules apply to the full path.
+            listed_key(list_base, &meta.location).map_err(|_| outside())?;
+            let path = match listed_key(scope_base, &meta.location) {
+                Err(_) => return Err(outside()),
                 Ok(ListedKey::Refused) => {
                     count_skipped("key");
                     continue;
@@ -137,11 +141,12 @@ impl MemoryStore for S3MemoryStore {
     }
 
     async fn list(&self, scope: &MemoryScope, dir: &MemoryDir) -> Result<Vec<MemoryEntry>, MemoryStoreError> {
-        self.listing(&dir_path(&self.prefix, scope, dir)).await
+        self.listing(&scope_path(&self.prefix, scope), &dir_path(&self.prefix, scope, dir)).await
     }
 
     async fn usage(&self, scope: &MemoryScope) -> Result<MemoryUsage, MemoryStoreError> {
-        let entries = self.listing(&scope_path(&self.prefix, scope)).await?;
+        let base = scope_path(&self.prefix, scope);
+        let entries = self.listing(&base, &base).await?;
         Ok(MemoryUsage {
             files: entries.len() as u64,
             bytes: entries.iter().map(|e| e.size_bytes).sum(),
@@ -167,7 +172,6 @@ impl MemoryStore for S3MemoryStore {
                 Err(e) => return Err(MemoryStoreError::Store(store_text("the memory delete failed", &e))),
             }
         }
-        drop(deletes);
         if self.raw_keys(&base).await?.is_empty() {
             Ok(())
         } else {
@@ -302,7 +306,23 @@ mod tests {
         let dir = MemoryDir::parse("/a").unwrap();
         let list = store.list(&scope(), &dir).await.unwrap();
         let paths: Vec<&str> = list.iter().map(|e| e.path.as_str()).collect();
-        assert_eq!(paths, ["/b/z", "/x"]);
+        assert_eq!(paths, ["/a/b/z", "/a/x"]);
+    }
+
+    #[tokio::test]
+    async fn list_of_a_dir_checks_the_full_path() {
+        let recorder = DebuggingRecorder::new();
+        let snap = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let (scripted, store) = fixture();
+        put(&scripted, &scope(), "/a/b/c/d/e/f/g/ok", "1");
+        // Eight segments under the directory are valid alone, but nine segments in full are not.
+        scripted.insert_raw(&format!("{}/a/b/c/d/e/f/g/h/i", scope_path(&prefix(), &scope())), &encode(&WriteId::random(), "x"));
+        let dir = MemoryDir::parse("/a/b/c/d/e/f/g").unwrap();
+        let list = store.list(&scope(), &dir).await.unwrap();
+        let paths: Vec<&str> = list.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["/a/b/c/d/e/f/g/ok"]);
+        assert_eq!(skip_counts(&snap), BTreeMap::from([("key".to_owned(), 1)]));
     }
 
     #[tokio::test]
