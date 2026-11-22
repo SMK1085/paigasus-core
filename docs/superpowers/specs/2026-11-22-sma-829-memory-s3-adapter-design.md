@@ -302,7 +302,9 @@ says. The worst case of one `apply` is `apply_deadline_secs`.
    came during the erasure.
 
 A key that `object_store::Path` refuses makes step 1 fail, so `delete_scope` returns `Store` and the
-operator must remove the key (§6.2). The operation is not atomic. A second call finishes it,
+operator must remove the key (§6.2). A folder marker `…/notes/` also stays: `object_store` strips
+the trailing `/`, so the delete misses it, and step 3 returns the "keys remain after the scope
+delete" `Store` error (measured on `rustfs` 1.0.6). The README repair step applies. The operation is not atomic. A second call finishes it,
 because a delete of a missing key succeeds.
 
 ### 6.7 The races (stated in the adapter doc and the README)
