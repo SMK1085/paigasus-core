@@ -421,12 +421,46 @@ Section 2.3 of `RUNBOOK-observability.md` lists the three history metrics.
 - `gateway_tool_history_ids_capped_total`: ids that a request sent past the cap of 128 in one list.
 - `gateway_tool_history_events_trimmed_total`: events that a write removed, by `retention` or `cap`.
 
+### Before you deploy this build
+
+A live set can already hold a history rule. SMA-774 (PR 478, merged 2026-11-16) saved compiled
+sets with no history check. SMA-775 (PR 485, merged 2026-11-17) added the check, but it did not
+change the rows that were already live. The gateway before this build refuses such a set. This
+build loads it (section 5). So the deploy changes the decisions of each such organization:
+
+- `enforce` with `fail_mode = open`: before the deploy, each call that the floor does not deny is
+  observed. After the deploy, the other policies are enforced, and the calls that depend on a slot
+  are blocked.
+- `enforce` with `fail_mode = closed`: before the deploy, every call is blocked. After the deploy,
+  only the calls that depend on a slot are blocked.
+- A floor with a history rule: before the deploy, the floor is unavailable. After the deploy, the
+  floor works, and its history forbids deny.
+
+Do these steps before you deploy this build.
+
+1. Read the floor (`GET /v1/tool-policy-floor`) and the set of each tenant
+   (`GET /v1/organizations/{id}/tool-policy-set`), as in section 5.
+2. Look for a temporal block (a history condition) in each set.
+3. For each set that has one, tell the tenant about the change above. Or publish a version with no
+   temporal block before the deploy.
+
 ### Gateway rollback
 
 This build (SMA-753 PR 1) loads a set that holds history rules, and it leaves the history slots
-empty (section 5). After PR 2, tenants can save history rules. A rollback from PR 2 to this build
-is then safe for most calls. Only the history rules fail closed. The other policies of each set
-work as usual.
+empty (section 5). After PR 2, tenants can save history rules. After a rollback from PR 2 to this
+build, the history rules fail closed. The other policies of each set work as usual.
+
+The effect of one history rule is its action scope, not one tool:
+
+- A permit over `InvokeTool`, or with no action constraint, that reads a slot allows no call. So
+  every tool call of that tenant that no other permit allows is denied. The rate-limit shape of the
+  golden case `scope_principal.result.json` is an example.
+- A floor forbid over `InvokeTool`, or with no action constraint, that reads a slot denies every
+  call of every tenant, in every mode.
+
+Before a rollback from PR 2 to this build, list each history rule whose scope is `InvokeTool` or
+has no action constraint. Treat the sets that hold such a rule as for a rollback to an older build
+(the steps below).
 
 A gateway build older than SMA-753 PR 1 refuses the whole set (section 5). A refused tenant set
 under `fail_mode = closed` blocks every tool call of that tenant. A refused floor under a global
@@ -435,6 +469,11 @@ steps for each set that holds a history rule:
 
 1. Publish a version of the set with no history rule. For the floor, this step is mandatory.
 2. Or set the tenant to mode `log_only`. Then the tenant set blocks no call.
+
+To find these decisions after a rollback, look at the basis. A call that a history forbid denies
+has the basis `errored_forbid` in `gateway_tool_policy_decisions_total`. The decision log line
+names that forbid in `errored=`. A call that only a history permit can allow has the basis `policy`
+and an empty `determining=` list.
 
 ### Known limits of PR 1
 

@@ -14,8 +14,8 @@ calls, not one request. Examples: "no outbound email after a secret was read in 
 "the sum of transfers in 24 hours must be at most 5,000".
 
 IAM already compiles such rules. Each Dogwood temporal block becomes a `HistoryCondition` with a
-stable slot name (SMA-751). Today the gateway refuses every set with a condition, and IAM refuses
-to save one. This change gives the gateway a trusted history and an evaluator, so these rules
+stable slot name (SMA-751). Before D16, the gateway refused every set with a condition, and IAM
+refuses to save one. This change gives the gateway a trusted history and an evaluator, so these rules
 work.
 
 The history must be trusted. The client sends the conversation, so the client can edit it. The
@@ -476,7 +476,7 @@ The builder can add metrics. These names are the minimum.
 | `paigasus-gateway` domain | `SessionStore` port (lookup, write, reserve, settle, append); `PolicyText`, `TenantPolicies` and `PolicySet::Available` carry the conditions |
 | `paigasus-gateway` adapters | `adapters/history/{memory,redis}.rs`; wiring in `runtime.rs`; settle in `interception.rs` |
 | `paigasus-gateway` application | linking in `RequestToolPolicy::apply` and the writes after admission; reserve and evaluation in `CedarDecider`; the recorder takes the decision id |
-| `policy_source/iam.rs` and `file.rs` | PR 1 removes the R5 refusal (D16). PR 2 parses the conditions. The retention check is in the application layer, so both sources get it. `file.rs` has no conditions and no refusal. |
+| `policy_source/iam.rs` and `file.rs` | PR 1 removes the SMA-775 R5 refusal (D16). PR 2 parses the conditions. The retention check is in the application layer, so both sources get it. `file.rs` has no conditions and no refusal. |
 | decision log | fill `session_id` and `turn` |
 | IAM | the setting `tool_policies.history_conditions` (D12); tests for both values; `docs/ops/RUNBOOK-tool-policies.md` |
 | `charts/` | the IAM value `tool_policies.history_conditions` |
@@ -490,7 +490,7 @@ The builder can add metrics. These names are the minimum.
   findings, `session_id` and `turn` in the decision log, the Redis requirement check. So PR 1 has
   working links and real findings. A store error in PR 1 is counted, and the request continues.
   The IAM setting stays as it is, so IAM still refuses each save with a condition. PR 1 replaces
-  the R5 refusal of the gateway with the D16 rule: a set with conditions loads, and its slots stay
+  the SMA-775 R5 refusal of the gateway with the D16 rule: a set with conditions loads, and its slots stay
   empty. "No policy effect" means that PR 1
   evaluates no temporal history conditions. The history findings (`mixed_sessions`,
   `forged_history`) and `context.session` do reach response-side Cedar in PR 1
@@ -511,19 +511,41 @@ org check still apply. The kernel builds each Cedar request with no schema (`dec
 `Request::new(..., None)`), so a policy that reads `context.<slot>` errors. An errored forbid
 denies, and an errored permit does not allow (SMA-752 D26). So only the history policies fail
 closed, and the other policies of the set work. A floor forbid that reads a slot denies in every
-mode (D33). This is the same rule as D10 "retention shorter than the window": only those slots are
+mode (D33).
+
+**Blast radius.** The effect of one history policy is its action scope, not one tool. A permit over
+`InvokeTool` (or with no action constraint) that is gated on a slot, for example the rate-limit
+shape of the golden case `scope_principal.result.json`, allows no call when the slot is empty. So
+it denies every tool call of that tenant that no other permit allows. A floor forbid over
+`InvokeTool` that reads a slot denies every call of every tenant, in every mode. This is the same rule as D10 "retention shorter than the window": only those slots are
 missing. The optimistic set never holds a forbid that reads a slot (D6, `optimistic.rs:73`), so the
 request-side removal stays sound.
 
-**Reason.** A rollback from PR 2 to PR 1. After PR 2, tenants save conditions. With the R5 refusal,
-a rollback would make each such tenant set unavailable (a `closed` tenant then blocks every tool
+**Reason.** A rollback from PR 2 to PR 1. After PR 2, tenants save conditions. With the SMA-775 R5
+refusal, a rollback would make each such tenant set unavailable (a `closed` tenant then blocks every tool
 call), and a floor with a condition would fail for every tenant.
 
 **Limit.** A gateway build older than PR 1 still refuses the whole set. Before a rollback to such a
 build, the operator publishes versions with no condition, or moves those tenants to `log_only`
-(RUNBOOK-tool-policies.md section 10). IAM keeps `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY`
-unchanged in PR 1, so IAM still refuses each save with a condition, and D16 has no production
-effect now.
+(RUNBOOK-tool-policies.md section 10). A rollback from PR 2 to PR 1 needs the same step for each
+history policy whose scope is `InvokeTool` or has no action constraint (see "Blast radius").
+
+**Effect at deploy.** IAM keeps `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` unchanged in PR 1, so IAM
+refuses each new save with a condition. But older live rows can hold conditions: SMA-774 (PR 478,
+merged 2026-11-16) saved compiled sets with no history refusal, and SMA-775 (PR 485, 2026-11-17)
+added the refusal (`sets.rs:15-24`, RUNBOOK-tool-policies.md section 5). The gateway before PR 1
+refuses such a row, and PR 1 loads it. So the deploy of PR 1 changes the decisions of that org:
+
+- `enforce` with `fail_mode = open`: before, the tenant set is unavailable, so each call that the
+  floor does not deny is observed. After, the other policies are
+  enforced, and the slot-dependent calls are blocked.
+- `enforce` with `fail_mode = closed`: before, every call is blocked. After, only the
+  slot-dependent calls are blocked.
+- A floor with a condition: before, the floor is unavailable. After, the floor works, and its slot
+  forbids deny.
+
+Before the deploy, the operator reads the floor and each tenant set and checks for conditions
+(RUNBOOK-tool-policies.md section 10, "Before you deploy this build").
 
 ## 7. Redis layout (proposal, the builder can change it)
 
@@ -543,7 +565,9 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
 
 - **Gateway rollback from PR 2 to PR 1**, or removal of `[tool_history]`. PR 1 loads a set with a
   condition and leaves its slots empty (D16). So only the history policies fail closed, and the
-  other policies of the set work. After PR 2, the removal of `[tool_history]` also only makes the
+  other policies of the set work. A history policy over `InvokeTool` or with no action constraint
+  fails closed for every call of its tenant (a floor one: of every tenant). Before such a rollback,
+  the operator treats those sets as for a rollback to a build before PR 1 (D16). After PR 2, the removal of `[tool_history]` also only makes the
   history slots missing (D10).
 - **Gateway rollback to a build before PR 1.** Such a build refuses a set with a condition. A
   `closed` tenant then loses its tool calls, and a floor with a condition fails for every tenant.
