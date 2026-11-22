@@ -48,7 +48,7 @@
 4. **An empty allowlisted credential variable** (`AWS_ACCESS_KEY_ID=""`, for example an unexpanded template). Expected: it is treated as not set, and it does not reach the builder. Pinned in Task 8 (`an_empty_allowlisted_variable_is_not_copied`).
 5. **An endpoint with a trailing `/`** (`http://minio.local:9000/`). Expected: it is accepted, the same as without the `/`. Pinned in Task 7 (`an_endpoint_with_a_trailing_slash_is_valid`).
 
-A sixth item is a spec gap, not a test: reqwest reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` by default, and `object_store` sets no `no_proxy` when `proxy_url` is not set (`client/mod.rs:879-896`). So these variables can change the client, which G5 forbids in its wording. Task 8 measures it and records the result. The README names the proxy variables as read. The coordinator decides whether the spec must change.
+A sixth item is a spec gap, not a test: reqwest reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` by default, and `object_store` sets no `no_proxy` when `proxy_url` is not set (`client/mod.rs:879-896`). So these variables can change the client, which G5 forbids in its wording. Task 8 measures it and records the result. The README names the proxy variables as read. Sven decided on 2026-11-22: keep the proxy variables and document them. The client does not turn off the proxy lookup.
 
 ---
 
@@ -460,7 +460,7 @@ Run: `cargo nextest run -p paigasus-agent-host -E 'test(memory_s3::client)'`. Ex
 
 - [ ] **Step 4: Measure the proxy variables (the sixth Review Focus item)**
 
-This is a measurement, not a test. Read the locked reqwest 0.13 source (`~/.cargo/registry/src/*/reqwest-0.13.*/src/async_impl/client.rs`): find whether `ClientBuilder` reads the system proxy variables when no `proxy` and no `no_proxy` is set. Record the result, with the file and line, in the doc comment of `build_store`. If reqwest reads `HTTPS_PROXY` by default, write the proxy variables into the README section of Task 7 and report it to the coordinator as a spec gap of G5. Do not add a `with_http_connector` work-around without a spec change.
+This is a measurement, not a test. Read the locked reqwest 0.13 source (`~/.cargo/registry/src/*/reqwest-0.13.*/src/async_impl/client.rs`): find whether `ClientBuilder` reads the system proxy variables when no `proxy` and no `no_proxy` is set. Record the result, with the file and line, in the doc comment of `build_store`. If reqwest reads `HTTPS_PROXY` by default, write the proxy variables into the README section of Task 7 as variables that the client reads. Sven decided to keep them (2026-11-22). Do not add a work-around that turns off the proxy lookup.
 
 - [ ] **Step 5: Run the tests and machete**
 

@@ -30,7 +30,9 @@ adapter makes the sequential case correct and documents each race.
 - G4. `apply` writes every `Put` before any `Delete`. A failure after a write can return `Partial`.
   A failure never loses a file that the set did not delete.
 - G5. `memory.backend = "s3"` config, with credentials only from an allowlist of AWS environment
-  variables. No other environment variable changes the client.
+  variables. No other environment variable changes the client, except the standard proxy variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) that `reqwest` reads. Sven decided on
+  2026-11-22 to keep them and to document them in the README.
 - G6. The new dependency passes `:deny`, `:osv` and `:machete`, with no `aws-lc-rs`, no second
   `reqwest` major and no second `rustls` major.
 - G7. A pinned S3-compatible test image, a fallback image, and a negative image for the boot probe.
