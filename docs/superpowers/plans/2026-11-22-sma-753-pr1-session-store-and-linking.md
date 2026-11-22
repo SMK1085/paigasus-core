@@ -25,7 +25,7 @@
 - Finding names: **`mixed_sessions`**, **`forged_history`**, **`history_truncated`**.
 - Notice form: **`[paigasus] tool call "<name>" was blocked (<code>). ref=<uuid>`**. A block without a decision id keeps the old form with no suffix.
 - Metric names (D13): **`gateway_tool_history_store_errors_total{op, kind}`** (`op` ∈ `lookup`, `write`, `reserve`, `settle`, `append`; `kind` ∈ `io`, `server`, `decode`, `deadline`), **`gateway_tool_history_ids_capped_total{list}`** (`list` ∈ `calls`, `results`, `refs`), **`gateway_tool_history_events_trimmed_total{reason}`** (`reason` ∈ `retention`, `cap`).
-- PR 1 has no policy effect. A store error is counted and the request continues. The R5 refusal in `adapters/policy_source/iam.rs` and the IAM constant stay unchanged.
+- PR 1 evaluates no temporal history conditions. The history findings and the session reach response-side Cedar. A store error is counted and the request continues. The R5 refusal in `adapters/policy_source/iam.rs` and the IAM constant stay unchanged.
 - PR 1 events store no argument `fields` and no `bad` flag (spec D5 to D7). Both need the condition paths and the kernel input mapping of PR 2. The event encoding has a version and readers ignore unknown fields, so PR 2 adds them without a migration.
 
 ## Review Focus
@@ -829,7 +829,7 @@ pub fn prime_tool_history_metrics();
 Rules:
 - `link` builds a `StoreBudget::new(deadline)`, reads `turn`'s `LatestTurn` (an `Unavailable` turn has no ids), counts `ids_capped{list}` by the `dropped_*` values, calls `lookup` through the budget, runs `link_session` with a new UUIDv7 (clock + entropy, as the recorder mints ids), and counts `gateway_tool_policy_findings_total{side="request", kind}` once for `mixed_sessions` and once per forged result. The `SessionContext` holds those two findings. `pending` holds a `WriteRequest` with `turn: Some(link.turn)` when `joined`, `None` otherwise, and one `ResultEvent` per `LinkedResult` (new ids); it is `None` when there is no touch and no result.
 - Every store call on the latency path (`lookup`, `write`, `reserve`) goes through one private helper. It returns `None` without a call when `budget.remaining()` is `None`. Otherwise it runs `tokio::time::timeout(remaining, call)`, charges the elapsed time, and on an error or a timeout calls `budget.fail()` and counts `store_errors{op, kind}` (`kind = "deadline"` for a timeout).
-- `settle` and `append` skip when `session.budget.is_failed()` or the tracker is closed. Each gets `timeout(deadline)` of its own and does not charge the budget (it is off the latency path).
+- A failed budget skips the later latency-path calls only. `settle` and `append` still run (rulings T10-a, T10-b). Each gets `timeout(deadline)` of its own and does not charge the budget (it is off the latency path). `append` also writes an allowed call that has no reserved event (final-review fix). The tracker being closed still skips both.
 - Count `events_trimmed{reason}` from every `AppendReply`.
 - PR 1 passes `window_from_ms: None` to `reserve` (no window read, spec D15).
 - `reserve` uses `Histories { org: session.org, principal: ctx.principal, key: ctx.api_key_id, session: session.session_id }`, `turn: session.info.turn`, and one `CallEvent { id: ids[i], tool: history_tool(&calls[i]) }` per call.
@@ -868,7 +868,7 @@ Expected: FAIL to compile.
 
 - [ ] **Step 3: Implement the service, the names, the descriptions and the runbook rows**
 
-Describe each family in `describe_gateway_metrics` in one sentence. In `RUNBOOK-observability.md`, add one row per family with its labels and what an operator does: a rise of `store_errors` means the history misses events (PR 1 has no policy effect yet); `ids_capped` means a client sends more than 128 ids in one turn; `events_trimmed{reason="cap"}` means a flood of one tool.
+Describe each family in `describe_gateway_metrics` in one sentence. In `RUNBOOK-observability.md`, add one row per family with its labels and what an operator does: a rise of `store_errors` means the history misses events (PR 1 evaluates no temporal history conditions yet; the history findings and the session reach response-side Cedar); `ids_capped` means a client sends more than 128 ids in one turn; `events_trimmed{reason="cap"}` means a flood of one tool.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 

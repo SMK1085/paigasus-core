@@ -371,7 +371,7 @@ tool policy is off, the gateway logs one `info` line and does not use the histor
 |---|---|
 | `backend` | `memory` (default) or `redis`. |
 | `redis_url` | Required for `redis`. Set it with `GATEWAY_TOOL_HISTORY__REDIS_URL`. Refused for `memory`. |
-| `deadline` | The time limit of one request for all store calls. Use `"<n>ms"` or `"<n>s"`. Default `"1s"`. |
+| `deadline` | The cumulative time budget of the latency-path store calls of one request (lookup, write, reserve). `settle` and `append` run off the latency path. Each has its own `deadline` timeout. So the total store time of one request can be more than `deadline`. Use `"<n>ms"` or `"<n>s"`. Default `"1s"`. |
 
 The `deadline` must be shorter than `tool_interception.decide_timeout_secs`. The gateway refuses a
 config where it is not.
