@@ -22,14 +22,37 @@ use take::{take, ttl_micros};
 /// The number of candidate inboxes that `acquire_next` locks.
 pub const CANDIDATE_LIMIT: u64 = 8;
 
+/// The age in seconds, on the database clock, of the oldest due pending event of every inbox of a
+/// served agent (SMA-790 §6.14), or 0 when there is none. It has no lease and no lock filter: an
+/// event in a leased inbox, or in an inbox that another acquirer holds locked, still counts. So a
+/// backlog behind a long or stuck run shows. The arguments are the placeholders of the org ids and
+/// the agent ids. The sub-select is not correlated, so Postgres runs it once (an InitPlan).
+macro_rules! lag_select {
+    ($orgs:literal, $agents:literal) => {
+        concat!(
+            "(SELECT COALESCE(EXTRACT(EPOCH FROM now() - min(e.received_at))::float8, 0) \
+              FROM inbox_event e JOIN inbox j ON j.id = e.inbox_id \
+              WHERE e.status = 'pending' AND e.not_before <= now() \
+                AND (j.org_id, j.agent_id) IN (SELECT * FROM unnest(",
+            $orgs,
+            "::uuid[], ",
+            $agents,
+            "::uuid[])))"
+        )
+    };
+}
+
 /// `$1` = `CANDIDATE_LIMIT`, `$2` = the org ids and `$3` = the agent ids of the served agents (two
 /// arrays of the same length, one pair per agent). An inbox of a served agent with a pending event
-/// that is due and with no live lease, the oldest event first (SMA-790 §6.1). `lag` is the age of
-/// that oldest due event in seconds, on the database clock (§6.14). `FOR NO KEY UPDATE` does not
-/// conflict with the `FOR KEY SHARE` lock of an `inbox_event` insert, so ingress never waits for an
-/// acquirer. The filter has no `attempts < max_attempts` term: an inbox with only exhausted events
-/// must still be taken, so that its claim moves them to `dead` (spec §8.4.1).
-pub const CANDIDATES_SQL: &str = "SELECT i.id, i.org_id, EXTRACT(EPOCH FROM now() - d.oldest)::float8 AS lag \
+/// that is due and with no live lease, the oldest event first (SMA-790 §6.1). Each row carries
+/// `lag`, the value of `lag_select!`, which is the same in every row (§6.14). `FOR NO KEY UPDATE`
+/// does not conflict with the `FOR KEY SHARE` lock of an `inbox_event` insert, so ingress never
+/// waits for an acquirer. The filter has no `attempts < max_attempts` term: an inbox with only
+/// exhausted events must still be taken, so that its claim moves them to `dead` (spec §8.4.1).
+pub const CANDIDATES_SQL: &str = concat!(
+    "SELECT i.id, i.org_id, ",
+    lag_select!("$2", "$3"),
+    " AS lag \
      FROM inbox i \
      CROSS JOIN LATERAL (SELECT min(e.received_at) AS oldest FROM inbox_event e \
                          WHERE e.inbox_id = i.id AND e.status = 'pending' AND e.not_before <= now()) d \
@@ -38,7 +61,11 @@ pub const CANDIDATES_SQL: &str = "SELECT i.id, i.org_id, EXTRACT(EPOCH FROM now(
        AND (i.org_id, i.agent_id) IN (SELECT * FROM unnest($2::uuid[], $3::uuid[])) \
      ORDER BY d.oldest \
      LIMIT $1 \
-     FOR NO KEY UPDATE OF i SKIP LOCKED";
+     FOR NO KEY UPDATE OF i SKIP LOCKED"
+);
+
+/// `$1` = the org ids, `$2` = the agent ids. The lag when `CANDIDATES_SQL` gives no row.
+const LAG_SQL: &str = concat!("SELECT ", lag_select!("$1", "$2"), " AS lag");
 
 /// `$1` = inbox, `$2` = token, `$3` = ttl in microseconds. Zero rows means that the lease is lost.
 const HEARTBEAT_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp() + ($3::bigint * interval '1 microsecond') \
@@ -123,12 +150,18 @@ impl LeaseRepository for PgLeaseStore {
         let agents: Vec<Uuid> = self.agents.iter().map(AgentId::uuid).collect();
         let txn = self.db.begin().await.map_err(store)?;
         let limit = i64::try_from(CANDIDATE_LIMIT).unwrap_or(i64::MAX);
-        let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, CANDIDATES_SQL, [limit.into(), orgs.into(), agents.into()]);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, CANDIDATES_SQL, [limit.into(), orgs.clone().into(), agents.clone().into()]);
         let rows = txn.query_all_raw(stmt).await.map_err(store)?;
-        // The rows come oldest first, so the first row holds the lag of the oldest due event.
+        // Every candidate row holds the same lag. With no candidate, one small statement reads it.
         let lag = match rows.first() {
             Some(row) => row.try_get::<f64>("", "lag").map_err(store)?,
-            None => 0.0,
+            None => {
+                let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, LAG_SQL, [orgs.into(), agents.into()]);
+                match txn.query_one_raw(stmt).await.map_err(store)? {
+                    Some(row) => row.try_get::<f64>("", "lag").map_err(store)?,
+                    None => 0.0,
+                }
+            }
         };
         metrics::gauge!(names::AGENT_HOST_INBOX_LAG_SECONDS).set(lag);
         for row in rows {

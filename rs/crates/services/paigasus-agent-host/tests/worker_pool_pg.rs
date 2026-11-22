@@ -247,13 +247,22 @@ async fn the_lag_gauge_reads_the_oldest_due_event() {
     let _guard = metrics::set_default_local_recorder(&recorder);
     let t = two_inboxes(&db).await;
     insert_pending_event(&db, t.x, Uuid::new_v4(), 30).await;
+    // Y belongs to agent B, which this store does not serve: its older event must not count.
+    insert_pending_event(&db, t.y, Uuid::new_v4(), 300).await;
     let store = PgLeaseStore::new(db.clone(), HB_TIMEOUT).serving(vec![AgentId::new(t.org, t.a)]);
 
     store.acquire_next("w", TTL).await.expect("acquire_next").expect("X is a candidate");
     let lag = gauge(&recorder, names::AGENT_HOST_INBOX_LAG_SECONDS).expect("the lag gauge is set");
-    assert!((29.0..120.0).contains(&lag), "lag {lag}");
+    assert!((29.0..120.0).contains(&lag), "the lag of X only, not of the unserved Y: {lag}");
 
-    // X now has a live lease, so no candidate is left: the gauge reads 0.
+    // X is leased now, so no candidate is left. Its event is still pending and due, so the gauge
+    // still reads its age, not 0.
     assert!(store.acquire_next("w", TTL).await.expect("acquire_next").is_none());
+    let lag = gauge(&recorder, names::AGENT_HOST_INBOX_LAG_SECONDS).expect("the lag gauge is set");
+    assert!((29.0..120.0).contains(&lag), "the backlog of the leased X shows: {lag}");
+
+    // A served agent with no due event reads 0.
+    let idle = PgLeaseStore::new(db.clone(), HB_TIMEOUT).serving(vec![AgentId::new(t.org, Uuid::new_v4())]);
+    assert!(idle.acquire_next("w", TTL).await.expect("acquire_next").is_none());
     assert_eq!(gauge(&recorder, names::AGENT_HOST_INBOX_LAG_SECONDS), Some(0.0));
 }

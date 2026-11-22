@@ -158,7 +158,10 @@ pub const AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL: &str = "agent_host_commit_me
 pub const AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL: &str = "agent_host_commit_outcome_unknown_total";
 /// Restarts of a worker of the pool. No label.
 pub const AGENT_HOST_WORKER_RESTARTS_TOTAL: &str = "agent_host_worker_restarts_total";
-/// The age of the oldest due pending event, read in the poll query, in seconds. No label.
+/// The age in seconds of the oldest due pending event (`status = 'pending'`, `not_before <= now()`)
+/// of every inbox of an agent that this host serves, on the database clock, or 0 when there is
+/// none. An event in a leased or locked inbox counts too. Read in each poll of `acquire_next`.
+/// No label.
 pub const AGENT_HOST_INBOX_LAG_SECONDS: &str = "agent_host_inbox_lag_seconds";
 /// A histogram of the `attempts` of an event when it goes to `done` or `dead`. No label.
 pub const AGENT_HOST_EVENT_ATTEMPTS: &str = "agent_host_event_attempts";
