@@ -394,14 +394,15 @@ async fn scope_lock_serializes_apply() {
 }
 
 /// The `down` of m0002 drops both tables and the sequence, and leaves m0001 in place. m0003 (the
-/// inbox event tables, SMA-787) comes after m0002, so two steps down reach m0002.
+/// inbox event tables, SMA-787) and m0004 (the timer table, SMA-788) come after m0002, so three
+/// steps down reach m0002.
 #[tokio::test]
 async fn m0002_down_drops_its_objects() {
     let Some((_node, _url, db)) = migrated().await else {
         eprintln!("skipping memory_pg: Docker unavailable");
         return;
     };
-    Migrator::down(&db, Some(2)).await.expect("down m0003 and m0002");
+    Migrator::down(&db, Some(3)).await.expect("down m0004, m0003 and m0002");
     for object in ["memory_file", "memory_scope", "memory_file_version_seq"] {
         let sql = format!("SELECT to_regclass('{object}') IS NULL AS v");
         assert!(support::scalar_bool(&db, &sql).await, "{object} must be dropped");

@@ -4,26 +4,17 @@
 // @generated from file paigasus/agents/v1/agents.proto (package paigasus.agents.v1, syntax proto3)
 /* eslint-disable */
 
-// The contract of the agent host.
-//
-// 1. The package is `paigasus.agents.v1`. Field numbers and names are permanent. New fields
-//    can be added.
-// 2. JSON `data` uses the proto3 JSON lowerCamelCase field names.
-// 3. Each message is the `data` of one CloudEvents event. The comment of each message gives
-//    its direction and its CloudEvents `type`.
-// 4. Envelope rule: a message never repeats a CloudEvents envelope attribute (`id`, `source`,
-//    `type`, `time`, `subject`) or an extension (`threadid`, `actorprn`, `correlationid`,
-//    `schemaversion`). The envelope is the only place for those values.
-
-import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { Timestamp } from "@bufbuild/protobuf/wkt";
+import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file paigasus/agents/v1/agents.proto.
  */
 export const file_paigasus_agents_v1_agents: GenFile = /*@__PURE__*/
-  fileDesc("Ch9wYWlnYXN1cy9hZ2VudHMvdjEvYWdlbnRzLnByb3RvEhJwYWlnYXN1cy5hZ2VudHMudjEiLgoNT3V0Ym94TWVzc2FnZRIPCgdydW5fcHJuGAEgASgJEgwKBHRleHQYAiABKAliBnByb3RvMw");
+  fileDesc("Ch9wYWlnYXN1cy9hZ2VudHMvdjEvYWdlbnRzLnByb3RvEhJwYWlnYXN1cy5hZ2VudHMudjEiLgoNT3V0Ym94TWVzc2FnZRIPCgdydW5fcHJuGAEgASgJEgwKBHRleHQYAiABKAki6wEKClRpbWVyRmlyZWQSEAoIdGltZXJfaWQYASABKAkSKwoEa2luZBgCIAEoDjIdLnBhaWdhc3VzLmFnZW50cy52MS5UaW1lcktpbmQSLwoGb3JpZ2luGAMgASgOMh8ucGFpZ2FzdXMuYWdlbnRzLnYxLlRpbWVyT3JpZ2luEisKB2ZpcmVfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgwKBG5vdGUYBSABKAkSEQoEY3JvbhgGIAEoCUgAiAEBEg8KAnR6GAcgASgJSAGIAQFCBwoFX2Nyb25CBQoDX3R6KloKCVRpbWVyS2luZBIaChZUSU1FUl9LSU5EX1VOU1BFQ0lGSUVEEAASGAoUVElNRVJfS0lORF9GT0xMT1dfVVAQARIXChNUSU1FUl9LSU5EX1NDSEVEVUxFEAIqXAoLVGltZXJPcmlnaW4SHAoYVElNRVJfT1JJR0lOX1VOU1BFQ0lGSUVEEAASFgoSVElNRVJfT1JJR0lOX0FHRU5UEAESFwoTVElNRVJfT1JJR0lOX1NZU1RFTRACYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * A message that the host sends out to the user of a run.
@@ -54,4 +45,132 @@ export type OutboxMessage = Message<"paigasus.agents.v1.OutboxMessage"> & {
  */
 export const OutboxMessageSchema: GenMessage<OutboxMessage> = /*@__PURE__*/
   messageDesc(file_paigasus_agents_v1_agents, 0);
+
+/**
+ * A timer fired.
+ *
+ * Direction: host to agent (inbox). CloudEvents `type`: `agents.timer.fired`. The envelope
+ * `source` is `urn:paigasus:agents:timer:agent` or `urn:paigasus:agents:timer:system`, by the
+ * origin of the timer. The envelope `time` is the time of the actual firing, so this message has
+ * no `fired_at`. The envelope `threadid` is the thread of the timer, if it has one.
+ *
+ * @generated from message paigasus.agents.v1.TimerFired
+ */
+export type TimerFired = Message<"paigasus.agents.v1.TimerFired"> & {
+  /**
+   * The ID of the timer, as a hyphenated UUID.
+   *
+   * @generated from field: string timer_id = 1;
+   */
+  timerId: string;
+
+  /**
+   * @generated from field: paigasus.agents.v1.TimerKind kind = 2;
+   */
+  kind: TimerKind;
+
+  /**
+   * @generated from field: paigasus.agents.v1.TimerOrigin origin = 3;
+   */
+  origin: TimerOrigin;
+
+  /**
+   * The scheduled time of the firing. It is the slot, not the actual time.
+   *
+   * @generated from field: google.protobuf.Timestamp fire_at = 4;
+   */
+  fireAt?: Timestamp | undefined;
+
+  /**
+   * The note of the timer. It is untrusted text.
+   *
+   * @generated from field: string note = 5;
+   */
+  note: string;
+
+  /**
+   * The cron pattern. Only a schedule has it.
+   *
+   * @generated from field: optional string cron = 6;
+   */
+  cron?: string | undefined;
+
+  /**
+   * The IANA time zone name of the schedule. Only a schedule has it.
+   *
+   * @generated from field: optional string tz = 7;
+   */
+  tz?: string | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.TimerFired.
+ * Use `create(TimerFiredSchema)` to create a new message.
+ */
+export const TimerFiredSchema: GenMessage<TimerFired> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 1);
+
+/**
+ * The kind of a timer.
+ *
+ * @generated from enum paigasus.agents.v1.TimerKind
+ */
+export enum TimerKind {
+  /**
+   * @generated from enum value: TIMER_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * A timer that fires once.
+   *
+   * @generated from enum value: TIMER_KIND_FOLLOW_UP = 1;
+   */
+  FOLLOW_UP = 1,
+
+  /**
+   * A timer that fires on a cron schedule.
+   *
+   * @generated from enum value: TIMER_KIND_SCHEDULE = 2;
+   */
+  SCHEDULE = 2,
+}
+
+/**
+ * Describes the enum paigasus.agents.v1.TimerKind.
+ */
+export const TimerKindSchema: GenEnum<TimerKind> = /*@__PURE__*/
+  enumDesc(file_paigasus_agents_v1_agents, 0);
+
+/**
+ * Who made a timer.
+ *
+ * @generated from enum paigasus.agents.v1.TimerOrigin
+ */
+export enum TimerOrigin {
+  /**
+   * @generated from enum value: TIMER_ORIGIN_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The agent made the timer with a tool.
+   *
+   * @generated from enum value: TIMER_ORIGIN_AGENT = 1;
+   */
+  AGENT = 1,
+
+  /**
+   * The system made the timer.
+   *
+   * @generated from enum value: TIMER_ORIGIN_SYSTEM = 2;
+   */
+  SYSTEM = 2,
+}
+
+/**
+ * Describes the enum paigasus.agents.v1.TimerOrigin.
+ */
+export const TimerOriginSchema: GenEnum<TimerOrigin> = /*@__PURE__*/
+  enumDesc(file_paigasus_agents_v1_agents, 1);
 

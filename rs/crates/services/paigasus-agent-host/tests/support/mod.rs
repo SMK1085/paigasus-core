@@ -219,6 +219,7 @@ pub mod fake_inbox;
 pub mod inbox;
 pub mod lease;
 pub mod stub_iam;
+pub mod timer;
 
 /// A scripted Helikon model. Each `invoke` emits the tool calls of the next turn, then ends the
 /// turn with `ToolCalls`. After the last turn it emits a final text turn.

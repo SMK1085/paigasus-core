@@ -5,11 +5,11 @@
 
 mod support;
 
-use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
+use paigasus_agent_host::adapters::persistence::inbox_repository::{PgInboxRepository, insert_event_in};
 use paigasus_agent_host_core::ids::{AgentId, EventId, InboxId, ThreadId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
 use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, RepositoryError};
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use serde_json::{Value, json};
 use support::inbox::{insert_inbox, migrated_postgres};
 use uuid::Uuid;
@@ -224,4 +224,39 @@ async fn a_store_error_is_a_repository_store_error() {
     db.close().await.expect("close");
     let err = repo.insert_event(new_event(10, 2, "c1", "agents.x", json!({}), None)).await.expect_err("closed pool");
     assert!(matches!(err, RepositoryError::Store(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn insert_in_a_transaction_rolls_back_with_it() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let txn = db.begin().await.expect("begin");
+    let outcome = insert_event_in(&txn, &new_event(10, 2, "c1", "agents.x", json!({"data": {"a": 1}}), None)).await.expect("insert");
+    assert_eq!(outcome, InsertOutcome::Inserted { id: EventId::from_uuid(u(10)) });
+    txn.rollback().await.expect("rollback");
+    assert_eq!(support::scalar_i64(&db, "SELECT count(*) AS n FROM inbox_event").await, 0);
+
+    let txn = db.begin().await.expect("begin");
+    insert_event_in(&txn, &new_event(10, 2, "c1", "agents.x", json!({"data": {"a": 1}}), None)).await.expect("insert");
+    txn.commit().await.expect("commit");
+    assert_eq!(support::scalar_i64(&db, "SELECT count(*) AS n FROM inbox_event").await, 1);
+}
+
+#[tokio::test]
+async fn insert_in_a_transaction_sees_a_duplicate() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let txn = db.begin().await.expect("begin");
+    insert_event_in(&txn, &new_event(10, 2, "c1", "agents.x", json!({"data": {"a": 1}}), None)).await.expect("first");
+    txn.commit().await.expect("commit");
+    let txn = db.begin().await.expect("begin");
+    let outcome = insert_event_in(&txn, &new_event(11, 2, "c1", "agents.x", json!({"data": {"a": 1}}), None)).await.expect("second");
+    txn.rollback().await.expect("rollback");
+    assert_eq!(
+        outcome,
+        InsertOutcome::Duplicate {
+            id: EventId::from_uuid(u(10)),
+            payload_matches: true
+        }
+    );
 }

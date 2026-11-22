@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use crate::agent::ResolvedAgent;
 use std::time::Duration;
 
+use jiff::Timestamp;
 use uuid::Uuid;
 
 use crate::claim::{Claim, ClaimConfig};
@@ -19,7 +20,7 @@ use crate::lease::{ClaimError, CompleteError, HeartbeatError, LeaseHandle};
 use crate::memory::{CapError, MemoryCaps, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use crate::outbox::OutboxMessage;
 use crate::run::{CommitError, Committed, RunHandle, RunOutcome};
-use crate::timer::Timer;
+use crate::timer::{TimerOrigin, TimerView};
 
 /// The error of a repository port.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -91,16 +92,19 @@ pub trait ClaimRepository: Send + Sync {
     async fn complete(&self, handle: &mut LeaseHandle, claim: Claim) -> Result<Vec<EventId>, CompleteError>;
 }
 
-/// The store of timers. Owner: SMA-788.
-/// Used outside a run: by the scheduler and the console. A run adds or cancels a timer only in the
-/// buffer of the `RunCommitter`, which writes it in the one commit.
+/// The read side of the timer store. Owner: SMA-788.
+/// Use it outside a run only. A run writes a timer through `TimerWorkspace` and the run commit.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait TimerRepository: Send + Sync {
-    /// Add a timer.
-    async fn insert(&self, timer: Timer) -> Result<(), RepositoryError>;
-    /// Cancel a timer.
-    async fn cancel(&self, id: &TimerId) -> Result<(), RepositoryError>;
+    /// List the active timers of an inbox with one origin, ordered by `next_fire_at`.
+    async fn list_active(&self, inbox: &InboxId, origin: TimerOrigin) -> Result<Vec<TimerView>, RepositoryError>;
+    /// Read one timer of an inbox. A timer of another inbox gives `None`.
+    async fn get(&self, inbox: &InboxId, id: TimerId) -> Result<Option<TimerView>, RepositoryError>;
+    /// The IDs of the active timers that the agent made in an inbox.
+    async fn active_agent_ids(&self, inbox: &InboxId) -> Result<Vec<TimerId>, RepositoryError>;
+    /// The number of timers that the agent made in an inbox after `since`.
+    async fn count_agent_created_since(&self, inbox: &InboxId, since: Timestamp) -> Result<u32, RepositoryError>;
 }
 
 /// The scheduler that fires due timers. Owner: SMA-788.
@@ -108,8 +112,23 @@ pub trait TimerRepository: Send + Sync {
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait Scheduler: Send + Sync {
-    /// Fire up to `limit` due timers. Returns the number of timers that fired.
+    /// Process up to `limit` due timers. Returns the number of processed rows, backed-off and
+    /// failed rows included.
     async fn fire_due(&self, limit: u32) -> Result<usize, RepositoryError>;
+    /// The database `now` minus the oldest due active `next_fire_at`, or zero.
+    async fn due_lag(&self) -> Result<Duration, RepositoryError>;
+}
+
+/// The clock of a run. The host gives the time; a run never reads the system clock itself.
+pub trait RunClock: Send + Sync {
+    /// The current time.
+    fn now(&self) -> Timestamp;
+}
+
+/// The source of new UUIDs.
+pub trait IdSource: Send + Sync {
+    /// Make a new UUID.
+    fn new_uuid(&self) -> Uuid;
 }
 
 /// A file as the store returns it.
@@ -224,6 +243,20 @@ pub trait AgentResolver: Send + Sync {
 pub trait RunCommitter: Send + Sync {
     /// Commit the outcome of a run in one transaction.
     async fn commit(&self, handle: RunHandle, outcome: RunOutcome) -> Result<Committed, CommitError>;
+}
+
+/// The time zone name is not in the time zone database.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TzError {
+    #[error("the time zone {name} is not known")]
+    Unknown { name: String },
+}
+
+/// Resolves an IANA time zone name. Timer code gets every zone through this port. It never reads
+/// the global time zone database of `jiff` (spec section 5.1).
+pub trait TzResolver: Send + Sync {
+    /// Return the zone of `name`, or `TzError::Unknown`.
+    fn resolve(&self, name: &str) -> Result<jiff::tz::TimeZone, TzError>;
 }
 
 #[cfg(test)]
