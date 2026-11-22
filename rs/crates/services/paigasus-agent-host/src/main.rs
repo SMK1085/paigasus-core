@@ -18,6 +18,7 @@ use std::time::Duration;
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
 use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
 use paigasus_agent_host::adapters::iam::IamClient;
+use paigasus_agent_host::adapters::memory_commit::MemoryCommit;
 use paigasus_agent_host::adapters::nats::consumer::{NatsSource, bind_channels, connect_and_check};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
@@ -273,9 +274,21 @@ async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot
         None
     };
     tracing::info!(worker_enabled = config.worker.enabled, "worker.enabled is read, and SMA-787 starts no worker");
-    let state = AppState { db: db.clone(), inboxes, ingress };
+    let memory = MemoryCommit::build(&config.memory, db.clone(), utf8_env()).await?;
+    let state = AppState {
+        db: db.clone(),
+        inboxes,
+        ingress,
+        memory,
+    };
     slot.install(app_router(state, None))?;
     Ok(BootTasks { nats, scheduler })
+}
+
+/// The process environment as UTF-8 pairs. `std::env::vars()` panics on a non-UTF-8 value, so a pair
+/// with a non-UTF-8 part is dropped.
+fn utf8_env() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
 }
 
 /// Wait for the server tasks, at most [`DRAIN_TIMEOUT`]. A task that ignores the shutdown watch

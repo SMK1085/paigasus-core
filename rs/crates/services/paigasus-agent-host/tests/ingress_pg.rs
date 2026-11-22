@@ -11,7 +11,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
+use paigasus_agent_host::adapters::memory_commit::MemoryCommit;
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
+use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use serde_json::{Value, json};
 use support::inbox::{insert_inbox, migrated_postgres};
@@ -37,6 +39,7 @@ fn app(db: &DatabaseConnection) -> Router {
                 iam: Arc::new(StubIam::api_key(u(OWNER))),
                 max_body_bytes: 262_144,
             })),
+            memory: MemoryCommit::InTransaction(PgMemoryStore::new(DatabaseConnection::default())),
         },
         None,
     )

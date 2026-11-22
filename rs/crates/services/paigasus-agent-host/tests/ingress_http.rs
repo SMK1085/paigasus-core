@@ -11,6 +11,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
+use paigasus_agent_host::adapters::memory_commit::MemoryCommit;
+use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host_core::ids::{AgentId, EventId, InboxId, PrincipalId, ThreadId};
 use paigasus_agent_host_core::inbox::Inbox;
 use sea_orm::DatabaseConnection;
@@ -54,6 +56,7 @@ fn router(repo: &Arc<FakeInbox>, iam: &Arc<StubIam>) -> Router {
                 iam: iam.clone(),
                 max_body_bytes: MAX,
             })),
+            memory: MemoryCommit::InTransaction(PgMemoryStore::new(DatabaseConnection::default())),
         },
         None,
     )
@@ -420,6 +423,7 @@ async fn without_iam_the_ingress_routes_are_404() {
             db: DatabaseConnection::default(),
             inboxes: repo,
             ingress: None,
+            memory: MemoryCommit::InTransaction(PgMemoryStore::new(DatabaseConnection::default())),
         },
         None,
     );
