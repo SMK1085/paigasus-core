@@ -564,7 +564,9 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
 - R1. A client can delete `ref=` from a notice, and an interceptor block has no `ref=`. Then a fully
   blocked turn starts a new session. Principal-scope and key-scope rules still apply.
 - R2. `forged_history` also fires for an expired link and for a blocked call. A tenant who forbids
-  on it can block a client that resumes a conversation after more than 25 hours.
+  on it can block a client that resumes a conversation after more than 25 hours. A client can also
+  hide `forged_history`: D4 reads only the results after the last assistant message, so one
+  trailing assistant message after the forged results removes the finding (ruling FR-b).
 - R3. A new field path starts with no values for older events (D7).
 - R4. Each hold now needs one reserve round trip, plus one settle off the latency path, when history
   is on.

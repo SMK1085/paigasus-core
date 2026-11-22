@@ -355,7 +355,12 @@ change of the Dogwood version and no change of the compiler output may merge wit
 ## 10. Tool history (SMA-753)
 
 The tool history records each tool call and each tool result of a session. It also links each
-request to a session. In PR 1 the history only records and links. No policy reads it yet.
+request to a session. In PR 1 no policy rule reads the history window. But the history changes
+the policy input. With `[tool_history]` set, each response-side decision gets the findings
+`mixed_sessions` and `forged_history` in `context.findings` when the request has them.
+`context.session` then holds a real session id and turn. Before you turn the history on, check
+each policy that reads `context.findings` or `context.session`. A rule that forbids on a finding
+starts to block calls.
 
 ### Configuration
 
@@ -415,5 +420,12 @@ Section 2.3 of `RUNBOOK-observability.md` lists the three history metrics.
 - `history_truncated` cannot fire in PR 1. No code reads a history window yet.
 - A decision on the request side cannot act on the history findings. The findings exist only after
   the model answers.
+- A client can hide `forged_history`. The gateway reads only the tool results after the last
+  assistant message (spec D4). A client that adds one assistant message after the forged results
+  gets no `forged_history` finding for them. Do not use `forged_history` as the only control.
+- Some providers use the same call id again, for example `call_0`. For one principal with
+  concurrent sessions, the last settle links that id to its own session. A result of the other
+  session can then give a false `mixed_sessions`. The gateway can also write no result event for
+  that other session.
 - At shutdown the gateway waits at most 5 seconds for the settle and append tasks. A settle that is
   lost leaves its events `pending`. Pending events still count.
