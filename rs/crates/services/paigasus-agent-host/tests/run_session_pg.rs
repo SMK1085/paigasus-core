@@ -12,14 +12,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use paigasus_agent_host::adapters::helikon::model_registry::{ModelRegistry, SharedModel};
+use paigasus_agent_host::adapters::helikon::runner::HelikonAgentRunner;
+use paigasus_agent_host::adapters::helikon::scripted::ScriptedModel;
 use paigasus_agent_host::adapters::helikon::session::{PgRunSession, to_session_row};
+use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::adapters::persistence::session_store::write_session;
-use paigasus_agent_host_core::ids::ThreadId;
+use paigasus_agent_host::application::worker::ports::{AgentRunner, RunEnd, RunLimits, RunSpec, UserTurn};
+use paigasus_agent_host_core::agent::AgentDefinition;
+use paigasus_agent_host_core::ids::{AgentId, ThreadId};
+use paigasus_agent_host_core::memory::conformance::fresh_scope;
+use paigasus_agent_host_core::memory::{MemoryCaps, MemoryWorkspace};
 use paigasus_agent_host_core::run::SessionRow;
 use paigasus_helikon::core::{ContentPart, ConversationSnapshot, SequenceId, Session, SessionError, SessionEvent};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, SqlErr, Statement, TransactionTrait};
 use serde_json::json;
 use support::inbox::{insert_inbox, migrated_postgres};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// One inbox, one thread and one `running` run of that thread, all with fresh ids.
@@ -251,4 +260,130 @@ async fn the_buffer_follows_the_committed_events() {
 
     assert_eq!(texts(&session.take_buffer()), ["b0", "b1"]);
     assert_eq!(texts(&session.events(None).await.expect("events after take")), ["m0", "m1"]);
+}
+
+/// An agent with the `memory` tool and the scripted model.
+fn scripted_agent() -> AgentDefinition {
+    AgentDefinition {
+        id: AgentId::new(Uuid::new_v4(), Uuid::new_v4()),
+        name: "worker".to_owned(),
+        model_id: "scripted".to_owned(),
+        instructions: "Use the memory tool.".to_owned(),
+        tool_names: vec!["memory".to_owned()],
+    }
+}
+
+/// A runner whose registry holds `model` as `scripted`.
+fn runner(db: &DatabaseConnection, model: ScriptedModel) -> HelikonAgentRunner {
+    let mut models = ModelRegistry::default();
+    models.register("scripted", SharedModel::new(model));
+    HelikonAgentRunner::new(db.clone(), Arc::new(models))
+}
+
+/// A run spec on `thread` with a fresh workspace. It also returns the workspace.
+fn run_spec(db: &DatabaseConnection, thread: Uuid, fresh_thread: bool, memory: Option<&str>) -> (RunSpec, Arc<tokio::sync::Mutex<MemoryWorkspace>>) {
+    let store = Arc::new(PgMemoryStore::new(db.clone()));
+    let workspace = Arc::new(tokio::sync::Mutex::new(MemoryWorkspace::new(store, fresh_scope(), MemoryCaps::default())));
+    let spec = RunSpec {
+        agent: scripted_agent(),
+        thread: ThreadId::from_uuid(thread),
+        fresh_thread,
+        turn: UserTurn {
+            memory: memory.map(str::to_owned),
+            events: "<event-N n=\"0\">{}</event-N>".to_owned(),
+        },
+        workspace: workspace.clone(),
+        cancel: CancellationToken::new(),
+        limits: RunLimits {
+            max_turns: 16,
+            timeout: Duration::from_secs(60),
+        },
+    };
+    (spec, workspace)
+}
+
+/// The number of text parts of a stored `user_message` row.
+fn text_parts(row: &SessionRow) -> usize {
+    row.payload["content"].as_array().expect("content").iter().filter(|p| p["type"] == "text").count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scripted_run_returns_its_session_with_the_memory_part() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping run_session_pg: Docker unavailable");
+        return;
+    };
+    let model = ScriptedModel::new(vec![vec![(
+        "c1".into(),
+        "memory".into(),
+        json!({"command": "create", "path": "/memories/tasks/t1.md", "file_text": "step 1 done"}),
+    )]]);
+    let (spec, workspace) = run_spec(&db, Uuid::new_v4(), true, Some("<memory-N>notes</memory-N>"));
+    let out = runner(&db, model).run(spec).await;
+
+    match &out.end {
+        RunEnd::Completed { output, .. } => assert_eq!(output, "done"),
+        other => panic!("expected a completed run, got {other:?}"),
+    }
+    let first = out.session.first().expect("the session holds the user turn");
+    assert_eq!(first.kind, "user_message");
+    // `write_session` removes the memory part only at the write (spec §6.4).
+    assert_eq!(text_parts(first), 2, "{:?}", first.payload);
+    assert!(out.session.iter().any(|r| r.kind == "tool_called"), "the memory call is in the session: {:?}", out.session);
+    assert_eq!(workspace.lock().await.take_changes().changes.len(), 1, "the memory create is buffered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_without_memory_text_has_one_user_text_part() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping run_session_pg: Docker unavailable");
+        return;
+    };
+    let (spec, _workspace) = run_spec(&db, Uuid::new_v4(), true, None);
+    let out = runner(&db, ScriptedModel::new(vec![])).run(spec).await;
+    assert!(matches!(out.end, RunEnd::Completed { .. }), "{:?}", out.end);
+    assert_eq!(text_parts(out.session.first().expect("the user turn")), 1);
+}
+
+/// Review Focus 5 (F13): Helikon reports a failed session read as `RunError::Other`, so an
+/// unreadable committed row ends the run as transient, before the model loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_read_error_is_transient() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping run_session_pg: Docker unavailable");
+        return;
+    };
+    let fx = fixture(&db).await;
+    db.execute_unprepared(&format!(
+        "INSERT INTO session_event (inbox_id, thread_id, sequence, run_id, kind, payload) \
+         VALUES ('{}', '{}', 0, '{}', 'from_the_future', '{{\"type\": \"from_the_future\"}}')",
+        fx.inbox, fx.thread, fx.run
+    ))
+    .await
+    .expect("insert row");
+    let (spec, _workspace) = run_spec(&db, fx.thread, false, None);
+    let out = runner(&db, ScriptedModel::new(vec![])).run(spec).await;
+    match &out.end {
+        RunEnd::Transient { error, retry_after: None } => assert!(error.contains("from_the_future"), "the read error is the cause: {error}"),
+        other => panic!("expected a transient end, got {other:?}"),
+    }
+    assert!(out.session.is_empty(), "{:?}", out.session);
+}
+
+#[tokio::test]
+async fn an_unregistered_model_is_transient() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping run_session_pg: Docker unavailable");
+        return;
+    };
+    let (spec, _workspace) = run_spec(&db, Uuid::new_v4(), true, None);
+    let out = HelikonAgentRunner::new(db.clone(), Arc::new(ModelRegistry::default())).run(spec).await;
+    assert_eq!(
+        out.end,
+        RunEnd::Transient {
+            error: "the model of the agent is not registered".to_owned(),
+            retry_after: None
+        }
+    );
+    assert!(out.session.is_empty());
 }
