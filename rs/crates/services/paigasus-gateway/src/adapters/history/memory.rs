@@ -141,19 +141,21 @@ impl State {
         for e in events {
             // A rewrite of a live body keeps its result guard (as `HSET` keeps the `r` field).
             let clock = self.clock_ms;
-            let result_written = self.bodies.get(&(h.org, e.id)).is_some_and(|b| b.alive(clock) && b.value.result_written);
-            self.bodies.insert(
-                (h.org, e.id),
-                Exp::new(
-                    Body {
-                        kind: e.kind,
-                        tool: e.tool.clone(),
-                        verdict: e.verdict,
-                        result_written,
-                    },
-                    now_ms,
-                ),
+            let live = self.bodies.get(&(h.org, e.id)).filter(|b| b.alive(clock));
+            let result_written = live.is_some_and(|b| b.value.result_written);
+            // A write with an older `now_ms` never shortens a live expiry.
+            let live_exp = live.map_or(0, |b| b.exp_ms);
+            let mut fresh = Exp::new(
+                Body {
+                    kind: e.kind,
+                    tool: e.tool.clone(),
+                    verdict: e.verdict,
+                    result_written,
+                },
+                now_ms,
             );
+            fresh.exp_ms = fresh.exp_ms.max(live_exp);
+            self.bodies.insert((h.org, e.id), fresh);
         }
         let cutoff = now_ms.saturating_sub(RETENTION_MS);
         let mut by_retention: HashSet<Uuid> = HashSet::new();
@@ -161,12 +163,25 @@ impl State {
         let tools: BTreeSet<&str> = events.iter().map(|e| e.tool.as_str()).collect();
         for (scope, scope_id) in h.scopes() {
             let key = hkey(h.org, scope, scope_id);
+            // An expired index counts as absent: drop it, so its old tools do not come back.
+            if self.index.get(&key).is_some_and(|e| e.exp_ms < now_ms) {
+                self.index.remove(&key);
+            }
             let index = self.index.entry(key.clone()).or_insert_with(|| Exp::new(BTreeSet::new(), now_ms));
-            index.exp_ms = now_ms.saturating_add(TTL_MS);
+            index.exp_ms = index.exp_ms.max(now_ms.saturating_add(TTL_MS));
             for e in events {
                 index.value.insert(e.tool.clone());
-                let list = self.lists.entry((key.clone(), e.tool.clone())).or_insert_with(|| Exp::new(Vec::new(), now_ms));
-                list.exp_ms = now_ms.saturating_add(TTL_MS);
+                let lkey = (key.clone(), e.tool.clone());
+                // An expired list (its expiry is before the time of this write) counts as absent: drop it, so its old members do not come back.
+                if self.lists.get(&lkey).is_some_and(|l| l.exp_ms < now_ms)
+                    && let Some(dead) = self.lists.remove(&lkey)
+                {
+                    // A dropped member older than the retention still counts as trimmed by it, as
+                    // the Redis list would have trimmed it.
+                    by_retention.extend(dead.value.iter().filter(|(ts, _)| *ts < cutoff).map(|(_, id)| *id));
+                }
+                let list = self.lists.entry(lkey).or_insert_with(|| Exp::new(Vec::new(), now_ms));
+                list.exp_ms = list.exp_ms.max(now_ms.saturating_add(TTL_MS));
                 let entry = (now_ms, e.id);
                 if let Err(at) = list.value.binary_search(&entry) {
                     list.value.insert(at, entry);
@@ -232,7 +247,7 @@ impl MemorySessionStore {
     }
 
     /// For the test harness: the events of one history and tool, ordered by `ts_ms`. The list decides
-    /// what is present. A body that expires at the same instant as its list entry is still read.
+    /// what is present, and a body whose expiry is before the clock hides its entry. A body that expires at the clock itself is still read, as the list entry is.
     pub fn events(&self, org: Uuid, scope: Scope, scope_id: &str, tool: &str) -> Vec<StoredEvent> {
         let st = self.lock();
         let key = (hkey(org, scope, scope_id.to_string()), tool.to_string());
@@ -242,7 +257,7 @@ impl MemorySessionStore {
         list.value
             .iter()
             .filter_map(|(ts, id)| {
-                let body = st.bodies.get(&(org, *id))?;
+                let body = st.bodies.get(&(org, *id)).filter(|b| b.exp_ms >= st.clock_ms)?;
                 Some(StoredEvent {
                     id: *id,
                     ts_ms: *ts,
@@ -351,8 +366,13 @@ impl SessionStore for MemorySessionStore {
             })
             .collect();
         let reply = st.add_events(h, &events, req.now_ms, req.window_from_ms);
+        let clock = st.clock_ms;
         for c in &req.calls {
-            st.decisions.insert((h.org, h.principal.clone(), c.id), Exp::new(h.session, req.now_ms));
+            let key = (h.org, h.principal.clone(), c.id);
+            let live_exp = st.decisions.get(&key).filter(|e| e.alive(clock)).map_or(0, |e| e.exp_ms);
+            let mut link = Exp::new(h.session, req.now_ms);
+            link.exp_ms = link.exp_ms.max(live_exp);
+            st.decisions.insert(key, link);
         }
         st.touch_session(h.org, h.session, req.turn, req.now_ms);
         Ok(reply)
@@ -468,6 +488,49 @@ mod tests {
         let gone = store.lookup(&lookup_req(1, 1_000 + TTL_MS)).await.unwrap();
         assert_eq!(gone.calls, vec![None]);
         assert!(gone.sessions.is_empty());
+    }
+
+    fn reserve_at(now_ms: u64, id: u128) -> ReserveRequest {
+        ReserveRequest {
+            histories: histories(1),
+            turn: 1,
+            calls: vec![CallEvent {
+                id: Uuid::from_u128(id),
+                tool: "send".into(),
+            }],
+            now_ms,
+            window_from_ms: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_list_does_not_bring_back_its_old_members() {
+        let store = MemorySessionStore::new();
+        store.reserve(&reserve_at(1_000, 10)).await.unwrap();
+        let later = 1_000 + TTL_MS + 5;
+        store.reserve(&reserve_at(later, 11)).await.unwrap();
+        let ids: Vec<Uuid> = store.events(Uuid::from_u128(1), Scope::Session, &Uuid::from_u128(2).to_string(), "send").iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![Uuid::from_u128(11)]);
+    }
+
+    #[tokio::test]
+    async fn an_older_write_does_not_shorten_a_live_expiry() {
+        let store = MemorySessionStore::new();
+        store.reserve(&reserve_at(10_000, 10)).await.unwrap();
+        store.reserve(&reserve_at(2_000, 10)).await.unwrap();
+        let ttls = store.ttls_ms(Uuid::from_u128(1), 10_000);
+        assert!(ttls.iter().flatten().all(|t| *t >= TTL_MS), "{ttls:?}");
+    }
+
+    #[tokio::test]
+    async fn events_hides_a_body_that_is_not_live() {
+        let store = MemorySessionStore::new();
+        store.reserve(&reserve_at(1_000, 10)).await.unwrap();
+        {
+            let mut st = store.lock();
+            st.bodies.get_mut(&(Uuid::from_u128(1), Uuid::from_u128(10))).unwrap().exp_ms = 0;
+        }
+        assert!(store.events(Uuid::from_u128(1), Scope::Session, &Uuid::from_u128(2).to_string(), "send").is_empty());
     }
 
     #[tokio::test]
