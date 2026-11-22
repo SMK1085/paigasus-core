@@ -369,6 +369,10 @@ fn describe_agent_host_metrics() {
         "Unix time in seconds of the last scheduler pass that finished."
     );
     describe_counter!(names::AGENT_HOST_TIMER_TOOL_CALLS_TOTAL, "Timer tool calls, labeled by tool and outcome (ok or refused).");
+    describe_counter!(
+        names::AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
+        "Objects under a memory scope that a read skipped or refused, labeled by reason. It counts events at each read, not distinct objects."
+    );
     // The name is provisional until SMA-798 moves it to `names::`.
     describe_counter!(
         "agent_host_memory_refusals_total",
