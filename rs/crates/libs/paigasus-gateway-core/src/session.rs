@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The session of one request and its store time budget (SMA-753, spec D4 and D10).
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use paigasus_kernel::tool_policy::{Findings, SessionInfo};
@@ -66,6 +68,9 @@ pub struct SessionContext {
     /// Request-level findings: `mixed_sessions`, `forged_history`.
     pub findings: Findings,
     pub budget: StoreBudget,
+    /// The decision ids whose pending event a reserve wrote. A call that is not in this set has no
+    /// event to settle, so the report site appends it (SMA-753 final review, finding 1).
+    reserved: Mutex<HashSet<Uuid>>,
 }
 
 impl SessionContext {
@@ -77,7 +82,19 @@ impl SessionContext {
             info: SessionInfo::new(session_id.to_string(), turn),
             findings,
             budget,
+            reserved: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Record that a reserve wrote the events of `ids`.
+    pub fn mark_reserved(&self, ids: &[Uuid]) {
+        self.reserved.lock().unwrap_or_else(PoisonError::into_inner).extend(ids.iter().copied());
+    }
+
+    /// Whether a reserve wrote the event of `id`.
+    #[must_use]
+    pub fn is_reserved(&self, id: Uuid) -> bool {
+        self.reserved.lock().unwrap_or_else(PoisonError::into_inner).contains(&id)
     }
 }
 

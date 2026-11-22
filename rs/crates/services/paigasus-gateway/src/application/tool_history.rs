@@ -57,11 +57,17 @@ pub struct SettlePlan {
 
 /// Split the report entries into the settles and the appends. Pure.
 ///
-/// An entry with a decision id is a settle: `Allow` when the entry is allowed, else `Deny`. Only an
-/// `Allow` carries the call id and the item id. An allowed entry with call facts and no decision id
-/// was forwarded with no decision (spec D8): an append under a new event id. Everything else gives
-/// nothing.
-pub fn settle_plan(reported: &[ReportedCall], mint: &mut dyn FnMut() -> Uuid) -> SettlePlan {
+/// An entry with a decision id that `reserved` holds is a settle: `Allow` when the entry is allowed,
+/// else `Deny`. Only an `Allow` carries the call id and the item id.
+///
+/// An entry with a decision id that `reserved` does not hold has no event to settle: the reserve
+/// failed, or the budget skipped it. An allowed one with call facts is an append under its decision
+/// id, so its result links on the next request. A denied one gives nothing: it was not forwarded,
+/// so it needs no link, and it is not counted (final review, finding 1).
+///
+/// An allowed entry with call facts and no decision id was forwarded with no decision (spec D8): an
+/// append under a new event id. Everything else gives nothing.
+pub fn settle_plan(reported: &[ReportedCall], reserved: &dyn Fn(Uuid) -> bool, mint: &mut dyn FnMut() -> Uuid) -> SettlePlan {
     let mut plan = SettlePlan {
         settle: Vec::new(),
         append: Vec::new(),
@@ -71,7 +77,7 @@ pub fn settle_plan(reported: &[ReportedCall], mint: &mut dyn FnMut() -> Uuid) ->
         // `normalise(&r.entry.name)` equals `history_tool(call)` only because `report.rs` sets `name`
         // from `ToolCall::display_name()`. Keep the two in step.
         match (r.decision_id, &r.call) {
-            (Some(event_id), call) => {
+            (Some(event_id), call) if reserved(event_id) => {
                 let (call_id, item_id) = match call {
                     Some(c) if allow => (c.id.clone(), c.item_id.clone()),
                     _ => (None, None),
@@ -84,6 +90,12 @@ pub fn settle_plan(reported: &[ReportedCall], mint: &mut dyn FnMut() -> Uuid) ->
                     item_id,
                 });
             }
+            (Some(event_id), Some(c)) if allow => plan.append.push(ForwardedCall {
+                id: event_id,
+                tool: normalise(&r.entry.name),
+                call_id: c.id.clone(),
+                item_id: c.item_id.clone(),
+            }),
             (None, Some(c)) if allow => plan.append.push(ForwardedCall {
                 id: mint(),
                 tool: normalise(&r.entry.name),
@@ -169,9 +181,17 @@ impl ToolHistory {
     }
 
     /// One store call on the latency path. `None` when no time is left (no call is made), on an
-    /// error and on a timeout. An error or a timeout fails the budget and is counted.
+    /// error and on a timeout. An error or a timeout fails the budget and is counted. A call that
+    /// a spent budget skips, with no earlier failure, counts as a `deadline` for its op and fails
+    /// the budget, so only the first skip counts.
     async fn timed<T>(&self, budget: &StoreBudget, op: &'static str, call: impl Future<Output = Result<T, HistoryStoreError>>) -> Option<T> {
-        let remaining = budget.remaining()?;
+        let Some(remaining) = budget.remaining() else {
+            if !budget.is_failed() {
+                budget.fail();
+                count_error(op, "deadline");
+            }
+            return None;
+        };
         let start = Instant::now();
         let out = tokio::time::timeout(remaining, call).await;
         budget.charge(start.elapsed());
@@ -311,6 +331,8 @@ impl ToolHistory {
             window_from_ms: None,
         };
         if let Some(reply) = self.timed(&session.budget, "reserve", self.store.reserve(&req)).await {
+            // Only a reserve that returned wrote its events. The report site appends the others.
+            session.mark_reserved(ids);
             count_trimmed(&reply);
             if !reply.truncated.is_empty() {
                 findings.insert(HISTORY_TRUNCATED);
@@ -326,7 +348,7 @@ impl ToolHistory {
         if self.tasks.is_closed() {
             return;
         }
-        let plan = settle_plan(reported, &mut || self.mint());
+        let plan = settle_plan(reported, &|id| session.is_reserved(id), &mut || self.mint());
         if plan.settle.is_empty() && plan.append.is_empty() {
             return;
         }
@@ -407,6 +429,8 @@ mod tests {
         Fail,
         /// Only `settle` fails.
         FailSettle,
+        /// Only `reserve` fails.
+        FailReserve,
         Sleep(Duration),
     }
 
@@ -435,7 +459,7 @@ mod tests {
         async fn gate(&self) -> Result<(), HistoryStoreError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.mode {
-                Mode::Pass | Mode::FailSettle => Ok(()),
+                Mode::Pass | Mode::FailSettle | Mode::FailReserve => Ok(()),
                 Mode::Fail => Err(HistoryStoreError::Unavailable {
                     kind: UnavailableKind::Io,
                     detail: "down".into(),
@@ -460,6 +484,12 @@ mod tests {
         }
         async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
             self.gate().await?;
+            if matches!(self.mode, Mode::FailReserve) {
+                return Err(HistoryStoreError::Unavailable {
+                    kind: UnavailableKind::Io,
+                    detail: "down".into(),
+                });
+            }
             if let Some(r) = self.reserve_reply.lock().unwrap().pop_front() {
                 return Ok(r);
             }
@@ -748,7 +778,7 @@ mod tests {
     #[test]
     fn settle_plan_marks_allow_and_deny_and_links_only_forwarded_calls() {
         let reported = reported_of(&[("c-1", "Read_File"), ("c-2", "rm")], &[(Decision::Allow, Some(u(1))), (BLOCK, Some(u(2)))]);
-        let plan = settle_plan(&reported, &mut counting_mint());
+        let plan = settle_plan(&reported, &|_| true, &mut counting_mint());
         assert!(plan.append.is_empty());
         assert_eq!(
             plan.settle,
@@ -774,7 +804,7 @@ mod tests {
     #[test]
     fn settle_plan_appends_a_forwarded_call_without_a_decision() {
         let reported = reported_of(&[("c-1", "Read_File")], &[(Decision::Allow, None)]);
-        let plan = settle_plan(&reported, &mut counting_mint());
+        let plan = settle_plan(&reported, &|_| true, &mut counting_mint());
         assert!(plan.settle.is_empty());
         assert_eq!(
             plan.append,
@@ -794,14 +824,14 @@ mod tests {
         ]});
         let parsed = parse_body(Format::OpenAiResponses, body.to_string().as_bytes(), 1 << 20).expect("body");
         let allow = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(u(1))], Basis::Decider);
-        let item = settle_plan(&allow, &mut counting_mint()).settle.remove(0);
+        let item = settle_plan(&allow, &|_| true, &mut counting_mint()).settle.remove(0);
         assert_eq!((item.verdict, item.call_id.as_deref(), item.item_id.as_deref()), (EventVerdict::Allow, Some("call_1"), Some("lsh_1")));
         let deny = parsed.reported(&[DecidedCall::new(BLOCK, None).with_decision_id(u(1))], Basis::Decider);
-        let item = settle_plan(&deny, &mut counting_mint()).settle.remove(0);
+        let item = settle_plan(&deny, &|_| true, &mut counting_mint()).settle.remove(0);
         assert_eq!((item.verdict, item.call_id, item.item_id), (EventVerdict::Deny, None, None));
         // No decision: the append carries both links.
         let none = parsed.reported(&[DecidedCall::new(Decision::Allow, None)], Basis::Decider);
-        let call = settle_plan(&none, &mut counting_mint()).append.remove(0);
+        let call = settle_plan(&none, &|_| true, &mut counting_mint()).append.remove(0);
         assert_eq!((call.call_id.as_deref(), call.item_id.as_deref()), (Some("call_1"), Some("lsh_1")));
     }
 
@@ -811,7 +841,7 @@ mod tests {
         reported.push(ReportedCall::new(entry("web_search", ReportDecision::Unenforceable), None, None));
         // An allow entry with no call facts and no decision id.
         reported.push(ReportedCall::new(entry("x", ReportDecision::Allow), None, None));
-        let plan = settle_plan(&reported, &mut counting_mint());
+        let plan = settle_plan(&reported, &|_| true, &mut counting_mint());
         assert!(plan.settle.is_empty() && plan.append.is_empty());
     }
 
@@ -858,10 +888,13 @@ mod tests {
         h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
         h.tasks().wait().await;
-        assert_eq!(store.count(), before + 2, "settle and append both ran");
-        let events = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "b");
-        assert_eq!(events.len(), 1, "the forwarded call without a decision is written");
-        assert_eq!(events[0].verdict, EventVerdict::Allow);
+        assert_eq!(store.count(), before + 1, "one append: the skipped reserve left no event to settle");
+        let sid = session.session_id.to_string();
+        let a = store.inner.events(ORG_A, Scope::Session, &sid, "a");
+        assert_eq!((a.len(), a[0].id, a[0].verdict), (1, u(1), EventVerdict::Allow), "the allowed call is appended under its decision id");
+        let b = store.inner.events(ORG_A, Scope::Session, &sid, "b");
+        assert_eq!(b.len(), 1, "the forwarded call without a decision is written");
+        assert_eq!(b[0].verdict, EventVerdict::Allow);
         assert!(session.budget.is_failed());
     }
 
@@ -878,10 +911,10 @@ mod tests {
         h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
         h.tasks().wait().await;
-        assert_eq!(store.count(), 3, "reserve, settle and append");
+        assert_eq!(store.count(), 2, "reserve, then one append: no reserved event to settle");
         let m = crate::application::tool_policy::testing::Snap::take(&snap);
         let e = |op: &str| m.counter(names::GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL, &[("op", op), ("kind", "io")]);
-        assert_eq!((e("reserve"), e("settle"), e("append")), (1, 1, 1));
+        assert_eq!((e("reserve"), e("settle"), e("append")), (1, 0, 1));
     }
 
     #[tokio::test]
@@ -891,6 +924,7 @@ mod tests {
         let store = Fake::new(Mode::FailSettle);
         let h = history(&store, Duration::from_secs(1));
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
         let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, Some(u(1))), (Decision::Allow, None)]);
         h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
@@ -899,6 +933,94 @@ mod tests {
         assert!(!session.budget.is_failed(), "an off-path error does not fail the budget");
         let events = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "b");
         assert_eq!(events.len(), 1, "the append was written");
+    }
+
+    #[test]
+    fn settle_plan_appends_an_allowed_call_whose_event_was_not_reserved() {
+        let reported = reported_of(
+            &[("c-1", "Read_File"), ("c-2", "rm"), ("c-3", "x")],
+            &[(Decision::Allow, Some(u(1))), (BLOCK, Some(u(2))), (Decision::Allow, Some(u(3)))],
+        );
+        let plan = settle_plan(&reported, &|id| id == u(3), &mut counting_mint());
+        // The reserved call settles. The unreserved allowed call appends under its decision id. The
+        // unreserved denied call gives nothing: it was not forwarded, so it needs no link.
+        assert_eq!(plan.settle.len(), 1);
+        assert_eq!(plan.settle[0].event_id, u(3));
+        assert_eq!(
+            plan.append,
+            vec![ForwardedCall {
+                id: u(1),
+                tool: "read_file".into(),
+                call_id: Some("c-1".into()),
+                item_id: None
+            }]
+        );
+    }
+
+    /// Final review finding 1: an allowed call whose reserve wrote no event is appended under its
+    /// decision id. Its result on the next request then links to the session: no `forged_history`.
+    async fn an_unreserved_allowed_call_links(mode: Mode, skip_reserve: bool) {
+        let (rec, snap) = metrics();
+        let _local = metrics::set_default_local_recorder(&rec);
+        let store = Fake::new(mode);
+        let h = history(&store, Duration::from_secs(1));
+        let first = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        if skip_reserve {
+            // An earlier latency-path error: the budget skips the reserve.
+            first.budget.fail();
+        }
+        let items = [("c-1", "a"), ("c-2", "b")];
+        h.reserve(&ctx(), &first, &calls(&items), &[u(1), u(2)]).await;
+        assert!(!first.is_reserved(u(1)) && !first.is_reserved(u(2)));
+        h.settle(&ctx().with_session(first.clone()), &reported_of(&items, &[(Decision::Allow, Some(u(1))), (BLOCK, Some(u(2)))]));
+        h.tasks().close();
+        h.tasks().wait().await;
+        let sid = first.session_id.to_string();
+        let a = store.inner.events(ORG_A, Scope::Session, &sid, "a");
+        assert_eq!((a.len(), a[0].id, a[0].verdict), (1, u(1), EventVerdict::Allow));
+        assert!(store.inner.events(ORG_A, Scope::Session, &sid, "b").is_empty(), "a denied call with no reserved event is not appended");
+
+        let second = link(&h, &turn(&[], &["c-1"])).await.expect("a session");
+        assert!(!second.session.findings.contains("forged_history"), "c-1 has a call link");
+        assert_eq!((second.session.session_id, second.session.info.turn), (first.session_id, 2));
+        assert_eq!(second.pending.expect("one result write").request.results.len(), 1);
+        assert_eq!(finding(&snap, "forged_history").unwrap_or(0), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_reserve_still_links_the_allowed_call() {
+        an_unreserved_allowed_call_links(Mode::FailReserve, false).await;
+    }
+
+    #[tokio::test]
+    async fn a_budget_skipped_reserve_still_links_the_allowed_call() {
+        an_unreserved_allowed_call_links(Mode::Pass, true).await;
+    }
+
+    #[tokio::test]
+    async fn a_reserve_marks_its_decision_ids() {
+        let (_store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
+        assert!(session.is_reserved(u(1)));
+        assert!(!session.is_reserved(u(2)));
+    }
+
+    /// A latency-path call that the spent budget skips, with no earlier error, counts one
+    /// `deadline` for its op and makes no store call.
+    #[tokio::test]
+    async fn a_spent_budget_counts_the_skipped_call_as_a_deadline() {
+        let (rec, snap) = metrics();
+        let _local = metrics::set_default_local_recorder(&rec);
+        let (store, h) = setup();
+        let budget = StoreBudget::new(Duration::from_millis(10));
+        budget.charge(Duration::from_millis(10));
+        let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), budget));
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-2", "t")]), &[u(2)]).await;
+        assert_eq!(store.count(), 0);
+        assert_eq!(errors(&snap, "reserve", "deadline"), Some(1), "the first skip counts; it fails the budget");
+        assert!(session.budget.is_failed());
     }
 
     #[tokio::test]

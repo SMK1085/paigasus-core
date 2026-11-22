@@ -8,8 +8,9 @@
 //! `now_ms + KEY_TTL_SECS * 1000`, and every write resets it. A read ignores an entry whose expiry
 //! is before the clock.
 //!
-//! `LookupRequest` has no `now_ms`. The store keeps a clock: the highest `now_ms` of any write it
-//! has seen. A lookup reads at that clock. So a test with a fixed time never reads at wall time.
+//! The store keeps a clock: the highest `now_ms` of any write it has seen. A lookup reads at the
+//! higher of that clock and `LookupRequest::now_ms` (ruling T7-e), and does not move the clock. So a
+//! test with a fixed time never reads at wall time.
 //!
 //! One `std::sync::Mutex` guards the state. No lock is held across an `.await`; no method awaits.
 //! A poisoned lock is recovered: every update leaves whole entries.

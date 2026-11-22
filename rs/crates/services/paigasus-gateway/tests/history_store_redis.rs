@@ -9,9 +9,16 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use paigasus_gateway::adapters::history::redis::{EvictionCheck, KEY_PREFIX, RedisSessionStore, decode_event, event_key, history_key};
-use paigasus_gateway::domain::tool_history::{Scope, SessionStore, StoredEvent};
+use paigasus_gateway::application::tool_history::ToolHistory;
+use paigasus_gateway::domain::decision_log::OsEntropy;
+use paigasus_gateway::domain::limits::{SystemClock, UnavailableKind};
+use paigasus_gateway::domain::tool_history::{
+    AppendReply, AppendRequest, EventVerdict, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, Scope, SessionStore, SettleRequest, StoredEvent, WriteRequest,
+};
+use paigasus_gateway_core::{Basis, DecidedCall, Decision, DecisionContext, Format, ToolTurn, TurnFacts, parse_body};
 use support::history_contract::{self as contract, Harness};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -64,6 +71,10 @@ impl Harness for RedisHarness {
         let pattern = format!("{KEY_PREFIX}*{org}*");
         let out = redis_cli(&self.node, &["--scan", "--pattern", &pattern]).await;
         let keys: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        // A line that is not a key (an error text, a banner) would make the PTTL read test nothing.
+        for k in &keys {
+            assert!(k.starts_with(KEY_PREFIX), "a scanned line is not a history key: {k:?}");
+        }
         if keys.is_empty() {
             return Vec::new();
         }
@@ -186,4 +197,90 @@ async fn noeviction_is_safe() {
     assert_eq!(redis_cli(&h.node, &["CONFIG", "SET", "maxmemory-policy", "noeviction"]).await, "OK");
     let store = RedisSessionStore::connect(&h.url).await.expect("connect");
     assert_eq!(store.read_eviction_policy().await, EvictionCheck::Safe);
+}
+
+/// A Redis store whose `reserve` fails. Every other call goes to Redis.
+struct FailReserve(Arc<dyn SessionStore>);
+
+#[async_trait::async_trait]
+impl SessionStore for FailReserve {
+    async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+        self.0.lookup(req).await
+    }
+    async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+        self.0.write(req).await
+    }
+    async fn reserve(&self, _req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+        Err(HistoryStoreError::Unavailable {
+            kind: UnavailableKind::Io,
+            detail: "down".into(),
+        })
+    }
+    async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+        self.0.settle(req).await
+    }
+    async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+        self.0.append(req).await
+    }
+}
+
+const SVC_PRINCIPAL: &str = "prn:pgs:iam:::principal/0190a1e5-0000-7000-8000-000000000004";
+const SVC_ORG: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
+const SVC_ORG_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
+
+fn results_turn(results: &[&str]) -> ToolTurn {
+    let mut f = TurnFacts::default();
+    f.latest.result_call_ids = results.iter().map(|s| (*s).to_owned()).collect();
+    ToolTurn::Parsed(f)
+}
+
+/// Final review finding 1, on Redis: an allowed call whose reserve wrote no event (a failed reserve,
+/// or a reserve that the budget skipped) is appended under its decision id. Its result on the next
+/// request links: same session, turn 2, no `forged_history`.
+async fn an_unreserved_allowed_call_links_on_redis(fail_reserve: bool) {
+    let what = if fail_reserve {
+        "history_store_redis failed reserve links"
+    } else {
+        "history_store_redis skipped reserve links"
+    };
+    let Some(h) = harness("7.4-alpine", what).await else {
+        return;
+    };
+    let redis: Arc<dyn SessionStore> = h.store().await;
+    let store: Arc<dyn SessionStore> = if fail_reserve { Arc::new(FailReserve(Arc::clone(&redis))) } else { Arc::clone(&redis) };
+    let history = ToolHistory::new(store, Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(2));
+    let first = history.link(SVC_PRINCIPAL, SVC_ORG, None, &results_turn(&[])).await.expect("a session").session;
+    if !fail_reserve {
+        first.budget.fail();
+    }
+    let body = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [
+        {"id": "c-1", "type": "function", "function": {"name": "send", "arguments": "{}"}}
+    ]}, "finish_reason": "tool_calls"}]});
+    let parsed = parse_body(Format::OpenAiChat, body.to_string().as_bytes(), 1 << 20).expect("body");
+    let decision_id = Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0000_00d1);
+    let ctx = DecisionContext::new(SVC_PRINCIPAL, SVC_ORG_PRN, None).with_request(None, "chat", "m");
+    history.reserve(&ctx, &first, &parsed.calls, &[decision_id]).await;
+    assert!(!first.is_reserved(decision_id));
+    let reported = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(decision_id)], Basis::Decider);
+    history.settle(&ctx.clone().with_session(first.clone()), &reported);
+    history.tasks().close();
+    history.tasks().wait().await;
+
+    let events = h.events(SVC_ORG, Scope::Session, &first.session_id.to_string(), "send").await;
+    assert_eq!(events.len(), 1, "the allowed call is appended");
+    assert_eq!((events[0].id, events[0].verdict), (decision_id, EventVerdict::Allow));
+
+    let second = history.link(SVC_PRINCIPAL, SVC_ORG, None, &results_turn(&["c-1"])).await.expect("a session");
+    assert!(!second.session.findings.contains("forged_history"), "c-1 has a call link");
+    assert_eq!((second.session.session_id, second.session.info.turn), (first.session_id, 2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_reserve_still_links_the_allowed_call_on_redis() {
+    an_unreserved_allowed_call_links_on_redis(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_budget_skipped_reserve_still_links_the_allowed_call_on_redis() {
+    an_unreserved_allowed_call_links_on_redis(false).await;
 }
