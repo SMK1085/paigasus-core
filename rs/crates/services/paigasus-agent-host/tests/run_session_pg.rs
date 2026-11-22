@@ -370,6 +370,22 @@ async fn a_session_read_error_is_transient() {
     assert!(out.session.is_empty(), "{:?}", out.session);
 }
 
+/// A run that reaches `max_turns` is deterministic and returns no session rows: only a full
+/// commit writes the session (spec §6.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_max_turns_end_is_deterministic_with_no_session_rows() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping run_session_pg: Docker unavailable");
+        return;
+    };
+    let view = || vec![("c".to_owned(), "memory".to_owned(), json!({"command": "view", "path": "/memories"}))];
+    let (mut spec, _workspace) = run_spec(&db, Uuid::new_v4(), true, None);
+    spec.limits.max_turns = 1;
+    let out = runner(&db, ScriptedModel::new(vec![view(), view()])).run(spec).await;
+    assert!(matches!(out.end, RunEnd::Deterministic { close_thread: false, .. }), "{:?}", out.end);
+    assert!(out.session.is_empty(), "{:?}", out.session);
+}
+
 #[tokio::test]
 async fn an_unregistered_model_is_transient() {
     let Some((_node, _url, db)) = migrated_postgres().await else {
