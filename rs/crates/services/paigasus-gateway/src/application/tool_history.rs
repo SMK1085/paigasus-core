@@ -192,9 +192,11 @@ impl ToolHistory {
             }
             return None;
         };
-        let start = Instant::now();
+        // The guard charges the elapsed time once, also when the caller drops this future (a hold
+        // timeout), so the next call of the same request does not get the time back.
+        let guard = ChargeOnDrop { budget, start: Instant::now() };
         let out = tokio::time::timeout(remaining, call).await;
-        budget.charge(start.elapsed());
+        drop(guard);
         self.finish(budget, op, out)
     }
 
@@ -388,6 +390,18 @@ impl ToolHistory {
                 count_trimmed(&reply);
             }
         }
+    }
+}
+
+/// Charges the time since `start` to the budget when it drops. It drops once, so it charges once.
+struct ChargeOnDrop<'a> {
+    budget: &'a StoreBudget,
+    start: Instant,
+}
+
+impl Drop for ChargeOnDrop<'_> {
+    fn drop(&mut self) {
+        self.budget.charge(self.start.elapsed());
     }
 }
 
@@ -710,6 +724,18 @@ mod tests {
         assert_eq!(findings, Findings::new());
         assert_eq!(store.count(), 1, "no second call");
         assert_eq!(errors(&snap, "reserve", "deadline").unwrap_or(0), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_store_call_still_charges_the_budget() {
+        let store = Fake::new(Mode::Sleep(Duration::from_secs(2)));
+        let h = history(&store, Duration::from_secs(1));
+        let budget = StoreBudget::new(Duration::from_secs(1));
+        let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), budget));
+        // The caller drops the reserve after 300 ms (a hold timeout).
+        let held = tokio::time::timeout(Duration::from_millis(300), h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)])).await;
+        assert!(held.is_err());
+        assert_eq!(session.budget.remaining(), Some(Duration::from_millis(700)));
     }
 
     #[tokio::test(start_paused = true)]
