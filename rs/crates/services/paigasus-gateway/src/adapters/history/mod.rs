@@ -3,3 +3,4 @@
 //! Session history store adapters (SMA-753).
 
 pub mod memory;
+pub mod redis;

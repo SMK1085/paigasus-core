@@ -155,6 +155,19 @@ fn link(ctx: &Ctx, tool: &str, event_id: Uuid, result_written: bool) -> CallLink
     }
 }
 
+/// Set-up only: reserve many calls in chunks of `FILL_CHUNK`, all at `now_ms`. A real request
+/// carries a few calls; one 10,000-call reserve is a Redis request of several MB that went past
+/// the 500 ms response budget of the shared client under the parallel load of the suite
+/// (measured). The stored state is the same as for one reserve, and no case asserts on the reply
+/// of a set-up reserve.
+async fn fill(store: &Arc<dyn SessionStore>, ctx: &Ctx, calls: &[CallEvent], now_ms: u64) {
+    for chunk in calls.chunks(FILL_CHUNK) {
+        store.reserve(&ctx.reserve(chunk.to_vec(), now_ms, None)).await.unwrap();
+    }
+}
+
+const FILL_CHUNK: usize = 1_000;
+
 async fn principal_events(h: &impl Harness, ctx: &Ctx, tool: &str) -> Vec<StoredEvent> {
     h.events(ctx.org, Scope::Principal, &ctx.principal, tool).await
 }
@@ -188,7 +201,7 @@ pub async fn a_caller_without_a_key_writes_the_principal_history_once(h: &impl H
 pub async fn the_split_by_tool_keeps_other_tools(h: &impl Harness) {
     let (ctx, store) = (Ctx::new(false), h.store().await);
     store.reserve(&ctx.reserve(vec![call("read")], NOW - 1, None)).await.unwrap();
-    store.reserve(&ctx.reserve(calls("send", MAX_EVENTS_PER_TOOL), NOW - 1, None)).await.unwrap();
+    fill(&store, &ctx, &calls("send", MAX_EVENTS_PER_TOOL), NOW - 1).await;
     store.reserve(&ctx.reserve(calls("send", 1), NOW, None)).await.unwrap();
     assert_eq!(principal_events(h, &ctx, "read").await.len(), 1);
     assert_eq!(principal_events(h, &ctx, "send").await.len(), MAX_EVENTS_PER_TOOL);
@@ -211,7 +224,7 @@ pub async fn retention_trims_only_events_older_than_25_hours(h: &impl Harness) {
 pub async fn the_cap_keeps_the_newest_10_000_events_per_tool(h: &impl Harness) {
     let (ctx, store) = (Ctx::new(false), h.store().await);
     let old = calls("send", MAX_EVENTS_PER_TOOL);
-    store.reserve(&ctx.reserve(old.clone(), NOW - 1, None)).await.unwrap();
+    fill(&store, &ctx, &old, NOW - 1).await;
     let reply = store.reserve(&ctx.reserve(calls("send", 1), NOW, None)).await.unwrap();
     assert_eq!((reply.trimmed_cap, reply.trimmed_retention), (1, 0));
     let events = principal_events(h, &ctx, "send").await;
@@ -225,7 +238,7 @@ pub async fn the_truncated_flag_needs_a_lost_event_inside_the_window(h: &impl Ha
     let store = h.store().await;
     for (window_from, flagged) in [(Some(NOW - 100), true), (Some(NOW - 99), false), (None, false)] {
         let ctx = Ctx::new(false);
-        store.reserve(&ctx.reserve(calls("send", MAX_EVENTS_PER_TOOL), NOW - 100, None)).await.unwrap();
+        fill(&store, &ctx, &calls("send", MAX_EVENTS_PER_TOOL), NOW - 100).await;
         let reply = store.reserve(&ctx.reserve(calls("send", 1), NOW, window_from)).await.unwrap();
         assert_eq!(reply.trimmed_cap, 1, "{window_from:?}");
         if flagged {
@@ -445,7 +458,7 @@ pub async fn a_cap_trim_in_the_principal_history_keeps_the_event_in_its_session_
     let (first, store) = (Ctx::new(false), h.store().await);
     let second = first.other_session();
     let old = calls("send", MAX_EVENTS_PER_TOOL);
-    store.reserve(&first.reserve(old.clone(), NOW - 1, None)).await.unwrap();
+    fill(&store, &first, &old, NOW - 1).await;
     let reply = store.reserve(&second.reserve(calls("send", 1), NOW, None)).await.unwrap();
     assert_eq!(reply.trimmed_cap, 1);
     let oldest = old.iter().map(|c| c.id).min().unwrap();
@@ -458,7 +471,7 @@ pub async fn a_cap_trim_in_the_principal_history_keeps_the_event_in_its_session_
 
 pub async fn a_cut_of_two_flagged_events_gives_one_truncated_entry_per_scope_and_tool(h: &impl Harness) {
     let (ctx, store) = (Ctx::new(false), h.store().await);
-    store.reserve(&ctx.reserve(calls("send", MAX_EVENTS_PER_TOOL), NOW - 100, None)).await.unwrap();
+    fill(&store, &ctx, &calls("send", MAX_EVENTS_PER_TOOL), NOW - 100).await;
     let reply = store.reserve(&ctx.reserve(calls("send", 2), NOW, Some(NOW - 100))).await.unwrap();
     assert_eq!(reply.trimmed_cap, 2);
     let count = |scope: Scope| reply.truncated.iter().filter(|t| **t == (scope, "send".to_string())).count();
@@ -551,6 +564,39 @@ pub async fn the_first_settle_wins(h: &impl Harness) {
     assert_eq!(principal_events(h, &ctx, "send").await[0].verdict, EventVerdict::Allow);
 }
 
+pub async fn a_repeated_settle_of_the_same_event_keeps_result_written(h: &impl Harness) {
+    // Ruling T7-f: a settle retry for the same event must not re-open a written result.
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = call("send");
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let settle = ctx.settle(vec![item(c.id, EventVerdict::Allow, "send", Some("call-1"))], NOW);
+    store.settle(&settle).await.unwrap();
+    let result = ResultEvent {
+        id: fresh_id(),
+        call_id: "call-1".into(),
+        tool: "send".into(),
+    };
+    store.write(&ctx.write(None, vec![result], NOW + 1)).await.unwrap();
+    store.settle(&settle).await.unwrap();
+    let reply = store.lookup(&ctx.lookup(&["call-1"], &[], &[])).await.unwrap();
+    assert_eq!(reply.calls, vec![Some(link(&ctx, "send", c.id, true))]);
+}
+
+pub async fn a_result_for_a_call_id_without_a_link_writes_nothing(h: &impl Harness) {
+    // Ruling F5: a link that is gone (expired between lookup and write) gets no result event, and
+    // the guard makes no link key with no fields and no time to live.
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let result = ResultEvent {
+        id: fresh_id(),
+        call_id: "call-gone".into(),
+        tool: "send".into(),
+    };
+    let reply = store.write(&ctx.write(None, vec![result], NOW)).await.unwrap();
+    assert_eq!(reply.written, 0);
+    assert!(principal_events(h, &ctx, "send").await.is_empty());
+    assert!(h.ttls_ms(ctx.org, NOW).await.is_empty());
+}
+
 pub async fn concurrent_reserves_all_land(h: &impl Harness) {
     let ctx = Ctx::new(true);
     let stores = [h.store().await, h.store().await];
@@ -597,4 +643,6 @@ pub async fn run_all(h: &impl Harness) {
     an_append_on_a_new_session_writes_its_state(h).await;
     a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event(h).await;
     the_first_settle_wins(h).await;
+    a_repeated_settle_of_the_same_event_keeps_result_written(h).await;
+    a_result_for_a_call_id_without_a_link_writes_nothing(h).await;
 }

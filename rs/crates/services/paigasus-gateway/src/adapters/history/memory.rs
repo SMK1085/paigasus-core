@@ -192,10 +192,17 @@ impl State {
         reply
     }
 
-    /// Write the `c:` link of a call under one client id. An existing link is replaced: session,
-    /// tool and event id change, and `result_written` is false again (ruling T7-b).
-    fn put_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, link: CallLink, now_ms: u64) {
-        self.calls.insert((org, principal.to_string(), link_digest(client_id)), Exp::new(link, now_ms));
+    /// Write the `c:` link of a call under one client id. An existing link for a different event is
+    /// replaced: session, tool and event id change, and `result_written` is false again (ruling
+    /// T7-b). A live link for the same event keeps `result_written`, so a settle retry does not
+    /// re-open a written result (ruling T7-f).
+    fn put_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, mut link: CallLink, now_ms: u64) {
+        let key = (org, principal.to_string(), link_digest(client_id));
+        let clock = self.clock_ms;
+        if let Some(old) = self.calls.get(&key).filter(|e| e.alive(clock) && e.value.event_id == link.event_id) {
+            link.result_written = old.value.result_written;
+        }
+        self.calls.insert(key, Exp::new(link, now_ms));
     }
 
     fn call_link(&self, org: Uuid, principal: &str, client_id: &str, clock_ms: u64) -> Option<&Exp<CallLink>> {

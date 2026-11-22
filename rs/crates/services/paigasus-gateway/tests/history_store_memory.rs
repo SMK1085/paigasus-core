@@ -177,6 +177,16 @@ async fn the_first_settle_wins() {
 }
 
 #[tokio::test]
+async fn a_repeated_settle_of_the_same_event_keeps_result_written() {
+    contract::a_repeated_settle_of_the_same_event_keeps_result_written(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_result_for_a_call_id_without_a_link_writes_nothing() {
+    contract::a_result_for_a_call_id_without_a_link_writes_nothing(&harness()).await;
+}
+
+#[tokio::test]
 async fn run_all_passes_on_one_shared_store() {
     contract::run_all(&harness()).await;
 }
