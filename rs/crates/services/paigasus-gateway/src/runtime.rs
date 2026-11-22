@@ -56,8 +56,8 @@ pub const DECISION_LOG_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 ///   first `changed().await` correctly waits.
 /// - `charges`: the Redis limit store's spawned charges (SMA-677 D16). After the servers drain,
 ///   they get at most [`CHARGE_DRAIN_BUDGET`]; the rest are counted as dropped.
-/// - `history`: the settle and append tasks of the tool history (SMA-753). They drain after the charges, for at
-///   most [`CHARGE_DRAIN_BUDGET`]. A settle that still runs is lost and logged. It leaves its events `pending`,
+/// - `history`: the settle and append tasks of the tool history (SMA-753). They drain together with the charges, for at
+///   most [`CHARGE_DRAIN_BUDGET`] in all. A settle that still runs is lost and logged. It leaves its events `pending`,
 ///   and `pending` events still count.
 /// - `decision_log`: the writer and the relay run outside `servers`, on a shutdown watch of their own (P-18).
 ///   They drain last, after the servers and after the charges, because a server that stops can still
@@ -111,12 +111,19 @@ pub async fn supervise(
             Err(_) => {}
         }
     }
-    if let Some(charges) = charges {
-        drain_charges(&charges, CHARGE_DRAIN_BUDGET).await;
-    }
-    if let Some(history) = history {
-        drain_history(&history, CHARGE_DRAIN_BUDGET).await;
-    }
+    // The charge drain and the history drain run together, so the worst case is one budget, not two.
+    tokio::join!(
+        async {
+            if let Some(charges) = &charges {
+                drain_charges(charges, CHARGE_DRAIN_BUDGET).await;
+            }
+        },
+        async {
+            if let Some(history) = &history {
+                drain_history(history, CHARGE_DRAIN_BUDGET).await;
+            }
+        }
+    );
     if let Some(tasks) = decision_log {
         tasks.drain(DECISION_LOG_DRAIN_BUDGET).await;
     }
@@ -853,9 +860,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_history_task_past_the_budget_is_lost_and_counted() {
+    async fn a_history_task_past_the_budget_is_lost_and_logged() {
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
         let history = TaskTracker::new();
         history.spawn(std::future::pending::<()>());
         assert_eq!(drain_history(&history, Duration::from_millis(50)).await, 1);
+        assert!(logs.text().contains("tool history tasks still running"), "{}", logs.text());
     }
 }

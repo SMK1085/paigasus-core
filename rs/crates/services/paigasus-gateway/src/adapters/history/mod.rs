@@ -35,6 +35,36 @@ fn connect_failure_message(err: &::redis::RedisError) -> String {
     format!("the tool history Redis store did not connect at boot (redis error kind={:?})", err.kind())
 }
 
+/// The boot rule for `maxmemory-policy` (spec D11): `Evicts` fails the boot and names the policy,
+/// `Unknown` logs one warning, `Safe` passes.
+///
+/// # Errors
+///
+/// A policy that can evict a history key.
+fn apply_eviction_check(check: EvictionCheck) -> anyhow::Result<()> {
+    match check {
+        EvictionCheck::Safe => Ok(()),
+        EvictionCheck::Evicts(policy) => {
+            anyhow::bail!("the tool history Redis has maxmemory-policy {policy:?}, which can evict a history key: set maxmemory-policy to \"noeviction\" or use another Redis")
+        }
+        EvictionCheck::Unknown => {
+            tracing::warn!("could not read maxmemory-policy of the tool history Redis (CONFIG GET is not allowed?): make sure it is \"noeviction\"");
+            Ok(())
+        }
+    }
+}
+
+/// `[tool_history]` only counts with the tool policy on. With the tool policy off, nothing reads the
+/// history, so nothing is built: no warning, no Redis connection, no eviction check (ruling T13-a).
+#[must_use]
+pub fn history_config_in_use(tool_policy_enabled: bool, config: Option<&ToolHistoryConfig>) -> Option<&ToolHistoryConfig> {
+    if config.is_some() && !tool_policy_enabled {
+        tracing::info!("[tool_history] is set, but the tool policy is off: the history is not built and not used");
+        return None;
+    }
+    config
+}
+
 /// Build the tool history from `[tool_history]` (spec D10, D11, D12). Call it after
 /// `paigasus_observability::init`: the metrics and the breaker need the installed recorder.
 ///
@@ -62,15 +92,7 @@ pub async fn build_tool_history(config: Option<&ToolHistoryConfig>, clock: Arc<d
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("tool_history.backend = \"redis\" requires tool_history.redis_url"))?;
             let store = RedisSessionStore::connect(url.expose_secret()).await.map_err(|err| anyhow::anyhow!(connect_failure_message(&err)))?;
-            match store.read_eviction_policy().await {
-                EvictionCheck::Safe => {}
-                EvictionCheck::Evicts(policy) => {
-                    anyhow::bail!("the tool history Redis has maxmemory-policy {policy:?}, which can evict a history key: set maxmemory-policy to \"noeviction\" or use another Redis");
-                }
-                EvictionCheck::Unknown => {
-                    tracing::warn!("could not read maxmemory-policy of the tool history Redis (CONFIG GET is not allowed?): make sure it is \"noeviction\"");
-                }
-            }
+            apply_eviction_check(store.read_eviction_policy().await)?;
             Arc::new(store)
         }
     };
@@ -107,6 +129,44 @@ mod tests {
         assert!(wiring.history.is_some() && wiring.tasks.is_some());
         assert!(wiring.tasks.expect("tracker").is_empty(), "no task runs at boot");
         assert!(logs.text().contains("development and one replica only"), "{}", logs.text());
+    }
+
+    #[test]
+    fn an_evicting_policy_fails_the_boot_and_names_it() {
+        let err = apply_eviction_check(EvictionCheck::Evicts("allkeys-lru".to_owned())).expect_err("must fail");
+        assert!(format!("{err:#}").contains("allkeys-lru"), "{err:#}");
+    }
+
+    #[test]
+    fn an_unknown_policy_warns_once_and_passes() {
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+        apply_eviction_check(EvictionCheck::Unknown).expect("passes");
+        assert_eq!(logs.text().matches("could not read maxmemory-policy").count(), 1, "{}", logs.text());
+    }
+
+    #[test]
+    fn a_safe_policy_passes_silently() {
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+        apply_eviction_check(EvictionCheck::Safe).expect("passes");
+        assert!(logs.text().is_empty(), "{}", logs.text());
+    }
+
+    /// T13-a: with the tool policy off, a down Redis cannot fail the boot: the config is not used.
+    #[tokio::test]
+    async fn the_tool_policy_off_builds_no_history_even_for_a_down_redis() {
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::INFO);
+        let config = ToolHistoryConfig {
+            backend: HistoryBackend::Redis,
+            redis_url: Some(SecretString::from("redis://127.0.0.1:1/2".to_owned())),
+            ..ToolHistoryConfig::default()
+        };
+        let used = history_config_in_use(false, Some(&config));
+        assert!(used.is_none());
+        let wiring = build(used).await.expect("nothing is built");
+        assert!(wiring.history.is_none());
+        assert!(logs.text().contains("the tool policy is off"), "{}", logs.text());
+        assert!(history_config_in_use(true, Some(&config)).is_some());
+        assert!(history_config_in_use(false, None).is_none());
     }
 
     #[tokio::test]

@@ -105,7 +105,12 @@ async fn serve() -> anyhow::Result<()> {
     // that is down fails the boot here (Q14).
     let limits = build_limits(config.limits.as_ref()).await?;
     // SMA-753: the tool history, also after `init` (the metrics) and eager for Redis (spec D10, D11).
-    let history = paigasus_gateway::adapters::history::build_tool_history(config.tool_history.as_ref(), Arc::new(SystemClock), Arc::new(OsEntropy)).await?;
+    let history = paigasus_gateway::adapters::history::build_tool_history(
+        paigasus_gateway::adapters::history::history_config_in_use(config.tool_policy.enabled, config.tool_history.as_ref()),
+        Arc::new(SystemClock),
+        Arc::new(OsEntropy),
+    )
+    .await?;
 
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
     // is built with the three split timeout budgets. Neither construction logs the key.
