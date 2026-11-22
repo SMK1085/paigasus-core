@@ -8,6 +8,11 @@
   [the SMA-843 spec](./2026-11-21-sma-843-memory-dir-guard-design.md). This document records the
   changes to that input and the decisions that the input left open.
 - Status: approved at Gate 1 on 2026-11-22. Sven picked `rustfs` as the primary test image (§7).
+- Measured after Gate 1: (1) `rustfs` 1.0.6 holds a file and a directory of one name, so probe step 7
+  is true (§6.2). `versitygw` v1.11.0 posix does not. (2) A folder marker `…/notes/` is not removed
+  by `delete_scope` (§6.6, §7). (3) The fallback switch is not one constant (§7). (4)
+  `conformance::run_all` has 34 checks, not 35. (5) A timed-out write that did not land is unknown
+  (§6.5, ruling F1).
 
 ## 1. Intent
 
@@ -30,9 +35,13 @@ adapter makes the sequential case correct and documents each race.
 - G4. `apply` writes every `Put` before any `Delete`. A failure after a write can return `Partial`.
   A failure never loses a file that the set did not delete.
 - G5. `memory.backend = "s3"` config, with credentials only from an allowlist of AWS environment
-  variables. No other environment variable changes the client, except the standard proxy variables
-  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) that `reqwest` reads. Sven decided on
-  2026-11-22 to keep them and to document them in the README.
+  variables. No other environment variable changes the client, except these, which the README names:
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lower-case forms (`reqwest` reads
+  them); `REQUEST_METHOD` (when set, `HTTP_PROXY` is ignored, a CGI guard); and, on Linux,
+  `SSL_CERT_FILE` and `SSL_CERT_DIR`, which change the system trust roots (through
+  `rustls-native-certs`). `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it
+  names. Sven decided on 2026-11-22 to keep the proxy variables and to document them. The
+  `SSL_CERT_*` roots are documented, not locked: Sven did not decide them.
 - G6. The new dependency passes `:deny`, `:osv` and `:machete`, with no `aws-lc-rs`, no second
   `reqwest` major and no second `rustls` major.
 - G7. A pinned S3-compatible test image, a fallback image, and a negative image for the boot probe.
@@ -150,8 +159,10 @@ The scratch crate had `reqwest` as a normal dependency. The agent host has it on
   segment, so the two never meet.
 - **Assumption: a flat key namespace.** The port lets one set hold a file `/notes` and a file under
   `/notes/` at the same time, for a short time (for example `[Put /notes/x, Delete /notes]`, the puts
-  first). A store over a file system (the `versitygw` posix backend, MinIO-like stores, probably `rustfs`)
-  cannot hold both. On such a store that set fails at the `Put`, and nothing is lost (the `Delete` is not sent).
+  first). A store over a file system (the `versitygw` posix backend, MinIO-like stores)
+  cannot hold both. Measured: `rustfs` 1.0.6 does hold a file and a directory of one name (probe
+  step 7 is true, and `[Put /notes/x, Delete /notes]` gives `Ok`). `versitygw` v1.11.0 posix does
+  not (`file_and_dir_of_one_name` is false). On such a store that set fails at the `Put`, and nothing is lost (the `Delete` is not sent).
   The set then fails on every retry. The probe tests this (§6.8 step 7) and logs a `warn` with the
   known limit. It does not refuse the boot, because the case is rare and loses no data.
 - **Assumption: strong read-after-write consistency** of `GET`, `HEAD` and `LIST`. AWS S3 gives it.
@@ -226,7 +237,8 @@ of the fake (`fake.rs:94-141`), so every adapter reports the same refusal:
    check (`Put { Absent }` conflicts when the snapshot holds the path; `Put { Version(v) }` and
    `Delete { v }` conflict when the snapshot version is not `v` or the path is absent), then for a
    `Put` the NUL check (U+0000 is `Store`, as `ports.rs:177-180` asks) and `caps.check_file(path,
-   size)`. The builder copies the exact order from `fake.rs`, and a test pins it (for
+   size)`. **Correction:** the order inside one `Put` is the NUL check, then the version check, then
+   `check_file`, as in `fake.rs`. The builder copies the exact order from `fake.rs`, and a test pins it (for
    `[Put /a conflict, Put /b NUL]` the result is `Conflict { /a }`, as in the fake and Postgres).
 3. **The store caps:** the function computes `after` from the snapshot and the set (an overwrite
    subtracts the old size, a `Delete` subtracts the file) and runs `caps.check(before, after)`.
@@ -250,12 +262,15 @@ starts only after every `Put` succeeded.
   - It holds another write ID, or the object is absent, and the error was a refusal: a real
     `Conflict`. The store did not write this `Put`.
   - It holds another write ID or is absent, and the error was not a refusal: the `Put` **failed**,
-    and the store did not write it.
+    and the store did not write it. **Ruling F1:** when the class is `timeout` or `transport` and
+    the object is absent, the outcome is **unknown**, not failed. The server can commit the write
+    after the client gave up. The result is `Partial { applied: 0 }`.
   - The `GET` itself fails, or the object is foreign: the outcome is **unknown**.
 - `Delete { v }`: `HEAD` the key. Absent, or an ETag that is not `v`, is `Conflict`. Else `DELETE`
   (a single-object `DELETE`; §6.8 turns off bulk delete). A `DELETE` error is checked with a
   `HEAD`: absent means the delete succeeded; present with `v` means it failed; a failed `HEAD` is
-  unknown.
+  unknown. **Ruling F1:** when the class is `timeout` or `transport` and the `HEAD` shows `v`, the
+  outcome is unknown, not failed.
 - **The result.** `confirmed` is the count of writes that succeeded.
   - When every write succeeded: `Ok(())`.
   - When a write failed and `confirmed` is 0 and no outcome is unknown: the error itself
@@ -312,7 +327,8 @@ A `Put` has no race: the store checks its condition. So a stale `Put` never over
 
 **The client** (`client.rs`). It is one function that takes the config and the environment as a
 parameter (`impl IntoIterator<Item = (String, String)>`), so tests can pass an environment without
-`std::env::set_var` (which is `unsafe` in edition 2024). Production passes `std::env::vars()`.
+`std::env::set_var` (which is `unsafe` in edition 2024). Production passes `std::env::vars_os()`,
+filtered to UTF-8 pairs (`std::env::vars()` panics on a non-UTF-8 variable).
 
 - It installs the `ring` provider (`rustls::crypto::ring::default_provider().install_default()`,
   the result ignored) before it builds the client, as the workspace requires.
@@ -480,7 +496,10 @@ endpoint and the bucket, which are operator config, not principal data.
   - A `Put` that writes and then returns a timeout-class error: `Ok` (the `GET` finds the write ID).
   - A `Put` that writes, returns a timeout, and then the check `GET` fails: `Partial` with
     `applied: 0` (unknown outcome).
-  - A `Put` that does not write and returns a timeout: the bare `Store` error.
+  - A `Put` that does not write and returns a timeout: `Partial` with `applied: 0` (ruling F1,
+    unknown outcome). A `Put` that does not write and returns a definite failure (class `other`):
+    the bare `Store` error. A `Delete` that returns a timeout and whose check `HEAD` shows the
+    expected ETag: `Partial` with `applied: 0`.
   - The deadline: a wrapper that stalls the second `PUT`; with a short deadline the result is
     `Partial` with the class `timeout`, within the deadline plus a small margin.
   - The probe: a store that accepts every conditional put fails at step 2; a store that refuses only
@@ -508,8 +527,10 @@ group and the agent-host filter of `rs/.config/nextest.toml` (line 174).
   - The raw storage check: after a `create` of `/tasks/t1.md`, the object key is
     `<prefix>/<org>/<agent>/<principal>/tasks/t1.md`, and its bytes start with the header.
   - The version from `list`, `get` and `head` is equal for one object (§6.3).
-  - Raw keys written with a signed request: a folder marker `…/notes/` is skipped by `list` and
-    removed by `delete_scope`; a key `…/a//b` (if the store accepts it) makes `list` return the
+  - Raw keys written with a signed request: a folder marker `…/notes/` is skipped by `list`. It is NOT
+    removed by `delete_scope` (`object_store` strips the trailing `/`). `delete_scope` returns the
+    "keys remain after the scope delete" `Store` error, and the README repair step applies
+    (measured on `rustfs` 1.0.6); a key `…/a//b` (if the store accepts it) makes `list` return the
     `Store` error of §6.2. The test records what the store does.
   - `[Put /notes/x, Delete /notes]` with `/notes` present: the documented result of §6.2.
   - The credentials reach the client through the injected environment, not `set_var`.
@@ -526,7 +547,8 @@ group and the agent-host filter of `rs/.config/nextest.toml` (line 174).
   on a wrong ETag and 200 on the right one. One test runs the conformance suite and the probe on it
   **only when** `PAIGASUS_S3_FALLBACK=1` is set. When the variable is not set, the test prints that
   it skipped and passes. The plan runs it once locally and records the result. If `rustfs` breaks,
-  the switch is one constant.
+  the switch is not one constant: change `start_rustfs()` to `start_versitygw(...)` and replace the
+  `rc`-based raw-key helper (the module doc of the test file says how).
 - **The CI runner is not measured yet.** The image measurement ran on Docker Desktop only, and the
   repo knows a storage difference between Docker Desktop and a runner (memory
   `docker-desktop-store-vs-ci-runner`). The first CI run of the PR is that measurement. If `rustfs`
