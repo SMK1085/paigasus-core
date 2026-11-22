@@ -69,6 +69,8 @@ pub const CANDIDATES_SQL: &str = concat!(
 const LAG_SQL: &str = concat!("SELECT ", lag_select!("$1", "$2"), " AS lag");
 
 /// `$1` = inbox, `$2` = token, `$3` = ttl in microseconds. Zero rows means that the lease is lost.
+/// It runs after `lock_live_lease`, so it does not wait on the row lock, and its expiry term reads
+/// the clock after the lock is held.
 const HEARTBEAT_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_timestamp() + ($3::bigint * interval '1 microsecond') \
      WHERE inbox_id = $1 AND token = $2 AND expires_at > clock_timestamp()";
 
@@ -215,6 +217,13 @@ impl LeaseRepository for PgLeaseStore {
         txn.execute_unprepared(&format!("SET LOCAL statement_timeout = '{}ms'", self.heartbeat_statement_timeout.as_millis()))
             .await
             .map_err(to_store)?;
+        // Lock the row, then check the expiry: a heartbeat that waited past the expiry does not
+        // revive the lease (ADR-0028 (c)).
+        if !lock_live_lease(&txn, handle.inbox().uuid(), handle.token()).await.map_err(to_store)? {
+            txn.rollback().await.map_err(to_store)?;
+            lost("heartbeat");
+            return Err(HeartbeatError::LeaseLost);
+        }
         let stmt = Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             HEARTBEAT_SQL,

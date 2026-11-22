@@ -5,7 +5,7 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use metrics_util::debugging::DebuggingRecorder;
 use paigasus_agent_host::adapters::persistence::lease_store::{DEAD_REASON, PgLeaseStore};
@@ -16,7 +16,7 @@ use paigasus_agent_host_core::lease::{ClaimError, LeaseHandle};
 use paigasus_agent_host_core::ports::LeaseRepository;
 use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
-use sea_orm::{ConnectionTrait, DatabaseConnection};
+use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use support::inbox::{insert_inbox, migrated_postgres};
 use support::lease::{counter, expire, insert_event_on_thread, insert_pending_event, insert_thread};
 use uuid::Uuid;
@@ -120,6 +120,68 @@ async fn a_rotation_after_expiry_is_lease_lost() {
     assert_eq!(store.claim_events(&mut handle, &cfg()).await, Err(ClaimError::LeaseLost));
     assert_eq!(count(&db, "SELECT count(*) AS n FROM run").await, 0);
     assert_eq!(count(&db, &format!("SELECT token AS n FROM inbox_lease WHERE inbox_id = '{}'", u(INBOX))).await, 1);
+}
+
+/// Another transaction holds the lease row with `FOR UPDATE` for `hold` and does not change the
+/// row, while `claim` runs. It returns the result of the claim, and whether the claim ended after
+/// the lock was released (so the claim waited for it).
+async fn claim_behind_a_lock(db: &DatabaseConnection, store: &PgLeaseStore, handle: &mut LeaseHandle, hold: Duration) -> (Result<Option<Claim>, ClaimError>, bool) {
+    let txn = db.begin().await.expect("begin");
+    txn.execute_unprepared(&format!("SELECT token FROM inbox_lease WHERE inbox_id = '{}' FOR UPDATE", u(INBOX)))
+        .await
+        .expect("lock the lease row");
+    let claim = async {
+        let result = store.claim_events(handle, &cfg()).await;
+        (result, Instant::now())
+    };
+    let holder = async {
+        tokio::time::sleep(hold).await;
+        // The time before the commit is sent: the server can release the lock before the
+        // client sees the commit reply, so a time taken after it can be later than the end of a
+        // call that waited.
+        let release = Instant::now();
+        txn.commit().await.expect("commit the lock");
+        release
+    };
+    let ((result, claim_done), released) = tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(claim, holder) }).await.expect("the claim ends");
+    (result, claim_done >= released)
+}
+
+/// ADR-0028 (b): the first claim after a take waits on the lease row lock past the expiry. It must
+/// give `LeaseLost` and claim nothing.
+#[tokio::test]
+async fn a_first_claim_that_waits_past_the_expiry_is_lease_lost() {
+    let Some((_node, url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(INBOX), u(3), u(4)).await;
+    insert_pending_event(&db, u(INBOX), u(10), 5).await;
+    let ttl = Duration::from_secs(2);
+    let store = PgLeaseStore::new(support::connect(&url).await, HB_TIMEOUT);
+    let mut handle = store.acquire(&InboxId::new(u(1), u(INBOX)), "w1", ttl).await.expect("acquire").expect("some");
+    let (result, waited) = claim_behind_a_lock(&db, &store, &mut handle, ttl + Duration::from_secs(1)).await;
+    assert!(waited, "the claim did not wait for the row lock, so this test proves nothing");
+    assert_eq!(result, Err(ClaimError::LeaseLost), "a claim after the expiry passed");
+    assert_eq!(count(&db, "SELECT count(*) AS n FROM run").await, 0, "the claim opened a run");
+    assert_eq!(count(&db, "SELECT count(*) AS n FROM inbox_event WHERE attempts = 0 AND claimed_run_id IS NULL").await, 1);
+}
+
+/// ADR-0028 (b): a rotating claim waits on the lease row lock past the expiry. It must give
+/// `LeaseLost`, and the token must not rotate.
+#[tokio::test]
+async fn a_rotating_claim_that_waits_past_the_expiry_is_lease_lost() {
+    let Some((_node, url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(INBOX), u(3), u(4)).await;
+    let ttl = Duration::from_secs(2);
+    let store = PgLeaseStore::new(support::connect(&url).await, HB_TIMEOUT);
+    let mut handle = store.acquire(&InboxId::new(u(1), u(INBOX)), "w1", ttl).await.expect("acquire").expect("some");
+    assert_eq!(store.claim_events(&mut handle, &cfg()).await, Ok(None), "the first claim finds nothing");
+    assert!(handle.needs_rotation());
+    insert_pending_event(&db, u(INBOX), u(10), 5).await;
+    let token = handle.token().0;
+    let (result, waited) = claim_behind_a_lock(&db, &store, &mut handle, ttl + Duration::from_secs(1)).await;
+    assert!(waited, "the claim did not wait for the row lock, so this test proves nothing");
+    assert_eq!(result, Err(ClaimError::LeaseLost), "a rotation after the expiry passed");
+    assert_eq!(count(&db, &format!("SELECT count(*) AS n FROM inbox_lease WHERE token = {token}")).await, 1, "the token rotated");
+    assert_eq!(count(&db, "SELECT count(*) AS n FROM run").await, 0, "the claim opened a run");
 }
 
 #[tokio::test]

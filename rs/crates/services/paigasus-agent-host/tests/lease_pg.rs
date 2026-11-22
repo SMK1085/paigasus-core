@@ -6,7 +6,7 @@
 mod support;
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
@@ -17,7 +17,7 @@ use paigasus_agent_host_core::lease::HeartbeatError;
 use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, LeaseRepository};
 use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use support::inbox::{insert_inbox, migrated_postgres};
 use support::lease::{expire, expires_us, insert_pending_event, insert_run};
 use uuid::Uuid;
@@ -118,6 +118,44 @@ async fn heartbeat_after_expiry_is_lease_lost() {
     let recorder = DebuggingRecorder::new();
     let _guard = metrics::set_default_local_recorder(&recorder);
     assert_eq!(store.heartbeat(&handle, TTL).await, Err(HeartbeatError::LeaseLost));
+    assert_eq!(lost_counter(&recorder, "heartbeat"), 1);
+}
+
+/// ADR-0028 (c): a heartbeat after `expires_at` does not revive the lease. Another transaction
+/// holds the lease row with `FOR UPDATE` past the expiry and does not change the row. The
+/// heartbeat waits for the lock (its statement timeout is longer than the wait), then it must give
+/// `LeaseLost`, and `expires_at` must not move.
+#[tokio::test]
+async fn a_heartbeat_that_waits_past_the_expiry_is_lease_lost() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let ttl = Duration::from_secs(2);
+    let store = PgLeaseStore::new(db.clone(), HB_TIMEOUT);
+    let handle = store.acquire(&inbox_id(2), "w1", ttl).await.expect("acquire").expect("some");
+    let txn = db.begin().await.expect("begin");
+    txn.execute_unprepared(&format!("SELECT token FROM inbox_lease WHERE inbox_id = '{}' FOR UPDATE", u(2)))
+        .await
+        .expect("lock the lease row");
+    let before = expires_us(&db, u(2)).await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let beat = async {
+        let result = store.heartbeat(&handle, Duration::from_secs(60)).await;
+        (result, Instant::now())
+    };
+    let holder = async {
+        tokio::time::sleep(ttl + Duration::from_secs(1)).await;
+        // The time before the commit is sent: the server can release the lock before the
+        // client sees the commit reply, so a time taken after it can be later than the end of a
+        // call that waited.
+        let release = Instant::now();
+        txn.commit().await.expect("commit the lock");
+        release
+    };
+    let ((result, beat_done), released) = tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(beat, holder) }).await.expect("the heartbeat ends");
+    assert!(beat_done >= released, "the heartbeat did not wait for the row lock, so this test proves nothing");
+    assert_eq!(result, Err(HeartbeatError::LeaseLost), "a heartbeat after the expiry revived the lease");
+    assert_eq!(expires_us(&db, u(2)).await, before, "the heartbeat moved expires_at");
     assert_eq!(lost_counter(&recorder, "heartbeat"), 1);
 }
 

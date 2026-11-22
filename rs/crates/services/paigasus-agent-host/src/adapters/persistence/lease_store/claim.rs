@@ -17,7 +17,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseTransaction, Statement, 
 use uuid::Uuid;
 
 use super::take::ttl_micros;
-use super::{PgLeaseStore, commit_or_poison, lost};
+use super::{PgLeaseStore, commit_or_poison, lock_live_lease, lost};
 use crate::adapters::id::mint_uuid;
 use crate::adapters::persistence::inbox_repository::{event_columns, row_to_event};
 
@@ -152,8 +152,12 @@ impl ClaimRepository for PgLeaseStore {
 async fn claim_in(txn: &DatabaseTransaction, handle: &LeaseHandle, cfg: &ClaimConfig) -> Result<Step, ClaimError> {
     let inbox = handle.inbox().uuid();
 
-    // Step 1: rotate the token, except on the first claim after a take.
+    // Step 1: lock the lease row of the handle's token and check the expiry after the lock is held
+    // (ADR-0028 (b)). Then rotate the token, except on the first claim after a take.
     let mut token = handle.token();
+    if !lock_live_lease(txn, inbox, token).await.map_err(store)? {
+        return Ok(Step::Lost);
+    }
     if handle.needs_rotation() {
         let Some(row) = txn.query_one_raw(stmt(ROTATE_SQL, [inbox.into(), token.0.into()])).await.map_err(store)? else {
             return Ok(Step::Lost);
@@ -161,7 +165,8 @@ async fn claim_in(txn: &DatabaseTransaction, handle: &LeaseHandle, cfg: &ClaimCo
         token = LeaseToken(row.try_get("", "token").map_err(store)?);
     }
 
-    // Step 2: lock the lease row and check it.
+    // Step 2: check the lease row with the current token. Step 1 holds the row lock, so this does
+    // not wait.
     if txn.query_one_raw(stmt(LOCK_SQL, [inbox.into(), token.0.into()])).await.map_err(store)?.is_none() {
         return Ok(Step::Lost);
     }
