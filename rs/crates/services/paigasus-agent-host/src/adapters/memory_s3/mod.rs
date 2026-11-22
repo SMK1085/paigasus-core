@@ -34,7 +34,7 @@ use paigasus_observability::names;
 use tokio::time::Instant;
 
 use self::envelope::{WriteId, content_size, decode, encode};
-use self::errors::{TIMEOUT_CLASS, class, is_refusal, store_text};
+use self::errors::{TIMEOUT_CLASS, class, is_refusal, is_uncertain, store_text};
 use self::keys::{KeyPrefix, ListedKey, dir_path, file_path, listed_key, scope_path};
 use self::plan::{Outcome, Seen, SeenAfterDelete, Snapshot, delete_outcome, precheck, put_outcome, result_of};
 
@@ -217,7 +217,7 @@ impl S3MemoryStore {
                     Ok(_) => Outcome::Confirmed,
                     Err(e) => {
                         let cause = MemoryApplyError::Store(store_text("the memory write failed", &e));
-                        put_outcome(is_refusal(&e), cause, self.seen_after_put(&key, &id).await, path)
+                        put_outcome(is_refusal(&e), is_uncertain(&e), cause, self.seen_after_put(&key, &id).await, path)
                     }
                 }
             }
@@ -233,7 +233,7 @@ impl S3MemoryStore {
                     Ok(()) => Outcome::Confirmed,
                     Err(e) => {
                         let cause = MemoryApplyError::Store(store_text("the memory delete failed", &e));
-                        delete_outcome(cause, self.seen_after_delete(&key, expected).await)
+                        delete_outcome(cause, is_uncertain(&e), self.seen_after_delete(&key, expected).await)
                     }
                 }
             }
@@ -923,14 +923,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_timed_out_put_that_did_not_land_is_a_bare_store_error() {
+    async fn a_timed_out_put_that_did_not_land_is_partial() {
+        // Ruling F1: the server can still commit after a client timeout, so the result is unknown.
         let (scripted, store) = hashed();
         scripted.fault_put(1, Fault::Fail(timeout_error()));
         let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        let (applied, failed_at, cause) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+        assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
+    }
+
+    #[tokio::test]
+    async fn a_definite_put_failure_that_did_not_land_is_a_bare_store_error() {
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::Fail(generic_error()));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
         match store.apply(&set, &MemoryCaps::default()).await {
-            Err(MemoryApplyError::Store(text)) => assert!(text.contains("timeout"), "{text}"),
+            Err(MemoryApplyError::Store(text)) => assert_eq!(text, "the memory write failed (other)"),
             other => panic!("not a bare Store: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_delete_with_the_expected_etag_after_it_is_partial() {
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/a", "old");
+        let v = version(&store, "/a").await;
+        scripted.fault_delete(1, Fault::Fail(timeout_error()));
+        let set = set_of(&scope(), vec![delete_change("/a", v)]);
+        let (applied, failed_at, cause) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+        assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
     }
 
     #[tokio::test]

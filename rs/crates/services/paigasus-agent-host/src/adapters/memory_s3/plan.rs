@@ -155,10 +155,13 @@ pub enum Seen {
     ReadFailed,
 }
 
-/// The outcome of a `Put` whose request failed (spec §6.5).
-pub fn put_outcome(refused: bool, cause: MemoryApplyError, seen: Seen, path: &MemoryPath) -> Outcome {
+/// The outcome of a `Put` whose request failed (spec §6.5). `uncertain` is true when the error
+/// class is `timeout` or `transport`: the server can still commit the write after the client
+/// gave up, so an absent object does not prove that the write failed.
+pub fn put_outcome(refused: bool, uncertain: bool, cause: MemoryApplyError, seen: Seen, path: &MemoryPath) -> Outcome {
     match seen {
         Seen::Mine => Outcome::Confirmed,
+        Seen::Absent if uncertain => Outcome::Unknown(cause),
         Seen::Other | Seen::Absent if refused => Outcome::Failed(MemoryApplyError::Conflict { path: path.clone() }),
         Seen::Other | Seen::Absent => Outcome::Failed(cause),
         Seen::Foreign | Seen::ReadFailed => Outcome::Unknown(cause),
@@ -178,10 +181,12 @@ pub enum SeenAfterDelete {
     ReadFailed,
 }
 
-/// The outcome of a `Delete` whose request failed.
-pub fn delete_outcome(cause: MemoryApplyError, seen: SeenAfterDelete) -> Outcome {
+/// The outcome of a `Delete` whose request failed. `uncertain` is true when the error class is
+/// `timeout` or `transport`: the server can still run the `DELETE` after the client gave up.
+pub fn delete_outcome(cause: MemoryApplyError, uncertain: bool, seen: SeenAfterDelete) -> Outcome {
     match seen {
         SeenAfterDelete::Absent => Outcome::Confirmed,
+        SeenAfterDelete::Expected if uncertain => Outcome::Unknown(cause),
         SeenAfterDelete::Expected => Outcome::Failed(cause),
         SeenAfterDelete::Other | SeenAfterDelete::ReadFailed => Outcome::Unknown(cause),
     }
@@ -403,7 +408,7 @@ mod tests {
     fn the_put_outcome_rows() {
         let path = p("/a");
         let cause = store("c");
-        let o = |refused, seen| put_outcome(refused, cause.clone(), seen, &path);
+        let o = |refused, seen| put_outcome(refused, false, cause.clone(), seen, &path);
         assert_eq!(o(true, Seen::Mine), Outcome::Confirmed);
         assert_eq!(o(false, Seen::Mine), Outcome::Confirmed);
         for seen in [Seen::Other, Seen::Absent] {
@@ -417,11 +422,30 @@ mod tests {
     }
 
     #[test]
+    fn an_uncertain_put_that_is_absent_is_unknown() {
+        // Ruling F1: after a timeout or a transport error the server can still commit.
+        let path = p("/a");
+        let cause = store("c");
+        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Absent, &path), Outcome::Unknown(cause.clone()));
+        // A write ID of this write is still proof, and another writer's object is still a failure.
+        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Mine, &path), Outcome::Confirmed);
+        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Other, &path), Outcome::Failed(cause));
+    }
+
+    #[test]
     fn the_delete_outcome_rows() {
         let cause = store("c");
-        assert_eq!(delete_outcome(cause.clone(), SeenAfterDelete::Absent), Outcome::Confirmed);
-        assert_eq!(delete_outcome(cause.clone(), SeenAfterDelete::Expected), Outcome::Failed(cause.clone()));
-        assert_eq!(delete_outcome(cause.clone(), SeenAfterDelete::Other), Outcome::Unknown(cause.clone()));
-        assert_eq!(delete_outcome(cause.clone(), SeenAfterDelete::ReadFailed), Outcome::Unknown(cause));
+        assert_eq!(delete_outcome(cause.clone(), false, SeenAfterDelete::Absent), Outcome::Confirmed);
+        assert_eq!(delete_outcome(cause.clone(), false, SeenAfterDelete::Expected), Outcome::Failed(cause.clone()));
+        assert_eq!(delete_outcome(cause.clone(), false, SeenAfterDelete::Other), Outcome::Unknown(cause.clone()));
+        assert_eq!(delete_outcome(cause.clone(), false, SeenAfterDelete::ReadFailed), Outcome::Unknown(cause));
+    }
+
+    #[test]
+    fn an_uncertain_delete_with_the_expected_etag_is_unknown() {
+        // Ruling F1: after a timeout or a transport error the server can still run the DELETE.
+        let cause = store("c");
+        assert_eq!(delete_outcome(cause.clone(), true, SeenAfterDelete::Expected), Outcome::Unknown(cause.clone()));
+        assert_eq!(delete_outcome(cause.clone(), true, SeenAfterDelete::Absent), Outcome::Confirmed);
     }
 }

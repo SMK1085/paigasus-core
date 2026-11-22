@@ -66,6 +66,12 @@ pub fn is_refusal(e: &Error) -> bool {
     matches!(e, Error::AlreadyExists { .. } | Error::Precondition { .. })
 }
 
+/// True when the class is `timeout` or `transport`. The server can still run the request after
+/// the client gave up, so a check read cannot prove that the request failed.
+pub fn is_uncertain(e: &Error) -> bool {
+    matches!(class(e).as_str(), TIMEOUT_CLASS | "transport")
+}
+
 /// The text of a `Store(String)`: the fixed sentence and the class in brackets.
 pub fn store_text(sentence: &'static str, e: &Error) -> String {
     format!("{sentence} ({})", class(e))
@@ -154,6 +160,13 @@ mod tests {
         };
         assert_eq!(class(&e), "status=501");
         assert!(!store_text("s", &e).contains(SECRET));
+    }
+
+    #[test]
+    fn only_timeout_and_transport_are_uncertain() {
+        for (e, want) in all_kinds() {
+            assert_eq!(is_uncertain(&e), matches!(want, "timeout" | "transport"), "{want}");
+        }
     }
 
     #[test]
