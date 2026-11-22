@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use paigasus_kernel::detect::{Finding, HostSet};
+use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, Finding, HostSet, Severity};
 use paigasus_kernel::tool_policy::{Effect, Findings, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
@@ -116,20 +116,48 @@ impl CallScan {
     }
 }
 
+/// How the scans of `decide_calls` map to its calls.
+#[derive(Debug, Clone, Copy)]
+enum ScansFor<'a> {
+    /// No detector ran: no scan findings, and the kernel reads the hosts.
+    None,
+    /// One scan per call, in the order of the calls.
+    PerCall(&'a [CallScan]),
+    /// The count is wrong, so no scan can be matched to its call. Every call gets one
+    /// `detector_error` (detector `built_in`, high) in place of the scans (A3).
+    Mismatch,
+}
+
+fn scans_for(calls: usize, scans: &[CallScan]) -> ScansFor<'_> {
+    if scans.is_empty() {
+        ScansFor::None
+    } else if scans.len() == calls {
+        ScansFor::PerCall(scans)
+    } else {
+        ScansFor::Mismatch
+    }
+}
+
 /// One outcome per call, in order. The findings of a call are its request-level findings
 /// (`name_collision`) and the findings of its scan; the kernel adds `unparsed_arguments` and the
 /// hosts-cap `detector_error` itself. The Cedar detail records all of them, each with its
 /// severity and detector, and the `max_severity` of the verdict.
 ///
-/// `scans` is empty (no detectors ran) or has one entry per call, in the order of `calls`. A call
-/// with no entry has no scan findings, and the kernel reads its hosts. When a scan has hosts, the
-/// invocation carries them, so the kernel does not read the arguments again (S8).
+/// `scans` is empty (no detectors ran) or has one entry per call, in the order of `calls`. When a
+/// scan has hosts, the invocation carries them, so the kernel does not read the arguments again
+/// (S8). Any other count is a defect of the caller: a debug build panics, and a release build
+/// uses no scan and gives every call a `detector_error` finding (detector `built_in`, high).
 ///
 /// `now` is the only time source (P-7): it is read before and after each kernel `decide`, and the
 /// difference is the `decide_duration` of the call. The core reads no clock of its own.
 #[must_use]
 pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
     debug_assert!(scans.is_empty() || scans.len() == calls.len(), "one scan per call, or none");
+    decide_with(snapshot, turn, calls, scans_for(calls.len(), scans), now)
+}
+
+/// `decide_calls` after the count check. It is also the release path of a wrong count.
+fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: ScansFor<'_>, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
     let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
         // P-6: `closed` blocks in every tenant mode, `off` included.
         return calls
@@ -150,14 +178,19 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let scan = scans.get(i);
             let mut inv = invocation(c, turn);
-            if let Some(hosts) = scan.and_then(|s| s.hosts.clone()) {
-                inv = inv.with_hosts(hosts);
+            let mut given = call_findings(c, &collisions);
+            match scans {
+                ScansFor::None => {}
+                ScansFor::PerCall(s) => {
+                    if let Some(hosts) = s[i].hosts.clone() {
+                        inv = inv.with_hosts(hosts);
+                    }
+                    given.extend(s[i].findings.iter().cloned());
+                }
+                ScansFor::Mismatch => given.push(Finding::new(DETECTOR_BUILT_IN, DETECTOR_ERROR, Severity::High, "")),
             }
             let started = now();
-            let mut given = call_findings(c, &collisions);
-            given.extend(scan.into_iter().flat_map(|s| s.findings.iter().cloned()));
             let v = decide(&inv, facts, &kernel_findings(&given), policies);
             let duration = now().saturating_duration_since(started);
             let mut cedar = CedarDetail::new(
@@ -181,7 +214,7 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
 mod tests {
     use std::sync::Arc;
 
-    use paigasus_kernel::detect::{DETECTOR_BUILT_IN, HostSet, SECRET_IN_ARGS, Severity};
+    use paigasus_kernel::detect::SECRET_IN_ARGS;
     use paigasus_kernel::tool_policy::{Declared, Facts, RequestInfo, SessionInfo, ToolPolicies};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
@@ -558,6 +591,36 @@ mod tests {
                 ("unparsed_arguments", Some(Severity::Medium), "kernel")
             ]
         );
+    }
+
+    #[test]
+    fn a_wrong_scan_count_gives_every_call_a_detector_error() {
+        assert!(matches!(scans_for(2, &[]), ScansFor::None));
+        assert!(matches!(scans_for(1, &[CallScan::default()]), ScansFor::PerCall(_)));
+        let mut hosts = HostSet::new();
+        hosts.insert("x.example");
+        let one = [CallScan::new(vec![Finding::new(DETECTOR_BUILT_IN, "other", Severity::Low, "")], Some(hosts))];
+        for (n, scans) in [(2, &one[..]), (0, &one[..])] {
+            assert!(matches!(scans_for(n, scans), ScansFor::Mismatch), "{n}");
+        }
+        // The release path: `decide_calls` checks the count with a `debug_assert!` first.
+        let snap = tenant_snapshot(FORBID_HIGH);
+        let turn = ToolTurn::Unavailable("test");
+        let out = decide_with(&snap, &turn, &[call("a"), call("b")], scans_for(2, &one), &Instant::now);
+        assert_eq!(out.len(), 2);
+        for o in &out {
+            assert_eq!(o.decision, BLOCK_POLICY);
+            // No scan finding and no scan host reaches any call: only the error.
+            assert_eq!(kinds_and_severities(o), [(DETECTOR_ERROR, Some(Severity::High), DETECTOR_BUILT_IN)]);
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one scan per call, or none")]
+    fn a_wrong_scan_count_panics_in_a_debug_build() {
+        let snap = tenant_snapshot(FORBID_HIGH);
+        let _ = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call("a"), call("b")], &[CallScan::default()], &Instant::now);
     }
 
     #[test]
