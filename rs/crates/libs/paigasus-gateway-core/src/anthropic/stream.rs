@@ -369,11 +369,11 @@ impl Protocol for AnthropicStream {
         let ev = frame.event.unwrap_or("ping");
         let original = || sse::frame(Some(ev), &frame.payload);
         let Some(value) = frame.value.as_ref() else { return vec![original()] };
-        let code_of = |i: u32| verdicts.get(&key(i)).and_then(|v| v.block_code(0));
+        let blocked_of = |i: u32| verdicts.get(&key(i)).and_then(|v| v.blocked(0));
         match ev {
             "content_block_start" | "content_block_delta" | "content_block_stop" => {
                 let Ok(i) = block_index(value) else { return vec![original()] };
-                let Some(code) = code_of(i) else { return vec![original()] };
+                let Some(blocked) = blocked_of(i) else { return vec![original()] };
                 match ev {
                     "content_block_start" => vec![sse::frame(
                         Some(ev),
@@ -383,7 +383,7 @@ impl Protocol for AnthropicStream {
                     _ => {
                         let Some(b) = self.blocks.get_mut(i as usize) else { return vec![original()] };
                         b.notice_done = true;
-                        vec![text_delta(i, &notice_line(&b.name, code)), stop_frame(i)]
+                        vec![text_delta(i, &notice_line(&b.name, blocked.code, blocked.reference)), stop_frame(i)]
                     }
                 }
             }
@@ -410,14 +410,14 @@ impl Protocol for AnthropicStream {
         let mut out = Vec::new();
         for (i, b) in self.blocks.iter_mut().enumerate() {
             let i = u32::try_from(i).expect("index is bounded");
-            let code = verdicts.get(&key(i)).and_then(|v| v.block_code(0));
-            if let Some(code) = code
+            let blocked = verdicts.get(&key(i)).and_then(|v| v.blocked(0));
+            if let Some(blocked) = blocked
                 && b.is_hold()
                 && b.open
                 && !b.notice_done
             {
                 b.notice_done = true;
-                out.push(text_delta(i, &notice_line(&b.name, code)));
+                out.push(text_delta(i, &notice_line(&b.name, blocked.code, blocked.reference)));
                 out.push(stop_frame(i));
             }
         }
@@ -444,7 +444,7 @@ impl Protocol for AnthropicStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Protocol, Step, Verdict, Verdicts};
+    use crate::protocol::{Protocol, Step, Verdict, Verdicts, per_call};
     use crate::report::ReportDecision;
     use crate::sse::Record;
     use crate::types::{BlockCode, Decision, HoldKey, ToolCallKind};
@@ -509,9 +509,20 @@ mod tests {
         assert_eq!(calls[0].id.as_deref(), Some("toolu_1"));
     }
 
+    const ID: &str = "0193f6c2-8a4e-7b10-9c2d-5e8f1a2b3c4d";
+
+    #[test]
+    fn anthropic_stream_notice_has_the_ref() {
+        let id = uuid::Uuid::try_parse(ID).unwrap();
+        let (out, _, _) = run(tool_stream(), Verdict::PerCall(vec![(Decision::Block { code: BlockCode::Policy }, Some(id))]));
+        assert!(out.contains(&format!(r#"[paigasus] tool call \"rm\" was blocked (policy). ref={ID}"#)), "{out}");
+        let (out, _, _) = run(tool_stream(), per_call(vec![Decision::Block { code: BlockCode::Policy }]));
+        assert!(out.contains(r#"[paigasus] tool call \"rm\" was blocked (policy)."#) && !out.contains("ref="), "{out}");
+    }
+
     #[test]
     fn a_blocked_tool_use_becomes_a_text_block_at_the_same_index() {
-        let (out, _, _) = run(tool_stream(), Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        let (out, _, _) = run(tool_stream(), per_call(vec![Decision::Block { code: BlockCode::Policy }]));
         assert!(!out.contains("SECRET"), "{out}");
         assert!(!out.contains("\"type\":\"tool_use\""), "{out}");
         assert!(out.contains(r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#), "{out}");
@@ -709,7 +720,7 @@ mod tests {
         stop_with_extra["evil"] = json!("x");
         let mut events = tool_stream();
         events[7] = stop_with_extra;
-        let (out, _, _) = run(events, Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        let (out, _, _) = run(events, per_call(vec![Decision::Block { code: BlockCode::Policy }]));
         assert!(out.contains("data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"), "{out}");
         assert!(!out.contains("evil"), "{out}");
     }
@@ -750,7 +761,7 @@ mod tests {
 
     #[test]
     fn a_blocked_block_does_not_leak_its_id() {
-        let (out, _, _) = run(tool_stream(), Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]));
+        let (out, _, _) = run(tool_stream(), per_call(vec![Decision::Block { code: BlockCode::Policy }]));
         assert!(!out.contains("toolu_1"), "{out}");
     }
 

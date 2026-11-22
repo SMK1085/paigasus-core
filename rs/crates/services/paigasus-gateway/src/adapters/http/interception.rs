@@ -152,8 +152,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
     }
     let entries: Vec<_> = reported.into_iter().map(|r| r.entry).collect();
     let report = report_header(&entries, requests);
-    let plain: Vec<Decision> = decisions.iter().map(|d| d.decision).collect();
-    let rewritten = calls.apply(&plain).map(Bytes::from);
+    let rewritten = calls.apply(&decisions).map(Bytes::from);
     BodyOutcome::Forward { rewritten, report: Some(report) }
 }
 

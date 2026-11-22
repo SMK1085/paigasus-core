@@ -93,7 +93,7 @@ fn responses_golden(name: &str) -> (PathBuf, Vec<u8>, Value) {
     assert!(!found.is_empty(), "responses/{name}: a golden must block at least one call");
     for (c, d) in &o.decided {
         if let Decision::Block { code } = d {
-            let want = notice_line(&c.display_name(), *code);
+            let want = notice_line(&c.display_name(), *code, None);
             assert!(
                 found.iter().any(|(i, t)| *t == want && *i == u64::from(c.position)),
                 "responses/{name}: no notice {want:?} at {}",
@@ -145,7 +145,7 @@ fn generate() -> (Vec<(PathBuf, Vec<u8>)>, Value) {
             .decided
             .iter()
             .filter_map(|(c, d)| match d {
-                Decision::Block { code } => Some(notice_line(&c.name, *code)),
+                Decision::Block { code } => Some(notice_line(&c.name, *code, None)),
                 _ => None,
             })
             .collect();

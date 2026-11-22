@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use bytes::Bytes;
+use uuid::Uuid;
 
 use crate::anthropic::stream::AnthropicStream;
 use crate::decider::DecidedCall;
@@ -367,8 +368,12 @@ impl Interceptor {
         };
         let (verdict, decided, mut basis) = match (checked, self.limits.on_failure) {
             (Ok(d), _) => {
-                let decisions: Vec<Decision> = d.iter().map(|c| c.decision).collect();
-                let v = if decisions.iter().all(|d| d.is_allow()) { Verdict::AllowAll } else { Verdict::PerCall(decisions) };
+                let decisions: Vec<(Decision, Option<Uuid>)> = d.iter().map(|c| (c.decision, c.decision_id)).collect();
+                let v = if decisions.iter().all(|(d, _)| d.is_allow()) {
+                    Verdict::AllowAll
+                } else {
+                    Verdict::PerCall(decisions)
+                };
                 (v, d, Basis::Decider)
             }
             (Err(_), OnFailure::Block) => {
@@ -403,7 +408,8 @@ impl Interceptor {
             });
             let entry = report_entry(c, decision, basis, code);
             self.emit(report_comment(&entry), now);
-            self.out.push(Action::Reported(Box::new(ReportedCall::new(entry, Some(CallFacts::of(c)), d.detail))));
+            self.out
+                .push(Action::Reported(Box::new(ReportedCall::new(entry, Some(CallFacts::of(c)), d.detail).with_decision_id(d.decision_id))));
         }
         if !observe {
             self.verdicts.insert(hold, verdict);
@@ -1384,5 +1390,35 @@ mod tests {
         // A wrong-length answer is a decider error as well, and drops the details.
         let acts = run_actions(Format::OpenAiChat, limits(), &chat, &|_| Some(Ok(vec![DecidedCall::new(Decision::Allow, Some(a_detail())); 2])));
         assert!(reported(&acts).iter().all(|r| r.detail.is_none() && r.entry.basis == Some(Basis::OnFailure)));
+    }
+
+    #[test]
+    fn the_decision_id_reaches_the_reported_action() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let decide = move |_: &[ToolCall]| {
+            Some(Ok(vec![
+                DecidedCall::new(Decision::Allow, None).with_decision_id(a),
+                DecidedCall::new(Decision::Block { code: BlockCode::Policy }, None).with_decision_id(b),
+            ]))
+        };
+        let chat = [call(0, 0, "read", "{}"), call(0, 1, "rm", "{}"), finish(0), "data: [DONE]\n\n".into()];
+        let acts = run_actions(Format::OpenAiChat, limits(), &chat, &decide);
+        let reps = reported(&acts);
+        assert_eq!(reps.iter().map(|r| r.decision_id).collect::<Vec<_>>(), [Some(a), Some(b)]);
+        let text = emitted(&acts);
+        assert!(text.contains(&format!("was blocked (policy). ref={b}")), "{text}");
+        assert!(!text.contains(&a.to_string()), "an allowed call has no notice: {text}");
+    }
+
+    #[test]
+    fn a_decider_error_reports_no_decision_id() {
+        let chat = [call(0, 0, "read", "{}"), finish(0), "data: [DONE]\n\n".into()];
+        let acts = run_actions(Format::OpenAiChat, limits(), &chat, &|_| Some(Err(DeciderError { reason: "boom" })));
+        assert!(reported(&acts).iter().all(|r| r.decision_id.is_none()));
+        assert!(!emitted(&acts).contains("ref="));
+        // A wrong-length answer is a decider error as well: the ids do not belong to these calls.
+        let wrong = |_: &[ToolCall]| Some(Ok(vec![DecidedCall::new(Decision::Allow, None).with_decision_id(Uuid::from_u128(7)); 2]));
+        let acts = run_actions(Format::OpenAiChat, limits(), &chat, &wrong);
+        assert!(reported(&acts).iter().all(|r| r.decision_id.is_none()));
     }
 }

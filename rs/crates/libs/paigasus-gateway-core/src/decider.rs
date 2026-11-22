@@ -8,6 +8,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use uuid::Uuid;
+
 use crate::decision_log::DecisionDetail;
 use crate::interceptor::DeciderError;
 use crate::policy::PolicySnapshot;
@@ -73,18 +75,28 @@ pub struct DecidedCall {
     pub decision: Decision,
     /// The detail for the record. `None` when the decider has nothing to add.
     pub detail: Option<Arc<DecisionDetail>>,
+    /// The id of the decision record of this call. A block notice carries it. `None` when the
+    /// decider has no record id.
+    pub decision_id: Option<Uuid>,
 }
 
 impl DecidedCall {
     #[must_use]
     pub fn new(decision: Decision, detail: Option<Arc<DecisionDetail>>) -> Self {
-        Self { decision, detail }
+        Self { decision, detail, decision_id: None }
+    }
+
+    /// Set the decision id of the call.
+    #[must_use]
+    pub fn with_decision_id(mut self, id: Uuid) -> Self {
+        self.decision_id = Some(id);
+        self
     }
 }
 
 impl From<Decision> for DecidedCall {
     fn from(decision: Decision) -> Self {
-        Self { decision, detail: None }
+        Self::new(decision, None)
     }
 }
 
@@ -140,7 +152,7 @@ mod tests {
     #[test]
     fn a_decision_converts_to_a_call_without_detail() {
         let d = DecidedCall::from(Decision::Allow);
-        assert_eq!((d.decision, d.detail), (Decision::Allow, None));
+        assert_eq!((d.decision, d.detail, d.decision_id), (Decision::Allow, None, None));
         assert_eq!(DecidedCall::new(Decision::Allow, None), DecidedCall::from(Decision::Allow));
     }
 
