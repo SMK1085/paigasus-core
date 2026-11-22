@@ -37,7 +37,8 @@ adapter makes the sequential case correct and documents each race.
 - G5. `memory.backend = "s3"` config, with credentials only from an allowlist of AWS environment
   variables. No other environment variable changes the client, except these, which the README names:
   `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lower-case forms (`reqwest` reads
-  them); `REQUEST_METHOD` (when set, `HTTP_PROXY` is ignored, a CGI guard); and, on Linux,
+  them); `REQUEST_METHOD` (when `REQUEST_METHOD` is set, the client uses no proxy, a guard for
+  CGI); and, on Linux,
   `SSL_CERT_FILE` and `SSL_CERT_DIR`, which change the system trust roots (through
   `rustls-native-certs`). `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it
   names. Sven decided on 2026-11-22 to keep the proxy variables and to document them. The
@@ -233,12 +234,12 @@ of the fake (`fake.rs:94-141`), so every adapter reports the same refusal:
 1. **Guards** (SMA-843): for each guard in `BTreeSet` order, the snapshot paths that the guard
    covers (`MemoryDir::covers`), in byte order. The first one that no change of the set names is
    `Conflict { path }`. So a guard conflict wins over every other refusal.
-2. **Each change, in the order of the set, all its checks before the next change:** the version
-   check (`Put { Absent }` conflicts when the snapshot holds the path; `Put { Version(v) }` and
-   `Delete { v }` conflict when the snapshot version is not `v` or the path is absent), then for a
-   `Put` the NUL check (U+0000 is `Store`, as `ports.rs:177-180` asks) and `caps.check_file(path,
-   size)`. **Correction:** the order inside one `Put` is the NUL check, then the version check, then
-   `check_file`, as in `fake.rs`. The builder copies the exact order from `fake.rs`, and a test pins it (for
+2. **Each change, in the order of the set, all its checks before the next change.** For a `Put`,
+   the order is the order of `fake.rs`: first the NUL check (U+0000 is `Store`, as
+   `ports.rs:177-180` asks), then the version check, then `caps.check_file(path, size)`. A
+   `Delete` has only the version check. The version check: `Put { Absent }` conflicts when the
+   snapshot holds the path; `Put { Version(v) }` and `Delete { v }` conflict when the snapshot
+   version is not `v` or the path is absent. A test pins the order (for
    `[Put /a conflict, Put /b NUL]` the result is `Conflict { /a }`, as in the fake and Postgres).
 3. **The store caps:** the function computes `after` from the snapshot and the set (an overwrite
    subtracts the old size, a `Delete` subtracts the file) and runs `caps.check(before, after)`.
@@ -307,7 +308,7 @@ A key that `object_store::Path` refuses makes step 1 fail, so `delete_scope` ret
 operator must remove the key (§6.2). A folder marker `…/notes/` also stays: `object_store` strips
 the trailing `/`, so the delete misses it, and step 3 returns the "keys remain after the scope
 delete" `Store` error (measured on `rustfs` 1.0.6). The README repair step applies. The operation is not atomic. A second call finishes it,
-because a delete of a missing key succeeds.
+because a delete of a missing key succeeds, except for a folder marker.
 
 ### 6.7 The races (stated in the adapter doc and the README)
 
@@ -468,7 +469,7 @@ endpoint and the bucket, which are operator config, not principal data.
 - The envelope: `HEADER_LEN == 51`; encode then decode; a short object; a bad prefix; non-hex ID; a
   missing `\n`; non-UTF-8 content.
 - The pure pre-check: each row of §6.5 phase 1; the order (a guard conflict first; per change, the
-  version check before the NUL check before the file cap; the store caps last), with
+  NUL check before the version check before the file cap; the store caps last), with
   `[Put /a conflict, Put /b NUL]`; the `after` usage of an overwrite, a delete and a create.
 - The error classes: each `object_store::Error` kind, built with a path and a URI that hold
   `secret-name`, maps to a text that does not hold `secret-name` (AG8).

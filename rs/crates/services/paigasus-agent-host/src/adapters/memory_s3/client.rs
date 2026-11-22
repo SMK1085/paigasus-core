@@ -111,8 +111,8 @@ pub fn s3_builder(cfg: &MemoryS3Config, env: impl IntoIterator<Item = (String, S
 /// `ALL_PROXY` and `NO_PROXY` (and their lower-case forms) when no `proxy` and no `no_proxy` is
 /// set. See `reqwest-0.13.5/src/async_impl/client.rs` line 417 (`ProxyMatcher::system()` under
 /// `auto_sys_proxy`, which is `true` by default, line 310). `object_store` sets neither, so these
-/// variables can change the client. When `REQUEST_METHOD` is set, `HTTP_PROXY` is ignored (a CGI
-/// guard). On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` change the system trust roots, through
+/// variables can change the client. When `REQUEST_METHOD` is set, the client uses no proxy (a
+/// guard for CGI). On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` change the system trust roots, through
 /// `rustls-native-certs`. `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it
 /// names. The README names these variables. The client does not turn them off.
 ///

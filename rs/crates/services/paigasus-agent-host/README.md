@@ -83,15 +83,15 @@ The store works with AWS S3 and with S3-compatible stores.
 `AWS_ROLE_ARN`, `AWS_ROLE_SESSION_NAME`, `AWS_ENDPOINT_URL_STS`,
 `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_CONTAINER_CREDENTIALS_FULL_URI` and
 `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`. An empty variable counts as not set. Any other `AWS_*`
-variable changes no setting. With none of these variables set, the client asks the instance metadata
+variable changes no setting. `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it
+names. With none of these variables set, the client asks the instance metadata
 endpoint for credentials. Off AWS, the boot probe then fails with `unauthenticated` or `timeout`.
 
 **Other variables that change the client.** These variables are not on the credential list. The host does not turn them off.
 
 - The HTTP client reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, and their lower-case forms. This is the default of `reqwest`. Set `NO_PROXY` for the store endpoint if the host must not use a proxy for it.
-- When `REQUEST_METHOD` is set, `reqwest` ignores `HTTP_PROXY`. This is a guard for CGI.
+- When `REQUEST_METHOD` is set, the client uses no proxy (a guard for CGI).
 - On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` change the system trust roots. The client reads them through `rustls-native-certs`.
-- `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it names.
 
 **Races.** The store is correct for one writer at a time. When two writers write one scope at the
 same moment, five races remain.
