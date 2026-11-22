@@ -3,6 +3,7 @@
 //! Cedar type, so a build with only this feature never gets Cedar.
 
 mod hosts;
+mod injection;
 pub(crate) mod input;
 mod schema;
 mod secrets;
@@ -10,6 +11,7 @@ mod types;
 mod walk;
 
 pub use hosts::{HOSTS_CAP, HOSTS_OVERFLOW, HostSet, call_hosts, hosts_in_text};
+pub use injection::{INJECTION_MARKERS_VERSION, injection_markers};
 pub use schema::invalid_args;
 pub use secrets::{SECRET_PATTERNS_VERSION, secret_in_args};
 
