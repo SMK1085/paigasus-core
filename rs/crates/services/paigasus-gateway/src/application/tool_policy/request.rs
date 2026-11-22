@@ -122,6 +122,12 @@ impl OverheadSample {
     pub fn new(snapshot: Arc<PolicySnapshot>) -> Self {
         OverheadSample(snapshot)
     }
+
+    /// The snapshot whose overhead this sample records.
+    #[must_use]
+    pub fn snapshot(&self) -> &PolicySnapshot {
+        &self.0
+    }
 }
 
 impl Drop for OverheadSample {
@@ -156,9 +162,14 @@ impl RequestToolPolicy {
     }
 
     /// The write after the limits admission (spec D4). A store error is counted and the request goes on.
-    pub async fn commit_history(&self, pending: PendingWrite) {
+    ///
+    /// The write is on the latency path, so its time goes into the overhead sample of the request
+    /// through `snapshot`. `request_elapsed` ends before the admission, so nothing counts twice.
+    pub async fn commit_history(&self, pending: PendingWrite, snapshot: &PolicySnapshot) {
         if let Some(h) = &self.history {
+            let started = Instant::now();
             h.commit(pending).await;
+            snapshot.add_request_elapsed(started.elapsed());
         }
     }
 
@@ -1133,8 +1144,63 @@ mod tests {
         assert_eq!(linked.info, SessionInfo::new(session.to_string(), 2));
         // The lookup is read only: nothing is written before the commit.
         assert_eq!(results(&store, session, "x"), 0);
-        policy.commit_history(out.history.expect("a pending write")).await;
+        policy.commit_history(out.history.expect("a pending write"), &out.snapshot).await;
         assert_eq!(results(&store, session, "x"), 1, "the result event is written after the commit");
+    }
+
+    /// The memory store, with a `write` that first waits `.1`.
+    struct SlowWrite(Arc<MemorySessionStore>, Duration);
+
+    #[async_trait::async_trait]
+    impl SessionStore for SlowWrite {
+        async fn lookup(&self, req: &crate::domain::tool_history::LookupRequest) -> Result<crate::domain::tool_history::LookupReply, crate::domain::tool_history::HistoryStoreError> {
+            self.0.lookup(req).await
+        }
+        async fn write(&self, req: &crate::domain::tool_history::WriteRequest) -> Result<crate::domain::tool_history::AppendReply, crate::domain::tool_history::HistoryStoreError> {
+            tokio::time::sleep(self.1).await;
+            self.0.write(req).await
+        }
+        async fn reserve(&self, req: &ReserveRequest) -> Result<crate::domain::tool_history::AppendReply, crate::domain::tool_history::HistoryStoreError> {
+            self.0.reserve(req).await
+        }
+        async fn settle(&self, req: &SettleRequest) -> Result<(), crate::domain::tool_history::HistoryStoreError> {
+            self.0.settle(req).await
+        }
+        async fn append(&self, req: &crate::domain::tool_history::AppendRequest) -> Result<crate::domain::tool_history::AppendReply, crate::domain::tool_history::HistoryStoreError> {
+            self.0.append(req).await
+        }
+    }
+
+    /// Spec § 9: the history write after the admission is on the latency path, so its time is in
+    /// the overhead sample of the request. It goes to the request side, not to the decide time.
+    #[tokio::test]
+    async fn the_commit_time_is_in_the_overhead_sample() {
+        const WAIT: Duration = Duration::from_millis(80);
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let store = Arc::new(MemorySessionStore::new());
+        let session = Uuid::from_u128(0x5e55);
+        seed(&store, session, "x").await;
+        let slow: Arc<dyn SessionStore> = Arc::new(SlowWrite(Arc::clone(&store), WAIT));
+        let policy = testing::policy(&FakeSource::new(testing::FLOOR, testing::PERMIT_ALL), settings(TenantMode::Enforce)).with_history(Arc::new(ToolHistory::new(
+            slow,
+            Arc::new(FixedClock(at(NOW))),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+        )));
+        let out = run(&policy, Bytes::from(LINKED)).await.expect("forwarded");
+        let before = out.snapshot.overhead();
+        let sample = OverheadSample::new(Arc::clone(&out.snapshot));
+        policy.commit_history(out.history.expect("a pending write"), sample.snapshot()).await;
+        assert_eq!(results(&store, session, "x"), 1, "the slow write did run");
+        assert!(out.snapshot.later_request_elapsed() >= WAIT, "{:?}", out.snapshot.later_request_elapsed());
+        assert_eq!(out.snapshot.decide_elapsed(), Duration::ZERO, "the commit is not decide time");
+        assert_eq!(out.snapshot.overhead(), before + out.snapshot.later_request_elapsed(), "counted once");
+        drop(sample);
+        let samples = Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS);
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0] >= (out.snapshot.request_elapsed + WAIT).as_secs_f64(), "{samples:?}");
     }
 
     #[tokio::test]

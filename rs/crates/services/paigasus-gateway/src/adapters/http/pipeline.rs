@@ -162,8 +162,10 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
         },
     };
     // SMA-753 D4: the request is admitted (or has no `[limits]`), so the history write runs now.
-    if let (Some(tp), Some(pending)) = (&state.tool_policy, pending_history.take()) {
-        tp.commit_history(pending).await;
+    // Its time goes into this request's overhead sample: `apply` always sets the sample when it
+    // returns a pending write.
+    if let (Some(tp), Some(pending), Some(sample)) = (&state.tool_policy, pending_history.take(), overhead.as_ref()) {
+        tp.commit_history(pending, sample.snapshot()).await;
     }
     if let Some(guard) = guard.as_mut() {
         guard.set_request_estimate(request_estimate);

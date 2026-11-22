@@ -80,16 +80,30 @@ pub struct PolicySnapshot {
     pub request_elapsed: Duration,
     /// The decider time of this request, summed over every decide call. The gateway records one
     /// overhead sample per request from [`PolicySnapshot::overhead`] (preflight F14).
-    decide_elapsed: DecideElapsed,
+    decide_elapsed: Nanos,
+    /// Request-side time that comes after the snapshot is built, for example the history write
+    /// after the limits admission (SMA-753). It is not in `request_elapsed`, so nothing counts twice.
+    later_request_elapsed: Nanos,
 }
 
-/// A sum of decider time in nanoseconds. A clone copies the current value.
+/// A sum of time in nanoseconds. A clone copies the current value.
 #[derive(Debug, Default)]
-struct DecideElapsed(AtomicU64);
+struct Nanos(AtomicU64);
 
-impl Clone for DecideElapsed {
+impl Nanos {
+    fn add(&self, elapsed: Duration) {
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        self.0.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    fn get(&self) -> Duration {
+        Duration::from_nanos(self.0.load(Ordering::Relaxed))
+    }
+}
+
+impl Clone for Nanos {
     fn clone(&self) -> Self {
-        DecideElapsed(AtomicU64::new(self.0.load(Ordering::Relaxed)))
+        Nanos(AtomicU64::new(self.0.load(Ordering::Relaxed)))
     }
 }
 
@@ -101,26 +115,39 @@ impl PolicySnapshot {
             mode,
             on_unavailable,
             request_elapsed: Duration::ZERO,
-            decide_elapsed: DecideElapsed::default(),
+            decide_elapsed: Nanos::default(),
+            later_request_elapsed: Nanos::default(),
         }
     }
 
     /// Add the time of one decide call (preflight F14). The decider calls it once per hold.
     pub fn add_decide_elapsed(&self, elapsed: Duration) {
-        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-        self.decide_elapsed.0.fetch_add(nanos, Ordering::Relaxed);
+        self.decide_elapsed.add(elapsed);
     }
 
     /// The decider time summed so far.
     #[must_use]
     pub fn decide_elapsed(&self) -> Duration {
-        Duration::from_nanos(self.decide_elapsed.0.load(Ordering::Relaxed))
+        self.decide_elapsed.get()
     }
 
-    /// The overhead of the request so far: the request side plus every decide call (preflight F14).
+    /// Add request-side time that comes after the snapshot is built (SMA-753: the history write
+    /// after the limits admission). Do not add time that `request_elapsed` already holds.
+    pub fn add_request_elapsed(&self, elapsed: Duration) {
+        self.later_request_elapsed.add(elapsed);
+    }
+
+    /// The request-side time added by [`PolicySnapshot::add_request_elapsed`] so far.
+    #[must_use]
+    pub fn later_request_elapsed(&self) -> Duration {
+        self.later_request_elapsed.get()
+    }
+
+    /// The overhead of the request so far: the request side (`request_elapsed` plus the later
+    /// request-side time) plus every decide call (preflight F14).
     #[must_use]
     pub fn overhead(&self) -> Duration {
-        self.request_elapsed + self.decide_elapsed()
+        self.request_elapsed + self.later_request_elapsed() + self.decide_elapsed()
     }
 
     /// Set the request-side elapsed time (preflight F14).
@@ -158,5 +185,18 @@ mod tests {
         assert_eq!(s.decide_elapsed(), Duration::from_millis(5));
         assert_eq!(s.overhead(), Duration::from_millis(12));
         assert_eq!(s.clone().overhead(), Duration::from_millis(12), "a clone keeps the sum");
+    }
+
+    #[test]
+    fn later_request_side_time_adds_to_the_overhead_once() {
+        let s = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Off, OnUnavailable::Open).with_request_elapsed(Duration::from_millis(7));
+        s.add_decide_elapsed(Duration::from_millis(2));
+        s.add_request_elapsed(Duration::from_millis(4));
+        assert_eq!(
+            (s.request_elapsed, s.later_request_elapsed(), s.decide_elapsed()),
+            (Duration::from_millis(7), Duration::from_millis(4), Duration::from_millis(2))
+        );
+        assert_eq!(s.overhead(), Duration::from_millis(13));
+        assert_eq!(s.clone().overhead(), Duration::from_millis(13), "a clone keeps the sum");
     }
 }
