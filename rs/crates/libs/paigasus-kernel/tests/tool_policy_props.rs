@@ -8,7 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use paigasus_kernel::CedarUid;
-use paigasus_kernel::detect::Severity;
+use paigasus_kernel::detect::{HostSet, Severity};
 use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, ToolVerdict, decide, decide_tool};
 use proptest::prelude::*;
 use proptest::sample::{select, subsequence};
@@ -48,6 +48,10 @@ fn atom() -> impl Strategy<Value = String> {
         Just("action in Pgs::Gateway::Action::\"Unregistered\"".to_owned()),
         Just("principal == Pgs::Iam::Principal::\"u1\"".to_owned()),
         Just("context == {}".to_owned()),
+        select(vec![-1i64, 0, 1, 2, 3]).prop_map(|s| format!("context.max_severity >= {s}")),
+        Just("context.max_severity == -1".to_owned()),
+        Just("context.call.hosts.contains(\"a.example\")".to_owned()),
+        Just("context.call.hosts.isEmpty()".to_owned()),
         Just("true".to_owned()),
         Just("false".to_owned()),
     ]
@@ -110,11 +114,22 @@ fn input() -> impl Strategy<Value = ToolInput> {
     ]
 }
 
+/// A subset of the kinds, each with a severity of its own, so that `context.max_severity` varies.
 fn findings() -> impl Strategy<Value = Findings> {
-    subsequence(FINDINGS.to_vec(), 0..=FINDINGS.len()).prop_map(|ks| {
+    let severity = select(vec![Severity::Info, Severity::Low, Severity::Medium, Severity::High]);
+    (subsequence(FINDINGS.to_vec(), 0..=FINDINGS.len()), prop::collection::vec(severity, FINDINGS.len())).prop_map(|(ks, ss)| {
         let mut f = Findings::new();
-        ks.iter().for_each(|k| f.add(k, if *k == "name_collision" { Severity::High } else { Severity::Medium }));
+        ks.iter().zip(ss).for_each(|(k, s)| f.add(k, s));
         f
+    })
+}
+
+/// The hosts of a call: a subset of two hosts, so that `context.call.hosts` varies.
+fn hosts() -> impl Strategy<Value = HostSet> {
+    subsequence(vec!["a.example", "b.example"], 0..=2).prop_map(|hs| {
+        let mut set = HostSet::new();
+        hs.iter().for_each(|h| set.insert(h));
+        set
     })
 }
 
@@ -166,9 +181,9 @@ fn case_strategy() -> impl Strategy<Value = Case> {
         subsequence(CATALOG.to_vec(), 0..=CATALOG.len()),
     );
     let request = (select(NAMES.to_vec()), select(vec!["u1", "u2"]), select(vec!["m1", "m2"]), session(), findings());
-    let call = (input(), select(vec![Declared::Yes, Declared::No, Declared::Unknown]), session(), findings());
+    let call = (input(), select(vec![Declared::Yes, Declared::No, Declared::Unknown]), session(), findings(), hosts());
     (sets, request, call).prop_map(
-        |((floor, tenant, catalog), (name, principal, model, tool_session, request_findings), (input, declared, call_session, call_findings))| {
+        |((floor, tenant, catalog), (name, principal, model, tool_session, request_findings), (input, declared, call_session, call_findings, call_hosts))| {
             let floor = render("f", &floor);
             let tenant = render("t", &tenant);
             let catalog: Vec<String> = catalog.into_iter().map(str::to_owned).collect();
@@ -182,7 +197,7 @@ fn case_strategy() -> impl Strategy<Value = Case> {
                 facts: facts(principal, model, tool_session),
                 request_findings,
                 policies,
-                call: ToolInvocation::new(name, input, declared),
+                call: ToolInvocation::new(name, input, declared).with_hosts(call_hosts),
                 facts_with_session: facts(principal, model, call_session),
                 call_findings,
             }

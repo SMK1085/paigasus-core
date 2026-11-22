@@ -21,3 +21,21 @@ pub use types::{
     CallSubject, DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Declared, Evidence, Finding, INJECTION_MARKERS, INVALID_ARGS, Location, NAME_COLLISION, NO_SEVERITY, SECRET_IN_ARGS, Severity,
     ToolInput, UNDECLARED_TOOL, UNPARSED_ARGUMENTS, UNSEEN_HOST, detector_error,
 };
+
+/// Kinds that the response side can give with no request screen (§ 6.8.0, D27). Every other kind
+/// is screen-dependent: `unseen_host`, `injection_markers`, `detector_error`, and every kind of
+/// SMA-856 and SMA-857.
+pub const SCREEN_INDEPENDENT_KINDS: &[&str] = &[NAME_COLLISION, UNPARSED_ARGUMENTS, UNDECLARED_TOOL, INVALID_ARGS, SECRET_IN_ARGS];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_screen_independent_kinds() {
+        assert_eq!(SCREEN_INDEPENDENT_KINDS, ["name_collision", "unparsed_arguments", "undeclared_tool", "invalid_args", "secret_in_args"]);
+        for dependent in [UNSEEN_HOST, INJECTION_MARKERS, DETECTOR_ERROR] {
+            assert!(!SCREEN_INDEPENDENT_KINDS.contains(&dependent), "{dependent}");
+        }
+    }
+}
