@@ -146,7 +146,10 @@ fn update(e_tag: &str) -> PutMode {
     })
 }
 
-/// Run the boot probe. `endpoint` is the config endpoint, or `the AWS default endpoint` when no
+/// The endpoint name in a probe error when the config sets no endpoint.
+pub const AWS_DEFAULT_ENDPOINT: &str = "the AWS default endpoint";
+
+/// Run the boot probe. `endpoint` is the config endpoint, or `AWS_DEFAULT_ENDPOINT` when no
 /// endpoint is set. A failure of steps 1 to 6 is an error. Step 7 never fails the probe.
 pub async fn run(store: &dyn ObjectStore, prefix: &KeyPrefix, endpoint: &str, bucket: &str) -> Result<ProbeReport, ProbeError> {
     let key = probe_path(prefix, Uuid::new_v4());
@@ -431,5 +434,14 @@ mod tests {
             assert!(text.contains(ENDPOINT) && text.contains(BUCKET), "{text}");
             assert!(!text.contains("_probe") && !text.contains("mem/"), "no key: {text}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_aws_default_endpoint_reads_well_in_the_boot_error() {
+        let store = ScriptedStore::new(EtagMode::Counter);
+        store.fault_put(1, Fault::Fail(generic_status(503)));
+        let e = run(&store, &prefix(), AWS_DEFAULT_ENDPOINT, BUCKET).await.unwrap_err();
+        let text = e.to_string();
+        assert!(text.starts_with(&format!("The memory store at the AWS default endpoint, bucket {BUCKET},")), "{text}");
     }
 }

@@ -11,7 +11,7 @@ use sea_orm::DatabaseConnection;
 
 use crate::adapters::memory_s3::S3MemoryStore;
 use crate::adapters::memory_s3::client::{ClientError, build_store};
-use crate::adapters::memory_s3::probe::{self, ProbeError};
+use crate::adapters::memory_s3::probe::{self, AWS_DEFAULT_ENDPOINT, ProbeError};
 use crate::adapters::persistence::memory::PgMemoryStore;
 use crate::config::{MemoryBackend, MemoryConfig};
 
@@ -64,7 +64,7 @@ impl MemoryCommit {
                 let s3 = cfg.s3.as_ref().ok_or(MemoryBootError::MissingS3Section)?;
                 let store = build_store(s3, env)?;
                 let prefix = s3.prefix();
-                let report = probe::run(store.as_ref(), &prefix, s3.endpoint.as_deref().unwrap_or("AWS"), &s3.bucket).await?;
+                let report = probe::run(store.as_ref(), &prefix, s3.endpoint.as_deref().unwrap_or(AWS_DEFAULT_ENDPOINT), &s3.bucket).await?;
                 tracing::info!(
                     bucket = %s3.bucket,
                     file_and_dir_of_one_name = report.file_and_dir_of_one_name,
