@@ -655,21 +655,26 @@ pub async fn a_relink_between_lookup_and_write_marks_the_original_event(h: &impl
     store.reserve(&second.reserve(vec![b.clone()], NOW + 1, None)).await.unwrap();
     store.settle(&second.settle(vec![item(b.id, EventVerdict::Allow, "read", Some("call-1"))], NOW + 1)).await.unwrap();
 
-    let result = |event_id| ResultEvent {
+    // Each result takes its tool from the `CallLink` of its own event, not from a constant.
+    let result = |l: &CallLink| ResultEvent {
         id: fresh_id(),
         call_id: "call-1".into(),
-        tool: "send".into(),
-        event_id,
+        tool: l.tool.clone(),
+        event_id: l.event_id,
     };
-    let reply = store.write(&first.write(None, vec![result(linked.event_id)], NOW + 2)).await.unwrap();
+    let reply = store.write(&first.write(None, vec![result(&linked)], NOW + 2)).await.unwrap();
     assert_eq!(reply.written, 1);
     // The new event is not marked: its link still reads `result_written` false.
     let after = store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap();
     assert_eq!(after.calls, vec![Some(link(&second, "read", b.id, false))]);
+    let new_link = after.calls[0].clone().expect("a link");
     // The original event is marked: a second result for it writes nothing; the new event's first does.
-    let again = store.write(&first.write(None, vec![result(a.id)], NOW + 3)).await.unwrap();
-    let fresh = store.write(&second.write(None, vec![result(b.id)], NOW + 3)).await.unwrap();
+    let again = store.write(&first.write(None, vec![result(&linked)], NOW + 3)).await.unwrap();
+    let fresh = store.write(&second.write(None, vec![result(&new_link)], NOW + 3)).await.unwrap();
     assert_eq!((again.written, fresh.written), (0, 1));
+    // The result of event B is in the read history of its tool.
+    let read_results = principal_events(h, &first, "read").await.into_iter().filter(|e| e.kind == EventKind::Result).count();
+    assert_eq!(read_results, 1);
 }
 
 pub async fn concurrent_reserves_all_land(h: &impl Harness) {

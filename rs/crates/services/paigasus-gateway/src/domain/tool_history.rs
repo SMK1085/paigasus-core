@@ -279,6 +279,10 @@ pub struct SessionLink {
 }
 
 /// The linking rule of D4. `new_session` is used when no id matches.
+///
+/// A live link can come back with no session state row in `reply.sessions`: the session row can
+/// expire before the link. The link still names the session, so the request joins it, and the
+/// turn is 1 because no state holds a turn to count on.
 pub fn link_session(req: &LookupRequest, reply: &LookupReply, new_session: Uuid) -> Result<SessionLink, HistoryStoreError> {
     check_len("calls", req.call_ids.len(), reply.calls.len())?;
     check_len("results", req.result_call_ids.len(), reply.results.len())?;
@@ -426,7 +430,10 @@ mod tests {
     fn a_duplicate_unlinked_result_counts_once_per_entry() {
         let mut r = reply();
         r.results = vec![None, None];
-        let l = go(&r);
+        // The request names the same id twice, as a client can.
+        let mut q = req();
+        q.result_call_ids = vec!["x".into(), "x".into()];
+        let l = link_session(&q, &r, u(7)).unwrap();
         assert_eq!(l.forged_results, 2);
         assert!(l.results.is_empty());
     }
