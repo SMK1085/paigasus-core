@@ -50,7 +50,12 @@ fn ti(decider: Arc<dyn ToolCallDecider>) -> Option<Arc<ToolInterception>> {
 }
 
 fn ti_with(limits: Limits, decider: Arc<dyn ToolCallDecider>) -> Option<Arc<ToolInterception>> {
-    Some(Arc::new(ToolInterception { limits, decider, recorder: None }))
+    Some(Arc::new(ToolInterception {
+        limits,
+        decider,
+        recorder: None,
+        history: None,
+    }))
 }
 
 /// A choice-0 tool-call delta. Every chunk carries `"object":"chat.completion.chunk"` (the `object` rule, spec § 11).

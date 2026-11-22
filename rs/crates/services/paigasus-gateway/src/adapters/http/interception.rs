@@ -14,6 +14,9 @@
 //!
 //! On a client disconnect mid-hold, billing follows what the relay had read from the upstream so
 //! far, read-ahead included, exactly as in the plain relay (SMA-730 D3).
+//!
+//! SMA-753: the report site settles the reserved events of the session (spec D8), because only it
+//! knows what the gateway did. The settle runs on the tracker of `ToolHistory`, not in the relay.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -24,6 +27,7 @@ use std::time::Instant;
 use axum::body::Bytes;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
+use paigasus_gateway_core::decision_log::ReportedCall;
 use paigasus_gateway_core::{
     Action, Basis, BlockCode, DecideFuture, DecidedCall, DeciderError, Decision, DecisionContext, Format, HoldKey, Interceptor, Limits, Metric, OnFailure, RequestEntry, ToolCall, ToolCallDecider,
     ToolTurn, parse_body, report_header,
@@ -35,6 +39,7 @@ use crate::adapters::http::usage::StreamUsage;
 use crate::adapters::openai::OpenAiByteStream;
 use crate::application::charge_guard::ChargeGuard;
 use crate::application::decision_log::DecisionRecorder;
+use crate::application::tool_history::ToolHistory;
 
 /// A response chunk. The alias keeps the body type `Bytes` out of a function parameter list: the
 /// `repo:http-extractor-envelope` gate bans `Bytes` as a REQUEST extractor there, and this is a
@@ -47,6 +52,21 @@ pub struct ToolInterception {
     pub decider: Arc<dyn ToolCallDecider>,
     /// The shared decision recorder (SMA-755, P-8). `None` with the tool policy off: nothing is recorded.
     pub recorder: Option<Arc<DecisionRecorder>>,
+    /// The tool history (SMA-753). `None`: the report site settles nothing.
+    pub history: Option<Arc<ToolHistory>>,
+}
+
+impl ToolInterception {
+    /// Settle the report entries of one batch (spec D8), when the request has a session. A store
+    /// error is counted inside `ToolHistory` and changes nothing here (PR 1).
+    fn settle(&self, ctx: &DecisionContext, reported: &[ReportedCall]) {
+        if let Some(history) = &self.history
+            && ctx.session.is_some()
+            && !reported.is_empty()
+        {
+            history.settle(ctx, reported);
+        }
+    }
 }
 
 /// Map one core metric to the registered names (P-9).
@@ -150,6 +170,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
             recorder.record_response(&ctx, r);
         }
     }
+    ti.settle(&ctx, &reported);
     let entries: Vec<_> = reported.into_iter().map(|r| r.entry).collect();
     let report = report_header(&entries, requests);
     let rewritten = calls.apply(&decisions).map(Bytes::from);
@@ -184,6 +205,8 @@ enum Event {
 
 impl Relay {
     fn apply(&mut self, actions: Vec<Action>) {
+        // The report entries of this call, settled once after the loop (SMA-753).
+        let mut reported = Vec::new();
         for a in actions {
             match a {
                 Action::Emit(b) => self.out.push_back(b),
@@ -196,9 +219,13 @@ impl Relay {
                     if let Some(recorder) = &self.ti.recorder {
                         recorder.record_response(&self.ctx, &r);
                     }
+                    if self.ti.history.is_some() {
+                        reported.push(*r);
+                    }
                 }
             }
         }
+        self.ti.settle(&self.ctx, &reported);
         // A hold that is no longer deciding (a timeout ruled on it) needs no answer. Drop
         // its future so the next hold is not stuck behind it.
         if let Some((hold, _)) = &self.pending
@@ -457,7 +484,12 @@ mod tests {
     }
 
     async fn run(decider: Arc<dyn ToolCallDecider>, limits: Limits, upstream: OpenAiByteStream) -> String {
-        let ti = Arc::new(ToolInterception { limits, decider, recorder: None });
+        let ti = Arc::new(ToolInterception {
+            limits,
+            decider,
+            recorder: None,
+            history: None,
+        });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         run_ctx(ti, ctx, upstream).await
     }
@@ -532,6 +564,7 @@ mod tests {
             limits: Limits::defaults(),
             decider: Arc::new(paigasus_gateway_core::AllowAll),
             recorder: None,
+            history: None,
         });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
@@ -629,6 +662,7 @@ mod tests {
             limits: Limits::defaults(),
             decider: Arc::new(CountingCedar(Arc::clone(&calls))),
             recorder: None,
+            history: None,
         });
         let s = relay(
             Format::AnthropicMessages,
@@ -659,6 +693,7 @@ mod tests {
             limits: Limits::defaults(),
             decider: Arc::new(paigasus_gateway_core::AllowAll),
             recorder: None,
+            history: None,
         });
         let ctx = Arc::new(DecisionContext::new("principal", "scope", None));
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
@@ -705,6 +740,7 @@ mod tests {
             limits,
             decider,
             recorder: Some(Arc::clone(rec)),
+            history: None,
         })
     }
 
@@ -932,5 +968,174 @@ mod tests {
                 assert!(records[0].arguments.is_none(), "the log does not want it");
             }
         }
+    }
+
+    // ---- the settle (SMA-753) ------------------------------------------------------------------
+
+    use crate::adapters::history::memory::MemorySessionStore;
+    use crate::application::tool_history::ToolHistory;
+    use crate::application::tool_policy::CedarDecider;
+    use crate::domain::tool_history::{EventVerdict, LookupRequest, Scope, SessionStore, StoredEvent};
+
+    /// A memory store and a tool history over it.
+    fn memory_history() -> (Arc<MemorySessionStore>, Arc<ToolHistory>) {
+        let store = Arc::new(MemorySessionStore::new());
+        let h = Arc::new(ToolHistory::new(store.clone(), Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(1)));
+        (store, h)
+    }
+
+    /// The tool interception with the Cedar decider and the history `h`.
+    fn ti_with_history(limits: Limits, decider: Arc<dyn ToolCallDecider>, h: &Arc<ToolHistory>) -> Arc<ToolInterception> {
+        Arc::new(ToolInterception {
+            limits,
+            decider,
+            recorder: None,
+            history: Some(Arc::clone(h)),
+        })
+    }
+
+    fn cedar_with(h: &Arc<ToolHistory>) -> Arc<CedarDecider> {
+        Arc::new(CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(Arc::clone(h)))
+    }
+
+    /// The Cedar context with a new session of the memory history.
+    async fn session_ctx(h: &ToolHistory) -> Arc<DecisionContext> {
+        let base = cedar_ctx(paigasus_gateway_core::TenantMode::Enforce).await;
+        let linked = h.link(PRINCIPAL, testing::ORG_A, None, &ToolTurn::Unavailable("unit test")).await.expect("a session");
+        Arc::new(DecisionContext::clone(&base).with_session(linked.session))
+    }
+
+    /// Wait for every settle and append task.
+    async fn drain(h: &ToolHistory) {
+        h.tasks().close();
+        h.tasks().wait().await;
+    }
+
+    fn session_events(store: &MemorySessionStore, ctx: &DecisionContext, tool: &str) -> Vec<StoredEvent> {
+        let session = ctx.session.as_ref().expect("a session");
+        store.events(testing::ORG_A, Scope::Session, &session.session_id.to_string(), tool)
+    }
+
+    /// The `c:` link of a client call id: `(session, event id)`.
+    async fn call_link(store: &MemorySessionStore, call_id: &str) -> Option<(uuid::Uuid, uuid::Uuid)> {
+        let req = LookupRequest {
+            org: testing::ORG_A,
+            principal: PRINCIPAL.to_owned(),
+            call_ids: vec![call_id.to_owned()],
+            result_call_ids: Vec::new(),
+            refs: Vec::new(),
+            now_ms: 0,
+        };
+        let reply = store.lookup(&req).await.expect("lookup");
+        reply.calls[0].as_ref().map(|l| (l.session, l.event_id))
+    }
+
+    fn chat_body(names: &[&str]) -> String {
+        let calls: Vec<serde_json::Value> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| serde_json::json!({"id": format!("c{i}"), "type": "function", "function": {"name": n, "arguments": "{}"}}))
+            .collect();
+        serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": calls}, "finish_reason": "tool_calls"}]}).to_string()
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_call_is_settled_allow_with_its_call_link() {
+        let (store, h) = memory_history();
+        let ctx = session_ctx(&h).await;
+        let ti = ti_with_history(Limits::defaults(), cedar_with(&h), &h);
+        let text = run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO)).await;
+        assert!(text.contains(r#""name":"ok","input":{}"#), "{text}");
+        drain(&h).await;
+        let events = session_events(&store, &ctx, "ok");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].verdict, EventVerdict::Allow);
+        let session = ctx.session.as_ref().expect("a session").session_id;
+        assert_eq!(call_link(&store, "toolu_0").await, Some((session, events[0].id)));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_call_is_settled_deny_without_a_call_link() {
+        let (store, h) = memory_history();
+        let ctx = session_ctx(&h).await;
+        let ti = ti_with_history(Limits::defaults(), cedar_with(&h), &h);
+        let text = run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["rm"], Duration::ZERO)).await;
+        assert!(text.contains(" ref="), "the call is blocked: {text}");
+        drain(&h).await;
+        let events = session_events(&store, &ctx, "rm");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].verdict, EventVerdict::Deny);
+        assert_eq!(call_link(&store, "toolu_0").await, None);
+    }
+
+    #[tokio::test]
+    async fn the_body_path_settles_like_the_stream_path() {
+        let (store, h) = memory_history();
+        let ctx = session_ctx(&h).await;
+        let ti = ti_with_history(Limits::defaults(), cedar_with(&h), &h);
+        let body = chat_body(&["ok", "rm"]);
+        let out = intercept_body(&ti, ti.limits, Format::OpenAiChat, Arc::clone(&ctx), Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]).await;
+        assert!(matches!(out, BodyOutcome::Forward { rewritten: Some(_), .. }));
+        drain(&h).await;
+        let ok = session_events(&store, &ctx, "ok");
+        let rm = session_events(&store, &ctx, "rm");
+        assert_eq!((ok.len(), rm.len()), (1, 1), "{ok:?} {rm:?}");
+        assert_eq!((ok[0].verdict, rm[0].verdict), (EventVerdict::Allow, EventVerdict::Deny));
+        let session = ctx.session.as_ref().expect("a session").session_id;
+        assert_eq!(call_link(&store, "c0").await, Some((session, ok[0].id)));
+        assert_eq!(call_link(&store, "c1").await, None);
+    }
+
+    /// The Cedar decider runs to its end (so the reserve runs), then this waits past the decide timeout.
+    struct CedarThenSleep(Arc<CedarDecider>);
+
+    impl ToolCallDecider for CedarThenSleep {
+        fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
+            let inner = self.0.decide(ctx, turn, calls);
+            Box::pin(async move {
+                let out = inner.await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                out
+            })
+        }
+    }
+
+    /// Ruling F3: the reserve left a pending event, and the report site appends an allowed one.
+    #[tokio::test]
+    async fn a_timed_out_hold_under_allow_appends_and_keeps_the_pending_event() {
+        let (store, h) = memory_history();
+        let ctx = session_ctx(&h).await;
+        let limits = Limits {
+            on_failure: OnFailure::Allow,
+            decide_timeout: Duration::from_millis(200),
+            ..Limits::defaults()
+        };
+        let ti = ti_with_history(limits, Arc::new(CedarThenSleep(cedar_with(&h))), &h);
+        let text = tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO)))
+            .await
+            .expect("the timeout ends the hold");
+        assert!(text.contains(r#""name":"ok","input":{}"#), "allowed on failure: {text}");
+        drain(&h).await;
+        let mut verdicts: Vec<_> = session_events(&store, &ctx, "ok").iter().map(|e| e.verdict.as_str()).collect();
+        verdicts.sort_unstable();
+        assert_eq!(verdicts, ["allow", "pending"]);
+        let appended = session_events(&store, &ctx, "ok").into_iter().find(|e| e.verdict == EventVerdict::Allow).expect("the append");
+        let session = ctx.session.as_ref().expect("a session").session_id;
+        assert_eq!(call_link(&store, "toolu_0").await, Some((session, appended.id)));
+    }
+
+    #[tokio::test]
+    async fn without_a_session_nothing_is_settled() {
+        let (store, h) = memory_history();
+        let ctx = cedar_ctx(paigasus_gateway_core::TenantMode::Enforce).await;
+        let ti = ti_with_history(Limits::defaults(), cedar_with(&h), &h);
+        let _ = run_ctx(Arc::clone(&ti), ctx.clone(), tool_blocks(&["ok"], Duration::ZERO)).await;
+        let body = chat_body(&["ok"]);
+        let _ = intercept_body(&ti, ti.limits, Format::OpenAiChat, ctx, Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]).await;
+        assert!(h.tasks().is_empty(), "no settle task");
+        drain(&h).await;
+        assert!(store.events(testing::ORG_A, Scope::Principal, PRINCIPAL, "ok").is_empty());
+        assert_eq!(call_link(&store, "toolu_0").await, None);
+        assert_eq!(call_link(&store, "c0").await, None);
     }
 }

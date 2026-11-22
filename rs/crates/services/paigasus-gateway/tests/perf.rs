@@ -136,6 +136,7 @@ async fn p99_policy_overhead_with_50_policies() {
         limits: CoreLimits::defaults(),
         decider: Arc::new(CedarDecider::new(Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()))),
         recorder: None,
+        history: None,
     }));
     let mock = MockOpenAi::spawn_json(StatusCode::OK, response_body()).await;
     let app = app_with_tool_policy(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, ti, tp);

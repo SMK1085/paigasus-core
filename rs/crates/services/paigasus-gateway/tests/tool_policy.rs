@@ -182,6 +182,7 @@ fn ti(decider: Arc<dyn ToolCallDecider>) -> Option<Arc<ToolInterception>> {
         limits: CoreLimits::defaults(),
         decider,
         recorder: None,
+        history: None,
     }))
 }
 

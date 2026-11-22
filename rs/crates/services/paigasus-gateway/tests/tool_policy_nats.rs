@@ -240,6 +240,7 @@ async fn nats_down_never_blocks_a_request() {
         limits: CoreLimits::defaults(),
         decider: Arc::new(CedarDecider::new(Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()))),
         recorder: None,
+        history: None,
     }));
     let app = app_with_tool_policy(
         ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN),

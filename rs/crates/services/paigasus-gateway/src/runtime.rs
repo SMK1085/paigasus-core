@@ -258,6 +258,8 @@ pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Opti
             limits: config.tool_interception.limits(),
             decider: Arc::clone(&rt.decider),
             recorder: rt.recorder.clone(),
+            // SMA-753: wired with the history runtime in a later task.
+            history: None,
         })
     })
 }
