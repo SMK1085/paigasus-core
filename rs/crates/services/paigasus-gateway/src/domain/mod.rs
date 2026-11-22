@@ -5,6 +5,7 @@
 //! the chat handler to log request metadata (never the prompt/response body or any other PII).
 
 pub mod decision_log;
+pub mod detectors;
 pub mod limits;
 pub mod tool_policy;
 

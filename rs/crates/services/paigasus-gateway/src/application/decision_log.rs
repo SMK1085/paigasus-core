@@ -317,6 +317,71 @@ mod tests {
         assert!(!text.contains(CANARY), "{text}");
     }
 
+    /// SMA-855 D37 (carried from Task 11): a finding with a bad kind from a detector never reaches the
+    /// line or a metric label. The pipeline replaces it before any record is built.
+    #[tokio::test]
+    async fn a_bad_kind_from_a_detector_never_reaches_the_line_or_a_label() {
+        use crate::adapters::detectors::BuiltInDetector;
+        use crate::application::detectors::DetectorPipeline;
+        use crate::application::tool_policy::testing::FixedDetector;
+        use crate::application::tool_policy::{FINDING_KINDS, finding_label};
+        use crate::domain::detectors::{DetectBatch, Detector, Side, Subject};
+        use paigasus_gateway_core::decision_log::{CedarDetail, FindingRecord};
+        use paigasus_kernel::detect::{Finding, Severity, ToolInput};
+        use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, ToolInvocation};
+        const CANARY: &str = "canary-3b7e";
+        let bad = [
+            format!("a,{CANARY}"),
+            format!("a:{CANARY}"),
+            format!("a\n{CANARY}=x"),
+            format!("sk_live_{CANARY}"),
+            format!("Bad-{CANARY}"),
+        ];
+        let hook: Arc<dyn Detector> = Arc::new(FixedDetector("hook_a", bad.iter().map(|k| Finding::new("hook_a", k.as_str(), Severity::Medium, "v1")).collect()));
+        let pipeline = DetectorPipeline::new(Arc::new(BuiltInDetector::new(65536)), vec![hook], None, std::time::Duration::from_millis(500));
+        let subject = Subject::Call {
+            index: 0,
+            invocation: ToolInvocation::new("t", ToolInput::Json("{}".into()), Declared::Yes),
+            schema: None,
+        };
+        let out = pipeline
+            .run(
+                DetectBatch::new(Side::Response, None, None, vec![subject], None),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .await;
+        let found = &out.findings[0];
+        for f in found {
+            assert!(FINDING_KINDS.contains(&finding_label(&f.kind)), "{f:?}");
+            assert!(!f.kind.contains(CANARY) && !f.detector.contains(CANARY), "{f:?}");
+        }
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let cedar = CedarDetail::new(
+            Effect::Deny,
+            vec![],
+            vec![],
+            false,
+            found.iter().map(FindingRecord::from_finding).collect(),
+            Some(Severity::High),
+            Declared::Yes,
+            ActionGroup::Catalog,
+            std::time::Duration::ZERO,
+        );
+        let call = ReportedCall::new(
+            entry_of(ReportDecision::Block, Some(Basis::Decider), Some(BlockCode::Policy), Some(true)),
+            None,
+            Some(Arc::new(DecisionDetail::new(RecordBasis::Policy, Some(cedar), None))),
+        );
+        rec.record_response(&ctx(&scope(ORG_A)), &call);
+        let text = logs.text();
+        let lines = decision_lines(&text);
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(has_field(&lines[0], "findings", "detector_error:high"), "{text}");
+        assert!(!text.contains(CANARY), "{text}");
+    }
+
     #[test]
     fn a_line_without_findings_has_an_empty_findings_field() {
         let (logs, _guard) = capture_logs_at(tracing::Level::INFO);

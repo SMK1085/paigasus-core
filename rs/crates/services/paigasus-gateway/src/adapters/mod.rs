@@ -6,6 +6,7 @@
 //! writes the tool decision records to a Redis stream (SMA-755).
 
 pub mod decision_log;
+pub mod detectors;
 pub mod http;
 pub mod iam;
 pub mod limits;

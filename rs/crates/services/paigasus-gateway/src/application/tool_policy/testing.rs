@@ -18,8 +18,10 @@ use super::{CacheSettings, PolicyCache, RequestToolPolicy};
 use crate::application::decision_log::DecisionRecorder;
 use crate::config::ToolPolicySettings;
 use crate::domain::decision_log::{MemoryDecisionLog, OsEntropy};
+use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput};
 use crate::domain::limits::SystemClock;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
+use paigasus_kernel::detect::Finding;
 
 pub(crate) const ORG_A: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
 pub(crate) const ORG_A_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
@@ -229,5 +231,83 @@ impl Snap {
             Some(DebugValue::Histogram(h)) => h.iter().map(|v| v.into_inner()).collect(),
             _ => Vec::new(),
         }
+    }
+}
+
+/// The findings per subject that a test detector returns.
+type Found = Result<Vec<Vec<Finding>>, DetectorError>;
+
+/// A detector that gives the same findings for every subject (SMA-855 Task 18).
+pub(crate) struct FixedDetector(pub(crate) &'static str, pub(crate) Vec<Finding>);
+
+#[async_trait]
+impl Detector for FixedDetector {
+    fn name(&self) -> &str {
+        self.0
+    }
+    async fn detect(&self, batch: Arc<DetectBatch>) -> Found {
+        Ok(vec![self.1.clone(); batch.subjects.len()])
+    }
+}
+
+/// A detector that always fails.
+pub(crate) struct ErrDetector(pub(crate) &'static str);
+
+#[async_trait]
+impl Detector for ErrDetector {
+    fn name(&self) -> &str {
+        self.0
+    }
+    async fn detect(&self, _batch: Arc<DetectBatch>) -> Found {
+        Err(DetectorError::Failed)
+    }
+}
+
+/// A detector that sleeps, then gives no findings.
+pub(crate) struct SlowDetector(pub(crate) &'static str, pub(crate) Duration);
+
+#[async_trait]
+impl Detector for SlowDetector {
+    fn name(&self) -> &str {
+        self.0
+    }
+    async fn detect(&self, batch: Arc<DetectBatch>) -> Found {
+        tokio::time::sleep(self.1).await;
+        Ok(vec![Vec::new(); batch.subjects.len()])
+    }
+}
+
+/// A detector that keeps the batches it gets, and gives the same findings for every subject.
+pub(crate) struct RecordingDetector(pub(crate) &'static str, pub(crate) Vec<Finding>, pub(crate) Mutex<Vec<Arc<DetectBatch>>>);
+
+impl RecordingDetector {
+    pub(crate) fn new(name: &'static str, findings: Vec<Finding>) -> Arc<Self> {
+        Arc::new(Self(name, findings, Mutex::new(Vec::new())))
+    }
+
+    /// The batches that the detector got, in order.
+    pub(crate) fn batches(&self) -> Vec<Arc<DetectBatch>> {
+        self.2.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Detector for RecordingDetector {
+    fn name(&self) -> &str {
+        self.0
+    }
+    async fn detect(&self, batch: Arc<DetectBatch>) -> Found {
+        let n = batch.subjects.len();
+        self.2.lock().unwrap().push(batch);
+        Ok(vec![self.1.clone(); n])
+    }
+}
+
+/// A built-in stage that panics with the canary as its payload.
+pub(crate) struct PanicStage(pub(crate) &'static str);
+
+impl BuiltInStage for PanicStage {
+    fn run(&self, _batch: &DetectBatch) -> PipelineOutput {
+        std::panic::panic_any(self.0.to_owned())
     }
 }
