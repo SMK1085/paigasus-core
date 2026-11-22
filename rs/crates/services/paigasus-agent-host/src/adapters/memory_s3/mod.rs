@@ -4,4 +4,6 @@
 //!
 //! The adapter keeps each memory file as one object. The object key comes from `keys`.
 
+pub mod envelope;
+pub mod errors;
 pub mod keys;
