@@ -157,11 +157,15 @@ pub enum Seen {
 
 /// The outcome of a `Put` whose request failed (spec §6.5). `uncertain` is true when the error
 /// class is `timeout` or `transport`: the server can still commit the write after the client
-/// gave up, so an absent object does not prove that the write failed.
-pub fn put_outcome(refused: bool, uncertain: bool, cause: MemoryApplyError, seen: Seen, path: &MemoryPath) -> Outcome {
+/// gave up, so an absent object does not prove that the write failed. `update` is true when the
+/// `Put` expects a version (an `If-Match` `PUT`). Such a `PUT` can still land on the object that
+/// the check `GET` found, so another writer's object does not prove that the update failed
+/// (ruling F3). A create-only `PUT` (`If-None-Match`) cannot land on an object that exists.
+pub fn put_outcome(refused: bool, uncertain: bool, update: bool, cause: MemoryApplyError, seen: Seen, path: &MemoryPath) -> Outcome {
     match seen {
         Seen::Mine => Outcome::Confirmed,
         Seen::Absent if uncertain => Outcome::Unknown(cause),
+        Seen::Other if uncertain && update => Outcome::Unknown(cause),
         Seen::Other | Seen::Absent if refused => Outcome::Failed(MemoryApplyError::Conflict { path: path.clone() }),
         Seen::Other | Seen::Absent => Outcome::Failed(cause),
         Seen::Foreign | Seen::ReadFailed => Outcome::Unknown(cause),
@@ -408,16 +412,19 @@ mod tests {
     fn the_put_outcome_rows() {
         let path = p("/a");
         let cause = store("c");
-        let o = |refused, seen| put_outcome(refused, false, cause.clone(), seen, &path);
-        assert_eq!(o(true, Seen::Mine), Outcome::Confirmed);
-        assert_eq!(o(false, Seen::Mine), Outcome::Confirmed);
-        for seen in [Seen::Other, Seen::Absent] {
-            assert_eq!(o(true, seen), Outcome::Failed(conflict("/a")));
-            assert_eq!(o(false, seen), Outcome::Failed(cause.clone()));
-        }
-        for seen in [Seen::Foreign, Seen::ReadFailed] {
-            assert_eq!(o(true, seen), Outcome::Unknown(cause.clone()));
-            assert_eq!(o(false, seen), Outcome::Unknown(cause.clone()));
+        // A definite error gives the same rows for a create and an update.
+        for update in [false, true] {
+            let o = |refused, seen| put_outcome(refused, false, update, cause.clone(), seen, &path);
+            assert_eq!(o(true, Seen::Mine), Outcome::Confirmed);
+            assert_eq!(o(false, Seen::Mine), Outcome::Confirmed);
+            for seen in [Seen::Other, Seen::Absent] {
+                assert_eq!(o(true, seen), Outcome::Failed(conflict("/a")));
+                assert_eq!(o(false, seen), Outcome::Failed(cause.clone()));
+            }
+            for seen in [Seen::Foreign, Seen::ReadFailed] {
+                assert_eq!(o(true, seen), Outcome::Unknown(cause.clone()));
+                assert_eq!(o(false, seen), Outcome::Unknown(cause.clone()));
+            }
         }
     }
 
@@ -426,10 +433,21 @@ mod tests {
         // Ruling F1: after a timeout or a transport error the server can still commit.
         let path = p("/a");
         let cause = store("c");
-        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Absent, &path), Outcome::Unknown(cause.clone()));
-        // A write ID of this write is still proof, and another writer's object is still a failure.
-        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Mine, &path), Outcome::Confirmed);
-        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Other, &path), Outcome::Failed(cause));
+        for update in [false, true] {
+            assert_eq!(put_outcome(false, true, update, cause.clone(), Seen::Absent, &path), Outcome::Unknown(cause.clone()));
+            // A write ID of this write is still proof.
+            assert_eq!(put_outcome(false, true, update, cause.clone(), Seen::Mine, &path), Outcome::Confirmed);
+        }
+        // A create-only PUT cannot land on another writer's object, so that object is a failure.
+        assert_eq!(put_outcome(false, true, false, cause.clone(), Seen::Other, &path), Outcome::Failed(cause));
+    }
+
+    #[test]
+    fn an_uncertain_update_that_finds_another_object_is_unknown() {
+        // Ruling F3: an If-Match PUT can still land on the object that the check GET found.
+        let path = p("/a");
+        let cause = store("c");
+        assert_eq!(put_outcome(false, true, true, cause.clone(), Seen::Other, &path), Outcome::Unknown(cause));
     }
 
     #[test]

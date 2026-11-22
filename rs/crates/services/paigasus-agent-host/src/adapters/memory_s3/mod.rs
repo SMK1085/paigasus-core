@@ -217,7 +217,9 @@ impl S3MemoryStore {
                     Ok(_) => Outcome::Confirmed,
                     Err(e) => {
                         let cause = MemoryApplyError::Store(store_text("the memory write failed", &e));
-                        put_outcome(is_refusal(&e), is_uncertain(&e), cause, self.seen_after_put(&key, &id).await, path)
+                        let update = matches!(expected, Expected::Version(_));
+                        let seen = self.seen_after_put(&key, &id).await;
+                        put_outcome(is_refusal(&e), is_uncertain(&e), update, cause, seen, path)
                     }
                 }
             }
@@ -931,6 +933,20 @@ mod tests {
         let (applied, failed_at, cause) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
         assert_eq!((applied, failed_at), (0, mp("/a")));
         assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_update_that_finds_the_old_object_is_partial() {
+        // Ruling F3: the If-Match PUT can still land after the check GET found the old object.
+        let (scripted, store) = hashed();
+        put(&scripted, &scope(), "/a", "old");
+        let v = version(&store, "/a").await;
+        scripted.fault_put(1, Fault::Fail(timeout_error()));
+        let set = set_of(&scope(), vec![put_change("/a", "new", Expected::Version(v))]);
+        let (applied, failed_at, cause) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+        assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
+        assert_eq!(content(&store, "/a").await.as_deref(), Some("old"));
     }
 
     #[tokio::test]

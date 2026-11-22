@@ -264,7 +264,9 @@ starts only after every `Put` succeeded.
   - It holds another write ID or is absent, and the error was not a refusal: the `Put` **failed**,
     and the store did not write it. **Ruling F1:** when the class is `timeout` or `transport` and
     the object is absent, the outcome is **unknown**, not failed. The server can commit the write
-    after the client gave up. The result is `Partial { applied: 0 }`.
+    after the client gave up. The result is `Partial { applied: 0 }`. **Ruling F3:** an update
+    (`Put { Version(v) }`) of class `timeout` or `transport` whose object holds another write ID is
+    also **unknown**, because its `If-Match` `PUT` can still land on that object.
   - The `GET` itself fails, or the object is foreign: the outcome is **unknown**.
 - `Delete { v }`: `HEAD` the key. Absent, or an ETag that is not `v`, is `Conflict`. Else `DELETE`
   (a single-object `DELETE`; §6.8 turns off bulk delete). A `DELETE` error is checked with a
