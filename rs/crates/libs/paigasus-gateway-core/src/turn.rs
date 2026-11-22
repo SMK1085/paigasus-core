@@ -455,6 +455,9 @@ enum ModelItem {
     Reasoning,
     /// A client-run call item.
     Call,
+    /// A provider-run item (`web_search_call` and the like). It is part of the model run, but it is
+    /// no client-run call and has no call id.
+    ProviderRun,
     Other,
 }
 
@@ -463,6 +466,7 @@ fn model_item(item: &Value) -> ModelItem {
     match ty {
         None | Some("message") if role(item) == Some("assistant") => ModelItem::Text,
         Some("reasoning") => ModelItem::Reasoning,
+        Some(t) if responses_result_shape(t).is_none() && item_class(t) == ItemClass::ProviderRun => ModelItem::ProviderRun,
         Some(t) if responses_result_shape(t).is_none() && matches!(item_class(t), ItemClass::ClientRun(k) if k != ToolCallKind::Other) => ModelItem::Call,
         _ => ModelItem::Other,
     }
@@ -491,7 +495,7 @@ fn responses_latest(items: &[Value]) -> LatestTurn {
                     l.call(id);
                 }
             }
-            ModelItem::Reasoning | ModelItem::Other => {}
+            ModelItem::Reasoning | ModelItem::ProviderRun | ModelItem::Other => {}
         }
     }
     for item in &items[start + 1..] {
@@ -1114,6 +1118,22 @@ mod tests {
         assert_eq!(f.latest.call_ids, ["c1", "mcpr_1"]);
         assert_eq!(f.latest.result_call_ids, ["c1", "mcpr_1"]);
         assert!(!format!("{f:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn a_provider_run_item_does_not_split_the_latest_turn() {
+        let id = "0192f0a0-0000-7000-8000-000000000001";
+        let notice = format!("[paigasus] tool call \"send\" was blocked (policy). ref={id}");
+        let f = facts(
+            Format::OpenAiResponses,
+            json!({"model":"m","input":[
+                {"type":"message","role":"user","content":"hi"},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":notice}]},
+                {"type":"web_search_call","id":"ws_1","status":"completed"},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}),
+        );
+        assert_eq!(f.latest.refs, [Uuid::try_parse(id).unwrap()]);
+        assert!(f.latest.call_ids.is_empty());
     }
 
     #[test]
