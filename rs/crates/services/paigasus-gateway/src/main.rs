@@ -104,6 +104,8 @@ async fn serve() -> anyhow::Result<()> {
     // breaker's constructor reach the installed recorder. Eager: with `backend = "redis"`, a Redis
     // that is down fails the boot here (Q14).
     let limits = build_limits(config.limits.as_ref()).await?;
+    // SMA-753: the tool history, also after `init` (the metrics) and eager for Redis (spec D10, D11).
+    let history = paigasus_gateway::adapters::history::build_tool_history(config.tool_history.as_ref(), Arc::new(SystemClock), Arc::new(OsEntropy)).await?;
 
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
     // is built with the three split timeout budgets. Neither construction logs the key.
@@ -119,7 +121,7 @@ async fn serve() -> anyhow::Result<()> {
     // SMA-755: one recorder for the decider, the request side and the report site (P-8). The decision log
     // never waits for Redis or NATS, so a broker that is down does not block the boot (spec § 5.6).
     let decision_log = runtime::build_decision_log(&config, Arc::new(SystemClock), Arc::new(OsEntropy)).await?;
-    let tool_policy_runtime = runtime::build_tool_policy(&config, decision_log.recorder)?;
+    let tool_policy_runtime = runtime::build_tool_policy(&config, decision_log.recorder, history.history)?;
     let tool_interception = runtime::tool_interception(&config, &tool_policy_runtime);
     let tool_policy = tool_policy_runtime.policy;
 
@@ -236,7 +238,7 @@ async fn serve() -> anyhow::Result<()> {
 
     // Supervise: stop on the first of a shutdown signal or any task ending, broadcast graceful
     // shutdown to the rest, and surface the first error (SMA-463).
-    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, decision_log.tasks).await
+    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, history.tasks, decision_log.tasks).await
 }
 
 /// Registers `# HELP`/`# TYPE` exposition text for the 38 metric families listed below (SMA-755 counted

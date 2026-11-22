@@ -46,6 +46,12 @@ impl CedarDecider {
         self
     }
 
+    /// The tool history of this holder (SMA-753). A runtime test reads it to check the wiring.
+    #[must_use]
+    pub fn history(&self) -> Option<&Arc<ToolHistory>> {
+        self.history.as_ref()
+    }
+
     /// The recorder of this decider. A runtime test reads it to check that the decider, the request side and
     /// the report site share one recorder (P-8).
     #[must_use]

@@ -456,7 +456,7 @@ async fn an_iam_that_is_down_at_boot_does_not_stop_the_gateway() {
         config = Some(cfg);
         Ok(())
     });
-    let runtime = build_tool_policy(&config.expect("config"), Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing())).expect("the gateway builds with IAM down");
+    let runtime = build_tool_policy(&config.expect("config"), Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()), None).expect("the gateway builds with IAM down");
     let (cache, _) = runtime.policy.expect("the tool policy is on");
     assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Unavailable));
 }

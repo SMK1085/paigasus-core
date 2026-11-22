@@ -149,6 +149,12 @@ impl RequestToolPolicy {
         self
     }
 
+    /// The tool history of this holder (SMA-753). A runtime test reads it to check the wiring.
+    #[must_use]
+    pub fn history(&self) -> Option<&Arc<ToolHistory>> {
+        self.history.as_ref()
+    }
+
     /// The write after the limits admission (spec D4). A store error is counted and the request goes on.
     pub async fn commit_history(&self, pending: PendingWrite) {
         if let Some(h) = &self.history {

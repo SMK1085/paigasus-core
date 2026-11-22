@@ -351,3 +351,69 @@ more effects.
 The first rollout of this release must finish before any compiler or schema change ships. No
 change of the Dogwood version and no change of the compiler output may merge without a bump of
 `COMPILER_GENERATION`. The golden test enforces this.
+
+## 10. Tool history (SMA-753)
+
+The tool history records each tool call and each tool result of a session. It also links each
+request to a session. In PR 1 the history only records and links. No policy reads it yet.
+
+### Configuration
+
+Set the `[tool_history]` table. The gateway keeps the history only if the tool policy is on. If the
+tool policy is off, the gateway logs one `info` line and does not use the history.
+
+| Key | Meaning |
+|---|---|
+| `backend` | `memory` (default) or `redis`. |
+| `redis_url` | Required for `redis`. Set it with `GATEWAY_TOOL_HISTORY__REDIS_URL`. Refused for `memory`. |
+| `deadline` | The time limit of one request for all store calls. Use `"<n>ms"` or `"<n>s"`. Default `"1s"`. |
+
+The `deadline` must be shorter than `tool_interception.decide_timeout_secs`. The gateway refuses a
+config where it is not.
+
+### Redis requirements
+
+- Use a dedicated Redis instance or a dedicated logical database.
+- Set `maxmemory-policy noeviction`. Every history key has a TTL. Any other policy can evict a
+  history key.
+- The history can share the limits Redis of SMA-677.
+- The history must NOT share the IAM Redis.
+
+### The memory backend
+
+The `memory` backend is for development. It supports one replica only. A second replica does not
+see the history of the first replica. The gateway logs a warning at boot. Use `redis` when more than
+one replica runs.
+
+### Boot checks
+
+With `backend = "redis"` the gateway checks Redis at boot.
+
+- A Redis that is down fails the boot. The error names the error kind only. It never shows the URL.
+- A `maxmemory-policy` that can evict a history key fails the boot. The error names the policy.
+- If `CONFIG GET` is not allowed, the gateway logs a warning and continues. Check the policy by hand.
+
+### Sizing
+
+Memory is about: events per day x (event body of about 60 B + 3 sorted-set entries of about 60 B
+each) + the links. One history and tool pair holds at most 10,000 events. The retention is 25 hours.
+The gateway removes older events at each write.
+
+### Metrics
+
+Section 2.3 of `RUNBOOK-observability.md` lists the three history metrics.
+
+- `gateway_tool_history_store_errors_total`: store calls that failed.
+- `gateway_tool_history_ids_capped_total`: ids that a request sent past the cap of 128 in one list.
+- `gateway_tool_history_events_trimmed_total`: events that a write removed, by `retention` or `cap`.
+
+### Known limits of PR 1
+
+- The settle is asynchronous. A very fast follow-up request can arrive before the settle ends. The
+  gateway can then report `forged_history` for a real call.
+- `forged_history` also fires for a blocked call, and for a link older than 25 hours.
+- `history_truncated` cannot fire in PR 1. No code reads a history window yet.
+- A decision on the request side cannot act on the history findings. The findings exist only after
+  the model answers.
+- At shutdown the gateway waits at most 5 seconds for the settle and append tasks. A settle that is
+  lost leaves its events `pending`. Pending events still count.
