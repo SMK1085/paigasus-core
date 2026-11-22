@@ -49,7 +49,7 @@ pub fn notice_line(name: &str, code: BlockCode, reference: Option<Uuid>) -> Stri
 pub fn notice_ref(line: &str) -> Option<Uuid> {
     let rest = line.strip_prefix("[paigasus] tool call \"")?;
     let (name, rest) = rest.split_once('"')?;
-    if name.is_empty() || name.len() > MAX_NAME_BYTES || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b)) {
+    if name.len() > MAX_NAME_BYTES || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b)) {
         return None;
     }
     let rest = rest.strip_prefix(" was blocked (")?;
@@ -374,12 +374,13 @@ mod tests {
         for code in BlockCode::ALL {
             assert_eq!(notice_ref(&notice_line("ns.tool", code, Some(id))), Some(id));
         }
+        // A provider can send a tool call with an empty name. The producer renders it, so the parser reads it.
+        assert_eq!(notice_ref(&notice_line("", BlockCode::ALL[0], Some(id))), Some(id));
         for bad in [
             format!("x [paigasus] tool call \"send\" was blocked (policy). ref={ID}"),
             format!("[paigasus] tool call \"send\" was blocked (policy). ref={ID} "),
             format!("[paigasus] tool call \"se nd\" was blocked (policy). ref={ID}"),
             format!("[paigasus] tool call \"send\" was blocked (nope). ref={ID}"),
-            format!("[paigasus] tool call \"\" was blocked (policy). ref={ID}"),
             "[paigasus] tool call \"send\" was blocked (policy). ref=not-a-uuid".to_owned(),
             "[paigasus] tool call \"send\" was blocked (policy).".to_owned(),
         ] {
