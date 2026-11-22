@@ -21,6 +21,8 @@ pub(crate) struct Leaf<'a> {
     pub pointer: &'a str,
     /// The decoded text.
     pub text: &'a str,
+    /// The text is an object key. Its `pointer` then ends with the escaped key.
+    pub is_key: bool,
 }
 
 /// How the walk reads one input.
@@ -202,13 +204,18 @@ fn escape_into(out: &mut String, key: &str) {
 
 fn visit(node: &Node, key: Option<&str>, pointer: &mut String, f: &mut dyn FnMut(Leaf<'_>)) {
     match node {
-        Node::Str(text) => f(Leaf { key, pointer, text }),
+        Node::Str(text) => f(Leaf { key, pointer, text, is_key: false }),
         Node::Obj(members) => {
             for (k, v) in members {
                 let len = pointer.len();
                 pointer.push('/');
                 escape_into(pointer, k);
-                f(Leaf { key: None, pointer, text: k });
+                f(Leaf {
+                    key: None,
+                    pointer,
+                    text: k,
+                    is_key: true,
+                });
                 visit(v, Some(k), pointer, f);
                 pointer.truncate(len);
             }
@@ -233,10 +240,20 @@ pub(crate) fn walk_strings(input: &ToolInput, f: &mut dyn FnMut(Leaf<'_>)) {
             Some((node, _)) => visit(&node, None, &mut String::new(), f),
             None => {
                 let raw = decode_raw(text);
-                f(Leaf { key: None, pointer: "", text: &raw });
+                f(Leaf {
+                    key: None,
+                    pointer: "",
+                    text: &raw,
+                    is_key: false,
+                });
             }
         },
-        ToolInput::Text(text) => f(Leaf { key: None, pointer: "", text }),
+        ToolInput::Text(text) => f(Leaf {
+            key: None,
+            pointer: "",
+            text,
+            is_key: false,
+        }),
     }
 }
 

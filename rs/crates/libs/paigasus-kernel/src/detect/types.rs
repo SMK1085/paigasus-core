@@ -7,6 +7,8 @@
 
 use std::fmt;
 
+use super::hosts::HostSet;
+
 /// The finding that two tool names have the same normal form in one request.
 pub const NAME_COLLISION: &str = "name_collision";
 /// The finding that the arguments of a call are not one strict JSON object.
@@ -268,6 +270,62 @@ impl Declared {
             Self::No => "no",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+/// What the call detectors read about one tool call.
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub struct CallSubject<'a> {
+    /// The raw name, as the model sent it.
+    pub name: &'a str,
+    /// The arguments of the call.
+    pub input: &'a ToolInput,
+    /// Whether the request declares the tool.
+    pub declared: Declared,
+    /// The JSON Schema of the matching definition.
+    pub schema: Option<&'a serde_json::Value>,
+    /// The hosts of the seen message sources. `None`: no screen ran, so `unseen_host` does not run.
+    pub seen_hosts: Option<&'a HostSet>,
+}
+
+impl<'a> CallSubject<'a> {
+    /// A subject with no schema and no seen hosts.
+    #[must_use]
+    pub fn new(name: &'a str, input: &'a ToolInput, declared: Declared) -> Self {
+        Self {
+            name,
+            input,
+            declared,
+            schema: None,
+            seen_hosts: None,
+        }
+    }
+
+    /// Set the JSON Schema of the matching definition.
+    #[must_use]
+    pub fn with_schema(mut self, schema: &'a serde_json::Value) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    /// Set the hosts of the seen message sources.
+    #[must_use]
+    pub fn with_seen_hosts(mut self, seen_hosts: &'a HostSet) -> Self {
+        self.seen_hosts = Some(seen_hosts);
+        self
+    }
+}
+
+impl fmt::Debug for CallSubject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "CallSubject {{ declared: {}, schema: {}, seen_hosts: {} }}",
+            self.declared.as_str(),
+            self.schema.is_some(),
+            self.seen_hosts.is_some()
+        )
     }
 }
 

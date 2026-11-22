@@ -4,12 +4,14 @@
 
 mod hosts;
 pub(crate) mod input;
+mod secrets;
 mod types;
 mod walk;
 
 pub use hosts::{HOSTS_CAP, HOSTS_OVERFLOW, HostSet, call_hosts, hosts_in_text};
+pub use secrets::{SECRET_PATTERNS_VERSION, secret_in_args};
 
 pub use types::{
-    DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Declared, Evidence, Finding, INJECTION_MARKERS, INVALID_ARGS, Location, NAME_COLLISION, NO_SEVERITY, SECRET_IN_ARGS, Severity, ToolInput,
-    UNDECLARED_TOOL, UNPARSED_ARGUMENTS, UNSEEN_HOST, detector_error,
+    CallSubject, DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Declared, Evidence, Finding, INJECTION_MARKERS, INVALID_ARGS, Location, NAME_COLLISION, NO_SEVERITY, SECRET_IN_ARGS, Severity,
+    ToolInput, UNDECLARED_TOOL, UNPARSED_ARGUMENTS, UNSEEN_HOST, detector_error,
 };
