@@ -182,8 +182,23 @@ async fn a_repeated_settle_of_the_same_event_keeps_result_written() {
 }
 
 #[tokio::test]
-async fn a_result_for_a_call_id_without_a_link_writes_nothing() {
-    contract::a_result_for_a_call_id_without_a_link_writes_nothing(&harness()).await;
+async fn a_result_for_a_call_event_that_is_gone_writes_nothing() {
+    contract::a_result_for_a_call_event_that_is_gone_writes_nothing(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_later_allow_settle_of_a_denied_event_writes_no_call_link() {
+    contract::a_later_allow_settle_of_a_denied_event_writes_no_call_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_local_shell_result_under_both_aliases_is_written_once() {
+    contract::a_local_shell_result_under_both_aliases_is_written_once(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_relink_between_lookup_and_write_marks_the_original_event() {
+    contract::a_relink_between_lookup_and_write_marks_the_original_event(&harness()).await;
 }
 
 #[tokio::test]

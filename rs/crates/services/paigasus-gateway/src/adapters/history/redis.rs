@@ -6,15 +6,16 @@
 //! Each operation is ONE Lua script call. Redis runs a script atomically, so two concurrent
 //! requests on two replicas see each other: a result guard, a trim or a session touch never
 //! interleaves with another. Every instant comes from the gateway's clock; no script calls `TIME`.
-//! Rust builds every key name and passes it in `KEYS`. The one exception is the `s:` key of a
-//! session that a link names, which `LOOKUP_SCRIPT` builds from a prefix in `ARGV`. That is
-//! allowed because Redis Cluster is not supported (N4).
+//! Rust builds every key name and passes it in `KEYS`. The exceptions are the `s:` key of a
+//! session and the `e:` key of an event that a link names, which `LOOKUP_SCRIPT` builds from a
+//! prefix in `ARGV` and only reads. That is allowed because Redis Cluster is not supported (N4).
 //!
 //! Layout. A client string in a key name is a digest (`link_digest`), never the raw string:
 //! - `h:<org>:<s|p|k>:<sha256(scope id)>:<sha256(tool)>`: a sorted set, score `ts_ms`, member the event id.
 //! - `t:<org>:<s|p|k>:<sha256(scope id)>`: the set of tool digests of a history.
-//! - `e:<org>:<event id>`: a hash, `b` = the JSON body, `v` = the verdict.
-//! - `l:<org>:<sha256(principal)>:c:<sha256(call id)>`: a hash, `s`, `t`, `e`, and `r` once the result exists.
+//! - `e:<org>:<event id>`: a hash, `b` = the JSON body, `v` = the verdict, and on a call event
+//!   `r` = the id of its result event once that exists (the result guard).
+//! - `l:<org>:<sha256(principal)>:c:<sha256(call id)>`: a hash, `s`, `t`, `e`.
 //! - `l:<org>:<sha256(principal)>:d:<decision id>`: a string, the session.
 //! - `s:<org>:<session>`: a hash, `last_ms` and `turn`.
 //!
@@ -50,13 +51,10 @@ const BODY_VERSION: u64 = 1;
 macro_rules! call_link_lua {
     () => {
         r#"
--- Write the c: link of a call. A link for a DIFFERENT event is replaced and its result guard `r`
--- is cleared (ruling T7-b). A link for the SAME event keeps `r`, so a settle retry does not
--- re-open a written result (ruling T7-f).
+-- Write the c: link of a call. The result guard `r` is on the e: key of the event, not here: a
+-- relink to a new event reads the fresh guard of that event (ruling T7-b), and a settle retry for
+-- the same event keeps the written guard (ruling T7-f).
 local function put_call_link(key, session, tool, id, ttl)
-  if redis.call('HGET', key, 'e') ~= id then
-    redis.call('HDEL', key, 'r')
-  end
   redis.call('HSET', key, 's', session, 't', tool, 'e', id)
   redis.call('EXPIRE', key, ttl)
 end
@@ -73,8 +71,9 @@ const APPEND_SCRIPT: &str = concat!(
 --       then per tool (2 values): tool digest, tool name,
 --       then per event (4 values): id, body, tool index (1..T), link count.
 -- KEYS: s-key, H t-keys, T * H h-keys (tool t, history i at 1 + H + (t - 1) * H + i),
---       then per event: e-key, the guard key when guard = '1', then `link count` link keys
---       (a local shell call has two c: links, F7).
+--       then per event: e-key, the guard key when guard = '1' (the e: key of the CALL event
+--       that the result belongs to), then `link count` link keys (a local shell call has two c:
+--       links, F7).
 -- A history key and a tool go once per distinct tool, not once per event: a reserve of 10,000
 -- events must stay small on the wire.
 local now = tonumber(ARGV[1])
@@ -112,10 +111,11 @@ for j = 1, N do
   if guard == '1' then
     k = k + 1
     local gkey = KEYS[k]
-    -- F5: a link that expired before this write gets no result and no new key.
+    -- F5: a call event that is gone gets no result and no new key.
     if redis.call('EXISTS', gkey) == 0 then
       skip = true
-    -- The result is already written: write it once per call id.
+    -- The result is already written: write it once per call event. Both aliases of a local
+    -- shell call name the same event, and a relink after the lookup does not move the guard.
     elseif redis.call('HSETNX', gkey, 'r', id) == 0 then
       skip = true
     else
@@ -221,9 +221,11 @@ return out
 
 /// Read only.
 const LOOKUP_SCRIPT: &str = r#"
--- ARGV: the number of c: keys (calls, then results), the number of d: keys, the s: key prefix.
+-- ARGV: the number of c: keys (calls, then results), the number of d: keys, the s: key prefix,
+--       the e: key prefix.
 -- KEYS: the c: keys, then the d: keys.
-local nc, nd, prefix = tonumber(ARGV[1]), tonumber(ARGV[2]), ARGV[3]
+-- A link reply is {s, t, e, r}: `r` is '1' when the linked EVENT has its result guard.
+local nc, nd, prefix, eprefix = tonumber(ARGV[1]), tonumber(ARGV[2]), ARGV[3], ARGV[4]
 local links, refs, sessions, named, order = {}, {}, {}, {}, {}
 local function name(s)
   if s and not named[s] then
@@ -232,8 +234,12 @@ local function name(s)
   end
 end
 for i = 1, nc do
-  local f = redis.call('HMGET', KEYS[i], 's', 't', 'e', 'r')
-  links[i] = f
+  local f = redis.call('HMGET', KEYS[i], 's', 't', 'e')
+  local r = false
+  if f[3] and redis.call('HEXISTS', eprefix .. f[3], 'r') == 1 then
+    r = '1'
+  end
+  links[i] = {f[1], f[2], f[3], r}
   name(f[1])
 end
 for i = 1, nd do
@@ -265,11 +271,14 @@ for j = 1, N do
   k = k + 1 + nlinks
   if redis.call('EXISTS', ekey) == 1 then
     -- The first settle wins (T7-c).
-    if redis.call('HGET', ekey, 'v') == 'pending' then
+    local stored = redis.call('HGET', ekey, 'v')
+    if stored == 'pending' then
       redis.call('HSET', ekey, 'v', verdict)
+      stored = verdict
     end
     redis.call('EXPIRE', ekey, ttl)
-    if verdict == 'allow' then
+    -- The link follows the STORED verdict: a later allow settle of a denied event writes no link.
+    if verdict == 'allow' and stored == 'allow' then
       for l = 1, nlinks do
         put_call_link(KEYS[lbase + l], session, tool, id, ttl)
       end
@@ -403,19 +412,41 @@ pub enum EvictionCheck {
 }
 
 /// Classify the reply of `CONFIG GET maxmemory-policy`. Only `noeviction` is `Safe`.
-pub fn eviction_check(reply: &redis::RedisResult<Vec<String>>) -> EvictionCheck {
-    match reply {
-        Ok(pair) => match pair.as_slice() {
-            [name, policy] if name == "maxmemory-policy" => {
-                if policy == "noeviction" {
-                    EvictionCheck::Safe
-                } else {
-                    EvictionCheck::Evicts(policy.clone())
-                }
-            }
-            _ => EvictionCheck::Unknown,
+///
+/// RESP2 answers with a flat array `[name, policy]`; RESP3 answers with a map `{name: policy}`.
+/// Both shapes give the real policy, so an evicting policy fails the boot on either protocol.
+pub fn eviction_check(reply: &redis::RedisResult<redis::Value>) -> EvictionCheck {
+    let Ok(value) = reply else {
+        return EvictionCheck::Unknown;
+    };
+    match policy_of(value) {
+        Some(policy) if policy == "noeviction" => EvictionCheck::Safe,
+        Some(policy) => EvictionCheck::Evicts(policy),
+        None => EvictionCheck::Unknown,
+    }
+}
+
+/// The `maxmemory-policy` value of a `CONFIG GET` reply, in the RESP2 array or the RESP3 map shape.
+fn policy_of(value: &redis::Value) -> Option<String> {
+    const NAME: &str = "maxmemory-policy";
+    match value {
+        redis::Value::Array(items) => match items.as_slice() {
+            [name, policy] if text_of(name).as_deref() == Some(NAME) => text_of(policy),
+            _ => None,
         },
-        Err(_) => EvictionCheck::Unknown,
+        redis::Value::Map(pairs) => match pairs.as_slice() {
+            [(name, policy)] if text_of(name).as_deref() == Some(NAME) => text_of(policy),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn text_of(value: &redis::Value) -> Option<String> {
+    match value {
+        redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        redis::Value::SimpleString(text) | redis::Value::VerbatimString { text, .. } => Some(text.clone()),
+        _ => None,
     }
 }
 
@@ -440,7 +471,7 @@ impl LinkKind {
 struct NewEvent {
     id: Uuid,
     tool: String,
-    /// The `c:` key whose `r` guard decides if the event is written. `write` only.
+    /// The `e:` key of the call event whose `r` guard decides if the result is written. `write` only.
     guard: Option<String>,
     link_keys: Vec<String>,
 }
@@ -484,7 +515,7 @@ impl RedisSessionStore {
     /// `CONFIG GET maxmemory-policy`, classified by `eviction_check`.
     pub async fn read_eviction_policy(&self) -> EvictionCheck {
         let mut con = self.handle.clone();
-        let reply = redis::cmd("CONFIG").arg("GET").arg("maxmemory-policy").query_async::<Vec<String>>(&mut con).await;
+        let reply = redis::cmd("CONFIG").arg("GET").arg("maxmemory-policy").query_async::<redis::Value>(&mut con).await;
         eviction_check(&reply)
     }
 
@@ -634,7 +665,7 @@ impl SessionStore for RedisSessionStore {
         for id in &req.refs {
             inv.key(decision_link_key(req.org, &req.principal, *id));
         }
-        inv.arg(nc).arg(req.refs.len()).arg(format!("{KEY_PREFIX}s:{}:", req.org));
+        inv.arg(nc).arg(req.refs.len()).arg(format!("{KEY_PREFIX}s:{}:", req.org)).arg(format!("{KEY_PREFIX}e:{}:", req.org));
         let mut con = self.handle.clone();
         let (links, refs, sessions): LookupRaw = inv.invoke_async(&mut con).await.map_err(|err| unavailable(&err))?;
         let links = links.iter().map(|f| decode_link(f)).collect::<Result<Vec<_>, _>>()?;
@@ -658,7 +689,7 @@ impl SessionStore for RedisSessionStore {
             .map(|r| NewEvent {
                 id: r.id,
                 tool: r.tool.clone(),
-                guard: Some(call_link_key(h.org, &h.principal, &r.call_id)),
+                guard: Some(event_key(h.org, r.event_id)),
                 link_keys: Vec::new(),
             })
             .collect();
@@ -748,18 +779,42 @@ impl SessionStore for RedisSessionStore {
 mod tests {
     use super::*;
 
+    fn bulk(s: &str) -> redis::Value {
+        redis::Value::BulkString(s.as_bytes().to_vec())
+    }
+
+    /// RESP2: `CONFIG GET` answers with a flat array.
+    fn resp2(policy: &str) -> redis::RedisResult<redis::Value> {
+        Ok(redis::Value::Array(vec![bulk("maxmemory-policy"), bulk(policy)]))
+    }
+
+    /// RESP3: `CONFIG GET` answers with a map.
+    fn resp3(policy: &str) -> redis::RedisResult<redis::Value> {
+        Ok(redis::Value::Map(vec![(bulk("maxmemory-policy"), bulk(policy))]))
+    }
+
     #[test]
     fn eviction_check_classifies_each_reply() {
-        let reply = |policy: &str| Ok(vec!["maxmemory-policy".to_string(), policy.to_string()]);
-        assert_eq!(eviction_check(&reply("noeviction")), EvictionCheck::Safe);
-        for policy in ["volatile-ttl", "volatile-lru", "allkeys-random", "allkeys-lfu"] {
-            assert_eq!(eviction_check(&reply(policy)), EvictionCheck::Evicts(policy.to_string()));
+        for reply in [resp2, resp3] {
+            assert_eq!(eviction_check(&reply("noeviction")), EvictionCheck::Safe);
+            for policy in ["volatile-ttl", "volatile-lru", "allkeys-random", "allkeys-lfu"] {
+                assert_eq!(eviction_check(&reply(policy)), EvictionCheck::Evicts(policy.to_string()));
+            }
         }
+        let simple = Ok(redis::Value::Map(vec![(
+            redis::Value::SimpleString("maxmemory-policy".into()),
+            redis::Value::SimpleString("allkeys-lru".into()),
+        )]));
+        assert_eq!(eviction_check(&simple), EvictionCheck::Evicts("allkeys-lru".to_string()));
+        let other_name = Ok(redis::Value::Map(vec![(bulk("maxmemory"), bulk("0"))]));
+        assert_eq!(eviction_check(&other_name), EvictionCheck::Unknown);
+        assert_eq!(eviction_check(&Ok(redis::Value::Map(vec![]))), EvictionCheck::Unknown);
+        assert_eq!(eviction_check(&Ok(redis::Value::Nil)), EvictionCheck::Unknown);
         let noperm = redis::RedisError::from((redis::ErrorKind::Server(redis::ServerErrorKind::NoPerm), "this user has no permissions to run the 'config|get' command"));
         assert_eq!(eviction_check(&Err(noperm)), EvictionCheck::Unknown);
         let unknown = redis::RedisError::from((redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError), "unknown command 'CONFIG'"));
         assert_eq!(eviction_check(&Err(unknown)), EvictionCheck::Unknown);
-        assert_eq!(eviction_check(&Ok(vec![])), EvictionCheck::Unknown);
+        assert_eq!(eviction_check(&Ok(redis::Value::Array(vec![]))), EvictionCheck::Unknown);
     }
 
     #[test]

@@ -278,6 +278,7 @@ impl ToolHistory {
                 id: self.mint(),
                 call_id: r.call_id,
                 tool: r.tool,
+                event_id: r.event_id,
             })
             .collect();
         let touch = link.joined.then_some(turn_no);

@@ -123,6 +123,9 @@ pub struct CallLink {
     pub session: Uuid,
     pub tool: String,
     pub event_id: Uuid,
+    /// The linked EVENT has its result (the guard lives on the event, not on the link). So the
+    /// two aliases of a local shell call share one flag, and a relink to a new event reads the
+    /// flag of the new event.
     pub result_written: bool,
 }
 
@@ -146,6 +149,9 @@ pub struct ResultEvent {
     pub id: Uuid,
     pub call_id: String,
     pub tool: String,
+    /// The call event that the lookup found for `call_id`. `write` guards the result on this
+    /// event: one result per event, whatever the link holds at write time.
+    pub event_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,7 +238,8 @@ pub enum HistoryStoreError {
 pub trait SessionStore: Send + Sync {
     /// Read only. One answer per id, in order. A reply of the wrong length is an error (`link_session` refuses it). `sessions` holds the state of every session that a link names.
     async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError>;
-    /// After the admission: touch the session when `turn` is Some, and write each result event once per call id.
+    /// After the admission: touch the session when `turn` is Some, and write each result event once
+    /// per linked call event (`ResultEvent::event_id`). A call event that is gone gets no result.
     async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError>;
     /// Inside the decide future: one pending call event per call in every history, and its `d:` link.
     async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError>;
@@ -257,6 +264,8 @@ pub fn history_tool(call: &ToolCall) -> String {
 pub struct LinkedResult {
     pub call_id: String,
     pub tool: String,
+    /// The call event of the link at lookup time. The write guards the result on it.
+    pub event_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,16 +299,19 @@ pub fn link_session(req: &LookupRequest, reply: &LookupReply, new_session: Uuid)
     };
 
     let forged_results = reply.results.iter().filter(|r| r.is_none()).count();
-    let mut seen: HashSet<&str> = HashSet::new();
+    // One result per call EVENT: a call id sent twice, and the two aliases of a local shell call,
+    // name the same event.
+    let mut seen: HashSet<Uuid> = HashSet::new();
     let mut results = Vec::new();
     for (call_id, link) in req.result_call_ids.iter().zip(reply.results.iter()) {
         let Some(link) = link else { continue };
-        if link.result_written || !seen.insert(call_id.as_str()) {
+        if link.result_written || !seen.insert(link.event_id) {
             continue;
         }
         results.push(LinkedResult {
             call_id: call_id.clone(),
             tool: link.tool.clone(),
+            event_id: link.event_id,
         });
     }
 
@@ -486,7 +498,8 @@ mod tests {
             l.results,
             vec![LinkedResult {
                 call_id: "y".into(),
-                tool: "a".into()
+                tool: "a".into(),
+                event_id: u(99),
             }]
         );
     }
@@ -518,6 +531,18 @@ mod tests {
         let l = link_session(&q, &r, u(7)).unwrap();
         assert!(l.results.is_empty());
         assert_eq!(l.forged_results, 0);
+    }
+
+    #[test]
+    fn two_aliases_of_one_call_event_link_one_result() {
+        let mut q = req();
+        q.result_call_ids = vec!["call-1".into(), "item-1".into(), "other".into()];
+        let mut r = reply();
+        let mut other = link(5, "a", false);
+        other.event_id = u(98);
+        r.results = vec![Some(link(5, "shell", false)), Some(link(5, "shell", false)), Some(other)];
+        let ids: Vec<Uuid> = link_session(&q, &r, u(7)).unwrap().results.iter().map(|l| l.event_id).collect();
+        assert_eq!(ids, vec![u(99), u(98)]);
     }
 
     #[test]

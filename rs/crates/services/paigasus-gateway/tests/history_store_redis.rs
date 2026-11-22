@@ -176,7 +176,10 @@ contract_cases!(
     a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event,
     the_first_settle_wins,
     a_repeated_settle_of_the_same_event_keeps_result_written,
-    a_result_for_a_call_id_without_a_link_writes_nothing,
+    a_result_for_a_call_event_that_is_gone_writes_nothing,
+    a_later_allow_settle_of_a_denied_event_writes_no_call_link,
+    a_local_shell_result_under_both_aliases_is_written_once,
+    a_relink_between_lookup_and_write_marks_the_original_event,
 );
 
 #[tokio::test]
@@ -187,6 +190,20 @@ async fn an_evicting_policy_is_reported() {
     assert_eq!(redis_cli(&h.node, &["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"]).await, "OK");
     let store = RedisSessionStore::connect(&h.url).await.expect("connect");
     assert_eq!(store.read_eviction_policy().await, EvictionCheck::Evicts("allkeys-lru".to_string()));
+}
+
+/// Under RESP3 `CONFIG GET` answers with a map. The check must still read the real policy, so an
+/// evicting policy cannot pass the boot as `Unknown`.
+#[tokio::test]
+async fn an_evicting_policy_is_reported_over_resp3() {
+    let Some(h) = harness("7.4-alpine", "history_store_redis evicting policy resp3").await else {
+        return;
+    };
+    assert_eq!(redis_cli(&h.node, &["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"]).await, "OK");
+    let store = RedisSessionStore::connect(&format!("{}/?protocol=resp3", h.url)).await.expect("connect");
+    assert_eq!(store.read_eviction_policy().await, EvictionCheck::Evicts("allkeys-lru".to_string()));
+    assert_eq!(redis_cli(&h.node, &["CONFIG", "SET", "maxmemory-policy", "noeviction"]).await, "OK");
+    assert_eq!(store.read_eviction_policy().await, EvictionCheck::Safe);
 }
 
 #[tokio::test]

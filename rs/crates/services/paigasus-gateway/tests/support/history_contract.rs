@@ -326,6 +326,7 @@ pub async fn links_are_isolated_per_principal_and_org(h: &impl Harness) {
     assert_eq!((reply.calls, reply.results, reply.refs), (vec![None], vec![None], vec![None]));
 }
 
+/// The guard is on the linked call event: a second result for the same call id writes nothing.
 pub async fn a_result_event_is_written_once_per_call_id(h: &impl Harness) {
     let (ctx, store) = (Ctx::new(true), h.store().await);
     let c = call("send");
@@ -335,6 +336,7 @@ pub async fn a_result_event_is_written_once_per_call_id(h: &impl Harness) {
         id,
         call_id: "call-1".into(),
         tool: "send".into(),
+        event_id: c.id,
     };
     let first = store.write(&ctx.write(Some(2), vec![result(fresh_id())], NOW + 1)).await.unwrap();
     let second = store.write(&ctx.write(Some(2), vec![result(fresh_id())], NOW + 2)).await.unwrap();
@@ -389,6 +391,7 @@ pub async fn every_written_key_expires_after_the_retention(h: &impl Harness) {
         id: fresh_id(),
         call_id: "call-1".into(),
         tool: "send".into(),
+        event_id: c.id,
     };
     store.write(&ctx.write(Some(2), vec![result], NOW)).await.unwrap();
     let ttls = h.ttls_ms(ctx.org, NOW).await;
@@ -544,6 +547,7 @@ pub async fn a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event(h: &
         id: fresh_id(),
         call_id: "call-1".into(),
         tool: "send".into(),
+        event_id: a.id,
     };
     store.write(&first.write(None, vec![result], NOW)).await.unwrap();
     let before = store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap();
@@ -551,6 +555,7 @@ pub async fn a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event(h: &
 
     store.reserve(&second.reserve(vec![b.clone()], NOW + 1, None)).await.unwrap();
     store.settle(&second.settle(vec![item(b.id, EventVerdict::Allow, "read", Some("call-1"))], NOW + 1)).await.unwrap();
+    // The new event has no result yet: the flag is the guard of the new event (T7-b).
     let after = store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap();
     assert_eq!(after.calls, vec![Some(link(&second, "read", b.id, false))]);
 }
@@ -575,6 +580,7 @@ pub async fn a_repeated_settle_of_the_same_event_keeps_result_written(h: &impl H
         id: fresh_id(),
         call_id: "call-1".into(),
         tool: "send".into(),
+        event_id: c.id,
     };
     store.write(&ctx.write(None, vec![result], NOW + 1)).await.unwrap();
     store.settle(&settle).await.unwrap();
@@ -582,19 +588,88 @@ pub async fn a_repeated_settle_of_the_same_event_keeps_result_written(h: &impl H
     assert_eq!(reply.calls, vec![Some(link(&ctx, "send", c.id, true))]);
 }
 
-pub async fn a_result_for_a_call_id_without_a_link_writes_nothing(h: &impl Harness) {
-    // Ruling F5: a link that is gone (expired between lookup and write) gets no result event, and
-    // the guard makes no link key with no fields and no time to live.
+pub async fn a_result_for_a_call_event_that_is_gone_writes_nothing(h: &impl Harness) {
+    // Ruling F5: a call event that is gone (expired between lookup and write) gets no result
+    // event, and the guard makes no event key with no fields and no time to live.
     let (ctx, store) = (Ctx::new(true), h.store().await);
     let result = ResultEvent {
         id: fresh_id(),
         call_id: "call-gone".into(),
         tool: "send".into(),
+        event_id: fresh_id(),
     };
     let reply = store.write(&ctx.write(None, vec![result], NOW)).await.unwrap();
     assert_eq!(reply.written, 0);
     assert!(principal_events(h, &ctx, "send").await.is_empty());
     assert!(h.ttls_ms(ctx.org, NOW).await.is_empty());
+}
+
+pub async fn a_later_allow_settle_of_a_denied_event_writes_no_call_link(h: &impl Harness) {
+    // The first settle wins the verdict (T7-c), and the link follows the stored verdict.
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = call("send");
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    store.settle(&ctx.settle(vec![item(c.id, EventVerdict::Deny, "send", Some("call-1"))], NOW)).await.unwrap();
+    store.settle(&ctx.settle(vec![item(c.id, EventVerdict::Allow, "send", Some("call-1"))], NOW + 1)).await.unwrap();
+    assert_eq!(principal_events(h, &ctx, "send").await[0].verdict, EventVerdict::Deny);
+    assert_eq!(store.lookup(&ctx.lookup(&["call-1"], &["call-1"], &[])).await.unwrap().calls, vec![None]);
+}
+
+pub async fn a_local_shell_result_under_both_aliases_is_written_once(h: &impl Harness) {
+    // The two aliases (call id and item id) link to ONE call event, so they share one guard.
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = call("shell");
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let mut it = item(c.id, EventVerdict::Allow, "shell", Some("call-1"));
+    it.item_id = Some("item-1".into());
+    store.settle(&ctx.settle(vec![it], NOW)).await.unwrap();
+    let result = |alias: &str| ResultEvent {
+        id: fresh_id(),
+        call_id: alias.into(),
+        tool: "shell".into(),
+        event_id: c.id,
+    };
+    let both = store.write(&ctx.write(None, vec![result("call-1"), result("item-1")], NOW + 1)).await.unwrap();
+    let again = store.write(&ctx.write(None, vec![result("item-1")], NOW + 2)).await.unwrap();
+    assert_eq!((both.written, again.written), (1, 0));
+    let results = principal_events(h, &ctx, "shell").await.into_iter().filter(|e| e.kind == EventKind::Result).count();
+    assert_eq!(results, 1);
+    let reply = store.lookup(&ctx.lookup(&["call-1"], &["item-1"], &[])).await.unwrap();
+    let written = Some(link(&ctx, "shell", c.id, true));
+    assert_eq!((reply.calls, reply.results), (vec![written.clone()], vec![written]));
+}
+
+pub async fn a_relink_between_lookup_and_write_marks_the_original_event(h: &impl Harness) {
+    // The write guards the event that the LOOKUP found. A relink of the call id to a new event
+    // after the lookup must not mark the new event.
+    let (first, store) = (Ctx::new(true), h.store().await);
+    let second = first.other_session();
+    let (a, b) = (call("send"), call("read"));
+    store.reserve(&first.reserve(vec![a.clone()], NOW, None)).await.unwrap();
+    store.settle(&first.settle(vec![item(a.id, EventVerdict::Allow, "send", Some("call-1"))], NOW)).await.unwrap();
+    let seen = store.lookup(&first.lookup(&[], &["call-1"], &[])).await.unwrap();
+    let linked = seen.results[0].clone().expect("a link");
+    assert_eq!(linked.event_id, a.id);
+
+    // The relink, between the lookup and the write.
+    store.reserve(&second.reserve(vec![b.clone()], NOW + 1, None)).await.unwrap();
+    store.settle(&second.settle(vec![item(b.id, EventVerdict::Allow, "read", Some("call-1"))], NOW + 1)).await.unwrap();
+
+    let result = |event_id| ResultEvent {
+        id: fresh_id(),
+        call_id: "call-1".into(),
+        tool: "send".into(),
+        event_id,
+    };
+    let reply = store.write(&first.write(None, vec![result(linked.event_id)], NOW + 2)).await.unwrap();
+    assert_eq!(reply.written, 1);
+    // The new event is not marked: its link still reads `result_written` false.
+    let after = store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap();
+    assert_eq!(after.calls, vec![Some(link(&second, "read", b.id, false))]);
+    // The original event is marked: a second result for it writes nothing; the new event's first does.
+    let again = store.write(&first.write(None, vec![result(a.id)], NOW + 3)).await.unwrap();
+    let fresh = store.write(&second.write(None, vec![result(b.id)], NOW + 3)).await.unwrap();
+    assert_eq!((again.written, fresh.written), (0, 1));
 }
 
 pub async fn concurrent_reserves_all_land(h: &impl Harness) {
@@ -644,5 +719,8 @@ pub async fn run_all(h: &impl Harness) {
     a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event(h).await;
     the_first_settle_wins(h).await;
     a_repeated_settle_of_the_same_event_keeps_result_written(h).await;
-    a_result_for_a_call_id_without_a_link_writes_nothing(h).await;
+    a_result_for_a_call_event_that_is_gone_writes_nothing(h).await;
+    a_later_allow_settle_of_a_denied_event_writes_no_call_link(h).await;
+    a_local_shell_result_under_both_aliases_is_written_once(h).await;
+    a_relink_between_lookup_and_write_marks_the_original_event(h).await;
 }

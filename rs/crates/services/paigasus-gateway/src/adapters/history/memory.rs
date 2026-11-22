@@ -62,6 +62,9 @@ struct Body {
     kind: EventKind,
     tool: String,
     verdict: EventVerdict,
+    /// The result guard of a call event: true once its result event is written. It lives on the
+    /// event, not on the `c:` link, so both aliases of a local shell call share it.
+    result_written: bool,
 }
 
 #[derive(Default)]
@@ -136,6 +139,9 @@ impl State {
             truncated: Vec::new(),
         };
         for e in events {
+            // A rewrite of a live body keeps its result guard (as `HSET` keeps the `r` field).
+            let clock = self.clock_ms;
+            let result_written = self.bodies.get(&(h.org, e.id)).is_some_and(|b| b.alive(clock) && b.value.result_written);
             self.bodies.insert(
                 (h.org, e.id),
                 Exp::new(
@@ -143,6 +149,7 @@ impl State {
                         kind: e.kind,
                         tool: e.tool.clone(),
                         verdict: e.verdict,
+                        result_written,
                     },
                     now_ms,
                 ),
@@ -193,21 +200,20 @@ impl State {
         reply
     }
 
-    /// Write the `c:` link of a call under one client id. An existing link for a different event is
-    /// replaced: session, tool and event id change, and `result_written` is false again (ruling
-    /// T7-b). A live link for the same event keeps `result_written`, so a settle retry does not
-    /// re-open a written result (ruling T7-f).
-    fn put_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, mut link: CallLink, now_ms: u64) {
-        let key = (org, principal.to_string(), link_digest(client_id));
-        let clock = self.clock_ms;
-        if let Some(old) = self.calls.get(&key).filter(|e| e.alive(clock) && e.value.event_id == link.event_id) {
-            link.result_written = old.value.result_written;
-        }
-        self.calls.insert(key, Exp::new(link, now_ms));
+    /// Write the `c:` link of a call under one client id. An existing link is replaced: session,
+    /// tool and event id change. The result guard is on the event, so a relink to a new event
+    /// reads the fresh guard of that event (ruling T7-b), and a settle retry for the same event
+    /// keeps the written guard (ruling T7-f). The stored `result_written` is not read.
+    fn put_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, link: CallLink, now_ms: u64) {
+        self.calls.insert((org, principal.to_string(), link_digest(client_id)), Exp::new(link, now_ms));
     }
 
-    fn call_link(&self, org: Uuid, principal: &str, client_id: &str, clock_ms: u64) -> Option<&Exp<CallLink>> {
-        self.calls.get(&(org, principal.to_string(), link_digest(client_id))).filter(|e| e.alive(clock_ms))
+    /// The live `c:` link under one client id, with `result_written` read from its event.
+    fn call_link(&self, org: Uuid, principal: &str, client_id: &str, clock_ms: u64) -> Option<CallLink> {
+        let e = self.calls.get(&(org, principal.to_string(), link_digest(client_id))).filter(|e| e.alive(clock_ms))?;
+        let mut link = e.value.clone();
+        link.result_written = self.bodies.get(&(org, link.event_id)).is_some_and(|b| b.alive(clock_ms) && b.value.result_written);
+        Some(link)
     }
 }
 
@@ -268,7 +274,7 @@ impl SessionStore for MemorySessionStore {
     async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
         let st = self.lock();
         let clock = st.clock_ms.max(req.now_ms);
-        let get = |id: &String| st.call_link(req.org, &req.principal, id, clock).map(|e| e.value.clone());
+        let get = |id: &String| st.call_link(req.org, &req.principal, id, clock);
         let calls: Vec<Option<CallLink>> = req.call_ids.iter().map(get).collect();
         let results: Vec<Option<CallLink>> = req.result_call_ids.iter().map(get).collect();
         let refs: Vec<Option<Uuid>> = req
@@ -295,14 +301,18 @@ impl SessionStore for MemorySessionStore {
         let h = &req.histories;
         let mut events = Vec::new();
         for r in &req.results {
+            // The guard is on the call event that the lookup found, not on the link: a relink
+            // after the lookup cannot move it, and two aliases of one call share it. A call event
+            // that is gone (F5) gets no result and no new entry.
             let clock = st.clock_ms;
-            let key = (h.org, h.principal.clone(), link_digest(&r.call_id));
-            let Some(link) = st.calls.get_mut(&key).filter(|e| e.alive(clock)) else { continue };
-            if link.value.result_written {
+            let Some(call) = st.bodies.get_mut(&(h.org, r.event_id)).filter(|e| e.alive(clock)) else {
+                continue;
+            };
+            if call.value.result_written {
                 continue;
             }
-            link.value.result_written = true;
-            link.exp_ms = req.now_ms.saturating_add(TTL_MS);
+            call.value.result_written = true;
+            call.exp_ms = req.now_ms.saturating_add(TTL_MS).max(call.exp_ms);
             events.push(NewEvent {
                 id: r.id,
                 tool: r.tool.clone(),
@@ -360,7 +370,9 @@ impl SessionStore for MemorySessionStore {
                 body.value.verdict = item.verdict;
             }
             body.exp_ms = req.now_ms.saturating_add(TTL_MS).max(body.exp_ms);
-            if item.verdict != EventVerdict::Allow {
+            // The first settle wins the verdict (T7-c), so the link follows the STORED verdict: a
+            // later allow settle of a denied event writes no link.
+            if item.verdict != EventVerdict::Allow || body.value.verdict != EventVerdict::Allow {
                 continue;
             }
             let link = CallLink {
