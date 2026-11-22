@@ -145,6 +145,23 @@ pub const AGENT_HOST_SCHEDULER_LAG_SECONDS: &str = "agent_host_scheduler_lag_sec
 pub const AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS: &str = "agent_host_scheduler_last_pass_timestamp_seconds";
 /// Calls of the timer tools. Labels: `tool`, `outcome` (`ok` or `refused`).
 pub const AGENT_HOST_TIMER_TOOL_CALLS_TOTAL: &str = "agent_host_timer_tool_calls_total";
+// Agent host worker run loop (SMA-790 spec §6.14). The names are provisional; SMA-798 owns them.
+/// Runs that ended. Label: `class` (`completed`, `stopped`, `deterministic`, `transient`, `discarded` or `shutdown`).
+pub const AGENT_HOST_RUNS_TOTAL: &str = "agent_host_runs_total";
+/// The duration of one run, from the claim to the end of the commit, in seconds. No label.
+pub const AGENT_HOST_RUN_DURATION_SECONDS: &str = "agent_host_run_duration_seconds";
+/// Inbox events that the screen flagged. No label.
+pub const AGENT_HOST_EVENTS_SCREENED_TOTAL: &str = "agent_host_events_screened_total";
+/// Run commits that the memory store refused with a version conflict. No label.
+pub const AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL: &str = "agent_host_commit_memory_conflicts_total";
+/// Run commits whose COMMIT statement failed, so the outcome is unknown. No label.
+pub const AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL: &str = "agent_host_commit_outcome_unknown_total";
+/// Restarts of a worker of the pool. No label.
+pub const AGENT_HOST_WORKER_RESTARTS_TOTAL: &str = "agent_host_worker_restarts_total";
+/// The age of the oldest due pending event, read in the poll query, in seconds. No label.
+pub const AGENT_HOST_INBOX_LAG_SECONDS: &str = "agent_host_inbox_lag_seconds";
+/// A histogram of the `attempts` of an event when it goes to `done` or `dead`. No label.
+pub const AGENT_HOST_EVENT_ATTEMPTS: &str = "agent_host_event_attempts";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -405,6 +422,14 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_SCHEDULER_LAG_SECONDS,
     AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
     AGENT_HOST_TIMER_TOOL_CALLS_TOTAL,
+    AGENT_HOST_RUNS_TOTAL,
+    AGENT_HOST_RUN_DURATION_SECONDS,
+    AGENT_HOST_EVENTS_SCREENED_TOTAL,
+    AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL,
+    AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
+    AGENT_HOST_WORKER_RESTARTS_TOTAL,
+    AGENT_HOST_INBOX_LAG_SECONDS,
+    AGENT_HOST_EVENT_ATTEMPTS,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,
@@ -505,6 +530,22 @@ mod tests {
             AGENT_HOST_SCHEDULER_LAG_SECONDS,
             AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
             AGENT_HOST_TIMER_TOOL_CALLS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_agent_host_worker_families_are_registered() {
+        for name in [
+            AGENT_HOST_RUNS_TOTAL,
+            AGENT_HOST_RUN_DURATION_SECONDS,
+            AGENT_HOST_EVENTS_SCREENED_TOTAL,
+            AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL,
+            AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
+            AGENT_HOST_WORKER_RESTARTS_TOTAL,
+            AGENT_HOST_INBOX_LAG_SECONDS,
+            AGENT_HOST_EVENT_ATTEMPTS,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

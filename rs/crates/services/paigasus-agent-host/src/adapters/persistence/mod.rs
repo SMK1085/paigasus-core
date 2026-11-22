@@ -5,6 +5,7 @@ pub mod lease_store;
 pub mod memory;
 pub mod migration;
 pub mod migration_lock;
+pub mod run_commit;
 pub mod scheduler;
 pub mod session_store;
 pub mod time;
