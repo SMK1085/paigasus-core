@@ -2,4 +2,5 @@
 
 //! Text renderers that the core shares with the services.
 
+pub mod events;
 pub mod untrusted;
