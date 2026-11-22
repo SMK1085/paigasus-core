@@ -9,7 +9,7 @@ mod take;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use paigasus_agent_host_core::ids::InboxId;
+use paigasus_agent_host_core::ids::{AgentId, InboxId};
 use paigasus_agent_host_core::lease::{HeartbeatError, LeaseHandle};
 use paigasus_agent_host_core::ports::{LeaseRepository, StoreError};
 use paigasus_observability::names;
@@ -22,18 +22,21 @@ use take::{take, ttl_micros};
 /// The number of candidate inboxes that `acquire_next` locks.
 pub const CANDIDATE_LIMIT: u64 = 8;
 
-/// `$1` = `CANDIDATE_LIMIT`. An inbox with a pending event that is due and with no live lease, the
-/// oldest event first. `FOR NO KEY UPDATE` does not conflict with the `FOR KEY SHARE` lock of an
-/// `inbox_event` insert, so ingress never waits for an acquirer. The filter has no
-/// `attempts < max_attempts` term: an inbox with only exhausted events must still be taken, so that
-/// its claim moves them to `dead` (spec §8.4.1).
-pub const CANDIDATES_SQL: &str = "SELECT i.id, i.org_id \
+/// `$1` = `CANDIDATE_LIMIT`, `$2` = the org ids and `$3` = the agent ids of the served agents (two
+/// arrays of the same length, one pair per agent). An inbox of a served agent with a pending event
+/// that is due and with no live lease, the oldest event first (SMA-790 §6.1). `lag` is the age of
+/// that oldest due event in seconds, on the database clock (§6.14). `FOR NO KEY UPDATE` does not
+/// conflict with the `FOR KEY SHARE` lock of an `inbox_event` insert, so ingress never waits for an
+/// acquirer. The filter has no `attempts < max_attempts` term: an inbox with only exhausted events
+/// must still be taken, so that its claim moves them to `dead` (spec §8.4.1).
+pub const CANDIDATES_SQL: &str = "SELECT i.id, i.org_id, EXTRACT(EPOCH FROM now() - d.oldest)::float8 AS lag \
      FROM inbox i \
-     WHERE EXISTS (SELECT 1 FROM inbox_event e \
-                   WHERE e.inbox_id = i.id AND e.status = 'pending' AND e.not_before <= now()) \
+     CROSS JOIN LATERAL (SELECT min(e.received_at) AS oldest FROM inbox_event e \
+                         WHERE e.inbox_id = i.id AND e.status = 'pending' AND e.not_before <= now()) d \
+     WHERE d.oldest IS NOT NULL \
        AND NOT EXISTS (SELECT 1 FROM inbox_lease l WHERE l.inbox_id = i.id AND l.expires_at >= now()) \
-     ORDER BY (SELECT min(e.received_at) FROM inbox_event e \
-               WHERE e.inbox_id = i.id AND e.status = 'pending' AND e.not_before <= now()) \
+       AND (i.org_id, i.agent_id) IN (SELECT * FROM unnest($2::uuid[], $3::uuid[])) \
+     ORDER BY d.oldest \
      LIMIT $1 \
      FOR NO KEY UPDATE OF i SKIP LOCKED";
 
@@ -77,13 +80,27 @@ pub(crate) async fn commit_or_poison<E>(handle: &mut LeaseHandle, commit: impl s
 pub struct PgLeaseStore {
     db: DatabaseConnection,
     heartbeat_statement_timeout: Duration,
+    /// The agents whose inboxes `acquire_next` takes (SMA-790 §6.1).
+    agents: Vec<AgentId>,
 }
 
 impl PgLeaseStore {
-    /// `heartbeat_statement_timeout` bounds one heartbeat statement in the database.
+    /// `heartbeat_statement_timeout` bounds one heartbeat statement in the database. The store
+    /// serves no agent, so `acquire_next` takes nothing until `serving` names the agents.
     #[must_use]
     pub fn new(db: DatabaseConnection, heartbeat_statement_timeout: Duration) -> Self {
-        Self { db, heartbeat_statement_timeout }
+        Self {
+            db,
+            heartbeat_statement_timeout,
+            agents: Vec::new(),
+        }
+    }
+
+    /// The same store, serving `agents`: `acquire_next` takes only an inbox of one of them. An
+    /// inbox with no configured agent is never taken, and its events wait (SMA-790 §6.1, A7).
+    #[must_use]
+    pub fn serving(self, agents: Vec<AgentId>) -> Self {
+        Self { agents, ..self }
     }
 }
 
@@ -99,10 +116,21 @@ pub(crate) fn lost(operation: &'static str) {
 #[async_trait]
 impl LeaseRepository for PgLeaseStore {
     async fn acquire_next(&self, holder: &str, ttl: Duration) -> Result<Option<LeaseHandle>, StoreError> {
+        if self.agents.is_empty() {
+            return Ok(None);
+        }
+        let orgs: Vec<Uuid> = self.agents.iter().map(AgentId::org).collect();
+        let agents: Vec<Uuid> = self.agents.iter().map(AgentId::uuid).collect();
         let txn = self.db.begin().await.map_err(store)?;
         let limit = i64::try_from(CANDIDATE_LIMIT).unwrap_or(i64::MAX);
-        let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, CANDIDATES_SQL, [limit.into()]);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, CANDIDATES_SQL, [limit.into(), orgs.into(), agents.into()]);
         let rows = txn.query_all_raw(stmt).await.map_err(store)?;
+        // The rows come oldest first, so the first row holds the lag of the oldest due event.
+        let lag = match rows.first() {
+            Some(row) => row.try_get::<f64>("", "lag").map_err(store)?,
+            None => 0.0,
+        };
+        metrics::gauge!(names::AGENT_HOST_INBOX_LAG_SECONDS).set(lag);
         for row in rows {
             let id: Uuid = row.try_get("", "id").map_err(store)?;
             let org: Uuid = row.try_get("", "org_id").map_err(store)?;

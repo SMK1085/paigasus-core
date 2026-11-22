@@ -3,7 +3,7 @@
 //! Fakes of every port of the run worker, for the unit tests of `worker::run` (and of the pool).
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
@@ -29,10 +29,13 @@ fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The lease store. Each heartbeat gives `heartbeat`. `acquire_next` and `acquire` give `None`.
+/// The lease store. Each heartbeat gives `heartbeat`. `acquire_next` logs its holder and gives
+/// the next handle of its queue (an empty queue gives `None`). `acquire` gives `None`.
 pub(crate) struct FakeLeases {
     pub heartbeat: Result<(), HeartbeatError>,
     releases: AtomicUsize,
+    next: StdMutex<VecDeque<LeaseHandle>>,
+    holders: StdMutex<Vec<String>>,
 }
 
 impl FakeLeases {
@@ -40,7 +43,20 @@ impl FakeLeases {
         Self {
             heartbeat,
             releases: AtomicUsize::new(0),
+            next: StdMutex::new(VecDeque::new()),
+            holders: StdMutex::new(Vec::new()),
         }
+    }
+
+    /// A store whose `acquire_next` gives these handles, one per call, in order.
+    pub fn with_next(self, handles: Vec<LeaseHandle>) -> Self {
+        *lock(&self.next) = handles.into();
+        self
+    }
+
+    /// The holder of each `acquire_next` call, in call order.
+    pub fn holders(&self) -> Vec<String> {
+        lock(&self.holders).clone()
     }
 
     /// The number of `release` calls.
@@ -51,8 +67,9 @@ impl FakeLeases {
 
 #[async_trait]
 impl LeaseRepository for FakeLeases {
-    async fn acquire_next(&self, _holder: &str, _ttl: Duration) -> Result<Option<LeaseHandle>, StoreError> {
-        Ok(None)
+    async fn acquire_next(&self, holder: &str, _ttl: Duration) -> Result<Option<LeaseHandle>, StoreError> {
+        lock(&self.holders).push(holder.to_owned());
+        Ok(lock(&self.next).pop_front())
     }
 
     async fn acquire(&self, _inbox: &InboxId, _holder: &str, _ttl: Duration) -> Result<Option<LeaseHandle>, StoreError> {
@@ -235,12 +252,14 @@ impl EventScreen for FakeScreen {
 
 /// The runner. It counts its calls and keeps each user turn. It writes `write` into the workspace
 /// (when set), waits for the run token (when `wait_for_cancel` is set), and then gives `output`.
+/// With `panics_once`, its first call panics (after the count) and every later call runs as above.
 pub(crate) struct FakeRunner {
     pub output: RunOutput,
     pub wait_for_cancel: bool,
     pub write: Option<(&'static str, &'static str)>,
     calls: AtomicUsize,
     turns: StdMutex<Vec<UserTurn>>,
+    panic_next: AtomicBool,
 }
 
 impl FakeRunner {
@@ -251,7 +270,14 @@ impl FakeRunner {
             write: None,
             calls: AtomicUsize::new(0),
             turns: StdMutex::new(Vec::new()),
+            panic_next: AtomicBool::new(false),
         }
+    }
+
+    /// The same runner, but its first call panics.
+    pub fn panics_once(self) -> Self {
+        self.panic_next.store(true, Ordering::SeqCst);
+        self
     }
 
     /// A runner that ends with `end` and no session rows.
@@ -272,6 +298,8 @@ impl FakeRunner {
 impl AgentRunner for FakeRunner {
     async fn run(&self, spec: RunSpec) -> RunOutput {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        // No lock is held here, so the panic poisons no mutex.
+        assert!(!self.panic_next.swap(false, Ordering::SeqCst), "the fake runner panics once");
         lock(&self.turns).push(spec.turn.clone());
         if let Some((path, content)) = self.write {
             let path = MemoryPath::parse(path).expect("a test path");

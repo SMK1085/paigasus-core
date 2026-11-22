@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! A scripted Helikon model. The production registry is empty (spec §6.2) and never holds it.
-//! The tests register it, and the `test-model` feature reuses it.
+//! The tests register it, and the `test-model` feature reuses it. `CancelWaitingModel` holds a run
+//! in the model loop until the run token is cancelled.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
@@ -49,6 +50,24 @@ impl Model for ScriptedModel {
             None => vec![ModelEvent::TokenDelta { text: "done".to_string() }, ModelEvent::Finish { reason: FinishReason::Stop }],
         };
         Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+}
+
+/// A model that waits on each `invoke` until the run token is cancelled, then fails with
+/// `ModelError::Other`. A test uses it to hold a run in the model loop until a shutdown or a lost
+/// lease cancels the run (SMA-790 §6.1).
+#[derive(Debug, Default)]
+pub struct CancelWaitingModel;
+
+#[async_trait]
+impl Model for CancelWaitingModel {
+    async fn invoke(&self, _request: ModelRequest, cancel: CancellationToken) -> Result<BoxStream<'static, Result<ModelEvent, ModelError>>, ModelError> {
+        cancel.cancelled().await;
+        Err(ModelError::Other(anyhow::anyhow!("the run token was cancelled")))
     }
 
     fn capabilities(&self) -> ModelCapabilities {
