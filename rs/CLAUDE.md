@@ -340,6 +340,15 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
     developer. Outside this crate directory the shim has no configured version. So another wasm-pack
     project on the same host can find this shim instead of its own binaryen.
 
+## Postgres fences
+
+- **A fence locks the lease row first, then checks the expiry in a new statement.** Do not put
+  `expires_at > clock_timestamp()` in the statement that waits for the row lock. Postgres READ
+  COMMITTED evaluates that `WHERE` before the wait. It evaluates it again only if the other
+  transaction changed the row. So a waiter on an unchanged row acts on an expired lease
+  (SMA-790 Task 15: heartbeat, first claim and run commit). Use `lock_live_lease` in
+  `rs/crates/services/paigasus-agent-host/src/adapters/persistence/lease_store/mod.rs`.
+
 ## Container images
 
 - Container images (SMA-500) live behind

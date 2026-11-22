@@ -83,8 +83,13 @@ provider crate and does not touch the `aws-lc-rs` ban in `deny.toml` (SMA-786 G7
   back-off and release goes through it (SMA-787 §8.1).
 - `paigasus-agent-host-core` must not depend on Helikon (the A1 dependency guard in its `lib.rs`).
   Every type in a core port is a core type. The service converts from the Helikon types.
-- All correctness times use the database clock (`clock_timestamp()` where a statement can wait on a
-  lock).
+- All correctness times use the database clock. A fence must not check the lease expiry in the
+  statement that waits for the lease row lock. Lock the lease row first, by inbox and token. Then
+  check the expiry in a new statement in the same transaction. Postgres evaluates the predicate of
+  a locking statement before the wait. It evaluates the predicate again only if the other
+  transaction changed the row. `clock_timestamp()` in that predicate does not help.
+- Task 15 found this defect. The SMA-787 heartbeat and the first claim had it, and the run commit
+  did too. `lock_live_lease` in `lease_store/mod.rs` fixes all three.
 - Lock order in the run commit: the lease row first, then the memory scope row (SMA-789 §6.12).
 - Call `apply_in` when `MemoryCommitSet::is_empty()` is false, never on `changes.is_empty()`. A set
   with guards and no change still goes to `apply_in` (SMA-843 §6.6).
