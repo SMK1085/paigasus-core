@@ -43,7 +43,7 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `memory.caps.max_store_files` | `AGENT_HOST_MEMORY__CAPS__MAX_STORE_FILES` | `512` | Largest number of memory files in a scope. Greater than 0. |
 | `memory.caps.max_loaded_file_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_LOADED_FILE_BYTES` | `8192` | The cut of each file that the run start loads into the context. A longer file is cut with a truncation note. `view` does not use it (it cuts at 16,000 characters). Greater than 0, at most `max_file_bytes`. |
 | `memory.s3.bucket` | `AGENT_HOST_MEMORY__S3__BUCKET` | none (required) | The bucket. 3 to 63 characters of `a-z`, `0-9`, `.` and `-`. It starts and ends with a letter or digit. It has no `..`. |
-| `memory.s3.prefix` | `AGENT_HOST_MEMORY__S3__PREFIX` | none (required) | The key prefix of the store. At most 128 bytes and 8 segments. No empty segment, no leading or trailing `/`. |
+| `memory.s3.prefix` | `AGENT_HOST_MEMORY__S3__PREFIX` | none (required) | The key prefix of the store. At most 128 bytes and 8 segments. No empty segment, no leading or trailing `/`. Each segment has 1 to 64 bytes from `A-Z a-z 0-9 . _ -` and does not start with `.`. |
 | `memory.s3.region` | `AGENT_HOST_MEMORY__S3__REGION` | `us-east-1` | The region. An `AWS_REGION` variable does not change it. |
 | `memory.s3.endpoint` | `AGENT_HOST_MEMORY__S3__ENDPOINT` | not set (AWS) | The URL of an S3-compatible store. Scheme `http` or `https`. No user name, password, query or fragment. An `http` URL needs `allow_http`. |
 | `memory.s3.path_style` | `AGENT_HOST_MEMORY__S3__PATH_STYLE` | `true` with an `endpoint`, else `false` | Path-style addressing. With `false` and an `endpoint`, the endpoint must already hold the bucket. |
@@ -70,7 +70,10 @@ The store works with AWS S3 and with S3-compatible stores.
 - The bucket must not keep object versions. The boot probe refuses a bucket that keeps versions.
 - The store must give strong read-after-write consistency for `GET`, `HEAD` and `LIST`. AWS S3 does.
 - Each object starts with a 51-byte header line. So the objects are not plain Markdown. Do not read them as plain files.
-- Do not write objects under the prefix. A foreign object, or a key that is not a valid object path (for example `a//b`), makes the scope fail. Delete such a key with an S3 tool. The store reports it as `unparsable`.
+- Do not write objects under the prefix. If a foreign object is there, the store handles it as follows.
+- An object that the adapter did not write has no header. A `get` of that path fails with a fixed `Store` error. The store counts it as `reason=header`. It does not make the whole scope fail.
+- A key that is a valid object path but not a valid memory path: `list` skips it and counts `reason=key`. `delete_scope` deletes it.
+- A key that is not a valid object path (for example `a//b`) makes the whole scope unreadable. The store counts it as `reason=unparsable`. Remove it with an S3 tool.
 - A folder marker is a key that ends in `/`. A marker under the prefix cannot be deleted by `delete_scope`, because `object_store` removes the trailing `/`. Then `delete_scope` fails with the "keys remain" error. Delete the marker with an S3 tool. This is the same repair step as for an `unparsable` key.
 - The prefixes of two deployments on one bucket must not nest. For example, do not use `mem` and `mem/a`.
 - If `memory.s3.path_style` is `false` and an `endpoint` is set, the endpoint must already hold the bucket name.
@@ -83,17 +86,23 @@ The store works with AWS S3 and with S3-compatible stores.
 variable changes no setting. With none of these variables set, the client asks the instance metadata
 endpoint for credentials. Off AWS, the boot probe then fails with `unauthenticated` or `timeout`.
 
-**Proxy.** The HTTP client reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. This is the
-default of `reqwest`. These variables are not on the credential list, and the host does not turn the
-proxy lookup off. Set `NO_PROXY` for the store endpoint if the host must not use a proxy for it.
+**Other variables that change the client.** These variables are not on the credential list. The host does not turn them off.
+
+- The HTTP client reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, and their lower-case forms. This is the default of `reqwest`. Set `NO_PROXY` for the store endpoint if the host must not use a proxy for it.
+- When `REQUEST_METHOD` is set, `reqwest` ignores `HTTP_PROXY`. This is a guard for CGI.
+- On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` change the system trust roots. The client reads them through `rustls-native-certs`.
+- `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it names.
 
 **Races.** The store is correct for one writer at a time. When two writers write one scope at the
-same moment, five races remain. (1) A writer can add a file under a guarded directory between the
-check and the writes, and the file stays. (2) Two writers can both pass the store cap check, and the
-store can then go over a cap. (3) A delete is a `HEAD` and a `DELETE`. A change between the two is
-lost, and in a `rename` the new path then holds the old content. (4) A conflict between the check and
-the writes gives a partial result. (5) A write that lands after the last listing of `delete_scope`
-stays. A `Put` has no race: the store checks its condition, so a stale `Put` never overwrites.
+same moment, five races remain.
+
+1. A writer can add a file under a guarded directory between the check and the writes. The file stays.
+2. Two writers can both pass the store cap check. The store can then go over a cap. A later change that makes the store larger is refused. A change that makes the store smaller still passes.
+3. A delete is a `HEAD` and a `DELETE`. A change between the two is lost. In a `rename`, the new path then holds the old content.
+4. A conflict between the check and the writes gives a partial result.
+5. A write that lands after the last listing of `delete_scope` stays.
+
+A `Put` has no race: the store checks its condition, so a stale `Put` never overwrites.
 
 The `[iam]`, `[nats]` and `[timers]` sections are optional. A nested value that has no default, for example
 `iam.tls`, is easiest to set in the TOML file. `agent-host.toml.example` shows every key.
