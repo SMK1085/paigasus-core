@@ -42,8 +42,18 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `memory.caps.max_store_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_STORE_BYTES` | `1048576` | Largest memory total of a scope, in bytes. Greater than 0. |
 | `memory.caps.max_store_files` | `AGENT_HOST_MEMORY__CAPS__MAX_STORE_FILES` | `512` | Largest number of memory files in a scope. Greater than 0. |
 | `memory.caps.max_loaded_file_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_LOADED_FILE_BYTES` | `8192` | The cut of each file that the run start loads into the context. A longer file is cut with a truncation note. `view` does not use it (it cuts at 16,000 characters). Greater than 0, at most `max_file_bytes`. |
+| `timers.enabled` | `AGENT_HOST_TIMERS__ENABLED` | `true` | Run the scheduler loop. `false` stops only the loop. The tools still work. No range. |
+| `timers.poll_interval_secs` | `AGENT_HOST_TIMERS__POLL_INTERVAL_SECS` | `5` | Seconds between two passes. Range: 1 to 300. |
+| `timers.pass_limit` | `AGENT_HOST_TIMERS__PASS_LIMIT` | `100` | Most rows that one pass processes. Range: 1 to 1000. |
+| `timers.statement_timeout_ms` | `AGENT_HOST_TIMERS__STATEMENT_TIMEOUT_MS` | `5000` | `SET LOCAL statement_timeout` of each fire transaction, in milliseconds. Range: 100 to 60000. |
+| `timers.min_schedule_interval_secs` | `AGENT_HOST_TIMERS__MIN_SCHEDULE_INTERVAL_SECS` | `900` | Smallest civil gap between two slots of a schedule. Range: 60 to 86400. |
+| `timers.max_active_per_inbox` | `AGENT_HOST_TIMERS__MAX_ACTIVE_PER_INBOX` | `50` | Most active `agent` timers of one inbox. Range: 1 to 1000. |
+| `timers.max_horizon_days` | `AGENT_HOST_TIMERS__MAX_HORIZON_DAYS` | `366` | Latest allowed follow-up, and the window for the first slot of a schedule. Range: 1 to 366. |
+| `timers.max_fire_attempts` | `AGENT_HOST_TIMERS__MAX_FIRE_ATTEMPTS` | `10` | Failed fire attempts before a timer goes to `failed`. Range: 1 to 1000. |
+| `timers.min_follow_up_delay_secs` | `AGENT_HOST_TIMERS__MIN_FOLLOW_UP_DELAY_SECS` | `60` | Shortest follow-up, from the time of the tool call. Range: 1 to 86400. |
+| `timers.max_agent_timers_created_per_day` | `AGENT_HOST_TIMERS__MAX_AGENT_TIMERS_CREATED_PER_DAY` | `100` | Most `agent` timers that one inbox can create in a rolling 24 hours, in any status. Range: 1 to 10000. |
 
-The `[iam]` and `[nats]` sections are optional. A nested value that has no default, for example
+The `[iam]`, `[nats]` and `[timers]` sections are optional. A nested value that has no default, for example
 `iam.tls`, is easiest to set in the TOML file. `agent-host.toml.example` shows every key.
 
 ## Event ingress
@@ -154,6 +164,85 @@ exist, boot stops with a config error. So do these steps in this order:
 2. Create the inbox.
 3. Add the `[nats]` section and the channel with the inbox UUID.
 4. Restart the service.
+
+## Timers
+
+SMA-788 adds timers. A timer wakes an agent at a set time. The wake is an event in the inbox
+of the timer. The event has the type `agents.timer.fired`.
+
+The migration `m0004_create_timer` adds the table `timer`. A timer has a kind: `follow_up` (fires
+once) or `schedule` (a cron pattern in an IANA time zone). A timer has an origin: `agent` or
+`system`. The status of a timer is one of these:
+
+| Status | Meaning |
+|---|---|
+| `active` | The timer waits for `next_fire_at`. |
+| `done` | A follow-up fired. |
+| `cancelled` | The agent or the host cancelled the timer. |
+| `failed` | The timer failed `timers.max_fire_attempts` times with a permanent error. |
+
+### The scheduler loop
+
+The scheduler loop runs when `timers.enabled` is `true`. It starts after boot, and the existing
+drain stops it. Each pass reads the due rows with `FOR UPDATE OF t SKIP LOCKED`, one row for each
+transaction. The database clock decides what is due. Each row has its own transaction, which inserts the event into the inbox and
+updates the timer. Several replicas can run the loop. When a pass processes `timers.pass_limit`
+rows, the next pass starts at once.
+
+A duplicate fire gives no second event. The key of the event is stable for one timer and one slot.
+`timers.enabled = false` stops only the loop. The tools still work, so timers wait until a replica
+with the loop runs.
+
+The metrics `agent_host_scheduler_lag_seconds` and
+`agent_host_scheduler_last_pass_timestamp_seconds` show a late or a hung loop.
+
+### The agent tools
+
+The service has four tools: `schedule_follow_up`, `create_schedule`, `list_timers` and
+`cancel_timer`. The tools exist and have tests. Nothing registers them for a run before SMA-790,
+because no run exists before SMA-790. An agent can not use them yet.
+
+The tools refuse a request in these cases. The refusal is text for the model:
+
+- A follow-up is not in the future, is sooner than `timers.min_follow_up_delay_secs`, or is later
+  than `timers.max_horizon_days`.
+- A cron text is invalid, or a schedule has a civil gap below `timers.min_schedule_interval_secs`.
+- A time zone is not a known IANA zone.
+- A schedule has no slot in `timers.max_horizon_days`.
+- A create makes more than `timers.max_active_per_inbox` active `agent` timers.
+- A create is over the creation budget.
+- A note is longer than 1000 characters, or holds a NUL.
+
+The note is untrusted model text. The service never writes it to a log line or to a metric label.
+
+### The creation budget
+
+A fired follow-up leaves the count of active timers. So an agent could set a follow-up in each run
+and wake itself in a loop. The creation budget stops this. One inbox can create at most
+`timers.max_agent_timers_created_per_day` `agent` timers in a rolling 24 hours. A timer counts in
+any status, so cancel and create does not reset the budget. The service never enforces the budget
+when a timer fires, so a schedule that exists always fires.
+
+### The commit contract for SMA-790
+
+The tools collect their changes in a run buffer. `TimerWorkspace::seal()` gives the inserts and
+the cancels. `PgTimerStore::apply_in` writes them inside the run transaction. SMA-790 must call
+it after it takes the `inbox_lease` row lock with `FOR UPDATE`. That lock is the fence for a run
+that lost its lease. SMA-790 must compare the current lease token with the token of the run under
+that row lock, and roll back the run on a mismatch (ADR (b) step 1). `apply_in` checks only that
+the `inbox_lease` row exists. `apply_in` uses a savepoint, so an error leaves the caller transaction usable.
+
+| Result of `apply_in` | Recommended action for SMA-790 |
+|---|---|
+| `Ok(report)` | Commit the run. A cancel of a timer that is not active is reported as `NotActive`. |
+| `CapExceeded` or `BudgetExceeded` | Roll back the whole run as transient. The next attempt runs again. |
+| `InboxMismatch` or `InvalidInsert` | Log at `error` and roll back the whole run. These are bugs. |
+| A database error | Roll back the whole run and retry it. |
+
+Timer changes do not commit with a `failed` run. A `failed` run keeps its claimed events
+`pending`, so the next attempt runs the same events again. Each attempt makes a new timer id. With
+`claim.max_attempts` of 5, one intent would make five timers. Timer changes commit only with a
+run outcome that finishes its claimed events: `completed`, `deferred` or `stopped`.
 
 ## Migrations
 

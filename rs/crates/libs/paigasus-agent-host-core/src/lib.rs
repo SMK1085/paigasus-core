@@ -34,6 +34,9 @@ mod port_tests {
         assert_port::<dyn ClaimRepository>();
         assert_port::<dyn TimerRepository>();
         assert_port::<dyn Scheduler>();
+        assert_port::<dyn TzResolver>();
+        assert_port::<dyn RunClock>();
+        assert_port::<dyn IdSource>();
         assert_port::<dyn MemoryStore>();
         assert_port::<dyn Outbox>();
         assert_port::<dyn AgentResolver>();
@@ -43,7 +46,7 @@ mod port_tests {
 
 #[cfg(test)]
 mod tests {
-    const ALLOWED: &[&str] = &["paigasus-kernel", "uuid", "jiff", "thiserror", "async-trait", "serde", "serde_json"];
+    const ALLOWED: &[&str] = &["paigasus-kernel", "uuid", "jiff", "thiserror", "async-trait", "serde", "serde_json", "croner"];
 
     /// The kind of a table header: `Some(None)` is a table of dependencies, `Some(Some(name))` is
     /// the table of one dependency, `None` is any other table (dev-dependencies included).

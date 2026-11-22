@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 syntax = "proto3";
 
+package paigasus.agents.v1;
+
 // The contract of the agent host.
 //
 // 1. The package is `paigasus.agents.v1`. Field numbers and names are permanent. New fields
@@ -11,7 +13,8 @@ syntax = "proto3";
 // 4. Envelope rule: a message never repeats a CloudEvents envelope attribute (`id`, `source`,
 //    `type`, `time`, `subject`) or an extension (`threadid`, `actorprn`, `correlationid`,
 //    `schemaversion`). The envelope is the only place for those values.
-package paigasus.agents.v1;
+
+import "google/protobuf/timestamp.proto";
 
 // A message that the host sends out to the user of a run.
 //
@@ -22,4 +25,43 @@ message OutboxMessage {
   // Canonical PRN of the run that produced the message.
   string run_prn = 1;
   string text = 2;
+}
+
+// The kind of a timer.
+enum TimerKind {
+  TIMER_KIND_UNSPECIFIED = 0;
+  // A timer that fires once.
+  TIMER_KIND_FOLLOW_UP = 1;
+  // A timer that fires on a cron schedule.
+  TIMER_KIND_SCHEDULE = 2;
+}
+
+// Who made a timer.
+enum TimerOrigin {
+  TIMER_ORIGIN_UNSPECIFIED = 0;
+  // The agent made the timer with a tool.
+  TIMER_ORIGIN_AGENT = 1;
+  // The system made the timer.
+  TIMER_ORIGIN_SYSTEM = 2;
+}
+
+// A timer fired.
+//
+// Direction: host to agent (inbox). CloudEvents `type`: `agents.timer.fired`. The envelope
+// `source` is `urn:paigasus:agents:timer:agent` or `urn:paigasus:agents:timer:system`, by the
+// origin of the timer. The envelope `time` is the time of the actual firing, so this message has
+// no `fired_at`. The envelope `threadid` is the thread of the timer, if it has one.
+message TimerFired {
+  // The ID of the timer, as a hyphenated UUID.
+  string timer_id = 1;
+  TimerKind kind = 2;
+  TimerOrigin origin = 3;
+  // The scheduled time of the firing. It is the slot, not the actual time.
+  google.protobuf.Timestamp fire_at = 4;
+  // The note of the timer. It is untrusted text.
+  string note = 5;
+  // The cron pattern. Only a schedule has it.
+  optional string cron = 6;
+  // The IANA time zone name of the schedule. Only a schedule has it.
+  optional string tz = 7;
 }

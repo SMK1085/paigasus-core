@@ -63,3 +63,15 @@
 # max_store_bytes = 1048576       # greater than 0
 # max_store_files = 512           # greater than 0
 # max_loaded_file_bytes = 8192    # the cut of a file loaded at run start (not view). Greater than 0, at most max_file_bytes
+
+# [timers]
+# enabled = true                          # run the scheduler loop. false stops only the loop. The tools still work
+# poll_interval_secs = 5                  # the time between two passes. Range 1 to 300
+# pass_limit = 100                        # the most rows that one pass processes. Range 1 to 1000
+# statement_timeout_ms = 5000             # SET LOCAL statement_timeout of each fire transaction. Range 100 to 60000
+# min_schedule_interval_secs = 900        # the smallest civil gap between two slots of a schedule. Range 60 to 86400
+# max_active_per_inbox = 50               # the most active agent timers of one inbox. Range 1 to 1000
+# max_horizon_days = 366                  # the latest follow-up, and the window for the first slot. Range 1 to 366
+# max_fire_attempts = 10                  # failed fire attempts before a timer goes to failed. Range 1 to 1000
+# min_follow_up_delay_secs = 60           # the shortest follow-up, from the time of the tool call. Range 1 to 86400
+# max_agent_timers_created_per_day = 100  # the most agent timers one inbox makes in a rolling 24 hours. Range 1 to 10000

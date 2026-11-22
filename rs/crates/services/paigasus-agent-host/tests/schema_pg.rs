@@ -161,10 +161,161 @@ async fn down_drops_every_table_of_m0003_in_dependency_order() {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
-    Migrator::down(&db, Some(1)).await.expect("down of m0003");
+    // m0004 (the timer table, SMA-788) is newer than m0003, so two steps down reach m0003.
+    Migrator::down(&db, Some(2)).await.expect("down of m0004 and m0003");
     for table in ["thread", "inbox_lease", "run", "run_event", "inbox_event"] {
         assert!(support::scalar_bool(&db, &format!("SELECT to_regclass('{table}') IS NULL AS v")).await, "{table} must be gone");
     }
     assert!(support::scalar_bool(&db, "SELECT to_regclass('memory_file') IS NOT NULL AS v").await, "m0002 must stay");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox') IS NOT NULL AS v").await, "m0001 must stay");
+}
+
+#[tokio::test]
+async fn m0004_creates_the_timer_table() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    for object in ["timer", "timer_due", "timer_inbox_active", "timer_inbox_agent_created"] {
+        assert!(support::scalar_bool(&db, &format!("SELECT to_regclass('{object}') IS NOT NULL AS v")).await, "{object} must exist");
+    }
+}
+
+/// An insert into `timer` for inbox 1 with the given columns. `extra` is a list of
+/// `(column, SQL literal)` pairs that come on top of the valid base row.
+async fn insert_timer(db: &DatabaseConnection, tid: u128, base: &[(&str, &str)], extra: &[(&str, &str)]) -> Result<(), sea_orm::DbErr> {
+    let mut cols: Vec<(String, String)> = base.iter().map(|(c, v)| ((*c).to_string(), (*v).to_string())).collect();
+    for (c, v) in extra {
+        cols.retain(|(k, _)| k != c);
+        cols.push(((*c).to_string(), (*v).to_string()));
+    }
+    let names: Vec<&str> = cols.iter().map(|(c, _)| c.as_str()).collect();
+    let values: Vec<&str> = cols.iter().map(|(_, v)| v.as_str()).collect();
+    db.execute_unprepared(&format!(
+        "INSERT INTO timer (id, inbox_id, {}) VALUES ('{}', '{}', {})",
+        names.join(", "),
+        id(tid),
+        id(1),
+        values.join(", ")
+    ))
+    .await
+    .map(|_| ())
+}
+
+/// A valid `follow_up` row.
+const FOLLOW_UP: [(&str, &str); 6] = [
+    ("kind", "'follow_up'"),
+    ("origin", "'agent'"),
+    ("status", "'active'"),
+    ("note", "'n'"),
+    ("scheduled_at", "now()"),
+    ("next_fire_at", "now()"),
+];
+
+/// The extra columns that make the base row a valid `schedule`.
+const SCHEDULE: [(&str, &str); 5] = [
+    ("kind", "'schedule'"),
+    ("cron", "'0 * * * *'"),
+    ("tz", "'Europe/Berlin'"),
+    ("next_slot", "'2026-01-01 10:00:00'"),
+    ("next_slot_second", "false"),
+];
+
+fn assert_check_violation(r: Result<(), sea_orm::DbErr>, what: &str) {
+    let err = r.expect_err(what);
+    let code = match &err {
+        sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(e)) | sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(e)) => e.as_database_error().and_then(|d| d.code().map(|c| c.to_string())),
+        _ => None,
+    };
+    assert_eq!(code.as_deref(), Some("23514"), "{what}: expected SQLSTATE 23514, got {err:?}");
+}
+
+#[tokio::test]
+async fn timer_checks_hold() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    two_inboxes(&db).await;
+    // The two valid shapes are accepted.
+    insert_timer(&db, 5000, &FOLLOW_UP, &[]).await.expect("valid follow_up");
+    insert_timer(&db, 5001, &FOLLOW_UP, &SCHEDULE).await.expect("valid schedule");
+    insert_timer(&db, 5002, &FOLLOW_UP, &[("note", &format!("'{}'", "é".repeat(1000)))])
+        .await
+        .expect("1000 two-byte characters are accepted");
+
+    assert_check_violation(insert_timer(&db, 5010, &FOLLOW_UP, &[("kind", "'schedule'")]).await, "schedule with no cron");
+    assert_check_violation(insert_timer(&db, 5011, &FOLLOW_UP, &[("cron", "'0 * * * *'")]).await, "follow_up with a cron");
+    let no_tz: Vec<(&str, &str)> = SCHEDULE.iter().filter(|(c, _)| *c != "tz").copied().collect();
+    assert_check_violation(insert_timer(&db, 5012, &FOLLOW_UP, &no_tz).await, "cron without tz");
+    assert_check_violation(
+        insert_timer(
+            &db,
+            5013,
+            &FOLLOW_UP,
+            &[("kind", "'schedule'"), ("cron", "'0 * * * *'"), ("tz", "'UTC'"), ("next_slot", "'2026-01-01 10:00:00'")],
+        )
+        .await,
+        "next_slot without next_slot_second",
+    );
+    assert_check_violation(insert_timer(&db, 5014, &FOLLOW_UP, &[("note", &format!("'{}'", "é".repeat(1001)))]).await, "note of 1001 characters");
+    assert_check_violation(
+        insert_timer(&db, 5015, &FOLLOW_UP, &[("failure", &format!("'{}'", "x".repeat(501)))]).await,
+        "failure of 501 characters",
+    );
+    assert_check_violation(insert_timer(&db, 5016, &FOLLOW_UP, &[("status", "'paused'")]).await, "status paused");
+    for (n, col, lit) in [
+        (5017, "next_fire_at", "'-infinity'"),
+        (5018, "next_fire_at", "'infinity'"),
+        (5022, "scheduled_at", "'-infinity'"),
+        (5023, "scheduled_at", "'infinity'"),
+        (5019, "last_fired_at", "'-infinity'"),
+        (5020, "last_fired_at", "'infinity'"),
+    ] {
+        assert_check_violation(insert_timer(&db, n, &FOLLOW_UP, &[(col, lit)]).await, &format!("{col} {lit}"));
+    }
+    insert_timer(&db, 5021, &FOLLOW_UP, &[("last_fired_at", "now()")]).await.expect("a finite last_fired_at");
+    // `next_fire_at` is the due time. It must not be before `scheduled_at`.
+    assert_check_violation(
+        insert_timer(&db, 5024, &FOLLOW_UP, &[("scheduled_at", "now() + interval '1 minute'"), ("next_fire_at", "now()")]).await,
+        "next_fire_at before scheduled_at",
+    );
+    insert_timer(&db, 5025, &FOLLOW_UP, &[("scheduled_at", "now()"), ("next_fire_at", "now() + interval '1 minute'")])
+        .await
+        .expect("a due time after the scheduled instant (a back-off)");
+    let no_scheduled: Vec<(&str, &str)> = FOLLOW_UP.iter().filter(|(c, _)| *c != "scheduled_at").copied().collect();
+    let err = insert_timer(&db, 5026, &no_scheduled, &[]).await.expect_err("scheduled_at is required");
+    assert!(
+        err.to_string().contains("scheduled_at") && err.to_string().contains("null value"),
+        "expected a NOT NULL error on scheduled_at, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn timer_thread_must_be_of_the_inbox() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    two_inboxes(&db).await;
+    insert_thread(&db, id(300), id(2)).await;
+    let thread = format!("'{}'", id(300));
+    let err = insert_timer(&db, 5100, &FOLLOW_UP, &[("thread_id", &thread)])
+        .await
+        .expect_err("a thread of inbox B must be refused for inbox A");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+    insert_thread(&db, id(301), id(1)).await;
+    let own = format!("'{}'", id(301));
+    insert_timer(&db, 5101, &FOLLOW_UP, &[("thread_id", &own)]).await.expect("a thread of the same inbox is accepted");
+}
+
+#[tokio::test]
+async fn m0004_down_drops_only_the_timer_table() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    Migrator::down(&db, Some(1)).await.expect("down of m0004");
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('timer') IS NULL AS v").await, "timer must be gone");
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox_event') IS NOT NULL AS v").await, "m0003 must stay");
 }

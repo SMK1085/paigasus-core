@@ -3,8 +3,9 @@
 # plugin: python-betterproto2
 # This file has been @generated
 
-__all__ = ("OutboxMessage",)
+__all__ = ("OutboxMessage", "TimerFired", "TimerKind", "TimerOrigin")
 
+import datetime
 from dataclasses import dataclass
 
 import betterproto2
@@ -13,6 +14,74 @@ from ....message_pool import default_message_pool
 
 _COMPILER_VERSION = "0.10.1"
 betterproto2.check_compiler_version(_COMPILER_VERSION)
+
+
+class TimerKind(betterproto2.Enum):
+    """
+    The kind of a timer.
+    """
+
+    UNSPECIFIED = 0
+
+    FOLLOW_UP = 1
+    """
+    A timer that fires once.
+    """
+
+    SCHEDULE = 2
+    """
+    A timer that fires on a cron schedule.
+    """
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TIMER_KIND_UNSPECIFIED",
+            1: "TIMER_KIND_FOLLOW_UP",
+            2: "TIMER_KIND_SCHEDULE",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TIMER_KIND_UNSPECIFIED": 0,
+            "TIMER_KIND_FOLLOW_UP": 1,
+            "TIMER_KIND_SCHEDULE": 2,
+        }
+
+
+class TimerOrigin(betterproto2.Enum):
+    """
+    Who made a timer.
+    """
+
+    UNSPECIFIED = 0
+
+    AGENT = 1
+    """
+    The agent made the timer with a tool.
+    """
+
+    SYSTEM = 2
+    """
+    The system made the timer.
+    """
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "TIMER_ORIGIN_UNSPECIFIED",
+            1: "TIMER_ORIGIN_AGENT",
+            2: "TIMER_ORIGIN_SYSTEM",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "TIMER_ORIGIN_UNSPECIFIED": 0,
+            "TIMER_ORIGIN_AGENT": 1,
+            "TIMER_ORIGIN_SYSTEM": 2,
+        }
 
 
 @dataclass(eq=False, repr=False)
@@ -36,3 +105,59 @@ class OutboxMessage(betterproto2.Message):
 default_message_pool.register_message(
     "paigasus.agents.v1", "OutboxMessage", OutboxMessage
 )
+
+
+@dataclass(eq=False, repr=False)
+class TimerFired(betterproto2.Message):
+    """
+    A timer fired.
+
+    Direction: host to agent (inbox). CloudEvents `type`: `agents.timer.fired`. The envelope
+    `source` is `urn:paigasus:agents:timer:agent` or `urn:paigasus:agents:timer:system`, by the
+    origin of the timer. The envelope `time` is the time of the actual firing, so this message has
+    no `fired_at`. The envelope `threadid` is the thread of the timer, if it has one.
+    """
+
+    timer_id: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+    """
+    The ID of the timer, as a hyphenated UUID.
+    """
+
+    kind: "TimerKind" = betterproto2.field(
+        2, betterproto2.TYPE_ENUM, default_factory=lambda: TimerKind(0)
+    )
+
+    origin: "TimerOrigin" = betterproto2.field(
+        3, betterproto2.TYPE_ENUM, default_factory=lambda: TimerOrigin(0)
+    )
+
+    fire_at: "datetime.datetime | None" = betterproto2.field(
+        4,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+    """
+    The scheduled time of the firing. It is the slot, not the actual time.
+    """
+
+    note: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+    """
+    The note of the timer. It is untrusted text.
+    """
+
+    cron: "str | None" = betterproto2.field(6, betterproto2.TYPE_STRING, optional=True)
+    """
+    The cron pattern. Only a schedule has it.
+    """
+
+    tz: "str | None" = betterproto2.field(7, betterproto2.TYPE_STRING, optional=True)
+    """
+    The IANA time zone name of the schedule. Only a schedule has it.
+    """
+
+
+default_message_pool.register_message("paigasus.agents.v1", "TimerFired", TimerFired)
+
+
+from ....google import protobuf as ___google__protobuf__

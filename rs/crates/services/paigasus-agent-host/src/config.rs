@@ -10,12 +10,15 @@ use figment::{Figment, error::Error as FigmentError};
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::memory::MemoryCaps;
 use paigasus_agent_host_core::mid_run::MidRunPolicy;
+use paigasus_agent_host_core::timer::{TimerCaps, WALK_BOUND};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::adapters::nats::channels::filters_overlap;
 use crate::adapters::nats::{DURABLE_NAME, STREAM_NAME};
+use crate::adapters::persistence::scheduler::SchedulerSettings;
 use crate::application::lease_keeper::{KeeperTiming, KeeperTimingError};
+use crate::application::scheduler_loop::LoopSettings;
 
 /// A connection URL that can hold a password. `Debug` and `Serialize` print a fixed placeholder.
 /// Read the real value with [`RedactedUrl::as_str`].
@@ -75,6 +78,80 @@ pub struct Config {
     #[serde(default)]
     pub nats: Option<NatsConfig>,
     pub memory: MemoryConfig,
+    pub timers: TimersConfig,
+}
+
+/// The timers (spec §9.1, §9.2). Every number has a range that [`Config::validate`] checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TimersConfig {
+    /// Run the scheduler loop. `false` stops only the loop. The tools still work.
+    pub enabled: bool,
+    /// The time between two passes. Range 1 to 300.
+    pub poll_interval_secs: u64,
+    /// The most rows that one pass processes. Range 1 to 1000.
+    pub pass_limit: u32,
+    /// `SET LOCAL statement_timeout` for each fire transaction. Range 100 to 60000.
+    pub statement_timeout_ms: u64,
+    /// The smallest civil gap between two slots of a schedule. Range 60 to 86400.
+    pub min_schedule_interval_secs: u64,
+    /// The most active `agent` timers of one inbox. Range 1 to 1000.
+    pub max_active_per_inbox: u32,
+    /// The latest follow-up, and the window for the first slot of a schedule. Range 1 to 366.
+    /// The cap is the window of the civil gap check (`CIVIL_GAP_WINDOW_DAYS`), so a slot that the
+    /// check does not see is never inside the horizon.
+    pub max_horizon_days: u32,
+    /// The failed fire attempts after which a timer goes to `failed`. Range 1 to 1000.
+    pub max_fire_attempts: u32,
+    /// The shortest follow-up, from the time of the tool call. Range 1 to 86400.
+    pub min_follow_up_delay_secs: u64,
+    /// The most `agent` timers that one inbox can make in a rolling 24 hours. Range 1 to 10000.
+    pub max_agent_timers_created_per_day: u32,
+}
+
+impl TimersConfig {
+    /// The caps of the timer tools, as the core type.
+    #[must_use]
+    pub fn to_caps(&self) -> TimerCaps {
+        TimerCaps {
+            min_schedule_interval_secs: self.min_schedule_interval_secs,
+            max_active_per_inbox: self.max_active_per_inbox,
+            max_horizon_days: self.max_horizon_days,
+            min_follow_up_delay_secs: self.min_follow_up_delay_secs,
+            max_agent_timers_created_per_day: self.max_agent_timers_created_per_day,
+        }
+    }
+
+    /// The time between two passes.
+    #[must_use]
+    pub fn poll_interval(&self) -> Duration {
+        Duration::from_secs(self.poll_interval_secs)
+    }
+
+    /// The statement timeout of one fire transaction.
+    #[must_use]
+    pub fn statement_timeout(&self) -> Duration {
+        Duration::from_millis(self.statement_timeout_ms)
+    }
+
+    /// The settings of the scheduler loop.
+    #[must_use]
+    pub fn loop_settings(&self) -> LoopSettings {
+        LoopSettings {
+            poll_interval: self.poll_interval(),
+            pass_limit: self.pass_limit,
+        }
+    }
+
+    /// The settings of the scheduler. The back-off base is the poll interval.
+    #[must_use]
+    pub fn scheduler_settings(&self) -> SchedulerSettings {
+        SchedulerSettings {
+            statement_timeout: self.statement_timeout(),
+            max_fire_attempts: self.max_fire_attempts,
+            backoff_base: self.poll_interval(),
+            walk_bound: WALK_BOUND,
+        }
+    }
 }
 
 /// The agent memory store.
@@ -330,6 +407,8 @@ pub enum ConfigError {
     MemoryCapZero(&'static str),
     #[error("memory.caps.max_loaded_file_bytes must not be greater than memory.caps.max_file_bytes")]
     MemoryLoadedOverFile,
+    #[error("timers.{key} must be between {min} and {max} (got {value})")]
+    TimerValueOutOfRange { key: &'static str, value: u64, min: u64, max: u64 },
 }
 
 /// The defaults. `database_url` has none: it is required. `iam` has none: no `[iam]` section
@@ -346,6 +425,7 @@ struct Defaults {
     ingress: IngressConfig,
     mid_run: MidRunConfig,
     memory: MemoryDefaults,
+    timers: TimersConfig,
 }
 
 #[derive(Serialize)]
@@ -530,6 +610,18 @@ impl Config {
                     max_loaded_file_bytes: 8_192,
                 },
             },
+            timers: TimersConfig {
+                enabled: true,
+                poll_interval_secs: 5,
+                pass_limit: 100,
+                statement_timeout_ms: 5000,
+                min_schedule_interval_secs: 900,
+                max_active_per_inbox: 50,
+                max_horizon_days: 366,
+                max_fire_attempts: 10,
+                min_follow_up_delay_secs: 60,
+                max_agent_timers_created_per_day: 100,
+            },
         }))
         .merge(Toml::file("agent-host.toml"))
         .merge(Env::prefixed("AGENT_HOST_").split("__"))
@@ -618,6 +710,22 @@ impl Config {
         }
         if caps.max_loaded_file_bytes > caps.max_file_bytes {
             return Err(ConfigError::MemoryLoadedOverFile);
+        }
+        let t = &self.timers;
+        for (key, value, min, max) in [
+            ("poll_interval_secs", t.poll_interval_secs, 1, 300),
+            ("pass_limit", u64::from(t.pass_limit), 1, 1000),
+            ("statement_timeout_ms", t.statement_timeout_ms, 100, 60_000),
+            ("min_schedule_interval_secs", t.min_schedule_interval_secs, 60, 86_400),
+            ("max_active_per_inbox", u64::from(t.max_active_per_inbox), 1, 1000),
+            ("max_horizon_days", u64::from(t.max_horizon_days), 1, u64::from(paigasus_agent_host_core::timer::CIVIL_GAP_WINDOW_DAYS)),
+            ("max_fire_attempts", u64::from(t.max_fire_attempts), 1, 1000),
+            ("min_follow_up_delay_secs", t.min_follow_up_delay_secs, 1, 86_400),
+            ("max_agent_timers_created_per_day", u64::from(t.max_agent_timers_created_per_day), 1, 10_000),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(ConfigError::TimerValueOutOfRange { key, value, min, max });
+            }
         }
         Ok(())
     }
@@ -755,6 +863,102 @@ mod tests {
         });
     }
 
+    fn timer_err(key: &'static str, value: u64, min: u64, max: u64) -> ConfigError {
+        ConfigError::TimerValueOutOfRange { key, value, min, max }
+    }
+
+    #[test]
+    fn timers_defaults() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_url();
+            let t = &cfg.timers;
+            assert!(t.enabled);
+            assert_eq!(t.poll_interval_secs, 5);
+            assert_eq!(t.pass_limit, 100);
+            assert_eq!(t.statement_timeout_ms, 5000);
+            assert_eq!(t.min_schedule_interval_secs, 900);
+            assert_eq!(t.max_active_per_inbox, 50);
+            assert_eq!(t.max_horizon_days, 366);
+            assert_eq!(t.max_fire_attempts, 10);
+            assert_eq!(t.min_follow_up_delay_secs, 60);
+            assert_eq!(t.max_agent_timers_created_per_day, 100);
+            assert_eq!(t.poll_interval(), Duration::from_secs(5));
+            assert_eq!(t.statement_timeout(), Duration::from_millis(5000));
+            assert_eq!(t.min_schedule_interval_secs, 900);
+            assert_eq!(t.min_follow_up_delay_secs, 60);
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn timers_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AGENT_HOST_TIMERS__POLL_INTERVAL_SECS", "1");
+            jail.set_env("AGENT_HOST_TIMERS__ENABLED", "false");
+            let cfg = with_url();
+            assert!(!cfg.timers.enabled);
+            assert_eq!(cfg.timers.poll_interval_secs, 1);
+            assert_eq!(cfg.timers.pass_limit, 100);
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn timers_to_loop_settings() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.timers.poll_interval_secs = 4;
+            cfg.timers.pass_limit = 9;
+            let l = cfg.timers.loop_settings();
+            assert_eq!(l.poll_interval, Duration::from_secs(4));
+            assert_eq!(l.pass_limit, 9);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn timers_to_scheduler_settings() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.timers.statement_timeout_ms = 1234;
+            cfg.timers.max_fire_attempts = 7;
+            cfg.timers.poll_interval_secs = 3;
+            let s = cfg.timers.scheduler_settings();
+            assert_eq!(s.statement_timeout, Duration::from_millis(1234));
+            assert_eq!(s.max_fire_attempts, 7);
+            assert_eq!(s.backoff_base, Duration::from_secs(3));
+            assert_eq!(s.walk_bound, WALK_BOUND);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn timers_to_caps() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.timers.min_schedule_interval_secs = 61;
+            cfg.timers.max_active_per_inbox = 7;
+            cfg.timers.max_horizon_days = 8;
+            cfg.timers.min_follow_up_delay_secs = 9;
+            cfg.timers.max_agent_timers_created_per_day = 10;
+            let caps = cfg.timers.to_caps();
+            assert_eq!(caps.min_schedule_interval_secs, 61);
+            assert_eq!(caps.max_active_per_inbox, 7);
+            assert_eq!(caps.max_horizon_days, 8);
+            assert_eq!(caps.min_follow_up_delay_secs, 9);
+            assert_eq!(caps.max_agent_timers_created_per_day, 10);
+            assert_eq!(with_url().timers.to_caps(), TimerCaps::default());
+            Ok(())
+        });
+    }
+
     /// One §8.7 range: the key, a setter, the bounds, and the error of a value out of range.
     struct RangeRow {
         key: &'static str,
@@ -823,6 +1027,69 @@ mod tests {
                 min: 100,
                 max: 30_000,
                 err: ConfigError::IamCallTimeoutOutOfRange,
+            },
+            RangeRow {
+                key: "timers.poll_interval_secs",
+                set: |c, v| c.timers.poll_interval_secs = v,
+                min: 1,
+                max: 300,
+                err: |v| timer_err("poll_interval_secs", v, 1, 300),
+            },
+            RangeRow {
+                key: "timers.pass_limit",
+                set: |c, v| c.timers.pass_limit = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 1000,
+                err: |v| timer_err("pass_limit", v, 1, 1000),
+            },
+            RangeRow {
+                key: "timers.statement_timeout_ms",
+                set: |c, v| c.timers.statement_timeout_ms = v,
+                min: 100,
+                max: 60_000,
+                err: |v| timer_err("statement_timeout_ms", v, 100, 60_000),
+            },
+            RangeRow {
+                key: "timers.min_schedule_interval_secs",
+                set: |c, v| c.timers.min_schedule_interval_secs = v,
+                min: 60,
+                max: 86_400,
+                err: |v| timer_err("min_schedule_interval_secs", v, 60, 86_400),
+            },
+            RangeRow {
+                key: "timers.max_active_per_inbox",
+                set: |c, v| c.timers.max_active_per_inbox = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 1000,
+                err: |v| timer_err("max_active_per_inbox", v, 1, 1000),
+            },
+            RangeRow {
+                key: "timers.max_horizon_days",
+                set: |c, v| c.timers.max_horizon_days = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 366,
+                err: |v| timer_err("max_horizon_days", v, 1, 366),
+            },
+            RangeRow {
+                key: "timers.max_fire_attempts",
+                set: |c, v| c.timers.max_fire_attempts = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 1000,
+                err: |v| timer_err("max_fire_attempts", v, 1, 1000),
+            },
+            RangeRow {
+                key: "timers.min_follow_up_delay_secs",
+                set: |c, v| c.timers.min_follow_up_delay_secs = v,
+                min: 1,
+                max: 86_400,
+                err: |v| timer_err("min_follow_up_delay_secs", v, 1, 86_400),
+            },
+            RangeRow {
+                key: "timers.max_agent_timers_created_per_day",
+                set: |c, v| c.timers.max_agent_timers_created_per_day = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 10_000,
+                err: |v| timer_err("max_agent_timers_created_per_day", v, 1, 10_000),
             },
         ];
         figment::Jail::expect_with(|jail| {

@@ -112,7 +112,10 @@ tokio-stream = { version = "0.1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
 thiserror = "2"
 # jiff: core time type (SMA-786 section 6.2); Helikon core needs >= 0.2.46, which Task 8 brings in.
-jiff = "0.2"
+# SMA-788 §5.1, C7, C8: the bundled tz database, so no timer code reads the host zoneinfo.
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+# SMA-788 S3: the cron parser and walker. `jiff` feature only, no `chrono`.
+croner = { version = "4.0.3", default-features = false, features = ["jiff"] }
 anyhow = "1"
 figment = { version = "0.10", features = ["toml", "env"] }
 # Prefer native `async fn` in traits (stable since 1.75); use async-trait only when

@@ -5,6 +5,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use paigasus_agent_host_core::ports::IdSource;
 use paigasus_kernel::mint_uuid7;
 use uuid::Uuid;
 
@@ -13,6 +14,16 @@ use uuid::Uuid;
 pub fn mint_uuid() -> Uuid {
     let ms = SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock before 1970").as_millis();
     mint_uuid7(u64::try_from(ms).unwrap_or(u64::MAX), rand::random::<[u8; 10]>())
+}
+
+/// The id port of the timer tools over `mint_uuid`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MintIds;
+
+impl IdSource for MintIds {
+    fn new_uuid(&self) -> Uuid {
+        mint_uuid()
+    }
 }
 
 #[cfg(test)]
@@ -24,5 +35,12 @@ mod tests {
         let a = mint_uuid();
         assert_eq!(a.get_version_num(), 7);
         assert_ne!(mint_uuid(), a);
+    }
+
+    #[test]
+    fn mint_ids_are_v7() {
+        let a = MintIds.new_uuid();
+        assert_eq!(a.get_version_num(), 7);
+        assert_ne!(MintIds.new_uuid(), a);
     }
 }

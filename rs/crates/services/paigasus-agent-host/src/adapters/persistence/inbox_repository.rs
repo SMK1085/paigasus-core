@@ -103,6 +103,45 @@ fn domain_err(e: DomainError) -> RepositoryError {
     store(e)
 }
 
+/// Insert one event on any connection, so that a caller can do it inside its own transaction.
+/// A conflict on the dedup key writes nothing and returns the stored row with a payload check.
+/// A stored row that is gone is a `DbErr::Custom`.
+pub async fn insert_event_in<C: ConnectionTrait>(conn: &C, event: &NewInboxEvent) -> Result<InsertOutcome, DbErr> {
+    let inbox = event.inbox.uuid();
+    let thread: Option<Uuid> = event.thread.as_ref().map(|t| t.uuid());
+    let values: Vec<Value> = vec![
+        event.id.uuid().into(),
+        inbox.into(),
+        event.source.clone().into(),
+        event.ce_id.clone().into(),
+        event.ce_type.clone().into(),
+        thread.into(),
+        event.envelope.to_string().into(),
+    ];
+    let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, INSERT_SQL, values);
+    if let Some(row) = conn.query_one_raw(stmt).await? {
+        let id: Uuid = row.try_get("", "id")?;
+        return Ok(InsertOutcome::Inserted { id: EventId::from_uuid(id) });
+    }
+
+    // No row: a stored row holds the key. Compare its type in Rust and its data in Postgres.
+    let new_data: Option<String> = event.envelope.get("data").map(|d| d.to_string());
+    let stmt = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        STORED_SQL,
+        [inbox.into(), event.source.clone().into(), event.ce_id.clone().into(), new_data.into()],
+    );
+    let row = conn.query_one_raw(stmt).await?.ok_or_else(|| DbErr::Custom("the stored row of a duplicate key is gone".to_string()))?;
+    let id: Uuid = row.try_get("", "id")?;
+    let stored_type: String = row.try_get("", "ce_type")?;
+    let data_equal: bool = row.try_get("", "data_equal")?;
+    let payload_matches = stored_type == event.ce_type && data_equal;
+    Ok(InsertOutcome::Duplicate {
+        id: EventId::from_uuid(id),
+        payload_matches,
+    })
+}
+
 #[async_trait]
 impl InboxRepository for PgInboxRepository {
     async fn get_by_uuid(&self, id: Uuid) -> Result<Option<Inbox>, RepositoryError> {
@@ -120,43 +159,6 @@ impl InboxRepository for PgInboxRepository {
     }
 
     async fn insert_event(&self, event: NewInboxEvent) -> Result<InsertOutcome, RepositoryError> {
-        let inbox = event.inbox.uuid();
-        let thread: Option<Uuid> = event.thread.as_ref().map(|t| t.uuid());
-        let values: Vec<Value> = vec![
-            event.id.uuid().into(),
-            inbox.into(),
-            event.source.clone().into(),
-            event.ce_id.clone().into(),
-            event.ce_type.clone().into(),
-            thread.into(),
-            event.envelope.to_string().into(),
-        ];
-        let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, INSERT_SQL, values);
-        if let Some(row) = self.db.query_one_raw(stmt).await.map_err(db_err)? {
-            let id: Uuid = row.try_get("", "id").map_err(db_err)?;
-            return Ok(InsertOutcome::Inserted { id: EventId::from_uuid(id) });
-        }
-
-        // No row: a stored row holds the key. Compare its type in Rust and its data in Postgres.
-        let new_data: Option<String> = event.envelope.get("data").map(|d| d.to_string());
-        let stmt = Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            STORED_SQL,
-            [inbox.into(), event.source.clone().into(), event.ce_id.clone().into(), new_data.into()],
-        );
-        let row = self
-            .db
-            .query_one_raw(stmt)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| RepositoryError::Store("the stored row of a duplicate key is gone".to_string()))?;
-        let id: Uuid = row.try_get("", "id").map_err(db_err)?;
-        let stored_type: String = row.try_get("", "ce_type").map_err(db_err)?;
-        let data_equal: bool = row.try_get("", "data_equal").map_err(db_err)?;
-        let payload_matches = stored_type == event.ce_type && data_equal;
-        Ok(InsertOutcome::Duplicate {
-            id: EventId::from_uuid(id),
-            payload_matches,
-        })
+        insert_event_in(&self.db, &event).await.map_err(db_err)
     }
 }

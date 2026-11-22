@@ -168,10 +168,28 @@ threads-required = 'num-test-threads'
 retries = 0
 
 [[profile.default.overrides]]
+# SMA-788 §14.1: the follow-up wake test is a timing test. It asserts that the event comes less
+# than two poll intervals after its due time. `num-test-threads` gives it every test slot, so no
+# other test runs beside it. `retries = 0`: a retry would hide a real delay. This block comes
+# BEFORE the SMA-786 block below, because the first matching block that sets `retries` wins.
+filter = 'package(=paigasus-agent-host) and binary(timer_wake_pg)'
+threads-required = 'num-test-threads'
+retries = 0
+
+[[profile.default.overrides]]
+# SMA-788 §14.2: the scheduler race and timing tests (a `SKIP LOCKED` pass that must not wait, an
+# ingress insert that must not wait, a crash between insert and commit). A failure must red at
+# once: a retry would report the failure FLAKY and pass. This block comes BEFORE the block below,
+# because the first matching block that sets `retries` wins. It inherits `test-group` from it.
+filter = 'package(=paigasus-agent-host) and binary(scheduler_pg)'
+threads-required = 'num-test-threads'
+retries = 0
+
+[[profile.default.overrides]]
 # SMA-786: the agent host's Postgres-backed binaries, named one by one so the crate's pure unit
 # tests keep retries = 0. Same retry budget and container cap as the gateway's suites. SMA-789
 # adds the memory store binaries `memory_pg` and `memory_resume_pg`.
-filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg) or binary(inbox_repository_pg) or binary(lease_pg) or binary(claim_pg) or binary(complete_pg) or binary(keeper_pg) or binary(lease_property_pg) or binary(lease_stress_pg) or binary(lease_crash_pg) or binary(ingress_pg) or binary(ingress_latency_pg) or binary(nats_source) or binary(memory_pg) or binary(memory_resume_pg))'
+filter = 'package(=paigasus-agent-host) and (binary(docker_preflight) or binary(boot_pg) or binary(migration_isolation_pg) or binary(schema_pg) or binary(inbox_repository_pg) or binary(lease_pg) or binary(claim_pg) or binary(complete_pg) or binary(keeper_pg) or binary(lease_property_pg) or binary(lease_stress_pg) or binary(lease_crash_pg) or binary(ingress_pg) or binary(ingress_latency_pg) or binary(nats_source) or binary(memory_pg) or binary(memory_resume_pg) or binary(timer_store_pg) or binary(scheduler_pg) or binary(timer_wake_pg))'
 retries = { backoff = "exponential", count = 2, delay = "15s", max-delay = "60s", jitter = true }
 test-group = 'docker-containers'
 

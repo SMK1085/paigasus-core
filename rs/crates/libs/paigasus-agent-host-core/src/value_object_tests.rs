@@ -10,7 +10,9 @@ use crate::error::DomainError;
 use crate::ids::{AgentId, InboxId, PrincipalId, TimerId};
 use crate::inbox::Inbox;
 use crate::outbox::OutboxPayload;
-use crate::timer::{Timer, TimerKind};
+use crate::ports::{IdSource, RunClock, TimerRepository, TzResolver};
+use crate::timer::fake::{FakeClock, InMemoryTimerRepository, MapTzResolver, SeqIds};
+use crate::timer::{ApplyError, Note, NoteError, Timer, TimerCaps, TimerChanges, TimerKind, TimerOrigin, TimerParts, TimerStatus, TimerView};
 
 fn u(n: u128) -> Uuid {
     Uuid::from_u128(n)
@@ -28,16 +30,160 @@ fn inbox_new_takes_its_org_from_the_inbox_prn() {
     assert_eq!(inbox.org(), u(1));
 }
 
+fn ts(raw: &str) -> Timestamp {
+    raw.parse().unwrap()
+}
+
+fn follow_up(id: u128, inbox: &InboxId, origin: TimerOrigin, next: Timestamp) -> Timer {
+    Timer::new(TimerParts {
+        id: TimerId::from_uuid(u(id)),
+        inbox: inbox.clone(),
+        kind: TimerKind::FollowUp,
+        thread: None,
+        note: Note::parse("n").unwrap(),
+        origin,
+        status: TimerStatus::Active,
+        scheduled_at: next,
+        next_fire_at: next,
+    })
+}
+
+fn view(timer: Timer, created_at: Timestamp) -> TimerView {
+    TimerView {
+        timer,
+        fire_count: 0,
+        last_fired_at: None,
+        created_at,
+    }
+}
+
 #[test]
 fn timer_fire_event_id_is_deterministic() {
-    let timer = Timer {
-        id: TimerId::from_uuid(u(1)),
-        inbox: InboxId::new(u(1), u(2)),
-        kind: TimerKind::FollowUp { due_at: Timestamp::UNIX_EPOCH },
-        thread: None,
-        fire_seq: 7,
+    let inbox = InboxId::new(u(1), u(2));
+    let timer = follow_up(1, &inbox, TimerOrigin::Agent, ts("2026-03-29T01:00:00Z"));
+    let id = timer.fire_event_id(ts("2026-03-29T01:00:00Z"));
+    assert_eq!(id, "timer:00000000-0000-0000-0000-000000000001:2026-03-29T01:00:00Z");
+    assert_eq!(id.len(), 63);
+}
+
+#[test]
+fn next_fire_at_is_rounded_up() {
+    let inbox = InboxId::new(u(1), u(2));
+    let t = follow_up(1, &inbox, TimerOrigin::Agent, ts("2026-03-29T01:00:00.000001Z"));
+    assert_eq!(t.next_fire_at(), ts("2026-03-29T01:00:01Z"));
+    let t = follow_up(1, &inbox, TimerOrigin::Agent, ts("2026-03-29T01:00:00Z"));
+    assert_eq!(t.next_fire_at(), ts("2026-03-29T01:00:00Z"));
+}
+
+#[test]
+fn note_rules() {
+    assert!(Note::parse(&"\u{e9}".repeat(1000)).is_ok());
+    assert_eq!(Note::parse(&"\u{e9}".repeat(1001)), Err(NoteError::TooLong { chars: 1001 }));
+    assert_eq!(Note::parse("a\0b"), Err(NoteError::Nul));
+    assert_eq!(Note::parse("").unwrap().as_str(), "");
+}
+
+#[test]
+fn status_and_origin_round_trip() {
+    for s in [TimerStatus::Active, TimerStatus::Done, TimerStatus::Cancelled, TimerStatus::Failed] {
+        assert_eq!(TimerStatus::parse(s.as_str()), Some(s));
+    }
+    for o in [TimerOrigin::Agent, TimerOrigin::System] {
+        assert_eq!(TimerOrigin::parse(o.as_str()), Some(o));
+    }
+    assert_eq!(TimerStatus::parse("x"), None);
+    assert_eq!(TimerOrigin::parse("x"), None);
+}
+
+#[test]
+fn kind_names() {
+    assert_eq!(TimerKind::FollowUp.as_str(), "follow_up");
+}
+
+#[test]
+fn caps_defaults() {
+    let c = TimerCaps::default();
+    assert_eq!(
+        (
+            c.min_schedule_interval_secs,
+            c.max_active_per_inbox,
+            c.max_horizon_days,
+            c.min_follow_up_delay_secs,
+            c.max_agent_timers_created_per_day
+        ),
+        (900, 50, 366, 60, 100)
+    );
+}
+
+#[test]
+fn timer_changes_is_empty() {
+    let inbox = InboxId::new(u(1), u(2));
+    assert!(TimerChanges::default().is_empty());
+    let with_insert = TimerChanges {
+        inserts: vec![follow_up(1, &inbox, TimerOrigin::Agent, Timestamp::UNIX_EPOCH)],
+        cancels: vec![],
     };
-    assert_eq!(timer.fire_event_id(), "timer:00000000-0000-0000-0000-000000000001:7");
+    assert!(!with_insert.is_empty());
+    let with_cancel = TimerChanges {
+        inserts: vec![],
+        cancels: vec![(TimerId::from_uuid(u(1)), TimerOrigin::Agent)],
+    };
+    assert!(!with_cancel.is_empty());
+}
+
+#[tokio::test]
+async fn the_fake_repository_scopes_by_inbox() {
+    let x = InboxId::new(u(1), u(2));
+    let y = InboxId::new(u(1), u(3));
+    let repo = InMemoryTimerRepository::default();
+    let t0 = ts("2026-03-29T00:00:00Z");
+    repo.seed(view(follow_up(10, &x, TimerOrigin::Agent, ts("2026-03-30T00:00:00Z")), ts("2026-03-29T10:00:00Z")));
+    repo.seed(view(follow_up(11, &x, TimerOrigin::Agent, ts("2026-03-29T12:00:00Z")), ts("2026-03-29T11:00:00Z")));
+    repo.seed(view(follow_up(12, &x, TimerOrigin::System, ts("2026-03-29T12:00:00Z")), ts("2026-03-29T11:00:00Z")));
+    repo.seed(view(follow_up(13, &y, TimerOrigin::Agent, ts("2026-03-29T12:00:00Z")), ts("2026-03-29T11:00:00Z")));
+    let listed = repo.list_active(&x, TimerOrigin::Agent).await.unwrap();
+    let ids: Vec<_> = listed.iter().map(|v| v.timer.id()).collect();
+    assert_eq!(ids, [TimerId::from_uuid(u(11)), TimerId::from_uuid(u(10))]);
+    assert_eq!(repo.get(&y, TimerId::from_uuid(u(10))).await.unwrap(), None);
+    assert!(repo.get(&x, TimerId::from_uuid(u(10))).await.unwrap().is_some());
+    assert_eq!(repo.count_agent_created_since(&x, t0).await.unwrap(), 2);
+    assert_eq!(repo.count_agent_created_since(&x, ts("2026-03-29T10:00:00Z")).await.unwrap(), 1);
+    assert_eq!(repo.active_agent_ids(&x).await.unwrap().len(), 2);
+    repo.set_status(TimerId::from_uuid(u(10)), TimerStatus::Cancelled);
+    assert_eq!(repo.active_agent_ids(&x).await.unwrap(), [TimerId::from_uuid(u(11))]);
+    assert_eq!(repo.get(&x, TimerId::from_uuid(u(10))).await.unwrap().unwrap().timer.status(), TimerStatus::Cancelled);
+}
+
+#[test]
+fn apply_error_display_pins_the_text() {
+    let id = TimerId::from_uuid(u(1));
+    let cases = [
+        (ApplyError::InboxMismatch { id }, format!("timer {} belongs to another inbox", id.uuid())),
+        (ApplyError::InvalidInsert { id }, format!("timer {} is not a valid insert", id.uuid())),
+        (
+            ApplyError::CapExceeded { before: 49, after: 51, limit: 50 },
+            "active timer limit exceeded: 49 before, 51 after, limit 50".to_string(),
+        ),
+        (ApplyError::BudgetExceeded { created: 101, limit: 100 }, "daily timer budget exceeded: 101 made, limit 100".to_string()),
+        (ApplyError::LeaseMissing, "the inbox has no lease row".to_string()),
+        (ApplyError::Store("db down".to_string()), "store error: db down".to_string()),
+    ];
+    for (err, text) in cases {
+        assert_eq!(err.to_string(), text);
+    }
+}
+
+#[test]
+fn the_fakes_clock_ids_and_zones() {
+    let clock = FakeClock::new(ts("2026-03-29T00:00:00Z"));
+    clock.advance(jiff::SignedDuration::from_secs(90));
+    assert_eq!(clock.now(), ts("2026-03-29T00:01:30Z"));
+    let ids = SeqIds::default();
+    assert_eq!(ids.new_uuid(), u(0x1000));
+    assert_eq!(ids.new_uuid(), u(0x1001));
+    let tz = MapTzResolver::new(&[("UTC", jiff::tz::TimeZone::UTC)]);
+    assert!(tz.resolve("UTC").is_ok());
+    assert!(tz.resolve("Europe/Berlin").is_err());
 }
 
 #[test]

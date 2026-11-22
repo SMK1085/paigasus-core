@@ -128,6 +128,23 @@ pub const AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL: &str = "agent_host_nats_mes
 pub const AGENT_HOST_NATS_MESSAGES_TENANCY_SKIPPED_TOTAL: &str = "agent_host_nats_messages_tenancy_skipped_total";
 /// NATS messages on a subject that no channel maps. Each one is a boot-check gap.
 pub const AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL: &str = "agent_host_nats_messages_unmapped_total";
+// Agent host timers and scheduler (SMA-788 spec §13).
+/// Timer firings. Labels: `kind` (`follow_up` or `schedule`), `origin` (`agent` or `system`), `outcome` (`inserted` or `duplicate`).
+pub const AGENT_HOST_TIMER_FIRED_TOTAL: &str = "agent_host_timer_fired_total";
+/// Timer rows that a pass could not fire. Label: `class` (`permanent` or `transient`).
+pub const AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL: &str = "agent_host_timer_fire_errors_total";
+/// Timer rows that a pass set to `failed`. Labels: `kind`, `origin`.
+pub const AGENT_HOST_TIMER_FAILED_TOTAL: &str = "agent_host_timer_failed_total";
+/// Buffered timer cancels that found the timer not active.
+pub const AGENT_HOST_TIMER_CANCEL_NOT_ACTIVE_TOTAL: &str = "agent_host_timer_cancel_not_active_total";
+/// The duration of one scheduler pass, in seconds.
+pub const AGENT_HOST_SCHEDULER_PASS_DURATION_SECONDS: &str = "agent_host_scheduler_pass_duration_seconds";
+/// The age of the oldest due active timer after a pass, in seconds. It is 0 when nothing is due.
+pub const AGENT_HOST_SCHEDULER_LAG_SECONDS: &str = "agent_host_scheduler_lag_seconds";
+/// The Unix time in seconds of the last scheduler pass that finished.
+pub const AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS: &str = "agent_host_scheduler_last_pass_timestamp_seconds";
+/// Calls of the timer tools. Labels: `tool`, `outcome` (`ok` or `refused`).
+pub const AGENT_HOST_TIMER_TOOL_CALLS_TOTAL: &str = "agent_host_timer_tool_calls_total";
 // IAM HTTP
 pub const IAM_HTTP_REQUESTS_TOTAL: &str = "iam_http_requests_total";
 pub const IAM_HTTP_REQUEST_DURATION_SECONDS: &str = "iam_http_request_duration_seconds";
@@ -380,6 +397,14 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_NATS_MESSAGES_TERMINATED_TOTAL,
     AGENT_HOST_NATS_MESSAGES_TENANCY_SKIPPED_TOTAL,
     AGENT_HOST_NATS_MESSAGES_UNMAPPED_TOTAL,
+    AGENT_HOST_TIMER_FIRED_TOTAL,
+    AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL,
+    AGENT_HOST_TIMER_FAILED_TOTAL,
+    AGENT_HOST_TIMER_CANCEL_NOT_ACTIVE_TOTAL,
+    AGENT_HOST_SCHEDULER_PASS_DURATION_SECONDS,
+    AGENT_HOST_SCHEDULER_LAG_SECONDS,
+    AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
+    AGENT_HOST_TIMER_TOOL_CALLS_TOTAL,
     GATEWAY_HTTP_REQUESTS_TOTAL,
     GATEWAY_HTTP_REQUEST_DURATION_SECONDS,
     GATEWAY_HTTP_INFLIGHT_REQUESTS,
@@ -468,6 +493,22 @@ pub const ALL: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_host_timer_families_are_registered() {
+        for name in [
+            AGENT_HOST_TIMER_FIRED_TOTAL,
+            AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL,
+            AGENT_HOST_TIMER_FAILED_TOTAL,
+            AGENT_HOST_TIMER_CANCEL_NOT_ACTIVE_TOTAL,
+            AGENT_HOST_SCHEDULER_PASS_DURATION_SECONDS,
+            AGENT_HOST_SCHEDULER_LAG_SECONDS,
+            AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
+            AGENT_HOST_TIMER_TOOL_CALLS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
 
     #[test]
     fn the_gateway_limit_families_are_registered() {
