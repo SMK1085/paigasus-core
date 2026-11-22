@@ -19,7 +19,7 @@ use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{expire, expires_us, insert_pending_event, insert_run};
+use support::lease::{backend_pid, expire, expires_us, insert_pending_event, insert_run, wait_until_blocked_by};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(30);
@@ -136,6 +136,8 @@ async fn a_heartbeat_that_waits_past_the_expiry_is_lease_lost() {
     txn.execute_unprepared(&format!("SELECT token FROM inbox_lease WHERE inbox_id = '{}' FOR UPDATE", u(2)))
         .await
         .expect("lock the lease row");
+    let locked_at = tokio::time::Instant::now();
+    let holder_pid = backend_pid(&txn).await;
     let before = expires_us(&db, u(2)).await;
     let recorder = DebuggingRecorder::new();
     let _guard = metrics::set_default_local_recorder(&recorder);
@@ -144,7 +146,10 @@ async fn a_heartbeat_that_waits_past_the_expiry_is_lease_lost() {
         (result, Instant::now())
     };
     let holder = async {
-        tokio::time::sleep(ttl + Duration::from_secs(1)).await;
+        // Guard: the heartbeat waits on the row lock before the release. A heartbeat that starts
+        // after the release ends after it too, so the end time alone cannot prove a wait.
+        wait_until_blocked_by(&db, holder_pid, Duration::from_secs(2)).await;
+        tokio::time::sleep_until(locked_at + ttl + Duration::from_secs(1)).await;
         // The time before the commit is sent: the server can release the lock before the
         // client sees the commit reply, so a time taken after it can be later than the end of a
         // call that waited.

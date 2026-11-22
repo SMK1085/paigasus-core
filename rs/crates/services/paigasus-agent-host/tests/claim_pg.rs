@@ -18,7 +18,7 @@ use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{counter, expire, insert_event_on_thread, insert_pending_event, insert_thread};
+use support::lease::{backend_pid, counter, expire, insert_event_on_thread, insert_pending_event, insert_thread, wait_until_blocked_by};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(30);
@@ -130,12 +130,17 @@ async fn claim_behind_a_lock(db: &DatabaseConnection, store: &PgLeaseStore, hand
     txn.execute_unprepared(&format!("SELECT token FROM inbox_lease WHERE inbox_id = '{}' FOR UPDATE", u(INBOX)))
         .await
         .expect("lock the lease row");
+    let locked_at = tokio::time::Instant::now();
+    let holder_pid = backend_pid(&txn).await;
     let claim = async {
         let result = store.claim_events(handle, &cfg()).await;
         (result, Instant::now())
     };
     let holder = async {
-        tokio::time::sleep(hold).await;
+        // Guard: the claim waits on the row lock before the release. A claim that starts after
+        // the release ends after it too, so the end time alone cannot prove a wait.
+        wait_until_blocked_by(db, holder_pid, Duration::from_secs(2)).await;
+        tokio::time::sleep_until(locked_at + hold).await;
         // The time before the commit is sent: the server can release the lock before the
         // client sees the commit reply, so a time taken after it can be later than the end of a
         // call that waited.

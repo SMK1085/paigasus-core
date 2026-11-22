@@ -547,8 +547,9 @@ async fn stage_4_heartbeat_partition() {
 
     // The partition: the test holds the lease row lock, so A's heartbeats and A's step 1 wait.
     // The test only locks the row and does not change it, so Postgres does not check the `WHERE`
-    // of a waiting `FOR UPDATE` again (ADR-0028 (b)). The wait is TTL + 1 s, under the 5 s
-    // `lock_timeout` of the commit, so A's step 1 must read the expiry after the wait.
+    // of a waiting `FOR UPDATE` again (ADR-0028 (b)). The test releases the lock TTL + 1 s after it
+    // opens the gate. A's commit starts its wait after the gate, so the wait stays under the 5 s
+    // `lock_timeout` of the commit, and A's step 1 must read the expiry after the wait.
     let txn = w.db.begin().await.expect("begin");
     let locked = txn
         .query_one_raw(Statement::from_string(
@@ -558,6 +559,7 @@ async fn stage_4_heartbeat_partition() {
         .await
         .expect("lock the lease row");
     assert!(locked.is_some(), "no lease row");
+    let gate_released = tokio::time::Instant::now();
     double.gate.add_permits(1);
     // Guard: A's commit waits on the row lock of the test before the lease expires. A commit that
     // starts after the release reads an expired lease with no wait, and `ended[0] >= released`
@@ -568,7 +570,7 @@ async fn stage_4_heartbeat_partition() {
         assert!(tokio::time::Instant::now() < deadline, "A's commit did not wait on the lease row lock within 2 s");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    tokio::time::sleep(TTL + Duration::from_secs(1)).await;
+    tokio::time::sleep_until(gate_released + TTL + Duration::from_secs(1)).await;
     let released = std::time::Instant::now();
     txn.commit().await.expect("commit the lock");
 
