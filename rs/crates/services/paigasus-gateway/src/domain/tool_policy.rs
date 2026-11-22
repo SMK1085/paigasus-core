@@ -39,8 +39,9 @@ pub struct TenantPolicies {
     pub version: String,
     /// The tenant settings. `None` from a source with no settings.
     pub settings: Option<TenantSettings>,
-    /// The source refused the set (R5: a history condition, until SMA-753). The settings still
-    /// apply. The cache keeps them, but it never compiles the set, so the tenant set is
+    /// The source refused the set. The settings still apply. No source sets it now: R5 refused a
+    /// set with a history condition, and SMA-753 D16 replaced that rule with "load, slots empty".
+    /// The port keeps the field for a later refusal rule. The cache keeps them, but it never compiles the set, so the tenant set is
     /// unavailable and the tenant fail mode decides.
     pub refused: bool,
 }

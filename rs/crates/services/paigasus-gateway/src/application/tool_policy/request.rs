@@ -959,7 +959,7 @@ mod tests {
     }
 
     /// A source that answers as IAM does: a proto answer, mapped by the IAM adapter. Its tenant set
-    /// holds a history condition, so R5 refuses it (final review I-1).
+    /// holds a history condition. The set loads, and its slot `h0` stays empty (SMA-753 D16).
     struct IamHistoryAnswer(GetCompiledToolPoliciesResponse);
 
     #[async_trait::async_trait]
@@ -975,6 +975,9 @@ mod tests {
         }
     }
 
+    /// A tenant set: permit all, and forbid `y` when the history slot `h0` is true.
+    const HISTORY_SET: &str = r#"@id("p") permit(principal, action, resource); @id("h") forbid(principal, action == Pgs::Gateway::Action::"y", resource) when { context.h0 };"#;
+
     /// The request side over an IAM answer with a history set, `mode`, `fail` and the global value.
     fn history_policy(mode: ToolPolicyMode, fail: ToolPolicyFailMode, global: OnUnavailable) -> RequestToolPolicy {
         let answer = GetCompiledToolPoliciesResponse {
@@ -982,10 +985,10 @@ mod tests {
                 kind: ToolPolicySetKind::Tenant as i32,
                 org_id: testing::ORG_A.hyphenated().to_string(),
                 version: 2,
-                cedar_policies: testing::PERMIT_ALL.to_owned(),
+                cedar_policies: HISTORY_SET.to_owned(),
                 conditions: vec![HistoryCondition {
                     slot: "h0".to_owned(),
-                    policy_id: "p".to_owned(),
+                    policy_id: "h".to_owned(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -1024,25 +1027,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_org_in_log_only_with_a_history_set_is_not_blocked_under_a_global_closed() {
+    async fn an_org_in_log_only_with_a_history_set_loads_it_and_observes_the_slot_forbid() {
+        // D16: the set loads. The forbid that reads the empty slot errors, and an errored forbid
+        // denies (SMA-752 D26), so log_only observes a policy denial, not an unavailable set.
         let policy = history_policy(ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, OnUnavailable::Closed);
         let out = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
         assert_eq!(out.snapshot.mode, TenantMode::LogOnly);
-        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
-        assert_eq!(decide_y(&out.snapshot), Decision::Observe { would: BlockCode::PolicyUnavailable });
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }));
+        assert_eq!(decide_y(&out.snapshot), Decision::Observe { would: BlockCode::Policy });
     }
 
     #[tokio::test]
-    async fn the_tenant_fail_mode_decides_for_an_enforced_history_set() {
-        // The global value is the opposite of the tenant value in each case, so it cannot decide.
-        let open = history_policy(ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, OnUnavailable::Closed);
-        let out = run(&open, chat_request(&["y"], "")).await.expect("apply");
-        assert_eq!((out.snapshot.mode, out.snapshot.on_unavailable), (TenantMode::Enforce, OnUnavailable::Open));
-        assert_eq!(decide_y(&out.snapshot), Decision::Observe { would: BlockCode::PolicyUnavailable });
-        let closed = history_policy(ToolPolicyMode::Enforce, ToolPolicyFailMode::Closed, OnUnavailable::Open);
-        let out = run(&closed, chat_request(&["y"], "")).await.expect("apply");
-        assert_eq!((out.snapshot.mode, out.snapshot.on_unavailable), (TenantMode::Enforce, OnUnavailable::Closed));
-        assert_eq!(decide_y(&out.snapshot), Decision::Block { code: BlockCode::PolicyUnavailable });
+    async fn an_enforced_history_set_loads_and_no_fail_mode_decides() {
+        // D16: the set is available, so neither the tenant fail mode nor the global value decides.
+        // The forbid that reads the empty slot blocks `y` with `policy` in both cases.
+        for (fail, global) in [(ToolPolicyFailMode::Open, OnUnavailable::Closed), (ToolPolicyFailMode::Closed, OnUnavailable::Open)] {
+            let policy = history_policy(ToolPolicyMode::Enforce, fail, global);
+            let out = run(&policy, chat_request(&["y"], "")).await.expect("apply");
+            assert_eq!(out.snapshot.mode, TenantMode::Enforce);
+            assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }), "{fail:?}");
+            assert_eq!(decide_y(&out.snapshot), Decision::Block { code: BlockCode::Policy }, "{fail:?}");
+        }
     }
 
     #[tokio::test]

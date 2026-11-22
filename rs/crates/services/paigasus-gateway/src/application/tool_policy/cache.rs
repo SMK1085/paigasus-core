@@ -244,7 +244,7 @@ impl PolicyCache {
     }
 
     fn tenant_set(&self, org: Uuid, data: &TenantData, floor: &FloorEntry) -> Lookup<Arc<ToolPolicies>> {
-        // R5: a refused set is never compiled, also not against a new floor.
+        // A refused set is never compiled, also not against a new floor (R5 before SMA-753 D16).
         if data.source.refused {
             return Lookup::Unavailable;
         }
@@ -532,7 +532,7 @@ impl PolicyCache {
         });
     }
 
-    /// R5, final review I-1: the source answered with the settings, but it refused the set. The
+    /// Final review I-1: the source answered with the settings, but it refused the set. The
     /// answer replaces the entry, also a last good set: the new settings decide, and the set is
     /// unavailable. It counts as a source error, and the result is `false` (no usable set).
     fn store_refused(&self, key: Key, t: TenantPolicies, floor: Option<Arc<FloorPolicies>>, version: String, gen_at_load: u64) -> bool {
