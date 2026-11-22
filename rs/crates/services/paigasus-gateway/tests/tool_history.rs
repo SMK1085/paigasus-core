@@ -1,0 +1,539 @@
+// SPDX-License-Identifier: Apache-2.0
+//! SMA-753 PR 1: session linking end to end through the real HTTP surface. Each test sends one
+//! request, reads the answer, builds the next request from the answer as a client does, and reads
+//! the memory store, the decision records and the metrics.
+//!
+//! The gateway has no Anthropic Messages route yet (SMA-750), so the Anthropic format has no
+//! HTTP test here. The brief row `anthropic_a_forwarded_call_and_its_result_stay_in_one_session`
+//! cannot run through the router.
+
+mod support;
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use paigasus_gateway::adapters::history::memory::MemorySessionStore;
+use paigasus_gateway::adapters::http::interception::ToolInterception;
+use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
+use paigasus_gateway::adapters::policy_source::file::FilePolicySource;
+use paigasus_gateway::application::decision_log::DecisionRecorder;
+use paigasus_gateway::application::tool_history::ToolHistory;
+use paigasus_gateway::application::tool_policy::{CacheSettings, CedarDecider, PolicyCache, RequestToolPolicy};
+use paigasus_gateway::config::ToolPolicySettings;
+use paigasus_gateway::domain::decision_log::{DecisionLog, OsEntropy};
+use paigasus_gateway::domain::limits::Clock;
+use paigasus_gateway::domain::tool_history::{EventKind, Scope, StoredEvent};
+use paigasus_gateway::service_info::Capabilities;
+use paigasus_gateway_core::decision_log::DecisionRecord;
+use paigasus_gateway_core::{Limits as CoreLimits, OnUnavailable, TenantMode};
+use paigasus_observability::names;
+use serde_json::{Value, json};
+use support::MockOpenAi;
+use support::limits::*;
+use tempfile::TempDir;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+const MIB: usize = 1 << 20;
+/// The floor of these tests: it forbids a call of the tool `rm` in every mode.
+const FLOOR: &str = "// SPDX-License-Identifier: Apache-2.0\n@id(\"floor-rm\") forbid(principal, action == Pgs::Gateway::Action::\"rm\", resource);\n";
+/// The tenant set: permit every IAM principal.
+const TENANT: &str = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource);"#;
+
+// --- the rig ---------------------------------------------------------------------------------
+
+/// A clock that moves 10 ms at each read, so two sessions never share a millisecond.
+struct StepClock(AtomicU64);
+
+impl Clock for StepClock {
+    fn now(&self) -> SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_millis(1_790_000_000_000 + self.0.fetch_add(10, Ordering::SeqCst))
+    }
+}
+
+/// A decision log that keeps every record.
+#[derive(Default)]
+struct Records(Mutex<Vec<DecisionRecord>>);
+
+impl DecisionLog for Records {
+    fn wants_digest(&self) -> bool {
+        false
+    }
+
+    fn record(&self, record: DecisionRecord) {
+        self.0.lock().expect("records lock").push(record);
+    }
+}
+
+impl Records {
+    fn all(&self) -> Vec<DecisionRecord> {
+        self.0.lock().expect("records lock").clone()
+    }
+
+    /// The response-side records of the tool `tool`.
+    fn calls_of(&self, tool: &str) -> Vec<DecisionRecord> {
+        self.all().into_iter().filter(|r| r.tool.name == tool && format!("{:?}", r.side).contains("Response")).collect()
+    }
+}
+
+/// The shared parts: one store, one history, one recorder and one policy source for all requests.
+struct Rig {
+    store: Arc<MemorySessionStore>,
+    history: Arc<ToolHistory>,
+    records: Arc<Records>,
+    tp: Arc<RequestToolPolicy>,
+    ti: Arc<ToolInterception>,
+    _dir: TempDir,
+}
+
+fn settings() -> ToolPolicySettings {
+    ToolPolicySettings {
+        enabled: true,
+        default_mode: TenantMode::Enforce,
+        on_policy_unavailable: OnUnavailable::Closed,
+        refresh: Duration::from_secs(30),
+        max_stale: Duration::from_secs(300),
+        idle_evict: Duration::from_secs(3600),
+        load_timeout: Duration::from_secs(60),
+        orgs: HashMap::new(),
+        settings_from_source: false,
+    }
+}
+
+fn rig() -> Rig {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("floor.cedar"), FLOOR).expect("floor");
+    let tenant = dir.path().join("tenants").join(ORG_A);
+    std::fs::create_dir_all(&tenant).expect("tenant dir");
+    std::fs::write(tenant.join("policies.cedar"), TENANT).expect("tenant");
+
+    let store = Arc::new(MemorySessionStore::new());
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(0)));
+    let history = Arc::new(ToolHistory::new(store.clone(), Arc::clone(&clock), Arc::new(OsEntropy), Duration::from_secs(5)));
+    let records = Arc::new(Records::default());
+    let recorder = Arc::new(DecisionRecorder::new(records.clone(), clock, Arc::new(OsEntropy), None));
+
+    let s = settings();
+    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&s));
+    let tp = Arc::new(RequestToolPolicy::new(cache, s, Arc::clone(&recorder)).with_history(Arc::clone(&history)));
+    let decider = Arc::new(CedarDecider::new(Arc::clone(&recorder)).with_history(Arc::clone(&history)));
+    let ti = Arc::new(ToolInterception {
+        limits: CoreLimits::defaults(),
+        decider,
+        recorder: Some(Arc::clone(&recorder)),
+        history: Some(Arc::clone(&history)),
+    });
+    Rig {
+        store,
+        history,
+        records,
+        tp,
+        ti,
+        _dir: dir,
+    }
+}
+
+impl Rig {
+    fn app(&self, principal: &str, base_url: &str) -> Router {
+        router(AppState {
+            iam: ScopedIam::arc(principal, ORG_A_PRN),
+            openai: Arc::new(openai(base_url, Duration::from_secs(30))),
+            max_request_bytes: MIB,
+            capabilities: Capabilities { chat_stream: true },
+            limits: None,
+            dpop_enabled: false,
+            tool_interception: Some(Arc::clone(&self.ti)),
+            tool_policy: Some(Arc::clone(&self.tp)),
+            responses: Some(Arc::new(ResponsesSettings {
+                max_request_bytes: 16 * MIB,
+                max_record_bytes: 16 * MIB,
+                max_held_bytes: 32 * MIB,
+            })),
+        })
+    }
+
+    /// Send `body` to `path` as `principal`, against an upstream that answers `answer`, then wait
+    /// for the settle and the append tasks of the request.
+    async fn send(&self, principal: &str, path: &str, body: &Value, answer: Answer) -> Sent {
+        let mock = answer.spawn().await;
+        let app = self.app(principal, &mock.base_url);
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))
+            .body(Body::from(body.to_string()))
+            .expect("build request");
+        let resp = app.oneshot(req).await.expect("the router answers");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("the body reads");
+        self.history.tasks().close();
+        self.history.tasks().wait().await;
+        // A closed tracker refuses the settle of the next request.
+        self.history.tasks().reopen();
+        Sent { status, headers, body }
+    }
+
+    /// The events of one tool in one session.
+    fn events(&self, session: &str, tool: &str) -> Vec<StoredEvent> {
+        self.store.events(org(), Scope::Session, session, tool)
+    }
+}
+
+fn org() -> Uuid {
+    Uuid::try_parse(ORG_A).expect("a fixture uuid")
+}
+
+// --- upstream answers ------------------------------------------------------------------------
+
+/// What the mock upstream answers.
+enum Answer {
+    ChatJson(String),
+    ChatSse(Vec<String>),
+    ResponsesJson(String),
+}
+
+impl Answer {
+    async fn spawn(self) -> MockOpenAi {
+        match self {
+            Answer::ChatJson(b) | Answer::ResponsesJson(b) => MockOpenAi::spawn_json(StatusCode::OK, b).await,
+            Answer::ChatSse(c) => MockOpenAi::spawn_raw_sse(c).await,
+        }
+    }
+}
+
+const CHAT: &str = "/v1/chat/completions";
+const RESPONSES: &str = "/v1/responses";
+
+/// A chat answer that calls `calls`. The call ids are `<prefix>_<i>`.
+fn chat_json(prefix: &str, calls: &[(&str, &str)]) -> Answer {
+    let tool_calls: Vec<Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, (n, a))| json!({"id":format!("{prefix}_{i}"),"type":"function","function":{"name":n,"arguments":a}}))
+        .collect();
+    Answer::ChatJson(
+        json!({"id":"chatcmpl-1","object":"chat.completion","created":1790942400,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":tool_calls},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})
+        .to_string(),
+    )
+}
+
+/// A chat stream that calls `calls`. The call ids are `<prefix>_<i>`.
+fn chat_sse(prefix: &str, calls: &[(&str, &str)]) -> Answer {
+    let frame = |v: Value| format!("data: {v}\n\n");
+    let mut out = vec![chunk("Sure.", true)];
+    for (i, (name, args)) in calls.iter().enumerate() {
+        let e = json!({"index": i, "id": format!("{prefix}_{i}"), "type": "function", "function": {"name": name, "arguments": args}});
+        out.push(frame(
+            json!({"id":"chatcmpl-1","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[e]},"finish_reason":null}]}),
+        ));
+    }
+    out.push(frame(
+        json!({"id":"chatcmpl-1","object":"chat.completion.chunk","created":1790942400,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+    ));
+    out.push(usage_chunk(11));
+    out.push("data: [DONE]\n\n".to_owned());
+    Answer::ChatSse(out)
+}
+
+/// A Responses answer with these output items.
+fn responses_json(output: Vec<Value>) -> Answer {
+    Answer::ResponsesJson(json!({"id":"resp_1","object":"response","status":"completed","output":output,"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}).to_string())
+}
+
+/// A Responses `function_call` item.
+fn fn_item(prefix: &str, i: usize, name: &str, args: &str) -> Value {
+    json!({"type":"function_call","id":format!("{prefix}_fc{i}"),"call_id":format!("{prefix}_{i}"),"name":name,"arguments":args,"status":"completed"})
+}
+
+/// A plain answer: no call.
+fn plain_chat() -> Answer {
+    Answer::ChatJson(USAGE_BODY.to_owned())
+}
+
+// --- requests built from answers -------------------------------------------------------------
+
+fn chat_tools(names: &[&str]) -> Value {
+    names.iter().map(|n| json!({"type":"function","function":{"name":n,"parameters":{}}})).collect()
+}
+
+fn responses_tools(names: &[&str]) -> Value {
+    names.iter().map(|n| json!({"type":"function","name":n,"parameters":{}})).collect()
+}
+
+fn chat_first(tools: &[&str], stream: bool) -> Value {
+    json!({"model":"gpt-4o-mini","stream":stream,"messages":[{"role":"user","content":"hi"}],"tools":chat_tools(tools)})
+}
+
+fn responses_first(tools: &[&str]) -> Value {
+    json!({"model":"gpt-6","input":"hi","tools":responses_tools(tools)})
+}
+
+/// The tool calls of a chat answer, whole or streamed: `(id, name, arguments)`.
+fn chat_calls(sent: &Sent) -> Vec<(String, String, String)> {
+    let text = sent.text();
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    let tool_calls: Vec<Value> = if let Ok(v) = serde_json::from_str::<Value>(&text) {
+        v["choices"][0]["message"]["tool_calls"].as_array().cloned().unwrap_or_default()
+    } else {
+        text.lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter_map(|j| serde_json::from_str::<Value>(j).ok())
+            .flat_map(|v| v["choices"][0]["delta"]["tool_calls"].as_array().cloned().unwrap_or_default())
+            .collect()
+    };
+    for c in tool_calls {
+        out.push((
+            c["id"].as_str().expect("id").to_owned(),
+            c["function"]["name"].as_str().expect("name").to_owned(),
+            c["function"]["arguments"].as_str().unwrap_or("{}").to_owned(),
+        ));
+    }
+    out
+}
+
+/// The client's next chat request: the calls of the answer, then their results.
+fn chat_second(calls: &[(String, String, String)], tools: &[&str]) -> Value {
+    let tool_calls: Vec<Value> = calls.iter().map(|(id, n, a)| json!({"id":id,"type":"function","function":{"name":n,"arguments":a}})).collect();
+    let mut messages = vec![json!({"role":"user","content":"hi"}), json!({"role":"assistant","content":null,"tool_calls":tool_calls})];
+    for (id, _, _) in calls {
+        messages.push(json!({"role":"tool","tool_call_id":id,"content":"out"}));
+    }
+    json!({"model":"gpt-4o-mini","messages":messages,"tools":chat_tools(tools)})
+}
+
+/// The client's next Responses request: the output items of the answer, then their results.
+fn responses_second(answer: &Sent, tools: &[&str]) -> Value {
+    let output = answer.json()["output"].as_array().cloned().expect("an output");
+    let mut input = vec![json!({"role":"user","content":"hi"})];
+    for item in &output {
+        input.push(item.clone());
+    }
+    for item in &output {
+        if let Some(call_id) = item["call_id"].as_str() {
+            input.push(json!({"type":"function_call_output","call_id":call_id,"output":"out"}));
+        }
+    }
+    json!({"model":"gpt-6","input":input,"tools":responses_tools(tools)})
+}
+
+// --- readers ---------------------------------------------------------------------------------
+
+/// `(session id, turn)` of the response-side records of `tool`, in order.
+fn sessions_of(rig: &Rig, tool: &str) -> Vec<(String, i64)> {
+    rig.records.calls_of(tool).into_iter().map(|r| (r.session.id, r.session.turn)).collect()
+}
+
+fn result_events(events: &[StoredEvent]) -> Vec<&StoredEvent> {
+    events.iter().filter(|e| e.kind == EventKind::Result).collect()
+}
+
+/// The increase of the counter `name` with exactly `labels` since the last snapshot, or 0.
+fn counter_value(snapshotter: &Snapshotter, name: &str, labels: &[(&str, &str)]) -> u64 {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .find(|(k, _, _, _)| {
+            let key = k.key();
+            let have: Vec<(&str, &str)> = key.labels().map(|l| (l.key(), l.value())).collect();
+            key.name() == name && have.len() == labels.len() && labels.iter().all(|l| have.contains(l))
+        })
+        .map_or(0, |(_, _, _, v)| match v {
+            DebugValue::Counter(c) => c,
+            _ => 0,
+        })
+}
+
+fn finding(snapshotter: &Snapshotter, kind: &str) -> u64 {
+    counter_value(snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", "request"), ("kind", kind)])
+}
+
+/// Both requests of a conversation joined one session: request 2 has turn 2 and the session of
+/// request 1, and the session holds one `Result` event of `tool`.
+fn assert_one_session(rig: &Rig, tool: &str) {
+    let seen = sessions_of(rig, tool);
+    assert_eq!(seen.len(), 2, "one response record for each request: {seen:?}");
+    assert_eq!(seen[0].1, 1, "{seen:?}");
+    assert_eq!(seen[1].0, seen[0].0, "request 2 joins the session of request 1: {seen:?}");
+    assert_eq!(seen[1].1, 2, "{seen:?}");
+    let events = rig.events(&seen[0].0, tool);
+    let results = result_events(&events);
+    assert_eq!(results.len(), 1, "one Result event: {events:?}");
+    assert_eq!(results[0].tool, tool, "the stored tool name of the call: {events:?}");
+}
+
+// --- tests -----------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn chat_a_forwarded_call_and_its_result_stay_in_one_session() {
+    let rig = rig();
+    let first = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["read_file"], false), chat_json("c", &[("read_file", "{}")])).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let second = rig
+        .send(PRINCIPAL_1, CHAT, &chat_second(&chat_calls(&first), &["read_file"]), chat_json("d", &[("read_file", "{}")]))
+        .await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_one_session(&rig, "read_file");
+}
+
+#[tokio::test]
+async fn responses_a_forwarded_call_and_its_result_stay_in_one_session() {
+    let rig = rig();
+    let first = rig
+        .send(PRINCIPAL_1, RESPONSES, &responses_first(&["read_file"]), responses_json(vec![fn_item("c", 0, "read_file", "{}")]))
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+    let second = rig
+        .send(
+            PRINCIPAL_1,
+            RESPONSES,
+            &responses_second(&first, &["read_file"]),
+            responses_json(vec![fn_item("d", 0, "read_file", "{}")]),
+        )
+        .await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_one_session(&rig, "read_file");
+}
+
+#[tokio::test]
+async fn a_stream_answer_links_like_a_body_answer() {
+    let rig = rig();
+    let first = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["read_file"], true), chat_sse("c", &[("read_file", "{}")])).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let calls = chat_calls(&first);
+    assert_eq!(calls.len(), 1, "{}", first.text());
+    let second = rig.send(PRINCIPAL_1, CHAT, &chat_second(&calls, &["read_file"]), chat_json("d", &[("read_file", "{}")])).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_one_session(&rig, "read_file");
+}
+
+/// Request 1 blocks `rm` by the floor. Its notice carries the decision id. Request 2 holds the
+/// notice text of the answer, and the ref links it to the session of request 1.
+async fn blocked_first(rig: &Rig) -> String {
+    let first = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["rm"], false), chat_json("c", &[("rm", "{}")])).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let notice = first.json()["choices"][0]["message"]["content"].as_str().expect("the notice text").to_owned();
+    assert!(notice.contains("was blocked"), "{notice}");
+    notice
+}
+
+fn chat_after_notice(notice: &str) -> Value {
+    json!({"model":"gpt-4o-mini","messages":[
+        {"role":"user","content":"hi"},
+        {"role":"assistant","content":notice},
+        {"role":"user","content":"go on"}],
+        "tools":chat_tools(&["read_file"])})
+}
+
+#[tokio::test]
+async fn a_blocked_call_links_the_next_request_by_its_ref() {
+    let rig = rig();
+    let notice = blocked_first(&rig).await;
+    let second = rig.send(PRINCIPAL_1, CHAT, &chat_after_notice(&notice), chat_json("d", &[("read_file", "{}")])).await;
+    assert_eq!(second.status, StatusCode::OK);
+    let first_rm = sessions_of(&rig, "rm");
+    let second_read = sessions_of(&rig, "read_file");
+    assert_eq!(first_rm.len(), 1, "{first_rm:?}");
+    assert_eq!(second_read.len(), 1, "{second_read:?}");
+    assert_eq!(second_read[0].0, first_rm[0].0, "the ref links request 2 to request 1");
+    assert_eq!((first_rm[0].1, second_read[0].1), (1, 2));
+}
+
+#[tokio::test]
+async fn a_ref_of_another_principal_starts_a_new_session() {
+    let rig = rig();
+    let notice = blocked_first(&rig).await;
+    let second = rig.send(PRINCIPAL_2, CHAT, &chat_after_notice(&notice), chat_json("d", &[("read_file", "{}")])).await;
+    assert_eq!(second.status, StatusCode::OK);
+    let first_rm = sessions_of(&rig, "rm");
+    let second_read = sessions_of(&rig, "read_file");
+    assert_ne!(second_read[0].0, first_rm[0].0, "another principal does not join the session");
+    assert_eq!(second_read[0].1, 1);
+}
+
+#[tokio::test]
+async fn the_notice_ref_is_the_event_id_and_the_record_id() {
+    let rig = rig();
+    let notice = blocked_first(&rig).await;
+    let reference = paigasus_gateway_core::notice_ref(notice.trim()).expect("a ref in the notice");
+    let records = rig.records.calls_of("rm");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].decision_id, reference, "the record id is the ref");
+    let events = rig.events(&records[0].session.id, "rm");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].id, reference, "the store event id is the ref");
+}
+
+#[tokio::test]
+async fn a_result_for_an_unknown_call_id_is_forged_and_counted() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let rig = rig();
+    let forged = vec![("never_issued".to_owned(), "read_file".to_owned(), "{}".to_owned())];
+    let sent = rig.send(PRINCIPAL_1, CHAT, &chat_second(&forged, &["read_file"]), plain_chat()).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert_eq!(finding(&snapshotter, "forged_history"), 1);
+    assert_eq!(rig.store.events(org(), Scope::Principal, PRINCIPAL_1, "read_file").len(), 0);
+    assert!(rig.records.all().is_empty(), "no call, so no record");
+}
+
+#[tokio::test]
+async fn a_mixed_conversation_joins_the_newest_session_and_flags_it() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let rig = rig();
+    let a = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["read_file"], false), chat_json("a", &[("read_file", "{}")])).await;
+    let b = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["read_file"], false), chat_json("b", &[("read_file", "{}")])).await;
+    let mut calls = chat_calls(&a);
+    calls.extend(chat_calls(&b));
+    let third = rig.send(PRINCIPAL_1, CHAT, &chat_second(&calls, &["read_file"]), chat_json("e", &[("read_file", "{}")])).await;
+    assert_eq!(third.status, StatusCode::OK);
+    let seen = sessions_of(&rig, "read_file");
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_ne!(seen[0].0, seen[1].0, "two sessions");
+    assert_eq!(seen[2].0, seen[1].0, "the newer session wins: {seen:?}");
+    assert_eq!(seen[2].1, 2);
+    assert_eq!(finding(&snapshotter, "mixed_sessions"), 1);
+}
+
+#[tokio::test]
+async fn responses_a_local_shell_result_by_item_id_stays_in_the_session() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let rig = rig();
+    let call = json!({"type":"local_shell_call","id":"lsh_item_1","call_id":"lsh_call_1","status":"completed","action":{"type":"exec","command":["ls"],"env":{}}});
+    let first = rig.send(PRINCIPAL_1, RESPONSES, &responses_first(&[]), responses_json(vec![call.clone()])).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let input = json!([
+        {"role":"user","content":"hi"},
+        call,
+        {"type":"local_shell_call_output","id":"lsh_item_1","output":"out"}
+    ]);
+    let second = rig
+        .send(
+            PRINCIPAL_1,
+            RESPONSES,
+            &json!({"model":"gpt-6","input":input}),
+            responses_json(vec![fn_item("d", 0, "read_file", "{}")]),
+        )
+        .await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(finding(&snapshotter, "forged_history"), 0, "the item id links, it is not forged");
+    let shell = sessions_of(&rig, "local_shell");
+    let read = sessions_of(&rig, "read_file");
+    assert_eq!(shell.len(), 1, "{shell:?}");
+    assert_eq!(read[0].0, shell[0].0, "request 2 joins the session of the local shell call");
+    let events = rig.events(&shell[0].0, "local_shell");
+    assert_eq!(result_events(&events).len(), 1, "{events:?}");
+}
