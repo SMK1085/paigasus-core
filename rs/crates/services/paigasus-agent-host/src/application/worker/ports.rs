@@ -40,13 +40,17 @@ pub struct RunSpec {
     pub turn: UserTurn,
     /// The workspace of the run. The `memory` tool and the run commit share it.
     pub workspace: Arc<Mutex<MemoryWorkspace>>,
-    /// The run token (spec §6.1). Cancelling it ends the run with `RunEnd::Cancelled`.
+    /// The run token (spec §6.1). Cancelling it stops the run. The end of a cancelled run is not
+    /// always `RunEnd::Cancelled`: runtime-tokio 0.1.26 can also end it as `Transient`,
+    /// `Completed` or `Deterministic`.
     pub cancel: CancellationToken,
     pub limits: RunLimits,
 }
 
-/// How a run ended, in the classes of spec §6.7. The worker decides between Transient, Discarded
-/// and Shutdown for `Cancelled`, because only it knows the lease and the shutdown token.
+/// How a run ended, in the classes of spec §6.7. The worker checks the lease and the shutdown
+/// token after EVERY end, because only it knows them, and a cancel can give any end: a lost
+/// lease makes the run Discarded (no write), then a cancelled shutdown token makes it Shutdown.
+/// Only when neither holds does the end decide the class, and `Cancelled` is then Transient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunEnd {
     Completed { output: String, usage: RunUsage },
