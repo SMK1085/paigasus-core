@@ -44,6 +44,12 @@ tasks:
   build:
     deps: ['^:build']
   test:
+    # SMA-790 §6.11: the tests build with the `test-model` feature (the file-scripted model and
+    # the file barrier of the SIGKILL test). Deliberately `args:`, NOT `command:`, as in
+    # `paigasus-iam/moon.yml`: Moon's default `mergeArgs: append` appends a project task's args
+    # onto the inherited `cargo nextest run --locked --no-tests=pass`, so a full `command:` here
+    # would double the command.
+    args: ['--features', 'test-model']
     deps: ['^:build']
     inputs:
       # SMA-787 Task 17: a unit test pins the NATS constants to this file.

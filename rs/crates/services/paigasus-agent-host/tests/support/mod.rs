@@ -168,8 +168,18 @@ pub fn spawn_service(url: &str) -> (Child, u16) {
 /// Like [`spawn_service`], with extra environment variables for the child.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub fn spawn_service_with(url: &str, extra_env: &[(&str, String)]) -> (Child, u16) {
+    spawn_service_in(url, None, extra_env)
+}
+
+/// Like [`spawn_service_with`], with `dir` as the working directory of the child. The service
+/// reads `agent-host.toml` from its working directory, so a test puts its config file there.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub fn spawn_service_in(url: &str, dir: Option<&std::path::Path>, extra_env: &[(&str, String)]) -> (Child, u16) {
     let port = free_port();
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_paigasus-agent-host"));
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
     cmd.env("AGENT_HOST_DATABASE_URL", url)
         .env("AGENT_HOST_HTTP_ADDR", format!("127.0.0.1:{port}"))
         .env("AGENT_HOST_MIGRATION__LOCK_WAIT_SECS", "60");

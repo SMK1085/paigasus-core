@@ -10,4 +10,6 @@ pub mod id;
 pub mod memory_commit;
 pub mod nats;
 pub mod persistence;
+#[cfg(feature = "test-model")]
+pub mod test_model;
 pub mod timer_event;

@@ -15,6 +15,12 @@ path = "src/main.rs"
 name = "paigasus_agent_host"
 path = "src/lib.rs"
 
+[features]
+# SMA-790 §6.11: `adapters::test_model` — the file-scripted `scripted` model and the file barrier
+# of the SIGKILL test. It adds no dependency. The Moon `test` task turns it on. A release build
+# with it does not compile (`src/lib.rs`).
+test-model = []
+
 [dependencies]
 # `adapters::persistence` — the migrator and the advisory-lock runner. `postgres-array` binds
 # the `uuid[]` parameters of the claim (`lease_store::claim`).

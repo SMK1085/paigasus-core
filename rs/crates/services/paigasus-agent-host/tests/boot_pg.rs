@@ -273,3 +273,112 @@ async fn a_boot_with_timers_off_fires_nothing() {
         child.tail()
     );
 }
+
+/// Polls the log of `child` until it holds `line`, for at most 10 seconds.
+async fn wait_for_log(child: &support::Child, line: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !child.tail().contains(line) {
+        assert!(std::time::Instant::now() < deadline, "the log does not hold {line:?}; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn with_no_agents_the_pool_does_not_start() {
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    // The default `worker.enabled` is true, and the default `[[agents]]` list is empty.
+    let (mut child, port) = support::spawn_service_with(&url, &[("RUST_LOG", "paigasus_agent_host=info,warn".to_string())]);
+    support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
+    // `serve` logs "started" after it spawns every boot task, so once "started" is in the log,
+    // the absence of the pool line is final.
+    wait_for_log(&child, "paigasus-agent-host started").await;
+    let log = child.tail();
+    assert!(log.contains("the worker pool does not start"), "boot must warn that no agent is configured; log:\n{log}");
+    assert!(!log.contains("the worker pool started"), "with no agent, boot must start no pool; log:\n{log}");
+}
+
+#[tokio::test]
+async fn an_agent_with_an_unregistered_model_fails_the_boot() {
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("agent-host-boot-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create the config dir");
+    let id = paigasus_agent_host_core::ids::AgentId::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).as_prn().canonical();
+    std::fs::write(
+        dir.join("agent-host.toml"),
+        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"gpt-x\"\ninstructions = \"Sort the request.\"\n"),
+    )
+    .expect("write agent-host.toml");
+
+    let (mut child, _port) = support::spawn_service_in(&url, Some(&dir), &[]);
+    let started = std::time::Instant::now();
+    let exit = loop {
+        if let Some(exit) = child.child.try_wait().expect("try_wait") {
+            break exit;
+        }
+        assert!(started.elapsed() < Duration::from_secs(60), "an unknown model must stop the boot; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!exit.success(), "the boot must fail, got {exit}; log:\n{}", child.tail());
+    // The reader threads can lag the exit by a moment.
+    wait_for_log(&child, "gpt-x").await;
+}
+
+/// The composition root end to end: with one agent on the file-scripted model, the pool starts
+/// and a run moves a pending event to `done`.
+#[cfg(feature = "test-model")]
+#[tokio::test]
+async fn with_an_agent_the_pool_serves_a_pending_event() {
+    use paigasus_agent_host::adapters::test_model::SCRIPT_ENV;
+
+    let Some((_node, url, db)) = support::inbox::migrated_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    let (org, inbox, agent, event) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    support::inbox::insert_inbox(&db, org, inbox, agent, uuid::Uuid::new_v4()).await;
+    support::lease::insert_pending_event(&db, inbox, event, 1).await;
+
+    let dir = std::env::temp_dir().join(format!("agent-host-boot-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create the config dir");
+    let id = paigasus_agent_host_core::ids::AgentId::new(org, agent).as_prn().canonical();
+    std::fs::write(
+        dir.join("agent-host.toml"),
+        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\n"),
+    )
+    .expect("write agent-host.toml");
+    // No tool call: the model answers `done` at once.
+    let script = dir.join("script.json");
+    std::fs::write(&script, "[]").expect("write the script");
+
+    let (mut child, port) = support::spawn_service_in(
+        &url,
+        Some(&dir),
+        &[
+            (SCRIPT_ENV, script.display().to_string()),
+            ("AGENT_HOST_WORKER__POLL_INTERVAL_MS", "100".to_string()),
+            ("RUST_LOG", "paigasus_agent_host=info,warn".to_string()),
+        ],
+    );
+    support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
+    wait_for_log(&child, "the worker pool started").await;
+
+    let done = format!("SELECT status = 'done' AS v FROM inbox_event WHERE id = '{event}'");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !support::scalar_bool(&db, &done).await {
+        assert!(std::time::Instant::now() < deadline, "the pool did not finish the event; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        support::scalar_bool(&db, &format!("SELECT count(*) = 1 AS v FROM run WHERE inbox_id = '{inbox}' AND status = 'completed'")).await,
+        "one completed run must serve the event; log:\n{}",
+        child.tail()
+    );
+}
