@@ -36,7 +36,10 @@ serde_json = { workspace = true, features = ["raw_value"], optional = true }
 unicode-normalization = { version = "0.1.25", optional = true }
 
 [features]
-tool-policy = ["dep:cedar-policy", "dep:serde", "dep:serde_json", "dep:unicode-normalization"]
+# The finding types and the strict JSON reading, with no Cedar (SMA-855). `regex` and `url` join
+# in the task that adds the built-in detectors.
+detectors = ["dep:serde", "dep:serde_json", "dep:unicode-normalization"]
+tool-policy = ["detectors", "dep:cedar-policy", "dep:serde", "dep:serde_json", "dep:unicode-normalization"]
 
 [package.metadata.docs.rs]
 features = ["tool-policy"]

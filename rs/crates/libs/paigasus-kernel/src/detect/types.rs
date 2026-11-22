@@ -1,0 +1,332 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The finding types of the tool call detectors (SMA-855). Every public type is
+//! `#[non_exhaustive]`, so a caller makes a value with its constructor.
+//!
+//! Evidence says where a finding came from, never what the content was. The `Debug` output of
+//! these types prints counts and fixed names only.
+
+use std::fmt;
+
+/// The finding that two tool names have the same normal form in one request.
+pub const NAME_COLLISION: &str = "name_collision";
+/// The finding that the arguments of a call are not one strict JSON object.
+pub const UNPARSED_ARGUMENTS: &str = "unparsed_arguments";
+/// The finding that a call names a tool that the request does not declare.
+pub const UNDECLARED_TOOL: &str = "undeclared_tool";
+/// The finding that the arguments do not match the schema of the tool.
+pub const INVALID_ARGS: &str = "invalid_args";
+/// The finding that the arguments hold a host that the session has not seen.
+pub const UNSEEN_HOST: &str = "unseen_host";
+/// The finding that the arguments hold a secret.
+pub const SECRET_IN_ARGS: &str = "secret_in_args";
+/// The finding that the arguments hold a prompt injection marker.
+pub const INJECTION_MARKERS: &str = "injection_markers";
+/// The finding that a detector failed.
+pub const DETECTOR_ERROR: &str = "detector_error";
+/// The detector name for a finding that the kernel itself makes.
+pub const DETECTOR_KERNEL: &str = "kernel";
+/// The detector name for the stage of the built-in detectors.
+pub const DETECTOR_BUILT_IN: &str = "built_in";
+
+/// The severity value when there are no findings.
+pub const NO_SEVERITY: i64 = -1;
+
+/// The most evidence entries that one finding keeps.
+const MAX_EVIDENCE: usize = 16;
+/// The longest JSON pointer, in bytes, that an evidence entry keeps.
+const MAX_POINTER: usize = 256;
+
+/// How serious a finding is. The order is the order of the levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Severity {
+    /// For information only.
+    Info,
+    /// Low.
+    Low,
+    /// Medium.
+    Medium,
+    /// High.
+    High,
+}
+
+impl Severity {
+    /// The value in `context.max_severity`: 0 for `Info` to 3 for `High`.
+    #[must_use]
+    pub fn as_long(self) -> i64 {
+        match self {
+            Self::Info => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+        }
+    }
+
+    /// The fixed spelling of the level.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Where in the input a finding came from.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Location {
+    /// A value in the arguments, by JSON pointer.
+    Argument {
+        /// The JSON pointer of the value.
+        pointer: String,
+    },
+    /// The free text of a call that has no JSON arguments.
+    TextInput,
+    /// A tool result, by its index.
+    Result {
+        /// The index of the result.
+        index: usize,
+    },
+}
+
+impl fmt::Debug for Location {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Argument { .. } => f.write_str("Argument"),
+            Self::TextInput => f.write_str("TextInput"),
+            Self::Result { index } => write!(f, "Result {{ index: {index} }}"),
+        }
+    }
+}
+
+/// One place where a rule matched.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Evidence {
+    /// The fixed identifier of the rule.
+    pub rule: &'static str,
+    /// Where the rule matched.
+    pub location: Location,
+    /// The host that the rule matched, if the rule is about a host.
+    pub host: Option<String>,
+}
+
+impl Evidence {
+    /// A match in the arguments. A pointer over 256 bytes is cut on a character boundary.
+    #[must_use]
+    pub fn argument(rule: &'static str, mut pointer: String) -> Self {
+        truncate_on_boundary(&mut pointer, MAX_POINTER);
+        Self {
+            rule,
+            location: Location::Argument { pointer },
+            host: None,
+        }
+    }
+
+    /// A match of a host. `pointer` is `None` when the host is in free text.
+    #[must_use]
+    pub fn host(rule: &'static str, pointer: Option<String>, host: String) -> Self {
+        let location = match pointer {
+            Some(mut pointer) => {
+                truncate_on_boundary(&mut pointer, MAX_POINTER);
+                Location::Argument { pointer }
+            }
+            None => Location::TextInput,
+        };
+        Self { rule, location, host: Some(host) }
+    }
+
+    /// A match in the free text of a call.
+    #[must_use]
+    pub fn text_input(rule: &'static str) -> Self {
+        Self {
+            rule,
+            location: Location::TextInput,
+            host: None,
+        }
+    }
+
+    /// A match in the tool result with this index.
+    #[must_use]
+    pub fn result(rule: &'static str, index: usize) -> Self {
+        Self {
+            rule,
+            location: Location::Result { index },
+            host: None,
+        }
+    }
+}
+
+impl fmt::Debug for Evidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Evidence {{ rule: {}, location: {:?} }}", self.rule, self.location)
+    }
+}
+
+/// Cut `s` to at most `max` bytes, on a character boundary.
+fn truncate_on_boundary(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
+/// One finding of one detector. A finding never blocks a call by itself.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Finding {
+    /// The name of the detector.
+    pub detector: String,
+    /// The kind of the finding.
+    pub kind: String,
+    /// How serious the finding is.
+    pub severity: Severity,
+    /// The version of the detector rules.
+    pub version: String,
+    /// Where the finding came from. It holds at most 16 entries.
+    pub evidence: Vec<Evidence>,
+}
+
+impl Finding {
+    /// A finding with no evidence.
+    #[must_use]
+    pub fn new(detector: impl Into<String>, kind: impl Into<String>, severity: Severity, version: impl Into<String>) -> Self {
+        Self {
+            detector: detector.into(),
+            kind: kind.into(),
+            severity,
+            version: version.into(),
+            evidence: Vec::new(),
+        }
+    }
+
+    /// Add one evidence entry. An entry past the sixteenth is dropped.
+    #[must_use]
+    pub fn with_evidence(mut self, evidence: Evidence) -> Self {
+        if self.evidence.len() < MAX_EVIDENCE {
+            self.evidence.push(evidence);
+        }
+        self
+    }
+}
+
+impl fmt::Debug for Finding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Finding {{ detector: {}, kind: {}, severity: {}, version: {}, evidence: {} }}",
+            self.detector,
+            self.kind,
+            self.severity.as_str(),
+            self.version,
+            self.evidence.len()
+        )
+    }
+}
+
+/// The finding for a detector that failed. It is `high` and has no version.
+#[must_use]
+pub fn detector_error(detector: impl Into<String>) -> Finding {
+    Finding::new(detector, DETECTOR_ERROR, Severity::High, "")
+}
+
+/// The arguments of a tool call, as the model sent them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolInput {
+    /// The raw JSON text. The kernel parses it and reads each number from its original text.
+    Json(String),
+    /// Free text, for the tool kinds `custom`, `apply_patch` and `other`.
+    Text(String),
+}
+
+/// Whether the name of a call is among the tool definitions of the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Declared {
+    /// The name is among the definitions.
+    Yes,
+    /// The definitions are complete and the name is not among them.
+    No,
+    /// The definitions are not complete, so the kernel cannot tell.
+    Unknown,
+}
+
+impl Declared {
+    /// The value in `context.call.declared`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Yes => "yes",
+            Self::No => "no",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn severity_levels_and_spellings() {
+        let all = [Severity::Info, Severity::Low, Severity::Medium, Severity::High];
+        assert_eq!(all.map(Severity::as_long), [0, 1, 2, 3]);
+        assert_eq!(all.map(Severity::as_str), ["info", "low", "medium", "high"]);
+        assert!(Severity::High > Severity::Medium && NO_SEVERITY < Severity::Info.as_long());
+    }
+
+    #[test]
+    fn evidence_is_capped_at_16() {
+        let mut f = Finding::new("d", "k", Severity::Low, "v1");
+        for i in 0..20 {
+            f = f.with_evidence(Evidence::result("r", i));
+        }
+        assert_eq!(f.evidence.len(), 16);
+        assert_eq!(f.evidence[15].location, Location::Result { index: 15 });
+    }
+
+    #[test]
+    fn a_long_pointer_is_cut_on_a_char_boundary() {
+        let e = Evidence::argument("r", format!("/{}", "é".repeat(200)));
+        let Location::Argument { pointer } = &e.location else { panic!("not an argument") };
+        assert!(pointer.len() <= 256 && pointer.len() > 250);
+        let h = Evidence::host("r", Some(format!("/{}", "é".repeat(200))), "h".into());
+        let Location::Argument { pointer } = &h.location else { panic!("not an argument") };
+        assert!(pointer.len() <= 256);
+    }
+
+    #[test]
+    fn a_host_without_a_pointer_is_in_the_text_input() {
+        let e = Evidence::host("r", None, "h.example".into());
+        assert_eq!(e.location, Location::TextInput);
+        assert_eq!(e.host.as_deref(), Some("h.example"));
+        assert_eq!(Evidence::text_input("r").location, Location::TextInput);
+    }
+
+    #[test]
+    fn detector_error_is_high_with_no_version() {
+        let f = detector_error("built_in");
+        assert_eq!((f.kind.as_str(), f.severity, f.version.as_str()), ("detector_error", Severity::High, ""));
+        assert_eq!(f.detector, "built_in");
+    }
+
+    #[test]
+    fn debug_prints_no_content() {
+        const CANARY: &str = "CANARY-7f3a";
+        let f = Finding::new("unseen_host", "unseen_host", Severity::Medium, "v1")
+            .with_evidence(Evidence::host("url", Some(format!("/{CANARY}")), format!("{CANARY}.example")))
+            .with_evidence(Evidence::argument("type", format!("/{CANARY}")));
+        for s in [format!("{f:?}"), format!("{:?}", f.evidence[0]), format!("{:?}", f.evidence[0].location)] {
+            assert!(!s.contains(CANARY), "{s}");
+        }
+        assert!(format!("{f:?}").contains("unseen_host") && format!("{f:?}").contains("evidence: 2"));
+    }
+}

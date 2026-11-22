@@ -8,44 +8,7 @@ use uuid::Uuid;
 
 use crate::CedarUid;
 
-/// The finding that two tool names have the same normal form in one request.
-pub const NAME_COLLISION: &str = "name_collision";
-/// The finding that the arguments of a call are not one strict JSON object.
-pub const UNPARSED_ARGUMENTS: &str = "unparsed_arguments";
-
-/// The arguments of a tool call, as the model sent them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ToolInput {
-    /// The raw JSON text. The kernel parses it and reads each number from its original text.
-    Json(String),
-    /// Free text, for the tool kinds `custom`, `apply_patch` and `other`.
-    Text(String),
-}
-
-/// Whether the name of a call is among the tool definitions of the request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Declared {
-    /// The name is among the definitions.
-    Yes,
-    /// The definitions are complete and the name is not among them.
-    No,
-    /// The definitions are not complete, so the kernel cannot tell.
-    Unknown,
-}
-
-impl Declared {
-    /// The value in `context.call.declared`.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Yes => "yes",
-            Self::No => "no",
-            Self::Unknown => "unknown",
-        }
-    }
-}
+pub use crate::detect::{Declared, NAME_COLLISION, ToolInput, UNPARSED_ARGUMENTS};
 
 /// One tool call to decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
