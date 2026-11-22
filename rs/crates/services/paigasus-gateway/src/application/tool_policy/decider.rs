@@ -109,7 +109,7 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
     outcomes
         .into_iter()
         .zip(digests)
-        .map(|(o, digest)| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, digest)))))
+        .map(|(o, digest)| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, digest)))).with_decision_id(recorder.mint_decision_id()))
         .collect()
 }
 
@@ -168,6 +168,21 @@ mod tests {
 
     async fn decide(ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<Decision> {
         decide_full(ctx, turn, call_names).await.into_iter().map(|d| d.decision).collect()
+    }
+
+    #[tokio::test]
+    async fn the_decider_gives_every_call_its_own_decision_id() {
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        let decided = decide_full(ctx.with_policy(out.snapshot), turn, &["x", "y", "rm", "z"]).await;
+        let ids: Vec<_> = decided.iter().map(|d| d.decision_id.expect("an id for every call")).collect();
+        assert!(ids.iter().all(|id| id.get_version_num() == 7));
+        let distinct: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), 4, "four distinct ids: {ids:?}");
     }
 
     #[tokio::test]

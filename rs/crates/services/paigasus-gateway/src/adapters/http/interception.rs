@@ -753,6 +753,41 @@ mod tests {
         records.iter().map(|r| r.tool.name.clone()).collect()
     }
 
+    /// The `ref=<uuid>` of the one notice in the client bytes.
+    fn notice_ref_of(text: &str) -> uuid::Uuid {
+        let (_, rest) = text.split_once(" ref=").unwrap_or_else(|| panic!("no ref= in the client bytes: {text}"));
+        rest[..36].parse().unwrap_or_else(|e| panic!("bad uuid in {rest}: {e}"))
+    }
+
+    #[tokio::test]
+    async fn the_notice_ref_is_the_record_id_on_the_stream_path() {
+        let (log, rec) = memory_recorder(false, false);
+        let ti = ti_with_recorder(Limits::defaults(), Arc::new(crate::application::tool_policy::CedarDecider::new(Arc::clone(&rec))), &rec);
+        let text = run_ctx(ti, cedar_ctx(paigasus_gateway_core::TenantMode::Enforce).await, tool_blocks(&["rm"], Duration::ZERO)).await;
+        let records = log.records();
+        let blocks: Vec<_> = records.iter().filter(|r| r.applied == AppliedEffect::Block).collect();
+        assert_eq!(blocks.len(), 1, "{records:?}");
+        assert_eq!(notice_ref_of(&text), blocks[0].decision_id, "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_notice_ref_is_the_record_id_on_the_body_path() {
+        let (log, rec) = memory_recorder(false, false);
+        let ti = ti_with_recorder(Limits::defaults(), Arc::new(crate::application::tool_policy::CedarDecider::new(Arc::clone(&rec))), &rec);
+        let calls = vec![serde_json::json!({"id": "c0", "type": "function", "function": {"name": "rm", "arguments": "{}"}})];
+        let body = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": calls}, "finish_reason": "tool_calls"}]}).to_string();
+        let ctx = cedar_ctx(paigasus_gateway_core::TenantMode::Enforce).await;
+        let out = intercept_body(&ti, ti.limits, Format::OpenAiChat, ctx, Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]).await;
+        let BodyOutcome::Forward { rewritten: Some(bytes), .. } = out else {
+            panic!("expected a rewritten body")
+        };
+        let text = String::from_utf8(bytes.to_vec()).expect("utf-8");
+        let records = log.records();
+        let blocks: Vec<_> = records.iter().filter(|r| r.applied == AppliedEffect::Block).collect();
+        assert_eq!(blocks.len(), 1, "{records:?}");
+        assert_eq!(notice_ref_of(&text), blocks[0].decision_id, "{text}");
+    }
+
     #[tokio::test]
     async fn the_stream_path_records_once_per_report_entry() {
         let (log, rec) = memory_recorder(false, false);

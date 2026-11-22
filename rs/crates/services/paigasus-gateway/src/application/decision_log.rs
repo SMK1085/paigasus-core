@@ -110,7 +110,14 @@ impl DecisionRecorder {
         self.digest.as_ref().map(|k| k.digest(arguments.as_bytes()))
     }
 
-    fn header(&self, org: Option<Uuid>) -> RecordHeader {
+    /// A fresh decision id: a UUIDv7 from the clock and the entropy of this recorder.
+    #[must_use]
+    pub fn mint_decision_id(&self) -> Uuid {
+        mint_uuid7(unix_ms(self.clock.now()), self.entropy.bytes10())
+    }
+
+    /// `id` is the decision id of the record. `None` mints a fresh one.
+    fn header(&self, org: Option<Uuid>, id: Option<Uuid>) -> RecordHeader {
         // The clock is read inside the sequence lock, so `decided_at` order equals `sequence` order per org.
         let (now, sequence) = {
             let mut map = self.sequences.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -119,12 +126,12 @@ impl DecisionRecorder {
             *next += 1;
             (now, *next)
         };
-        RecordHeader::new(mint_uuid7(unix_ms(now), self.entropy.bytes10()), now, self.instance_id, sequence, org)
+        RecordHeader::new(id.unwrap_or_else(|| mint_uuid7(unix_ms(now), self.entropy.bytes10())), now, self.instance_id, sequence, org)
     }
 
     /// Build the record, write the tracing line when `line` is set, and hand the record to the log.
-    fn emit(&self, org: Option<Uuid>, line: bool, build: impl FnOnce(RecordHeader) -> DecisionRecord) {
-        let record = build(self.header(org));
+    fn emit(&self, org: Option<Uuid>, id: Option<Uuid>, line: bool, build: impl FnOnce(RecordHeader) -> DecisionRecord) {
+        let record = build(self.header(org, id));
         if line {
             log_line(&record);
         }
@@ -133,15 +140,15 @@ impl DecisionRecorder {
 
     /// The tracing line is written exactly when the decider ran for this entry: `r.detail` is set (R11).
     pub fn record_response(&self, ctx: &DecisionContext, r: &ReportedCall) {
-        self.emit(response_org(ctx).or_else(|| org_of(&ctx.scope)), r.detail.is_some(), |h| build_response(h, ctx, r));
+        self.emit(response_org(ctx).or_else(|| org_of(&ctx.scope)), r.decision_id, r.detail.is_some(), |h| build_response(h, ctx, r));
     }
 
     pub fn record_request(&self, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry) {
-        self.emit(org_of(&ctx.scope), false, |h| build_request(h, ctx, mode, e));
+        self.emit(org_of(&ctx.scope), None, false, |h| build_request(h, ctx, mode, e));
     }
 
     pub fn record_refusal(&self, ctx: &DecisionContext, mode: Option<TenantMode>) {
-        self.emit(org_of(&ctx.scope), false, |h| build_refusal(h, ctx, mode));
+        self.emit(org_of(&ctx.scope), None, false, |h| build_refusal(h, ctx, mode));
     }
 }
 
@@ -236,6 +243,20 @@ mod tests {
         assert_eq!(id, mint_uuid7(ms, [0xAB; 10]));
         assert_eq!(id.get_version_num(), 7);
         assert_eq!(rec.instance_id(), id, "the instance id comes from the same clock and entropy");
+    }
+
+    #[test]
+    fn a_reported_decision_id_is_the_record_id() {
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let id = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000c3);
+        rec.record_response(&ctx(&scope(ORG_A)), &reported().with_decision_id(Some(id)));
+        rec.record_response(&ctx(&scope(ORG_A)), &reported());
+        let ids: Vec<Uuid> = log.records().iter().map(|r| r.decision_id).collect();
+        assert_eq!(ids[0], id);
+        assert_ne!(ids[1], id);
+        assert_eq!(ids[1].get_version_num(), 7, "an entry without an id gets a fresh UUIDv7");
+        assert_eq!(rec.mint_decision_id().get_version_num(), 7);
     }
 
     fn entry_of(decision: ReportDecision, basis: Option<Basis>, code: Option<BlockCode>, enforced: Option<bool>) -> ReportEntry {
