@@ -49,6 +49,10 @@ pub struct Verdict {
     pub added: Vec<Finding>,
     /// The policies of `errored` whose effect is `forbid`, sorted the same way (D12).
     pub errored_forbids: Vec<PolicyRef>,
+    /// The policies of `determining` whose effect is `forbid`, sorted the same way (D12). For a deny
+    /// by an errored forbid, `determining` holds Cedar's satisfied permits, so the differential
+    /// result decision compares this list, not `determining`.
+    pub determining_forbids: Vec<PolicyRef>,
 }
 
 impl Verdict {
@@ -66,6 +70,7 @@ impl Verdict {
             max_severity: findings.max_severity(),
             added: Vec::new(),
             errored_forbids: Vec::new(),
+            determining_forbids: Vec::new(),
         }
     }
 }
@@ -204,6 +209,7 @@ pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policie
     let is_forbid = |id: &&PolicyId| policies.set().policy(id).is_some_and(|p| p.effect() == cedar_policy::Effect::Forbid);
     let errored_forbid = errored_ids.iter().any(is_forbid);
     let errored_forbids = sorted(errored_ids.iter().copied().filter(is_forbid).filter_map(lookup).collect());
+    let determining_forbids = sorted(diagnostics.reason().filter(is_forbid).filter_map(lookup).collect());
     let errored = sorted(errored_ids.into_iter().filter_map(lookup).collect());
     let decision = if response.decision() == Decision::Allow && !errored_forbid { Effect::Allow } else { Effect::Deny };
     // Floor policies are forbids only: `compile_floor` rejects a floor permit.
@@ -219,5 +225,6 @@ pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policie
         max_severity: seen.max_severity,
         added: seen.added,
         errored_forbids,
+        determining_forbids,
     }
 }

@@ -433,6 +433,24 @@ fn errored_forbids_hold_only_forbids() {
 }
 
 #[test]
+fn determining_forbids_hold_only_forbids() {
+    // A deny by an errored forbid: Cedar's reason set is the satisfied permit `all`.
+    let tenant = r#"@id("all") permit(principal, action, resource);
+        @id("e") forbid(principal, action, resource) when { context.input.missing == 1 };"#;
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &policies("", tenant, &["t"]));
+    assert_eq!((v.decision, v.determining.clone()), (Effect::Deny, vec![pref(PolicyOrigin::Tenant, "all")]));
+    assert!(v.determining_forbids.is_empty());
+    // A deny by satisfied forbids of both sets.
+    let floor = r#"@id("z") forbid(principal, action, resource);"#;
+    let tenant = r#"@id("all") permit(principal, action, resource); @id("f") forbid(principal, action, resource);"#;
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &policies(floor, tenant, &["t"]));
+    assert_eq!(v.determining_forbids, vec![pref(PolicyOrigin::Floor, "z"), pref(PolicyOrigin::Tenant, "f")]);
+    // An allow: the determining permits are not forbids.
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p_all());
+    assert!(!v.determining.is_empty() && v.determining_forbids.is_empty());
+}
+
+#[test]
 fn a_whole_record_literal_on_call_is_false() {
     // Release note of § 6.2.3: `context.call` now has two attributes.
     let p = policies("", r#"@id("c") permit(principal, action, resource) when { context.call == {"declared": "yes"} };"#, &["t"]);
@@ -445,5 +463,5 @@ fn a_whole_record_literal_on_call_is_false() {
 fn an_unevaluable_verdict_has_the_caller_severity_and_empty_lists() {
     let v = decide(&call("x", "not json"), &bad_facts(), &findings(&["name_collision"]), &policies("", "", &[]));
     assert_eq!(v.max_severity, Some(Severity::High));
-    assert!(v.added.is_empty() && v.errored_forbids.is_empty());
+    assert!(v.added.is_empty() && v.errored_forbids.is_empty() && v.determining_forbids.is_empty());
 }

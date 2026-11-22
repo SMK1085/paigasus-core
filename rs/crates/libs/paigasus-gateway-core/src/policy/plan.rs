@@ -148,19 +148,21 @@ impl RequestPlan {
 }
 
 /// The policies by which the findings change the verdict (§ 6.8.2, D12), or `None` when they do
-/// not. A is the verdict with the findings, B the one without. With `F(v) = v.determining ∪
-/// v.errored_forbids`, the findings change it when `A` denies and `B` allows (all of F(A)), or
+/// not. A is the verdict with the findings, B the one without. F(v) holds only forbids:
+/// `v.determining_forbids ∪ v.errored_forbids` (controller ruling on D12). The kernel keeps Cedar's
+/// satisfied permits in `determining` for a deny by an errored forbid, and a permit must not make
+/// a difference. The findings change the verdict when `A` denies and `B` allows (all of F(A)), or
 /// when F(A) is not a subset of F(B) (the policies of F(A) \ F(B)). The list can be empty: a
 /// default deny in A against an allow in B.
 fn difference<'v>(a: &'v Verdict, b: &Verdict) -> Option<Vec<&'v PolicyRef>> {
     if a.decision != Effect::Deny {
         return None;
     }
-    let f_a = a.determining.iter().chain(&a.errored_forbids);
+    let f_a = a.determining_forbids.iter().chain(&a.errored_forbids);
     if b.decision == Effect::Allow {
         return Some(f_a.collect());
     }
-    let in_b = |p: &PolicyRef| b.determining.contains(p) || b.errored_forbids.contains(p);
+    let in_b = |p: &PolicyRef| b.determining_forbids.contains(p) || b.errored_forbids.contains(p);
     let more: Vec<&PolicyRef> = f_a.filter(|p| !in_b(p)).collect();
     (!more.is_empty()).then_some(more)
 }
@@ -1391,13 +1393,11 @@ mod tests {
         (a, b)
     }
 
-    /// Controller ruling (S2): decide this case by the exact predicate. The spec text expected
-    /// "not replaced", on the assumption that A's `determining` is empty. The kernel keeps Cedar's
-    /// reason set for a deny by an errored forbid, and that set is the satisfied permit `all`. So
-    /// F(A) = {all, e} is not a subset of F(B) = {e}, and the result is replaced (fail-safe: B
-    /// denies the call too).
+    /// F(v) holds only forbids (controller ruling on D12). The kernel keeps Cedar's satisfied
+    /// permit `all` in A's `determining`, because a forbid errored. That permit is not in F(A), so
+    /// F(A) = {e} is a subset of F(B) = {e}. B denies too, so the findings did not cause the block.
     #[test]
-    fn an_is_empty_or_input_forbid_is_decided_by_the_exact_predicate() {
+    fn an_is_empty_or_input_forbid_does_not_replace() {
         let s = tenant(
             &format!(r#"{PERMIT_ALL} @id("e") forbid(principal, action, resource) when {{ context.findings.isEmpty() || context.input.x == 1 }};"#),
             TenantMode::Enforce,
@@ -1405,12 +1405,31 @@ mod tests {
         // `e` is an errored forbid in A and a determining forbid in B.
         let (a, b) = pair(&s);
         assert_eq!((a.decision, ids(&a.errored_forbids), ids(&a.determining)), (Effect::Deny, vec!["e"], vec!["all"]));
-        assert_eq!((b.decision, ids(&b.determining), b.errored_forbids.len()), (Effect::Deny, vec!["e"], 0));
+        assert!(a.determining_forbids.is_empty());
+        assert_eq!((b.decision, ids(&b.determining_forbids), b.errored_forbids.len()), (Effect::Deny, vec!["e"], 0));
+        assert!(difference(&a, &b).is_none(), "F(A) is a subset of F(B) and B denies");
+        let p = plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![high()]]);
+        assert!(p.replaced.is_empty() && p.entries.is_empty());
+        assert_eq!(p.screen_records.len(), 1);
+    }
+
+    #[test]
+    fn two_denies_by_different_forbids_replace() {
+        // A is denied by a forbid on the finding; B by another forbid, which needs no finding.
+        let s = tenant(
+            &format!(
+                r#"{PERMIT_ALL} @id("fa") forbid(principal, action, resource) when {{ context.findings.contains("injection_markers") }};
+                   @id("fb") forbid(principal, action, resource) when {{ context.findings.isEmpty() }};"#
+            ),
+            TenantMode::Enforce,
+        );
+        let (a, b) = pair(&s);
+        assert_eq!((a.decision, ids(&a.determining_forbids)), (Effect::Deny, vec!["fa"]));
+        assert_eq!((b.decision, ids(&b.determining_forbids)), (Effect::Deny, vec!["fb"]));
         let more = difference(&a, &b).expect("F(A) is not a subset of F(B)");
-        assert_eq!(more.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["all"]);
+        assert_eq!(more.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["fa"]);
         let p = plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![high()]]);
         assert_eq!(p.replaced, [c0(true)]);
-        assert!(p.screen_records.is_empty());
     }
 
     #[test]
@@ -1423,9 +1442,9 @@ mod tests {
         let (a, b) = pair(&s);
         assert_eq!((a.decision, ids(&a.errored_forbids)), (Effect::Deny, vec!["c"]));
         assert_eq!((b.decision, b.errored_forbids.len()), (Effect::Allow, 0));
-        // B allows, so the difference is all of F(A): the permit `all` (Cedar's reason) and `c`.
+        // B allows, so the difference is all of F(A): the forbid `c` (the permit `all` is not in F).
         let more = difference(&a, &b).expect("B allows");
-        assert_eq!(more.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["all", "c"]);
+        assert_eq!(more.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["c"]);
         let p = plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![high()]]);
         assert_eq!(p.replaced, [c0(true)]);
     }
