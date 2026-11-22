@@ -147,7 +147,14 @@ impl ToolCallDecider for CedarDecider {
                     extra.insert(kind);
                 }
                 if let Some(history) = &history {
-                    for kind in history.reserve(&ctx, session, &calls, &ids).await.iter() {
+                    // The reserve round trip is part of the overhead sample (spec § 9). Its region
+                    // ends before the timer of `decide_now` starts, so nothing counts twice.
+                    let started = Instant::now();
+                    let found = history.reserve(&ctx, session, &calls, &ids).await;
+                    if let Some(s) = ctx.policy.as_deref() {
+                        s.add_decide_elapsed(started.elapsed());
+                    }
+                    for kind in found.iter() {
                         extra.insert(kind);
                     }
                 }
@@ -552,5 +559,40 @@ mod tests {
         assert_eq!(effects(&with_error), effects(&without));
         assert!(with_error.iter().all(|d| d.decision_id.is_some()), "every call keeps its id");
         assert!(s.budget.is_failed(), "the reserve did run and fail");
+    }
+
+    /// The memory store, with a reserve that first waits `.1`.
+    struct SlowReserve(MemorySessionStore, Duration);
+
+    #[async_trait::async_trait]
+    impl SessionStore for SlowReserve {
+        async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            self.0.lookup(req).await
+        }
+        async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.write(req).await
+        }
+        async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            tokio::time::sleep(self.1).await;
+            self.0.reserve(req).await
+        }
+        async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+            self.0.settle(req).await
+        }
+        async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.append(req).await
+        }
+    }
+
+    /// Spec § 9: the overhead sample holds the reserve round trip.
+    #[tokio::test]
+    async fn the_reserve_time_is_in_the_overhead_sample() {
+        const WAIT: Duration = Duration::from_millis(80);
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(Arc::new(SlowReserve(MemorySessionStore::new(), WAIT))));
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let snap = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
+        let decided = decide_by(&decider, ctx.with_session(session(Findings::new())), turn, &["ok"]).await;
+        assert_eq!(decided[0].decision, Decision::Allow);
+        assert!(snap.decide_elapsed() >= WAIT, "the reserve wait is in the decide time: {:?}", snap.decide_elapsed());
     }
 }

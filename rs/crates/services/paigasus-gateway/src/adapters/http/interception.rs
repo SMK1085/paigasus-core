@@ -170,6 +170,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
             recorder.record_response(&ctx, r);
         }
     }
+    // Intended: the settle starts before the body reaches the client. The event counts either way.
     ti.settle(&ctx, &reported);
     let entries: Vec<_> = reported.into_iter().map(|r| r.entry).collect();
     let report = report_header(&entries, requests);
@@ -225,6 +226,7 @@ impl Relay {
                 }
             }
         }
+        // Intended: the settle starts when the batch is applied, before its bytes reach the client. The event counts either way.
         self.ti.settle(&self.ctx, &reported);
         // A hold that is no longer deciding (a timeout ruled on it) needs no answer. Drop
         // its future so the next hold is not stuck behind it.
@@ -1060,11 +1062,11 @@ mod tests {
         let ctx = session_ctx(&h).await;
         let ti = ti_with_history(Limits::defaults(), cedar_with(&h), &h);
         let text = run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["rm"], Duration::ZERO)).await;
-        assert!(text.contains(" ref="), "the call is blocked: {text}");
         drain(&h).await;
         let events = session_events(&store, &ctx, "rm");
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].verdict, EventVerdict::Deny);
+        assert_eq!(notice_ref_of(&text), events[0].id, "the notice ref is the event id (spec D1)");
         assert_eq!(call_link(&store, "toolu_0").await, None);
     }
 
@@ -1137,5 +1139,51 @@ mod tests {
         assert!(store.events(testing::ORG_A, Scope::Principal, PRINCIPAL, "ok").is_empty());
         assert_eq!(call_link(&store, "toolu_0").await, None);
         assert_eq!(call_link(&store, "c0").await, None);
+    }
+
+    /// A block that the interceptor makes itself (`decider-error` under `block`): the reserve left
+    /// a pending event, and nothing settles or appends it.
+    #[tokio::test]
+    async fn an_interceptor_block_keeps_the_pending_event_and_appends_nothing() {
+        let (store, h) = memory_history();
+        let ctx = session_ctx(&h).await;
+        let limits = Limits {
+            on_failure: OnFailure::Block,
+            decide_timeout: Duration::from_millis(200),
+            ..Limits::defaults()
+        };
+        let ti = ti_with_history(limits, Arc::new(CedarThenSleep(cedar_with(&h))), &h);
+        let text = tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO)))
+            .await
+            .expect("the timeout ends the hold");
+        assert!(text.contains(&format!(r#""code":"{}""#, BlockCode::DeciderError.as_kebab())), "{text}");
+        drain(&h).await;
+        let verdicts: Vec<_> = session_events(&store, &ctx, "ok").iter().map(|e| e.verdict).collect();
+        assert_eq!(verdicts, [EventVerdict::Pending]);
+        assert_eq!(call_link(&store, "toolu_0").await, None);
+    }
+
+    /// Ruling F3 on the body path: a decide timeout under `allow` appends an allowed event.
+    #[tokio::test]
+    async fn a_timed_out_body_under_allow_appends_and_keeps_the_pending_event() {
+        let (store, h) = memory_history();
+        let ctx = session_ctx(&h).await;
+        let limits = Limits {
+            on_failure: OnFailure::Allow,
+            decide_timeout: Duration::from_millis(200),
+            ..Limits::defaults()
+        };
+        let ti = ti_with_history(limits, Arc::new(CedarThenSleep(cedar_with(&h))), &h);
+        let body = chat_body(&["ok"]);
+        let out = intercept_body(&ti, ti.limits, Format::OpenAiChat, Arc::clone(&ctx), Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]).await;
+        assert!(matches!(out, BodyOutcome::Forward { .. }));
+        drain(&h).await;
+        let events = session_events(&store, &ctx, "ok");
+        let mut verdicts: Vec<_> = events.iter().map(|e| e.verdict.as_str()).collect();
+        verdicts.sort_unstable();
+        assert_eq!(verdicts, ["allow", "pending"]);
+        let appended = events.iter().find(|e| e.verdict == EventVerdict::Allow).expect("the append");
+        let session = ctx.session.as_ref().expect("a session").session_id;
+        assert_eq!(call_link(&store, "c0").await, Some((session, appended.id)));
     }
 }
