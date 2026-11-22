@@ -12,6 +12,7 @@ use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 use super::ToolInput;
 use super::input::nesting_ok;
+use super::secrets::is_secret_token;
 
 /// One string of the arguments.
 pub(crate) struct Leaf<'a> {
@@ -19,6 +20,9 @@ pub(crate) struct Leaf<'a> {
     pub key: Option<&'a str>,
     /// The JSON pointer of the value or of the key. It is empty for raw and free text.
     pub pointer: &'a str,
+    /// The pointer cut before the first object key that is a secret. The walk tests each key
+    /// once, when it pushes the key, so this costs nothing more per leaf.
+    pub safe_pointer: &'a str,
     /// The decoded text.
     pub text: &'a str,
 }
@@ -198,16 +202,27 @@ pub(crate) fn escape_into(out: &mut String, key: &str) {
     }
 }
 
-fn visit(node: &Node, key: Option<&str>, pointer: &mut String, f: &mut dyn FnMut(Leaf<'_>)) {
+/// `cut` is the length of the pointer before the first key that is a secret, if there is one.
+fn visit(node: &Node, key: Option<&str>, pointer: &mut String, cut: Option<usize>, f: &mut dyn FnMut(Leaf<'_>)) {
     match node {
-        Node::Str(text) => f(Leaf { key, pointer, text }),
+        Node::Str(text) => {
+            let safe_pointer = &pointer[..cut.unwrap_or(pointer.len())];
+            f(Leaf { key, pointer, safe_pointer, text });
+        }
         Node::Obj(members) => {
             for (k, v) in members {
                 let len = pointer.len();
                 pointer.push('/');
                 escape_into(pointer, k);
-                f(Leaf { key: None, pointer, text: k });
-                visit(v, Some(k), pointer, f);
+                let cut = cut.or_else(|| is_secret_token(k).then_some(len));
+                let safe_pointer = &pointer[..cut.unwrap_or(pointer.len())];
+                f(Leaf {
+                    key: None,
+                    pointer,
+                    safe_pointer,
+                    text: k,
+                });
+                visit(v, Some(k), pointer, cut, f);
                 pointer.truncate(len);
             }
         }
@@ -216,7 +231,7 @@ fn visit(node: &Node, key: Option<&str>, pointer: &mut String, f: &mut dyn FnMut
                 let len = pointer.len();
                 pointer.push('/');
                 pointer.push_str(&i.to_string());
-                visit(v, key, pointer, f);
+                visit(v, key, pointer, cut, f);
                 pointer.truncate(len);
             }
         }
@@ -228,13 +243,23 @@ fn visit(node: &Node, key: Option<&str>, pointer: &mut String, f: &mut dyn FnMut
 pub(crate) fn walk_strings(input: &ToolInput, f: &mut dyn FnMut(Leaf<'_>)) {
     match input {
         ToolInput::Json(text) => match parse(text) {
-            Some((node, _)) => visit(&node, None, &mut String::new(), f),
+            Some((node, _)) => visit(&node, None, &mut String::new(), None, f),
             None => {
                 let raw = decode_raw(text);
-                f(Leaf { key: None, pointer: "", text: &raw });
+                f(Leaf {
+                    key: None,
+                    pointer: "",
+                    safe_pointer: "",
+                    text: &raw,
+                });
             }
         },
-        ToolInput::Text(text) => f(Leaf { key: None, pointer: "", text }),
+        ToolInput::Text(text) => f(Leaf {
+            key: None,
+            pointer: "",
+            safe_pointer: "",
+            text,
+        }),
     }
 }
 

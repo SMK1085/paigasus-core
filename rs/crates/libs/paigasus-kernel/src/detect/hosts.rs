@@ -222,7 +222,7 @@ fn leaf_hosts(key: Option<&str>, text: &str) -> HostSet {
 /// pointer. The pointer is borrowed, so a caller copies it only when it needs to.
 pub(crate) fn scan_hosts(input: &ToolInput, f: &mut dyn FnMut(&HostSet, Option<&str>)) {
     let is_text = matches!(input, ToolInput::Text(_));
-    walk_strings(input, &mut |leaf| f(&leaf_hosts(leaf.key, leaf.text), (!is_text).then_some(leaf.pointer)));
+    walk_strings(input, &mut |leaf| f(&leaf_hosts(leaf.key, leaf.text), (!is_text).then_some(leaf.safe_pointer)));
 }
 
 /// Every host in the arguments of one call.

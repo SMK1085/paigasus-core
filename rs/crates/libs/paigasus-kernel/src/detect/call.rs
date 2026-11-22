@@ -6,7 +6,7 @@ use std::fmt;
 
 use super::hosts::scan_hosts;
 use super::schema::invalid_args;
-use super::secrets::{safe_pointer, secret_in_args};
+use super::secrets::secret_in_args;
 use super::types::prefix_on_boundary;
 use super::{CallSubject, Declared, Evidence, Finding, HOSTS_OVERFLOW, HostSet, Severity, UNDECLARED_TOOL, UNSEEN_HOST};
 
@@ -98,10 +98,8 @@ pub fn detect_call(subject: &CallSubject<'_>) -> CallDetection {
     scan_hosts(subject.input, &mut |leaf_hosts, pointer| {
         hosts.extend(leaf_hosts);
         if let Some(seen) = subject.seen_hosts {
-            // The secret cut runs once per leaf with an unseen host, before any pointer is copied.
-            let mut safe: Option<Option<&str>> = None;
-            for host in leaf_hosts.iter().filter(|h| *h != HOSTS_OVERFLOW && !seen.contains(h)) {
-                let pointer = *safe.get_or_insert_with(|| pointer.map(safe_pointer));
+            // The pointer is already cut before a secret key (the walk does it once per key).
+            for host in leaf_hosts.iter() {
                 unseen.offer(seen, host, pointer);
             }
         }
@@ -209,6 +207,41 @@ mod tests {
         let input = ToolInput::Json(format!(r#"{{"{escaped}":{{"u":"https://x.example"}}}}"#));
         let d = detect_call(&CallSubject::new("t", &input, Declared::Yes).with_seen_hosts(&seen));
         assert!(pointers(&d.findings[0]).iter().all(|p| !p.contains(secret_part)));
+    }
+
+    #[test]
+    fn an_escaped_secret_key_and_a_key_under_an_array_are_cut() {
+        let token = aws();
+        let secret_part = &token[4..];
+        let seen = HostSet::new();
+        // The key holds `/` and `~`, so its pointer token is `a~1~0AKIA...` (RFC 6901).
+        let key = format!("a/~{token}");
+        let input = ToolInput::Json(format!(r#"{{"ok":{{"{key}":{{"u":"https://x.example"}}}}}}"#));
+        let d = detect_call(&CallSubject::new("t", &input, Declared::Yes).with_seen_hosts(&seen));
+        assert_eq!(pointers(&d.findings[0]), ["/ok"]);
+        assert_eq!(pointers(&d.findings[1]), ["/ok"]);
+        // A secret key under an array element: the pointer stops at the element.
+        let input = ToolInput::Json(format!(r#"[{{"{token}":{{"u":"https://x.example"}}}}]"#));
+        let d = detect_call(&CallSubject::new("t", &input, Declared::Yes).with_seen_hosts(&seen));
+        assert_eq!(pointers(&d.findings[0]), ["/0"]);
+        for f in &d.findings {
+            assert!(pointers(f).iter().all(|p| !p.contains(secret_part)));
+        }
+    }
+
+    #[test]
+    fn many_leaves_under_a_long_key_stay_linear() {
+        // 2 000 leaves with an unseen host, all below one 8 MiB key: a per-leaf scan of the
+        // pointer would cost seconds per thousand leaves.
+        let key = "k".repeat(8 << 20);
+        let leaves: Vec<String> = (0..2_000).rev().map(|i| format!(r#""l{i}":"https://h{i}.example/""#)).collect();
+        let input = ToolInput::Json(format!(r#"{{"{key}":{{{}}}}}"#, leaves.join(",")));
+        let seen = HostSet::new();
+        let start = std::time::Instant::now();
+        let d = detect_call(&CallSubject::new("t", &input, Declared::Yes).with_seen_hosts(&seen));
+        let elapsed = start.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(10), "{elapsed:?}");
+        assert_eq!(d.findings[0].evidence.len(), 16);
     }
 
     #[test]

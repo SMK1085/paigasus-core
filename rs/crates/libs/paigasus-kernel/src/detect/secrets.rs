@@ -54,6 +54,11 @@ fn rule_ids() -> Vec<&'static str> {
     PATTERNS.iter().map(|(rule, _)| *rule).collect()
 }
 
+/// Whether `token` (an unescaped object key) is a known token form.
+pub(super) fn is_secret_token(token: &str) -> bool {
+    SET.as_ref().is_some_and(|set| set.is_match(token))
+}
+
 /// The pointer cut before the first reference token that is itself a secret (RFC 6901: `~1` is
 /// decoded before `~0`). A key that is a secret would else appear in the pointer of the key and
 /// of every value below it. The cut pointer is the pointer of the object that holds that key.
