@@ -38,6 +38,8 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub inboxes: Arc<dyn InboxRepository>,
     pub ingress: Option<Arc<Ingress>>,
+    /// How the memory changes of a run commit. Chosen at boot from `memory.backend`.
+    pub memory: crate::adapters::memory_commit::MemoryCommit,
 }
 
 /// The events route and the service-info route.
@@ -108,6 +110,7 @@ mod tests {
                 db: DatabaseConnection::default(),
                 inboxes: Arc::new(PgInboxRepository::new(DatabaseConnection::default())),
                 ingress: None,
+                memory: crate::adapters::memory_commit::MemoryCommit::InTransaction(crate::adapters::persistence::memory::PgMemoryStore::new(DatabaseConnection::default())),
             },
             None,
         )
