@@ -75,7 +75,8 @@ pub const GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL: &str = "gateway_tool_pol
 /// 1 while the tool-policy NATS client is connected, else 0. Set on each connect and disconnect event.
 pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_connected";
 /// Tool-policy findings (SMA-755 § 5.9). `side` = `request` | `response`; `kind` = `name_collision` |
-/// `unparsed_arguments` | `other` (a kind that this service does not know).
+/// `unparsed_arguments` | `mixed_sessions` | `forged_history` | `history_truncated` | `other` (a kind
+/// that this service does not know). Primed at 0 for all twelve pairs.
 pub const GATEWAY_TOOL_POLICY_FINDINGS_TOTAL: &str = "gateway_tool_policy_findings_total";
 // Gateway tool decision log (SMA-755 § 5.9). No label carries a tool name, an org or an argument.
 /// Records that the decision log accepted from the recorder (counted before the queue).

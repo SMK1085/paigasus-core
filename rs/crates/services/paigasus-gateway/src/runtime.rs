@@ -456,13 +456,13 @@ mod tool_policy_tests {
     }
 
     #[test]
-    fn prime_tool_policy_metrics_primes_six_series_at_zero() {
+    fn prime_tool_policy_metrics_primes_twelve_series_at_zero() {
         let debugging = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = debugging.snapshotter();
         let _local = metrics::set_default_local_recorder(&debugging);
         build_tool_policy(&enabled_config(), rec()).expect("builds");
         for side in ["request", "response"] {
-            for kind in ["name_collision", "unparsed_arguments", "other"] {
+            for kind in crate::application::tool_policy::FINDING_KINDS {
                 let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
                 assert_eq!(v, Some(0), "{side}/{kind} is primed at 0");
             }
@@ -473,7 +473,7 @@ mod tool_policy_tests {
             .into_iter()
             .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL)
             .count();
-        assert_eq!(series, 6);
+        assert_eq!(series, 12);
     }
 
     /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.

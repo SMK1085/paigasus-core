@@ -14,6 +14,7 @@ use std::time::Instant;
 use metrics::counter;
 use paigasus_gateway_core::decision_log::{DecisionDetail, RecordBasis};
 use paigasus_gateway_core::{DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls};
+use paigasus_kernel::tool_policy::{FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, NAME_COLLISION, UNPARSED_ARGUMENTS};
 use paigasus_observability::names;
 
 use crate::application::decision_log::DecisionRecorder;
@@ -39,15 +40,18 @@ impl CedarDecider {
 }
 
 /// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9).
-pub const FINDING_KINDS: [&str; 3] = ["name_collision", "unparsed_arguments", "other"];
+pub const FINDING_KINDS: [&str; 6] = ["name_collision", "unparsed_arguments", "mixed_sessions", "forged_history", "history_truncated", "other"];
 
 /// The `kind` metric label of a finding. An unknown kind is `other`.
 #[must_use]
 pub fn finding_label(kind: &str) -> &'static str {
     match kind {
-        "name_collision" => FINDING_KINDS[0],
-        "unparsed_arguments" => FINDING_KINDS[1],
-        _ => FINDING_KINDS[2],
+        NAME_COLLISION => FINDING_KINDS[0],
+        UNPARSED_ARGUMENTS => FINDING_KINDS[1],
+        MIXED_SESSIONS => FINDING_KINDS[2],
+        FORGED_HISTORY => FINDING_KINDS[3],
+        HISTORY_TRUNCATED => FINDING_KINDS[4],
+        _ => FINDING_KINDS[5],
     }
 }
 
@@ -236,7 +240,20 @@ mod tests {
         for k in ["name_collision", "unparsed_arguments"] {
             assert_eq!(finding_label(k), k);
         }
-        assert_eq!(FINDING_KINDS, ["name_collision", "unparsed_arguments", "other"]);
+        assert_eq!(
+            FINDING_KINDS,
+            ["name_collision", "unparsed_arguments", "mixed_sessions", "forged_history", "history_truncated", "other"]
+        );
+    }
+
+    #[test]
+    fn each_history_finding_has_its_own_label() {
+        assert_eq!(finding_label(MIXED_SESSIONS), "mixed_sessions");
+        assert_eq!(finding_label(FORGED_HISTORY), "forged_history");
+        assert_eq!(finding_label(HISTORY_TRUNCATED), "history_truncated");
+        assert_eq!(finding_label("something_new"), "other");
+        assert_eq!(FINDING_KINDS.len(), 6);
+        assert_eq!(FINDING_KINDS[5], "other");
     }
 
     #[tokio::test]
