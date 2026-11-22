@@ -4,11 +4,13 @@
 
 mod hosts;
 pub(crate) mod input;
+mod schema;
 mod secrets;
 mod types;
 mod walk;
 
 pub use hosts::{HOSTS_CAP, HOSTS_OVERFLOW, HostSet, call_hosts, hosts_in_text};
+pub use schema::invalid_args;
 pub use secrets::{SECRET_PATTERNS_VERSION, secret_in_args};
 
 pub use types::{

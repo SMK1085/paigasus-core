@@ -25,7 +25,6 @@ pub(crate) struct Leaf<'a> {
 
 /// How the walk reads one input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
 pub(crate) enum InputMode {
     /// One JSON object with unique keys.
     Strict,
@@ -119,8 +118,6 @@ fn parse(text: &str) -> Option<(Node, bool)> {
 }
 
 /// How the walk reads `input`.
-// Only its test calls it for now. The detectors that read the mode take it over.
-#[cfg(test)]
 pub(crate) fn input_mode(input: &ToolInput) -> InputMode {
     match input {
         ToolInput::Json(text) => match parse(text) {
@@ -190,7 +187,8 @@ fn decode_raw(text: &str) -> String {
     out
 }
 
-fn escape_into(out: &mut String, key: &str) {
+/// Append `key` to a JSON pointer, with `~` as `~0` and `/` as `~1`.
+pub(crate) fn escape_into(out: &mut String, key: &str) {
     for c in key.chars() {
         match c {
             '~' => out.push_str("~0"),
