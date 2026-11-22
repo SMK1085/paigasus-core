@@ -25,6 +25,7 @@ impl MemoryCommit {
     pub fn from_config(cfg: &MemoryConfig, db: DatabaseConnection) -> Self {
         match cfg.backend {
             MemoryBackend::Postgres => MemoryCommit::InTransaction(PgMemoryStore::new(db)),
+            MemoryBackend::S3 => unreachable!("the S3 memory backend is built by MemoryCommit::build"),
         }
     }
 
@@ -52,6 +53,7 @@ mod tests {
                 max_store_files: 1,
                 max_loaded_file_bytes: 1,
             },
+            s3: None,
         };
         let db = DatabaseConnection::default();
         let commit = MemoryCommit::from_config(&cfg, db);
