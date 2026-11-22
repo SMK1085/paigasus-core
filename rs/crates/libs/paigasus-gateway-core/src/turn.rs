@@ -2,6 +2,8 @@
 //! The request side of a turn (spec D19): what tools the caller declared, what it called before,
 //! and which results it sent back. Never the content of a tool result. No request rewrite.
 
+use std::sync::Arc;
+
 use serde_json::{Map, Value};
 
 use crate::json::{Malformed, ResponsesDoc, opt_obj, opt_str, parse_strict, parse_strict_responses};
@@ -69,7 +71,8 @@ pub struct ToolDefinition {
     /// The tool namespace of a Responses API definition. `None` for every other format.
     pub namespace: Option<String>,
     pub kind: ToolCallKind,
-    pub schema: Option<Value>,
+    /// Shared, so a detector can hold the schema without a copy.
+    pub schema: Option<Arc<Value>>,
 }
 
 impl ToolDefinition {
@@ -94,6 +97,8 @@ pub struct PriorCall {
     /// The request plan decides a result by this name, so it must match the call's name.
     pub name: String,
     pub arguments: String,
+    /// How the call arrived. It decides whether `arguments` is JSON or text.
+    pub kind: ToolCallKind,
     /// `true` for a Responses `local_shell_call`. Its result may name it by `id` alone.
     pub local_shell: bool,
     /// The item `id` of a Responses `local_shell_call`. `None` for every other call.
@@ -179,7 +184,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                     name: req_str(func, "name")?,
                     namespace: None,
                     kind: ToolCallKind::Function,
-                    schema: func.get("parameters").cloned(),
+                    schema: func.get("parameters").cloned().map(Arc::new),
                 });
             }
             Some("custom") => {
@@ -200,7 +205,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
             name: req_str(d, "name")?,
             namespace: None,
             kind: ToolCallKind::LegacyFunctionCall,
-            schema: d.get("parameters").cloned(),
+            schema: d.get("parameters").cloned().map(Arc::new),
         });
     }
     for m in arr(top, "messages")? {
@@ -209,11 +214,12 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
             Some("assistant") => {
                 for c in arr(m, "tool_calls")? {
                     let c = obj(c)?;
-                    let (name, arguments) = prior_body(c)?;
+                    let (name, arguments, kind) = prior_body(c)?;
                     f.prior_calls.push(PriorCall {
                         id: opt_str(c.get("id"), "id")?,
                         name,
                         arguments,
+                        kind,
                         local_shell: false,
                         item_id: None,
                     });
@@ -223,6 +229,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                         id: None,
                         name: req_str(fc, "name")?,
                         arguments: opt_str(fc.get("arguments"), "arguments")?.unwrap_or_default(),
+                        kind: ToolCallKind::LegacyFunctionCall,
                         local_shell: false,
                         item_id: None,
                     });
@@ -249,14 +256,14 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
 /// The (name, arguments) of a prior OpenAI tool call: a `function` body's name and arguments, or a
 /// `custom` body's name and input. An entry with neither body, both, or a body that disagrees with
 /// its `type` is malformed: an empty name would read as a call to no tool at all.
-fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
+fn prior_body(c: &Map<String, Value>) -> Result<(String, String, ToolCallKind), Malformed> {
     let ty = opt_str(c.get("type"), "type")?;
-    let (body, input) = match (opt_obj(c.get("function"), "function")?, opt_obj(c.get("custom"), "custom")?, ty.as_deref()) {
-        (Some(x), None, None | Some("function")) => (x, "arguments"),
-        (None, Some(x), None | Some("custom")) => (x, "input"),
+    let (body, input, kind) = match (opt_obj(c.get("function"), "function")?, opt_obj(c.get("custom"), "custom")?, ty.as_deref()) {
+        (Some(x), None, None | Some("function")) => (x, "arguments", ToolCallKind::Function),
+        (None, Some(x), None | Some("custom")) => (x, "input", ToolCallKind::Custom),
         _ => return Err(Malformed("tool_call")),
     };
-    Ok((req_str(body, "name")?, opt_str(body.get(input), input)?.unwrap_or_default()))
+    Ok((req_str(body, "name")?, opt_str(body.get(input), input)?.unwrap_or_default(), kind))
 }
 
 /// The request side of a Responses turn (spec § 7.2), read by `parse_request`.
@@ -343,6 +350,7 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
                         name: c.display_name(), // PRIOR-DISPLAY-NAME
                         id: c.id,
                         arguments: c.arguments,
+                        kind,
                         local_shell,
                         item_id: if local_shell { opt_str(item.get("id"), "id")? } else { None },
                     });
@@ -482,7 +490,7 @@ fn responses_definition(t: &Map<String, Value>, ty: &str, namespace: Option<Stri
         name: req_str(t, "name")?,
         namespace,
         kind: if function { ToolCallKind::Function } else { ToolCallKind::Custom },
-        schema: if function { t.get("parameters").cloned() } else { None },
+        schema: if function { t.get("parameters").cloned().map(Arc::new) } else { None },
     })
 }
 
@@ -499,7 +507,7 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                 name: req_str(t, "name")?,
                 namespace: None,
                 kind: ToolCallKind::AnthropicToolUse,
-                schema: t.get("input_schema").cloned(),
+                schema: t.get("input_schema").cloned().map(Arc::new),
             }),
             Some(_) => f.server_tools = true, // a server tool
         }
@@ -514,6 +522,7 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                     id: opt_str(b.get("id"), "id")?,
                     name: req_str(b, "name")?,
                     arguments: b.get("input").map(Value::to_string).unwrap_or_default(),
+                    kind: ToolCallKind::AnthropicToolUse,
                     local_shell: false,
                     item_id: None,
                 }),
@@ -876,5 +885,31 @@ mod tests {
         assert_eq!(c(json!({"type":"tool"})), ToolChoice::Unknown);
         assert_eq!(c(json!({"type":"x"})), ToolChoice::Unknown);
         assert_eq!(c(json!("auto")), ToolChoice::Unknown);
+    }
+
+    #[test]
+    fn prior_calls_carry_their_kind() {
+        let kinds = |f: &TurnFacts| f.prior_calls.iter().map(|c| c.kind).collect::<Vec<_>>();
+        let chat = facts(
+            Format::OpenAiChat,
+            json!({"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":[
+                {"id":"a","type":"function","function":{"name":"read","arguments":"{}"}},
+                {"id":"b","type":"custom","custom":{"name":"sql","input":"x"}}],
+                "function_call":{"name":"old","arguments":"{}"}}]}),
+        );
+        assert_eq!(kinds(&chat), [ToolCallKind::Function, ToolCallKind::Custom, ToolCallKind::LegacyFunctionCall]);
+        let anthropic = facts(
+            Format::AnthropicMessages,
+            json!({"model":"c","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{}}]}]}),
+        );
+        assert_eq!(kinds(&anthropic), [ToolCallKind::AnthropicToolUse]);
+        let responses = facts(
+            Format::OpenAiResponses,
+            json!({"model":"m","input":[
+                {"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},
+                {"type":"custom_tool_call","call_id":"c2","name":"sql","input":"x"},
+                {"type":"local_shell_call","id":"i","call_id":"c3","action":{"type":"exec","command":["ls"]}}]}),
+        );
+        assert_eq!(kinds(&responses), [ToolCallKind::Function, ToolCallKind::Custom, ToolCallKind::LocalShell]);
     }
 }

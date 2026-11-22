@@ -403,6 +403,7 @@ mod tests {
             id: Some(id.to_owned()),
             name: name.to_owned(),
             arguments: "{}".to_owned(),
+            kind: ToolCallKind::Function,
             local_shell: false,
             item_id: None,
         }
@@ -587,6 +588,7 @@ mod tests {
             id: Some("c1".to_owned()),
             name: name.to_owned(),
             arguments: "{}".to_owned(),
+            kind: ToolCallKind::LocalShell,
             local_shell: true,
             item_id: Some("ls_1".to_owned()),
         };
@@ -636,6 +638,7 @@ mod tests {
             id: Some(id.to_owned()),
             name: name.to_owned(),
             arguments: "{}".to_owned(),
+            kind: ToolCallKind::LocalShell,
             local_shell: true,
             item_id: Some(item.to_owned()),
         };

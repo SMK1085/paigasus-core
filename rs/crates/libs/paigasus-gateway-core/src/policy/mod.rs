@@ -11,7 +11,7 @@ mod rewrite;
 mod snapshot;
 
 pub use calls::{CallOutcome, PolicyBasis, decide_calls};
-pub use mapping::{call_findings, ingress, invocation, name_collisions};
+pub use mapping::{call_findings, call_schema, ingress, invocation, name_collisions};
 pub use plan::{ChoiceRewrite, PlanItem, RefusalCause, RequestPlan, ResultTarget, plan_request};
 pub use rewrite::{result_notice, rewrite_request};
 pub use snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
