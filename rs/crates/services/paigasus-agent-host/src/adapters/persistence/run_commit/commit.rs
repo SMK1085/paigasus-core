@@ -5,7 +5,7 @@
 //!
 //! One attempt is one transaction at READ COMMITTED, in this step order:
 //!
-//! 1. lock the lease row (`LOCK_SQL`);
+//! 1. lock the lease row, then check its expiry after the lock is held (`lock_lease`);
 //! 2. move the run out of `running`, fenced by its token, `RETURNING thread_id`;
 //! 3. full commit only: `write_session`;
 //! 4. full commit only: the thread (`last_run_at`, the successor link); failure commit only: close

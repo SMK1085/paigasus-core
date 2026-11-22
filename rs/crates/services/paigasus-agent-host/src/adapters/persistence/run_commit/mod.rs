@@ -25,12 +25,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTran
 use uuid::Uuid;
 
 use crate::adapters::memory_commit::MemoryCommit;
-use crate::adapters::persistence::lease_store::lost;
-
-/// `$1` = inbox, `$2` = token. The first statement of a commit that locks a row. No row means
-/// that the lease is lost.
-const LOCK_SQL: &str = "SELECT token FROM inbox_lease \
-     WHERE inbox_id = $1 AND token = $2 AND expires_at > clock_timestamp() FOR UPDATE";
+use crate::adapters::persistence::lease_store::{lock_live_lease, lost};
 
 /// The lock wait of one commit statement. A wait that ends with this timeout is a `Store` error.
 const LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '5s'";
@@ -91,11 +86,12 @@ fn check_handle(h: &LeaseHandle, run: &RunId, token: LeaseToken, operation: &'st
     Ok(())
 }
 
-/// Step 1 of every fenced transaction: set the lock wait, then lock the lease row and check the
-/// token and the expiry. `false` means that the lease is lost.
+/// Step 1 of every fenced transaction: set the lock wait, then lock the lease row of the token
+/// and check the expiry after the lock is held (`lock_live_lease`). `false` means that the lease
+/// is lost.
 async fn lock_lease(txn: &DatabaseTransaction, inbox: Uuid, token: LeaseToken) -> Result<bool, CommitError> {
     txn.execute_unprepared(LOCK_TIMEOUT_SQL).await.map_err(db_err)?;
-    Ok(txn.query_one_raw(stmt(LOCK_SQL, [inbox.into(), token.0.into()])).await.map_err(db_err)?.is_some())
+    lock_live_lease(txn, inbox, token).await.map_err(db_err)
 }
 
 /// Roll back after a failed step of `operation`, and return its error. A `LeaseLost` counts one

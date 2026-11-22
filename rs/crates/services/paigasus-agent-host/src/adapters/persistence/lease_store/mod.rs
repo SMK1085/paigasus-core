@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use paigasus_agent_host_core::ids::{AgentId, InboxId};
 use paigasus_agent_host_core::lease::{HeartbeatError, LeaseHandle};
 use paigasus_agent_host_core::ports::{LeaseRepository, StoreError};
+use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbErr, Statement, TransactionTrait};
 use uuid::Uuid;
 
 pub use claim::DEAD_REASON;
@@ -79,6 +80,30 @@ pub(crate) const RELEASE_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_
 /// `$1` = run, `$2` = token. A release discards the open run of the handle.
 pub(crate) const DISCARD_RUN_SQL: &str = "UPDATE run SET status = 'discarded', finished_at = now() \
      WHERE id = $1 AND status = 'running' AND lease_token = $2";
+
+/// `$1` = inbox, `$2` = token. Locks the lease row of the token. It checks no expiry: a
+/// `FOR UPDATE` that waits on a row lock checks its `WHERE` again only when the other transaction
+/// changed the row, so an expiry term here can be read before the wait (ADR-0028 (b)).
+const LOCK_TOKEN_SQL: &str = "SELECT token FROM inbox_lease WHERE inbox_id = $1 AND token = $2 FOR UPDATE";
+
+/// `$1` = inbox, `$2` = token. The expiry check. It runs after `LOCK_TOKEN_SQL` in the same
+/// transaction, so `clock_timestamp()` is read after the lock is held.
+const LIVE_SQL: &str = "SELECT expires_at > clock_timestamp() AS live FROM inbox_lease WHERE inbox_id = $1 AND token = $2";
+
+/// Lock the lease row of `token`, then check the expiry on the database clock with a new
+/// statement. `false` means that the lease is lost: another token, or an expired lease, also when
+/// no other worker has taken it yet (ADR-0028 (b)). The caller holds the row lock until its
+/// transaction ends.
+pub(crate) async fn lock_live_lease(txn: &DatabaseTransaction, inbox: Uuid, token: LeaseToken) -> Result<bool, DbErr> {
+    let values = || [inbox.into(), token.0.into()];
+    if txn.query_one_raw(Statement::from_sql_and_values(DatabaseBackend::Postgres, LOCK_TOKEN_SQL, values())).await?.is_none() {
+        return Ok(false);
+    }
+    match txn.query_one_raw(Statement::from_sql_and_values(DatabaseBackend::Postgres, LIVE_SQL, values())).await? {
+        Some(row) => row.try_get("", "live"),
+        None => Ok(false),
+    }
+}
 
 /// Await the commit of the transaction of a claim or of a run commit (spec §8.4, SMA-790 §6.8).
 /// The handle is poisoned unless the commit returns `Ok`. This covers a failed commit and a future
