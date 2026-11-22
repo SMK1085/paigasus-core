@@ -71,6 +71,14 @@ paigasus-nats-creds = { workspace = true }
 # `adapters::nats::consumer` reads the message stream of the pull consumer. The test model of
 # `adapters::helikon` also names the `BoxStream` type of the core `Model` trait.
 futures = { workspace = true }
+# `adapters::memory_s3` — the S3-compatible `MemoryStore` (SMA-829). `object_store` uses the rustls
+# backend that `reqwest` turns on. The `ring` provider is installed before each client build.
+object_store = { workspace = true }
+# `adapters::memory_s3` — `object_store` uses the rustls backend that `reqwest` turns on. The `ring`
+# provider is installed before each client build. reqwest 0.13 uses `rustls-no-provider` (SMA-809),
+# so a test also installs it before it builds a `Client`, or reqwest panics.
+reqwest = { workspace = true }
+rustls = { workspace = true }
 
 # figment's `Jail` test helper is feature-gated. It is a dev-dependency only.
 [dev-dependencies]
@@ -79,10 +87,6 @@ figment = { workspace = true, features = ["test"] }
 paigasus-test-docker = { workspace = true }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres", "nats"] }
-reqwest = { workspace = true }
-# reqwest 0.13 uses `rustls-no-provider` (SMA-809). A test installs the `ring` CryptoProvider
-# before it builds a `Client`, or reqwest panics.
-rustls = { workspace = true }
 # `tests/support/fake_iam.rs` — the fake IAM gRPC server listens through a `TcpListenerStream`.
 tokio-stream = { workspace = true, features = ["net"] }
 # The tests of `application::lease_keeper` run on paused time.
