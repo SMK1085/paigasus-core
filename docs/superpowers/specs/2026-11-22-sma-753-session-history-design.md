@@ -527,7 +527,7 @@ call), and a floor with a condition would fail for every tenant.
 
 **Limit.** A gateway build older than PR 1 still refuses the whole set. Before a rollback to such a
 build, the floor MUST be condition-free, and each tenant set with a condition MUST be condition-free
-or moved to `log_only`. The steps and the definition of "condition-free" are in § 8 ("Procedure for
+or moved to mode `off`. The steps and the definition of "condition-free" are in § 8 ("Procedure for
 either rollback"), and RUNBOOK-tool-policies.md section 10 states the same steps. A rollback from PR 2
 to PR 1 replaces each history policy whose scope is `InvokeTool` or has no action constraint (see
 "Blast radius").
@@ -584,13 +584,17 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
      condition. Wait until every in-flight save has finished. For a rollback to PR 1, this step is
      already true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1.
      Confirm the setting value anyway.
-  2. Prepare the floor and the tenant sets. For a rollback from PR 2 to PR 1, replace each history
-     policy whose scope is `InvokeTool` or has no action constraint with a reviewed replacement that
-     has no temporal block. For a rollback to a build before PR 1, publish a condition-free version of
-     each set with a condition. A tenant set may move to `log_only` instead. The floor has no
-     `log_only` alternative, so the floor must be condition-free.
+  2. Prepare the floor and the tenant sets.
+     - For a rollback from PR 2 to PR 1, replace each history policy whose scope is `InvokeTool` or
+       has no action constraint with a reviewed replacement that has no temporal block. A tenant set
+       may move to mode `log_only` instead. In PR 1, `log_only` only observes the slot policies.
+     - For a rollback to a build before PR 1, publish a condition-free version of each set with a
+       condition. A tenant set may move to mode `off` instead. Mode `off` stops all tool-policy checks
+       for that tenant during the rollback, not only the history rules.
+     - The floor has no alternative. The floor must be condition-free.
   3. Read the floor and each tenant set again. Verify that no compiled set has a condition, and that
-     no policy reads a `context.<slot>` attribute.
+     no policy reads a `context.<slot>` attribute. Exempt, by name, each tenant that step 2 moved to
+     its alternative mode. For every other set and for the floor, the check applies.
   4. Only then roll back the gateway.
 
   Step 1 comes first. While saves are enabled, another writer can save a new condition after the

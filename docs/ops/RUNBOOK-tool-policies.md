@@ -163,7 +163,8 @@ A set saved before this change can hold such a rule. Do these steps.
 
 1. Read the floor (`GET /v1/tool-policy-floor`) and the set of each tenant
    (`GET /v1/organizations/{id}/tool-policy-set`).
-2. Save each set that has a temporal block again, with no temporal block.
+2. Save each set that has a temporal block again, as a condition-free set. Section 10, "Gateway
+   rollback", gives the definition of condition-free.
 
 Until a tenant does this, that tenant cannot write its tool catalog. The write is refused with
 `tool-catalog-breaks-policy`, and the message names `tool-policy-history-unsupported`.
@@ -474,14 +475,19 @@ Procedure for a gateway rollback to this build or to an older build:
    Wait until every in-flight save has finished. For a rollback to this build, this step is already
    true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1. Confirm the
    setting value anyway.
-2. Prepare the floor and the tenant sets. For a rollback from PR 2 to this build, replace each history
-   policy whose scope is `InvokeTool` or has no action constraint with a reviewed replacement that has
-   no temporal block. For a rollback to a build before SMA-753 PR 1, publish a condition-free version
-   of each set with a condition. A tenant set may move to mode `log_only` instead. Then the tenant set
-   blocks no call. The floor has no `log_only` alternative, so the floor must be condition-free.
+2. Prepare the floor and the tenant sets.
+   - For a rollback from PR 2 to this build, replace each history policy whose scope is `InvokeTool`
+     or has no action constraint with a reviewed replacement that has no temporal block. A tenant
+     set may move to mode `log_only` instead. In this build, `log_only` only observes the slot
+     policies, so the tenant set blocks no call through them.
+   - For a rollback to a build before SMA-753 PR 1, publish a condition-free version of each set with
+     a condition. A tenant set may move to mode `off` instead. Mode `off` stops all tool-policy checks
+     for that tenant during the rollback, not only the history rules.
+   - The floor has no alternative. The floor must be condition-free.
 3. Read the floor (`GET /v1/tool-policy-floor`) and each tenant set
    (`GET /v1/organizations/{id}/tool-policy-set`) again. Verify that no compiled set has a condition,
-   and that no policy reads a `context.<slot>` attribute.
+   and that no policy reads a `context.<slot>` attribute. Exempt, by name, each tenant that step 2
+   moved to its alternative mode. For every other set and for the floor, the check applies.
 4. Only then roll back the gateway.
 
 Step 1 comes first. While saves are enabled, another writer can save a new condition after you
