@@ -78,6 +78,16 @@ pub const GATEWAY_TOOL_POLICY_NATS_CONNECTED: &str = "gateway_tool_policy_nats_c
 /// `unparsed_arguments` | `mixed_sessions` | `forged_history` | `history_truncated` | `other` (a kind
 /// that this service does not know). Primed at 0 for all twelve pairs.
 pub const GATEWAY_TOOL_POLICY_FINDINGS_TOTAL: &str = "gateway_tool_policy_findings_total";
+/// Tool-history store calls that failed or ran past the request budget (SMA-753 D13). `op` = `lookup` |
+/// `write` | `reserve` | `settle` | `append`; `kind` = `io` | `server` | `decode` | `deadline`. Primed at 0
+/// for all twenty pairs.
+pub const GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL: &str = "gateway_tool_history_store_errors_total";
+/// Call, result or `ref=` ids that a request sent past the cap of 128 per list (SMA-753 D4). `list` =
+/// `calls` | `results` | `refs`. Primed at 0 for all three values.
+pub const GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL: &str = "gateway_tool_history_ids_capped_total";
+/// History events that a write removed (SMA-753 D11). `reason` = `retention` (older than the retention) |
+/// `cap` (past 10,000 events for one tool). Primed at 0 for both values.
+pub const GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL: &str = "gateway_tool_history_events_trimmed_total";
 // Gateway tool decision log (SMA-755 § 5.9). No label carries a tool name, an org or an argument.
 /// Records that the decision log accepted from the recorder (counted before the queue).
 pub const GATEWAY_DECISION_LOG_RECORDED_TOTAL: &str = "gateway_decision_log_recorded_total";
@@ -436,6 +446,9 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
     GATEWAY_TOOL_POLICY_NATS_CONNECTED,
     GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+    GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
+    GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL,
+    GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL,
     GATEWAY_DECISION_LOG_RECORDED_TOTAL,
     GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
     GATEWAY_DECISION_LOG_DROPPED_TOTAL,
@@ -559,6 +572,17 @@ mod tests {
             GATEWAY_TOOL_POLICY_REQUEST_REFUSALS_TOTAL,
             GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
             GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_gateway_tool_history_families_are_registered() {
+        for name in [
+            GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
+            GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL,
+            GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

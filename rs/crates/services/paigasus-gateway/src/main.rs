@@ -239,7 +239,7 @@ async fn serve() -> anyhow::Result<()> {
     runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, decision_log.tasks).await
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 35 metric families listed below (SMA-755 counted
+/// Registers `# HELP`/`# TYPE` exposition text for the 38 metric families listed below (SMA-755 counted
 /// them; the number is a plain count, not a gate). `paigasus-gateway` emits them (spec §4.1 and later), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.3.
 fn describe_gateway_metrics() {
@@ -319,6 +319,18 @@ fn describe_gateway_metrics() {
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
         "Tool-policy findings, labeled by side (request, response) and kind (name_collision, unparsed_arguments, mixed_sessions, forged_history, history_truncated, other). Primed at 0 for all twelve pairs."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
+        "Tool-history store calls that failed or ran past the request budget, labeled by op (lookup, write, reserve, settle, append) and kind (io, server, decode, deadline)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL,
+        "Ids that a request sent past the cap of 128 in one list, labeled by list (calls, results, refs)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL,
+        "Tool-history events that a write removed, labeled by reason (retention, cap)."
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,
