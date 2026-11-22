@@ -4,10 +4,12 @@
 //!
 //! The store keeps each object as bytes and a quoted ETag, as S3 sends it. It honours
 //! `PutMode::Create` and `PutMode::Update`. A test can add a key to the next listing, make the
-//! next listing fail, or make the deletes do nothing.
+//! next listing fail, or make the deletes do nothing. The store records each `PUT`, `HEAD` and
+//! `DELETE` in the order of the calls.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
@@ -23,6 +25,8 @@ use object_store::{
 pub enum EtagMode {
     /// Each write gets the next number, so two writes of the same bytes differ.
     Counter,
+    /// The ETag is a hash of the bytes, as AWS does. So two writes of the same bytes are equal.
+    ContentHash,
 }
 
 #[derive(Debug, Default)]
@@ -32,6 +36,7 @@ struct State {
     injected: Vec<Path>,
     fail_list: bool,
     ignore_deletes: bool,
+    calls: Vec<String>,
 }
 
 /// An in-memory `ObjectStore` with hooks for the tests.
@@ -68,19 +73,29 @@ impl ScriptedStore {
         })
     }
 
-    fn next_etag(&self, state: &mut State) -> String {
+    fn next_etag(&self, state: &mut State, bytes: &[u8]) -> String {
         match self.mode {
             EtagMode::Counter => {
                 state.next_etag += 1;
                 format!("\"{}\"", state.next_etag)
             }
+            EtagMode::ContentHash => {
+                let mut hasher = DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                format!("\"{:016x}\"", hasher.finish())
+            }
         }
+    }
+
+    /// The `PUT`, `HEAD` and `DELETE` calls so far, in order, as `"<METHOD> <key>"`.
+    pub fn calls(&self) -> Vec<String> {
+        lock(&self.state).calls.clone()
     }
 
     /// Write bytes at a key with no check. The key is valid by construction.
     pub fn insert_raw(&self, key: &str, bytes: &[u8]) {
         let mut state = lock(&self.state);
-        let etag = self.next_etag(&mut state);
+        let etag = self.next_etag(&mut state, bytes);
         state.objects.insert(Path::parse(key).expect("a valid key"), (bytes.to_vec(), etag));
     }
 
@@ -111,6 +126,7 @@ impl ObjectStore for ScriptedStore {
     async fn put_opts(&self, location: &Path, payload: PutPayload, opts: PutOptions) -> Result<PutResult> {
         let bytes: Vec<u8> = payload.iter().flat_map(|part| part.iter().copied()).collect();
         let mut state = lock(&self.state);
+        state.calls.push(format!("PUT {location}"));
         match opts.mode {
             PutMode::Overwrite => {}
             PutMode::Create => {
@@ -131,7 +147,7 @@ impl ObjectStore for ScriptedStore {
                 }
             }
         }
-        let etag = self.next_etag(&mut state);
+        let etag = self.next_etag(&mut state, &bytes);
         state.objects.insert(location.clone(), (bytes, etag.clone()));
         Ok(PutResult {
             e_tag: Some(etag),
@@ -148,10 +164,16 @@ impl ObjectStore for ScriptedStore {
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
-        let (bytes, etag) = lock(&self.state).objects.get(location).cloned().ok_or_else(|| Error::NotFound {
-            path: location.to_string(),
-            source: generic("missing"),
-        })?;
+        let (bytes, etag) = {
+            let mut state = lock(&self.state);
+            if options.head {
+                state.calls.push(format!("HEAD {location}"));
+            }
+            state.objects.get(location).cloned().ok_or_else(|| Error::NotFound {
+                path: location.to_string(),
+                source: generic("missing"),
+            })?
+        };
         let object = meta(location, &bytes, &etag);
         options.check_preconditions(&object)?;
         if options.range.is_some() {
@@ -179,6 +201,7 @@ impl ObjectStore for ScriptedStore {
             .map(move |location| {
                 let location = location?;
                 let mut state = lock(&state);
+                state.calls.push(format!("DELETE {location}"));
                 if !state.ignore_deletes {
                     state.objects.remove(&location);
                 }

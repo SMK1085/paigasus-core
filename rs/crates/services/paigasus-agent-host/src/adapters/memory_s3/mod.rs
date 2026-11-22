@@ -11,14 +11,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use object_store::path::Path;
-use object_store::{Error, ObjectStore, ObjectStoreExt};
-use paigasus_agent_host_core::memory::{MemoryCaps, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
+use object_store::{Attribute, Attributes, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion};
+use paigasus_agent_host_core::memory::{Expected, MemoryCaps, MemoryChange, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use paigasus_agent_host_core::ports::{MemoryApplyError, MemoryEntry, MemoryFile, MemoryStore, MemoryStoreError, MemoryUsage};
 use paigasus_observability::names;
 
-use self::envelope::{content_size, decode};
+use self::envelope::{WriteId, content_size, decode, encode};
 use self::errors::{class, store_text};
 use self::keys::{KeyPrefix, ListedKey, dir_path, file_path, listed_key, scope_path};
+use self::plan::{Outcome, Snapshot, precheck, result_of};
 
 pub mod envelope;
 pub mod errors;
@@ -29,6 +30,12 @@ pub mod testing;
 
 /// The most delete requests that run at the same time in `delete_scope`.
 const DELETE_CONCURRENCY: usize = 8;
+
+/// The most writes that run at the same time inside one phase of `apply`.
+const WRITE_CONCURRENCY: usize = 8;
+
+/// The content type of each object. It is for operators only.
+const CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 /// Count one skipped or refused object. The label is a fixed word, never a key.
 fn count_skipped(reason: &'static str) {
@@ -105,6 +112,58 @@ impl S3MemoryStore {
         Ok(entries)
     }
 
+    /// Run the writes of one phase. At most `WRITE_CONCURRENCY` writes run at the same time, in
+    /// the calling task. `outcomes[i]` gets the outcome of change `i`.
+    async fn run_phase(&self, scope: &MemoryScope, set: &MemoryCommitSet, indexes: &[usize], outcomes: &mut [Outcome]) {
+        let changes = set.changes.changes();
+        let mut writes = futures::stream::iter(indexes.iter().copied())
+            .map(|i| async move { (i, self.write(scope, &changes[i]).await) })
+            .buffer_unordered(WRITE_CONCURRENCY);
+        while let Some((i, outcome)) = writes.next().await {
+            outcomes[i] = outcome;
+        }
+    }
+
+    /// Write one change. A `Put` is a conditional `PUT`. A `Delete` is a `HEAD` that checks the
+    /// version, then a `DELETE`.
+    async fn write(&self, scope: &MemoryScope, change: &MemoryChange) -> Outcome {
+        let key = file_path(&self.prefix, scope, change.path());
+        match change {
+            MemoryChange::Put { content, expected, .. } => {
+                let mode = match expected {
+                    Expected::Absent => PutMode::Create,
+                    Expected::Version(v) => PutMode::Update(UpdateVersion {
+                        e_tag: Some(v.as_str().to_owned()),
+                        version: None,
+                    }),
+                };
+                let opts = PutOptions {
+                    mode,
+                    attributes: Attributes::from_iter([(Attribute::ContentType, CONTENT_TYPE)]),
+                    ..PutOptions::default()
+                };
+                let id = WriteId::random();
+                match self.store.put_opts(&key, PutPayload::from(encode(&id, content)), opts).await {
+                    Ok(_) => Outcome::Confirmed,
+                    Err(e) => Outcome::Failed(MemoryApplyError::Store(store_text("the memory write failed", &e))),
+                }
+            }
+            MemoryChange::Delete { path, expected } => {
+                let conflict = || Outcome::Failed(MemoryApplyError::Conflict { path: path.clone() });
+                match self.store.head(&key).await {
+                    Err(Error::NotFound { .. }) => return conflict(),
+                    Err(e) => return Outcome::Failed(MemoryApplyError::Store(store_text("the memory read failed", &e))),
+                    Ok(meta) if version_of(meta.e_tag.as_deref()).as_ref() != Some(expected) => return conflict(),
+                    Ok(_) => {}
+                }
+                match self.store.delete(&key).await {
+                    Ok(()) => Outcome::Confirmed,
+                    Err(e) => Outcome::Failed(MemoryApplyError::Store(store_text("the memory delete failed", &e))),
+                }
+            }
+        }
+    }
+
     /// List every key under the scope, with no skip. It fails on a key outside the scope.
     async fn raw_keys(&self, base: &Path) -> Result<Vec<Path>, MemoryStoreError> {
         let mut stream = self.store.list(Some(base));
@@ -153,8 +212,24 @@ impl MemoryStore for S3MemoryStore {
         })
     }
 
-    async fn apply(&self, _set: &MemoryCommitSet, _caps: &MemoryCaps) -> Result<(), MemoryApplyError> {
-        Err(MemoryApplyError::Store("the S3 memory store cannot apply yet".into()))
+    /// Apply a change set (spec §6.5): one listing of the scope, the pure pre-check, then every
+    /// `Put`, then every `Delete`. The `Delete` phase starts only when every `Put` succeeded.
+    async fn apply(&self, set: &MemoryCommitSet, caps: &MemoryCaps) -> Result<(), MemoryApplyError> {
+        if set.is_empty() {
+            return Ok(());
+        }
+        let base = scope_path(&self.prefix, &set.scope);
+        let entries = self.listing(&base, &base).await.map_err(|MemoryStoreError::Store(text)| MemoryApplyError::Store(text))?;
+        let snapshot = Snapshot {
+            files: entries.into_iter().map(|e| (e.path, (e.size_bytes, e.version))).collect(),
+        };
+        let plan = precheck(set, &snapshot, caps)?;
+        let mut outcomes = vec![Outcome::NotStarted; set.changes.len()];
+        self.run_phase(&set.scope, set, &plan.puts, &mut outcomes).await;
+        if plan.puts.iter().all(|&i| outcomes[i] == Outcome::Confirmed) {
+            self.run_phase(&set.scope, set, &plan.deletes, &mut outcomes).await;
+        }
+        result_of(set, &outcomes)
     }
 
     async fn delete_scope(&self, scope: &MemoryScope) -> Result<(), MemoryStoreError> {
@@ -182,11 +257,12 @@ impl MemoryStore for S3MemoryStore {
 
 #[cfg(test)]
 mod tests {
-    use super::envelope::{WriteId, encode};
     use super::testing::{EtagMode, ScriptedStore};
     use super::*;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+    use object_store::memory::InMemory;
     use paigasus_agent_host_core::ids::{AgentId, PrincipalId};
+    use paigasus_agent_host_core::memory::{MemoryChangeSet, conformance};
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -399,6 +475,77 @@ mod tests {
         let text = store_err(store.delete_scope(&scope()).await);
         assert!(text.contains("unparsable_key"), "{text}");
         assert_eq!(skipped(&snap, "unparsable"), 1);
+    }
+
+    fn set_of(scope: &MemoryScope, changes: Vec<MemoryChange>) -> MemoryCommitSet {
+        let mut set = MemoryChangeSet::new();
+        for change in changes {
+            set.record(change);
+        }
+        MemoryCommitSet::new(scope.clone(), set)
+    }
+
+    #[tokio::test]
+    async fn in_memory_passes_the_conformance_suite() {
+        let store = S3MemoryStore::new(Arc::new(InMemory::new()), prefix(), Duration::from_secs(10));
+        conformance::run_all(&store).await;
+    }
+
+    #[tokio::test]
+    async fn content_hash_etags_pass_the_conformance_suite() {
+        let store = S3MemoryStore::new(ScriptedStore::new(EtagMode::ContentHash), prefix(), Duration::from_secs(10));
+        conformance::run_all(&store).await;
+    }
+
+    #[tokio::test]
+    async fn a_rename_writes_the_put_before_the_delete() {
+        let (scripted, store) = fixture();
+        put(&scripted, &scope(), "/old", "x");
+        let old = store.get(&scope(), &mp("/old")).await.unwrap().expect("the old file");
+        let set = set_of(
+            &scope(),
+            vec![
+                MemoryChange::Delete {
+                    path: mp("/old"),
+                    expected: old.version,
+                },
+                MemoryChange::Put {
+                    path: mp("/new"),
+                    content: "x".into(),
+                    expected: Expected::Absent,
+                },
+            ],
+        );
+        store.apply(&set, &MemoryCaps::default()).await.unwrap();
+        let calls = scripted.calls();
+        let put_at = calls.iter().position(|c| *c == format!("PUT {}", key_of(&scope(), "/new"))).expect("the PUT");
+        let delete_at = calls.iter().position(|c| *c == format!("DELETE {}", key_of(&scope(), "/old"))).expect("the DELETE");
+        assert!(put_at < delete_at, "{calls:?}");
+        assert_eq!(store.get(&scope(), &mp("/new")).await.unwrap().expect("the new file").content, "x");
+        assert_eq!(store.get(&scope(), &mp("/old")).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn the_stored_object_is_the_envelope() {
+        let inner = Arc::new(InMemory::new());
+        let store = S3MemoryStore::new(inner.clone(), prefix(), Duration::from_secs(10));
+        let set = set_of(
+            &scope(),
+            vec![MemoryChange::Put {
+                path: mp("/tasks/t1.md"),
+                content: "x".into(),
+                expected: Expected::Absent,
+            }],
+        );
+        store.apply(&set, &MemoryCaps::default()).await.unwrap();
+        let key = key_of(&scope(), "/tasks/t1.md");
+        assert_eq!(key, format!("mem/{}/{}/{}/tasks/t1.md", Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)));
+        let got = inner.get(&Path::parse(&key).unwrap()).await.unwrap();
+        assert_eq!(got.attributes.get(&Attribute::ContentType).map(|v| v.as_ref()), Some("text/plain; charset=utf-8"));
+        let bytes = got.bytes().await.unwrap();
+        assert!(bytes.starts_with(b"paigasus-memory/1 "), "{bytes:?}");
+        assert_eq!(bytes.len(), 52);
+        assert!(bytes.ends_with(b"\nx"), "{bytes:?}");
     }
 
     #[test]
