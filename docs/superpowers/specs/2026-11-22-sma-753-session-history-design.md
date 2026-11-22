@@ -526,9 +526,11 @@ refusal, a rollback would make each such tenant set unavailable (a `closed` tena
 call), and a floor with a condition would fail for every tenant.
 
 **Limit.** A gateway build older than PR 1 still refuses the whole set. Before a rollback to such a
-build, the operator publishes versions with no condition, or moves those tenants to `log_only`
-(RUNBOOK-tool-policies.md section 10). A rollback from PR 2 to PR 1 needs the same step for each
-history policy whose scope is `InvokeTool` or has no action constraint (see "Blast radius").
+build, the floor MUST have no condition. The operator publishes a floor version with no condition.
+For each tenant set, the operator publishes a version with no condition, or moves that tenant to
+`log_only` (RUNBOOK-tool-policies.md section 10). The `log_only` option applies to tenant sets only.
+A rollback from PR 2 to PR 1 needs the same step for each history policy whose scope is `InvokeTool`
+or has no action constraint (see "Blast radius").
 
 **Effect at deploy.** IAM keeps `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` unchanged in PR 1, so IAM
 refuses each new save with a condition. But older live rows can hold conditions: SMA-774 (PR 478,
@@ -571,8 +573,10 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
   history slots missing (D10).
 - **Gateway rollback to a build before PR 1.** Such a build refuses a set with a condition. A
   `closed` tenant then loses its tool calls, and a floor with a condition fails for every tenant.
-  Before such a rollback, the operator publishes versions with no condition or moves those tenants
-  to `log_only`, sets `tool_policies.history_conditions = false`, and tells the tenants that have
+  Before such a rollback, the floor MUST have no condition: the operator publishes a floor version
+  with no condition. For each tenant set with a condition, the operator publishes a version with no
+  condition, or moves that tenant to `log_only`. The `log_only` option applies to tenant sets only.
+  Then the operator sets `tool_policies.history_conditions = false` and tells the tenants that have
   conditions.
 - **IAM setting back to `false`.** IAM then refuses every save with a condition. Existing compiled
   sets stay in force. A later catalog write that recompiles such a set is refused

@@ -25,7 +25,7 @@
 - Finding names: **`mixed_sessions`**, **`forged_history`**, **`history_truncated`**.
 - Notice form: **`[paigasus] tool call "<name>" was blocked (<code>). ref=<uuid>`**. A block without a decision id keeps the old form with no suffix.
 - Metric names (D13): **`gateway_tool_history_store_errors_total{op, kind}`** (`op` ∈ `lookup`, `write`, `reserve`, `settle`, `append`; `kind` ∈ `io`, `server`, `decode`, `deadline`), **`gateway_tool_history_ids_capped_total{list}`** (`list` ∈ `calls`, `results`, `refs`), **`gateway_tool_history_events_trimmed_total{reason}`** (`reason` ∈ `retention`, `cap`).
-- PR 1 evaluates no temporal history conditions. The history findings and the session reach response-side Cedar. A store error is counted and the request continues. The R5 refusal in `adapters/policy_source/iam.rs` and the IAM constant stay unchanged.
+- PR 1 evaluates no temporal history conditions. The history findings and the session reach response-side Cedar. A store error is counted and the request continues. The gateway loads a policy set with history conditions and leaves its slots empty, per decision D16 (Sven, 2026-11-22). The SMA-775 R5 refusal in `adapters/policy_source/iam.rs` is removed. IAM still refuses saves with conditions, and `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` stays unchanged.
 - PR 1 events store no argument `fields` and no `bad` flag (spec D5 to D7). Both need the condition paths and the kernel input mapping of PR 2. The event encoding has a version and readers ignore unknown fields, so PR 2 adds them without a migration.
 
 ## Review Focus
