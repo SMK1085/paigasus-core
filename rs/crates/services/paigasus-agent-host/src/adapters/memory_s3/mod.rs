@@ -43,6 +43,7 @@ pub mod envelope;
 pub mod errors;
 pub mod keys;
 pub mod plan;
+pub mod probe;
 #[cfg(test)]
 pub mod testing;
 

@@ -7,7 +7,9 @@
 //! next listing fail or stall, or make the deletes do nothing. A hook runs the code of another
 //! writer before the first `HEAD`, `PUT` or `DELETE`. A fault makes the nth `PUT` or `DELETE`
 //! fail, write and then fail, or stall. The store records each `PUT`, `HEAD` and `DELETE` in the
-//! order of the calls.
+//! order of the calls. Switches make the store misbehave as a bad S3 store does: it can ignore
+//! the put conditions, give a version ID, refuse its own listed ETag, or refuse to hold a key
+//! and a key under it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -29,6 +31,8 @@ pub enum EtagMode {
     Counter,
     /// The ETag is a hash of the bytes, as AWS does. So two writes of the same bytes are equal.
     ContentHash,
+    /// The ETag is the size of the object only, so two contents of one length are equal.
+    SizeOnly,
 }
 
 /// The moment when a hook runs.
@@ -71,6 +75,12 @@ struct State {
     stall_list: bool,
     fail_get: bool,
     ignore_deletes: bool,
+    ignore_create: bool,
+    ignore_update: bool,
+    return_version: bool,
+    refuse_listed: bool,
+    listed_etags: BTreeSet<String>,
+    flat: bool,
     calls: Vec<String>,
     hooks: Vec<(Hook, HookFn)>,
     puts: usize,
@@ -124,6 +134,7 @@ impl ScriptedStore {
                 bytes.hash(&mut hasher);
                 format!("\"{:016x}\"", hasher.finish())
             }
+            EtagMode::SizeOnly => format!("\"{}\"", bytes.len()),
         }
     }
 
@@ -152,6 +163,34 @@ impl ScriptedStore {
     /// From now on a delete reports success and removes nothing.
     pub fn ignore_deletes(&self) {
         lock(&self.state).ignore_deletes = true;
+    }
+
+    /// From now on the store ignores the condition of every `PUT`, as `PutMode::Overwrite`.
+    pub fn ignore_conditions(&self) {
+        let mut state = lock(&self.state);
+        state.ignore_create = true;
+        state.ignore_update = true;
+    }
+
+    /// From now on the store refuses a `Create` over a present key, but accepts every `Update`.
+    pub fn ignore_if_match(&self) {
+        lock(&self.state).ignore_update = true;
+    }
+
+    /// From now on each `PUT` result holds a version ID, as a versioned bucket gives.
+    pub fn return_version_id(&self) {
+        lock(&self.state).return_version = true;
+    }
+
+    /// From now on the store refuses an `Update` with an ETag that a listing gave.
+    pub fn refuse_update_with_listed_etag(&self) {
+        lock(&self.state).refuse_listed = true;
+    }
+
+    /// From now on the store cannot hold a key `K` and a key under `K/` at the same time, as a
+    /// store over a file system. A `PUT` that would make both fails.
+    pub fn flat_namespace(&self) {
+        lock(&self.state).flat = true;
     }
 
     /// The next `list` never yields an item and never ends.
@@ -194,6 +233,17 @@ impl ScriptedStore {
     /// Do a `PUT` with its condition check.
     fn put_now(&self, location: &Path, bytes: Vec<u8>, mode: PutMode) -> Result<PutResult> {
         let mut state = lock(&self.state);
+        if state.flat && clashes(&state.objects, location) {
+            return Err(Error::Generic {
+                store: "ScriptedStore",
+                source: generic("Server returned non-2xx status code: 409 Conflict"),
+            });
+        }
+        let mode = match mode {
+            PutMode::Create if state.ignore_create => PutMode::Overwrite,
+            PutMode::Update(_) if state.ignore_update => PutMode::Overwrite,
+            mode => mode,
+        };
         match mode {
             PutMode::Overwrite => {}
             PutMode::Create => {
@@ -206,7 +256,8 @@ impl ScriptedStore {
             }
             PutMode::Update(want) => {
                 let held = state.objects.get(location).map(|(_, etag)| etag.as_str());
-                if held.is_none() || held != want.e_tag.as_deref() {
+                let listed = want.e_tag.as_ref().is_some_and(|e| state.refuse_listed && state.listed_etags.contains(e));
+                if held.is_none() || held != want.e_tag.as_deref() || listed {
                     return Err(Error::Precondition {
                         path: location.to_string(),
                         source: generic("etag differs"),
@@ -218,10 +269,16 @@ impl ScriptedStore {
         state.objects.insert(location.clone(), (bytes, etag.clone()));
         Ok(PutResult {
             e_tag: Some(etag),
-            version: None,
+            version: state.return_version.then(|| "v1".to_owned()),
             extensions: Default::default(),
         })
     }
+}
+
+/// True when `location` is a key under a held key, or a held key is under `location`.
+fn clashes(objects: &BTreeMap<Path, (Vec<u8>, String)>, location: &Path) -> bool {
+    let under = |inner: &Path, outer: &Path| inner.prefix_match(outer).is_some_and(|mut rest| rest.next().is_some());
+    objects.keys().any(|held| under(location, held) || under(held, location))
 }
 
 impl fmt::Display for ScriptedStore {
@@ -359,6 +416,8 @@ impl ObjectStore for ScriptedStore {
             .filter(|(key, _)| key.prefix_match(prefix).is_some_and(|mut rest| rest.next().is_some()))
             .map(|(key, (bytes, etag))| Ok(meta(key, bytes, etag)))
             .collect();
+        let listed: Vec<String> = items.iter().filter_map(|m| m.as_ref().ok()?.e_tag.clone()).collect();
+        state.listed_etags.extend(listed);
         for key in std::mem::take(&mut state.injected) {
             items.push(Ok(meta(&key, &[0; 60], "\"injected\"")));
         }
