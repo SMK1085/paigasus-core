@@ -140,17 +140,24 @@ is healthy. Do the steps in section 5 for that organization.
 ## 5. History rules
 
 IAM refuses a save that holds a history rule (reason 62 `tool-policy-history-unsupported`) until
-the gateway can enforce them (SMA-753). The gateway also refuses a stored set that holds one. The
-floor and a tenant set are refused in different ways. The gateway treats a floor with a history
-rule as malformed, so the floor is unavailable. Under a global `closed`, such a floor blocks
-every call of every tenant.
+the gateway can enforce them (SMA-753 PR 2).
 
-The gateway does not treat a tenant set with a history rule as malformed. It treats the answer
-as refused, and the settings of that organization from IAM in the same answer still decide. In
-mode `off`, the gateway does not use the set, so the set blocks no call. In mode `log_only`, the
-gateway records the set as unavailable and does not block the call. In mode `enforce`, the tenant
-`fail_mode` decides. The global `on_policy_unavailable` does not decide this case. The floor
-applies in every mode.
+This gateway (SMA-753 PR 1 and later) loads a stored set that holds a history rule. It uses the
+policy text and the catalog, but it does not fill the history slots. A policy that reads a slot
+then has an evaluation error. An errored `forbid` denies the call. An errored `permit` does not
+allow the call. So only the history rules fail closed. The other policies of the set work as
+usual. A floor history rule denies its calls in every mode, for every tenant. A tenant history
+rule follows the tenant mode: `enforce` blocks the call, `log_only` records the block and does not
+block, and `off` does not use the set.
+
+A gateway build older than SMA-753 PR 1 refuses such a set. The floor and a tenant set are
+refused in different ways. That build treats a floor with a history rule as malformed, so the
+floor is unavailable. Under a global `closed`, such a floor blocks every call of every tenant.
+That build does not treat a tenant set with a history rule as malformed. It treats the answer as
+refused, and the settings of that organization from IAM in the same answer still decide. In mode
+`off`, it does not use the set, so the set blocks no call. In mode `log_only`, it records the set
+as unavailable and does not block the call. In mode `enforce`, the tenant `fail_mode` decides.
+The global `on_policy_unavailable` does not decide this case. The floor applies in every mode.
 
 A set saved before this change can hold such a rule. Do these steps.
 
@@ -186,6 +193,8 @@ The `down` step of the migration `m0015_tool_policy_held_versions` does two dele
 2. It deletes every row that has no compiled output. These are the held rows of a failed compile.
 
 So a rollback loses each pending proposal. The job makes them again after the next upgrade.
+
+For a gateway rollback when sets hold history rules, read section 10, "Gateway rollback".
 
 ### Rollback of a compiler change
 
@@ -412,6 +421,21 @@ Section 2.3 of `RUNBOOK-observability.md` lists the three history metrics.
 - `gateway_tool_history_ids_capped_total`: ids that a request sent past the cap of 128 in one list.
 - `gateway_tool_history_events_trimmed_total`: events that a write removed, by `retention` or `cap`.
 
+### Gateway rollback
+
+This build (SMA-753 PR 1) loads a set that holds history rules, and it leaves the history slots
+empty (section 5). After PR 2, tenants can save history rules. A rollback from PR 2 to this build
+is then safe for most calls. Only the history rules fail closed. The other policies of each set
+work as usual.
+
+A gateway build older than SMA-753 PR 1 refuses the whole set (section 5). A refused tenant set
+under `fail_mode = closed` blocks every tool call of that tenant. A refused floor under a global
+`closed` blocks every tool call of every tenant. Before a rollback to such a build, do one of these
+steps for each set that holds a history rule:
+
+1. Publish a version of the set with no history rule. For the floor, this step is mandatory.
+2. Or set the tenant to mode `log_only`. Then the tenant set blocks no call.
+
 ### Known limits of PR 1
 
 - The settle is asynchronous. A very fast follow-up request can arrive before the settle ends. The
@@ -423,6 +447,10 @@ Section 2.3 of `RUNBOOK-observability.md` lists the three history metrics.
 - A client can hide `forged_history`. The gateway reads only the tool results after the last
   assistant message (spec D4). A client that adds one assistant message after the forged results
   gets no `forged_history` finding for them. Do not use `forged_history` as the only control.
+  SMA-753 PR 2 closes this limit. It checks the results after the last assistant message that has
+  tool calls (spec D4, decision of 2026-11-22). After PR 2, the results of the last tool turn are
+  checked again on each later request, until the next tool turn. After the link expiry of 25
+  hours, these results can fire `forged_history` on each of these requests.
 - Some providers use the same call id again, for example `call_0`. For one principal with
   concurrent sessions, the last settle links that id to its own session. A result of the other
   session can then give a false `mixed_sessions`. The gateway can also write no result event for

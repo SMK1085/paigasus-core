@@ -169,6 +169,15 @@ The gateway looks up each id in the link table of **this principal in this org**
   a link that expired (D11). The gateway cannot tell those cases apart from a forgery.
 - `SessionInfo.turn` is the number of requests in the session so far, starting at 1.
 
+**[Sven, 2026-11-22] PR 2 changes the anchor to the last assistant message with tool calls.** In
+PR 1 the gateway checks only the results after the last assistant message. So one trailing
+assistant message with text only hides `forged_history` (R2, ruling FR-b). PR 2 checks the results
+after the last assistant message that has tool calls. A trailing assistant message that has tool
+calls and no results is not a valid request: all three providers reject it upstream. Side effect:
+the results of the last tool turn are checked again on each later request, until the next tool
+turn. After the link expiry of 25 hours (D11), these results can fire `forged_history` on each of
+these requests. PR 1 has no code change for this decision.
+
 Findings never block alone. Only a Cedar policy that reads `context.findings` can block.
 
 **When the gateway writes.** The lookup is read-only, and it runs in `RequestToolPolicy::apply`, so
@@ -467,7 +476,7 @@ The builder can add metrics. These names are the minimum.
 | `paigasus-gateway` domain | `SessionStore` port (lookup, write, reserve, settle, append); `PolicyText`, `TenantPolicies` and `PolicySet::Available` carry the conditions |
 | `paigasus-gateway` adapters | `adapters/history/{memory,redis}.rs`; wiring in `runtime.rs`; settle in `interception.rs` |
 | `paigasus-gateway` application | linking in `RequestToolPolicy::apply` and the writes after admission; reserve and evaluation in `CedarDecider`; the recorder takes the decision id |
-| `policy_source/iam.rs` and `file.rs` | remove the R5 refusal; parse the conditions. The retention check is in the application layer, so both sources get it. |
+| `policy_source/iam.rs` and `file.rs` | PR 1 removes the R5 refusal (D16). PR 2 parses the conditions. The retention check is in the application layer, so both sources get it. `file.rs` has no conditions and no refusal. |
 | decision log | fill `session_id` and `turn` |
 | IAM | the setting `tool_policies.history_conditions` (D12); tests for both values; `docs/ops/RUNBOOK-tool-policies.md` |
 | `charts/` | the IAM value `tool_policies.history_conditions` |
@@ -480,17 +489,41 @@ The builder can add metrics. These names are the minimum.
   linking with its writes, an append-only reserve, settle and the links, the `ref=` notice, the
   findings, `session_id` and `turn` in the decision log, the Redis requirement check. So PR 1 has
   working links and real findings. A store error in PR 1 is counted, and the request continues.
-  The R5 refusal and the IAM setting stay as they are. "No policy effect" means that PR 1
+  The IAM setting stays as it is, so IAM still refuses each save with a condition. PR 1 replaces
+  the R5 refusal of the gateway with the D16 rule: a set with conditions loads, and its slots stay
+  empty. "No policy effect" means that PR 1
   evaluates no temporal history conditions. The history findings (`mixed_sessions`,
   `forged_history`) and `context.session` do reach response-side Cedar in PR 1
   (RUNBOOK-tool-policies.md).
 - **PR 2, the policy effect.** The kernel evaluator and slots, the window read in the reserve, the
-  load validation, the R5 removal, the IAM setting, the corpus cases, the parity test, the cap test
+  load validation, the IAM setting, the corpus cases, the parity test, the cap test
   and the p99 test.
 
 Both PRs use a `feature/sma-753-…` branch, because the pre-push hook allows only `feature/*`.
 Linear closes the issue when PR 1 merges. After that merge, SMA-753 is moved back to In Progress by
 hand.
+
+### D16. Rollback target (Sven, 2026-11-22)
+
+**Rule.** PR 1 loads a floor or a tenant set that has history conditions as a set with no
+conditions. The gateway uses the text and the catalog, and it fills no slot. The kind check and the
+org check still apply. The kernel builds each Cedar request with no schema (`decide.rs`,
+`Request::new(..., None)`), so a policy that reads `context.<slot>` errors. An errored forbid
+denies, and an errored permit does not allow (SMA-752 D26). So only the history policies fail
+closed, and the other policies of the set work. A floor forbid that reads a slot denies in every
+mode (D33). This is the same rule as D10 "retention shorter than the window": only those slots are
+missing. The optimistic set never holds a forbid that reads a slot (D6, `optimistic.rs:73`), so the
+request-side removal stays sound.
+
+**Reason.** A rollback from PR 2 to PR 1. After PR 2, tenants save conditions. With the R5 refusal,
+a rollback would make each such tenant set unavailable (a `closed` tenant then blocks every tool
+call), and a floor with a condition would fail for every tenant.
+
+**Limit.** A gateway build older than PR 1 still refuses the whole set. Before a rollback to such a
+build, the operator publishes versions with no condition, or moves those tenants to `log_only`
+(RUNBOOK-tool-policies.md section 10). IAM keeps `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY`
+unchanged in PR 1, so IAM still refuses each save with a condition, and D16 has no production
+effect now.
 
 ## 7. Redis layout (proposal, the builder can change it)
 
@@ -508,11 +541,15 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
 
 ## 8. Rollback
 
-- **Gateway rollback to a build before PR 2**, or removal of `[tool_history]`. A build before PR 2
-  refuses a set with a condition (`iam.rs:157-166`), so a `closed` tenant loses its tool calls.
-  Before such a rollback, the operator sets `tool_policies.history_conditions = false` and tells the
-  tenants that have conditions. After PR 2, the removal of `[tool_history]` only makes the history
-  slots missing (D10).
+- **Gateway rollback from PR 2 to PR 1**, or removal of `[tool_history]`. PR 1 loads a set with a
+  condition and leaves its slots empty (D16). So only the history policies fail closed, and the
+  other policies of the set work. After PR 2, the removal of `[tool_history]` also only makes the
+  history slots missing (D10).
+- **Gateway rollback to a build before PR 1.** Such a build refuses a set with a condition. A
+  `closed` tenant then loses its tool calls, and a floor with a condition fails for every tenant.
+  Before such a rollback, the operator publishes versions with no condition or moves those tenants
+  to `log_only`, sets `tool_policies.history_conditions = false`, and tells the tenants that have
+  conditions.
 - **IAM setting back to `false`.** IAM then refuses every save with a condition. Existing compiled
   sets stay in force. A later catalog write that recompiles such a set is refused
   (`sets.rs:21-24`). The runbook states this.
@@ -569,7 +606,10 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
 - R2. `forged_history` also fires for an expired link and for a blocked call. A tenant who forbids
   on it can block a client that resumes a conversation after more than 25 hours. A client can also
   hide `forged_history`: D4 reads only the results after the last assistant message, so one
-  trailing assistant message after the forged results removes the finding (ruling FR-b).
+  trailing assistant message after the forged results removes the finding (ruling FR-b). PR 2
+  closes this limit: it anchors the check on the last assistant message with tool calls (D4,
+  Sven, 2026-11-22). After PR 2, an expired link can fire `forged_history` on each request until
+  the next tool turn.
 - R3. A new field path starts with no values for older events (D7).
 - R4. Each hold now needs one reserve round trip, plus one settle off the latency path, when history
   is on.
