@@ -6,7 +6,8 @@
 //! Redis. Every instant is fixed; nothing sleeps.
 //!
 //! Counts: `written` counts events, not rows. One call written to three histories is 1.
-//! `trimmed_retention` and `trimmed_cap` count distinct events that the call removed.
+//! `trimmed_retention` and `trimmed_cap` count distinct events that this call removed (within one call,
+//! an event cut from two histories counts once).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,6 +64,16 @@ impl Ctx {
         }
     }
 
+    /// The same caller in a second session.
+    fn other_session(&self) -> Ctx {
+        Ctx {
+            org: self.org,
+            principal: self.principal.clone(),
+            key: self.key.clone(),
+            session: fresh_id(),
+        }
+    }
+
     fn histories(&self) -> Histories {
         Histories {
             org: self.org,
@@ -79,13 +90,18 @@ impl Ctx {
             call_ids: call_ids.iter().map(|s| s.to_string()).collect(),
             result_call_ids: result_call_ids.iter().map(|s| s.to_string()).collect(),
             refs: refs.to_vec(),
+            now_ms: NOW,
         }
     }
 
     fn reserve(&self, calls: Vec<CallEvent>, now_ms: u64, window_from_ms: Option<u64>) -> ReserveRequest {
+        self.reserve_turn(1, calls, now_ms, window_from_ms)
+    }
+
+    fn reserve_turn(&self, turn: i64, calls: Vec<CallEvent>, now_ms: u64, window_from_ms: Option<u64>) -> ReserveRequest {
         ReserveRequest {
             histories: self.histories(),
-            turn: 1,
+            turn,
             calls,
             now_ms,
             window_from_ms,
@@ -206,7 +222,6 @@ pub async fn the_cap_keeps_the_newest_10_000_events_per_tool(h: &impl Harness) {
 }
 
 pub async fn the_truncated_flag_needs_a_lost_event_inside_the_window(h: &impl Harness) {
-    let _ = h;
     let store = h.store().await;
     for (window_from, flagged) in [(Some(NOW - 100), true), (Some(NOW - 99), false), (None, false)] {
         let ctx = Ctx::new(false);
@@ -277,7 +292,6 @@ pub async fn the_reserve_writes_decision_links(h: &impl Harness) {
     let other = fresh_id();
     let reply = store.lookup(&ctx.lookup(&[], &[], &[c.id, other])).await.unwrap();
     assert_eq!(reply.refs, vec![Some(ctx.session), None]);
-    let _ = h;
 }
 
 pub async fn links_are_isolated_per_principal_and_org(h: &impl Harness) {
@@ -297,7 +311,6 @@ pub async fn links_are_isolated_per_principal_and_org(h: &impl Harness) {
     other_org.org = fresh_id();
     let reply = store.lookup(&other_org).await.unwrap();
     assert_eq!((reply.calls, reply.results, reply.refs), (vec![None], vec![None], vec![None]));
-    let _ = h;
 }
 
 pub async fn a_result_event_is_written_once_per_call_id(h: &impl Harness) {
@@ -327,7 +340,6 @@ pub async fn a_write_without_results_and_without_turn_writes_nothing(h: &impl Ha
 }
 
 pub async fn touch_keeps_the_latest_activity_and_the_highest_turn(h: &impl Harness) {
-    let _ = h;
     let (ctx, store) = (Ctx::new(true), h.store().await);
     let c = call("send");
     store.reserve(&ctx.reserve(vec![c.clone()], NOW - 1000, None)).await.unwrap();
@@ -429,6 +441,116 @@ pub async fn a_local_shell_settle_links_the_item_id_too(h: &impl Harness) {
     assert_eq!(reply.results, vec![expected.clone(), expected]);
 }
 
+pub async fn a_cap_trim_in_the_principal_history_keeps_the_event_in_its_session_history(h: &impl Harness) {
+    let (first, store) = (Ctx::new(false), h.store().await);
+    let second = first.other_session();
+    let old = calls("send", MAX_EVENTS_PER_TOOL);
+    store.reserve(&first.reserve(old.clone(), NOW - 1, None)).await.unwrap();
+    let reply = store.reserve(&second.reserve(calls("send", 1), NOW, None)).await.unwrap();
+    assert_eq!(reply.trimmed_cap, 1);
+    let oldest = old.iter().map(|c| c.id).min().unwrap();
+    assert!(principal_events(h, &first, "send").await.iter().all(|e| e.id != oldest));
+    let in_session = h.events(first.org, Scope::Session, &first.session.to_string(), "send").await;
+    assert_eq!(in_session.len(), MAX_EVENTS_PER_TOOL);
+    let kept = in_session.iter().find(|e| e.id == oldest).expect("the event stays in its session history");
+    assert_eq!(kept.verdict, EventVerdict::Pending);
+}
+
+pub async fn a_cut_of_two_flagged_events_gives_one_truncated_entry_per_scope_and_tool(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    store.reserve(&ctx.reserve(calls("send", MAX_EVENTS_PER_TOOL), NOW - 100, None)).await.unwrap();
+    let reply = store.reserve(&ctx.reserve(calls("send", 2), NOW, Some(NOW - 100))).await.unwrap();
+    assert_eq!(reply.trimmed_cap, 2);
+    let count = |scope: Scope| reply.truncated.iter().filter(|t| **t == (scope, "send".to_string())).count();
+    assert_eq!((count(Scope::Session), count(Scope::Principal), count(Scope::Key)), (1, 1, 0), "{:?}", reply.truncated);
+}
+
+pub async fn a_reserve_on_a_new_session_writes_its_state(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = call("send");
+    store.reserve(&ctx.reserve_turn(4, vec![c.clone()], NOW, None)).await.unwrap();
+    let reply = store.lookup(&ctx.lookup(&[], &[], &[c.id])).await.unwrap();
+    assert_eq!(
+        reply.sessions,
+        vec![SessionState {
+            id: ctx.session,
+            last_ms: NOW,
+            turn: 4
+        }]
+    );
+}
+
+pub async fn a_reserve_with_a_lower_turn_does_not_lower_the_turn(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let (first, second) = (call("send"), call("send"));
+    store.reserve(&ctx.reserve_turn(7, vec![first.clone()], NOW, None)).await.unwrap();
+    store.reserve(&ctx.reserve_turn(3, vec![second.clone()], NOW + 10, None)).await.unwrap();
+    let reply = store.lookup(&ctx.lookup(&[], &[], &[first.id])).await.unwrap();
+    assert_eq!(
+        reply.sessions,
+        vec![SessionState {
+            id: ctx.session,
+            last_ms: NOW + 10,
+            turn: 7
+        }]
+    );
+}
+
+pub async fn an_append_on_a_new_session_writes_its_state(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let req = AppendRequest {
+        histories: ctx.histories(),
+        turn: 6,
+        calls: vec![ForwardedCall {
+            id: fresh_id(),
+            tool: "send".into(),
+            call_id: Some("call-1".into()),
+            item_id: None,
+        }],
+        now_ms: NOW,
+    };
+    store.append(&req).await.unwrap();
+    let reply = store.lookup(&ctx.lookup(&["call-1"], &[], &[])).await.unwrap();
+    assert_eq!(
+        reply.sessions,
+        vec![SessionState {
+            id: ctx.session,
+            last_ms: NOW,
+            turn: 6
+        }]
+    );
+}
+
+pub async fn a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event(h: &impl Harness) {
+    let (first, store) = (Ctx::new(true), h.store().await);
+    let second = first.other_session();
+    let (a, b) = (call("send"), call("read"));
+    store.reserve(&first.reserve(vec![a.clone()], NOW, None)).await.unwrap();
+    store.settle(&first.settle(vec![item(a.id, EventVerdict::Allow, "send", Some("call-1"))], NOW)).await.unwrap();
+    let result = ResultEvent {
+        id: fresh_id(),
+        call_id: "call-1".into(),
+        tool: "send".into(),
+    };
+    store.write(&first.write(None, vec![result], NOW)).await.unwrap();
+    let before = store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap();
+    assert!(before.calls[0].as_ref().unwrap().result_written);
+
+    store.reserve(&second.reserve(vec![b.clone()], NOW + 1, None)).await.unwrap();
+    store.settle(&second.settle(vec![item(b.id, EventVerdict::Allow, "read", Some("call-1"))], NOW + 1)).await.unwrap();
+    let after = store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap();
+    assert_eq!(after.calls, vec![Some(link(&second, "read", b.id, false))]);
+}
+
+pub async fn the_first_settle_wins(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = call("send");
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    store.settle(&ctx.settle(vec![item(c.id, EventVerdict::Allow, "send", Some("call-1"))], NOW)).await.unwrap();
+    store.settle(&ctx.settle(vec![item(c.id, EventVerdict::Deny, "send", Some("call-1"))], NOW + 1)).await.unwrap();
+    assert_eq!(principal_events(h, &ctx, "send").await[0].verdict, EventVerdict::Allow);
+}
+
 pub async fn concurrent_reserves_all_land(h: &impl Harness) {
     let ctx = Ctx::new(true);
     let stores = [h.store().await, h.store().await];
@@ -468,4 +590,11 @@ pub async fn run_all(h: &impl Harness) {
     append_writes_an_allowed_event_and_its_call_link(h).await;
     a_local_shell_settle_links_the_item_id_too(h).await;
     concurrent_reserves_all_land(h).await;
+    a_cap_trim_in_the_principal_history_keeps_the_event_in_its_session_history(h).await;
+    a_cut_of_two_flagged_events_gives_one_truncated_entry_per_scope_and_tool(h).await;
+    a_reserve_on_a_new_session_writes_its_state(h).await;
+    a_reserve_with_a_lower_turn_does_not_lower_the_turn(h).await;
+    an_append_on_a_new_session_writes_its_state(h).await;
+    a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event(h).await;
+    the_first_settle_wins(h).await;
 }

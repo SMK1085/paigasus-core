@@ -113,6 +113,9 @@ pub struct LookupRequest {
     pub call_ids: Vec<String>,
     pub result_call_ids: Vec<String>,
     pub refs: Vec<Uuid>,
+    /// The time of the read. The memory adapter judges expiry at `max(its clock, now_ms)`. The Redis
+    /// adapter ignores it: the server TTL decides.
+    pub now_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,6 +338,7 @@ mod tests {
             call_ids: vec![],
             result_call_ids: vec![],
             refs: vec![],
+            now_ms: 0,
         }
     }
     fn link(session: u128, tool: &str, written: bool) -> CallLink {

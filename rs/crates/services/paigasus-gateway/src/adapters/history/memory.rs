@@ -25,6 +25,8 @@ use crate::domain::tool_history::{
 };
 
 const TTL_MS: u64 = KEY_TTL_SECS * 1000;
+/// The sweep of expired entries runs on the write path, once per this many writes. No background task.
+const SWEEP_EVERY: u64 = 1024;
 
 /// A value and its expiry in ms.
 struct Exp<T> {
@@ -41,7 +43,7 @@ impl<T> Exp<T> {
     }
 
     fn alive(&self, clock_ms: u64) -> bool {
-        self.exp_ms >= clock_ms
+        self.exp_ms > clock_ms
     }
 }
 
@@ -64,6 +66,7 @@ struct Body {
 #[derive(Default)]
 struct State {
     clock_ms: u64,
+    writes: u64,
     /// Events of one tool in one history, ascending by (ts, id).
     lists: HashMap<(HistoryKey, String), Exp<EventList>>,
     /// The tools of one history.
@@ -89,8 +92,24 @@ fn hkey(org: Uuid, scope: Scope, scope_id: String) -> HistoryKey {
 }
 
 impl State {
+    /// Start of a write: move the clock, and sweep once per `SWEEP_EVERY` writes.
     fn advance(&mut self, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
+        self.writes += 1;
+        if self.writes.is_multiple_of(SWEEP_EVERY) {
+            self.sweep();
+        }
+    }
+
+    /// Remove every entry whose expiry has passed.
+    fn sweep(&mut self) {
+        let clock = self.clock_ms;
+        self.lists.retain(|_, e| e.alive(clock));
+        self.index.retain(|_, e| e.alive(clock));
+        self.bodies.retain(|_, e| e.alive(clock));
+        self.calls.retain(|_, e| e.alive(clock));
+        self.decisions.retain(|_, e| e.alive(clock));
+        self.sessions.retain(|_, e| e.alive(clock));
     }
 
     fn touch_session(&mut self, org: Uuid, session: Uuid, turn: i64, now_ms: u64) {
@@ -131,7 +150,6 @@ impl State {
         let cutoff = now_ms.saturating_sub(RETENTION_MS);
         let mut by_retention: HashSet<Uuid> = HashSet::new();
         let mut by_cap: HashSet<Uuid> = HashSet::new();
-        let mut dropped: Vec<Uuid> = Vec::new();
         let tools: BTreeSet<&str> = events.iter().map(|e| e.tool.as_str()).collect();
         for (scope, scope_id) in h.scopes() {
             let key = hkey(h.org, scope, scope_id);
@@ -152,15 +170,13 @@ impl State {
                     let keep = *ts >= cutoff;
                     if !keep {
                         by_retention.insert(*id);
-                        dropped.push(*id);
                     }
                     keep
                 });
                 let mut cut_in_window = false;
-                while list.value.len() > MAX_EVENTS_PER_TOOL {
-                    let (ts, id) = list.value.remove(0);
+                let over = list.value.len().saturating_sub(MAX_EVENTS_PER_TOOL);
+                for (ts, id) in list.value.drain(..over) {
                     by_cap.insert(id);
-                    dropped.push(id);
                     cut_in_window |= window_from_ms.is_some_and(|w| ts >= w);
                 }
                 if cut_in_window {
@@ -171,28 +187,19 @@ impl State {
                 }
             }
         }
-        for id in dropped {
-            self.bodies.remove(&(h.org, id));
-        }
         reply.trimmed_retention = by_retention.len() as u64;
         reply.trimmed_cap = by_cap.len() as u64;
         reply
     }
 
-    /// Write the `c:` link of a call under one client id. An existing link keeps its flag.
+    /// Write the `c:` link of a call under one client id. An existing link is replaced: session,
+    /// tool and event id change, and `result_written` is false again (ruling T7-b).
     fn put_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, link: CallLink, now_ms: u64) {
-        let key = (org, principal.to_string(), link_digest(client_id));
-        let clock = self.clock_ms;
-        match self.calls.get_mut(&key).filter(|e| e.alive(clock)) {
-            Some(e) => e.exp_ms = now_ms.saturating_add(TTL_MS),
-            None => {
-                self.calls.insert(key, Exp::new(link, now_ms));
-            }
-        }
+        self.calls.insert((org, principal.to_string(), link_digest(client_id)), Exp::new(link, now_ms));
     }
 
-    fn call_link(&self, org: Uuid, principal: &str, client_id: &str) -> Option<&Exp<CallLink>> {
-        self.calls.get(&(org, principal.to_string(), link_digest(client_id))).filter(|e| e.alive(self.clock_ms))
+    fn call_link(&self, org: Uuid, principal: &str, client_id: &str, clock_ms: u64) -> Option<&Exp<CallLink>> {
+        self.calls.get(&(org, principal.to_string(), link_digest(client_id))).filter(|e| e.alive(clock_ms))
     }
 }
 
@@ -210,7 +217,8 @@ impl MemorySessionStore {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// For the test harness: the events of one history and tool, ordered by `ts_ms`.
+    /// For the test harness: the events of one history and tool, ordered by `ts_ms`. The list decides
+    /// what is present. A body that expires at the same instant as its list entry is still read.
     pub fn events(&self, org: Uuid, scope: Scope, scope_id: &str, tool: &str) -> Vec<StoredEvent> {
         let st = self.lock();
         let key = (hkey(org, scope, scope_id.to_string()), tool.to_string());
@@ -220,7 +228,7 @@ impl MemorySessionStore {
         list.value
             .iter()
             .filter_map(|(ts, id)| {
-                let body = st.bodies.get(&(org, *id)).filter(|b| b.alive(st.clock_ms))?;
+                let body = st.bodies.get(&(org, *id))?;
                 Some(StoredEvent {
                     id: *id,
                     ts_ms: *ts,
@@ -235,14 +243,14 @@ impl MemorySessionStore {
     /// For the test harness: the time to live in ms of every stored key of the org.
     pub fn ttls_ms(&self, org: Uuid, now_ms: u64) -> Vec<Option<u64>> {
         let st = self.lock();
-        let ttl = |exp_ms: u64| Some(exp_ms.saturating_sub(now_ms));
+        let ttl = |exp_ms: u64| Some(exp_ms - now_ms);
         let mut out = Vec::new();
-        out.extend(st.lists.iter().filter(|(k, _)| k.0.org == org).map(|(_, e)| ttl(e.exp_ms)));
-        out.extend(st.index.iter().filter(|(k, _)| k.org == org).map(|(_, e)| ttl(e.exp_ms)));
-        out.extend(st.bodies.iter().filter(|(k, _)| k.0 == org).map(|(_, e)| ttl(e.exp_ms)));
-        out.extend(st.calls.iter().filter(|(k, _)| k.0 == org).map(|(_, e)| ttl(e.exp_ms)));
-        out.extend(st.decisions.iter().filter(|(k, _)| k.0 == org).map(|(_, e)| ttl(e.exp_ms)));
-        out.extend(st.sessions.iter().filter(|(k, _)| k.0 == org).map(|(_, e)| ttl(e.exp_ms)));
+        out.extend(st.lists.iter().filter(|(k, e)| k.0.org == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
+        out.extend(st.index.iter().filter(|(k, e)| k.org == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
+        out.extend(st.bodies.iter().filter(|(k, e)| k.0 == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
+        out.extend(st.calls.iter().filter(|(k, e)| k.0 == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
+        out.extend(st.decisions.iter().filter(|(k, e)| k.0 == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
+        out.extend(st.sessions.iter().filter(|(k, e)| k.0 == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
         out
     }
 }
@@ -251,13 +259,14 @@ impl MemorySessionStore {
 impl SessionStore for MemorySessionStore {
     async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
         let st = self.lock();
-        let get = |id: &String| st.call_link(req.org, &req.principal, id).map(|e| e.value.clone());
+        let clock = st.clock_ms.max(req.now_ms);
+        let get = |id: &String| st.call_link(req.org, &req.principal, id, clock).map(|e| e.value.clone());
         let calls: Vec<Option<CallLink>> = req.call_ids.iter().map(get).collect();
         let results: Vec<Option<CallLink>> = req.result_call_ids.iter().map(get).collect();
         let refs: Vec<Option<Uuid>> = req
             .refs
             .iter()
-            .map(|id| st.decisions.get(&(req.org, req.principal.clone(), *id)).filter(|e| e.alive(st.clock_ms)).map(|e| e.value))
+            .map(|id| st.decisions.get(&(req.org, req.principal.clone(), *id)).filter(|e| e.alive(clock)).map(|e| e.value))
             .collect();
         let mut named: Vec<Uuid> = Vec::new();
         for s in calls.iter().chain(results.iter()).flatten().map(|l| l.session).chain(refs.iter().flatten().copied()) {
@@ -267,7 +276,7 @@ impl SessionStore for MemorySessionStore {
         }
         let sessions = named
             .iter()
-            .filter_map(|s| st.sessions.get(&(req.org, *s)).filter(|e| e.alive(st.clock_ms)).map(|e| e.value.clone()))
+            .filter_map(|s| st.sessions.get(&(req.org, *s)).filter(|e| e.alive(clock)).map(|e| e.value.clone()))
             .collect();
         Ok(LookupReply { calls, results, refs, sessions })
     }
@@ -395,18 +404,18 @@ mod tests {
     use super::*;
     use crate::domain::tool_history::{CallEvent, ForwardedCall};
 
-    #[tokio::test]
-    async fn an_expired_link_reads_as_absent() {
-        let store = MemorySessionStore::new();
-        let org = Uuid::from_u128(1);
-        let h = Histories {
-            org,
+    fn histories(org: u128) -> Histories {
+        Histories {
+            org: Uuid::from_u128(org),
             principal: "p".into(),
             key: None,
             session: Uuid::from_u128(2),
-        };
-        let req = AppendRequest {
-            histories: h.clone(),
+        }
+    }
+
+    fn append_req(org: u128, now_ms: u64) -> AppendRequest {
+        AppendRequest {
+            histories: histories(org),
             turn: 1,
             calls: vec![ForwardedCall {
                 id: Uuid::from_u128(3),
@@ -414,31 +423,67 @@ mod tests {
                 call_id: Some("c1".into()),
                 item_id: None,
             }],
-            now_ms: 1_000,
-        };
-        store.append(&req).await.unwrap();
-        let lookup = LookupRequest {
-            org,
+            now_ms,
+        }
+    }
+
+    fn lookup_req(org: u128, now_ms: u64) -> LookupRequest {
+        LookupRequest {
+            org: Uuid::from_u128(org),
             principal: "p".into(),
             call_ids: vec!["c1".into()],
             result_call_ids: vec![],
             refs: vec![],
-        };
-        assert!(store.lookup(&lookup).await.unwrap().calls[0].is_some());
-        // The clock moves to one ms after the expiry of the link.
-        let late = ReserveRequest {
-            histories: Histories { org: Uuid::from_u128(9), ..h },
-            turn: 1,
-            calls: vec![CallEvent {
-                id: Uuid::from_u128(4),
-                tool: "send".into(),
-            }],
-            now_ms: 1_000 + TTL_MS + 1,
-            window_from_ms: None,
-        };
-        store.reserve(&late).await.unwrap();
-        let reply = store.lookup(&lookup).await.unwrap();
-        assert_eq!(reply.calls, vec![None]);
-        assert!(reply.sessions.is_empty());
+            now_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_link_reads_as_absent() {
+        let store = MemorySessionStore::new();
+        store.append(&append_req(1, 1_000)).await.unwrap();
+        // Still alive at the last instant before the expiry, gone at the expiry. No other write.
+        let alive = store.lookup(&lookup_req(1, 1_000 + TTL_MS - 1)).await.unwrap();
+        assert!(alive.calls[0].is_some());
+        let gone = store.lookup(&lookup_req(1, 1_000 + TTL_MS)).await.unwrap();
+        assert_eq!(gone.calls, vec![None]);
+        assert!(gone.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_sweep_removes_expired_entries_and_keeps_live_ones() {
+        let store = MemorySessionStore::new();
+        store.append(&append_req(1, 1_000)).await.unwrap();
+        let later = 1_000 + TTL_MS + 1;
+        // One live org write, then enough writes to reach the sweep.
+        store
+            .reserve(&ReserveRequest {
+                histories: histories(9),
+                turn: 1,
+                calls: vec![CallEvent {
+                    id: Uuid::from_u128(4),
+                    tool: "send".into(),
+                }],
+                now_ms: later,
+                window_from_ms: None,
+            })
+            .await
+            .unwrap();
+        for _ in 0..SWEEP_EVERY {
+            store
+                .write(&WriteRequest {
+                    histories: histories(9),
+                    turn: None,
+                    results: vec![],
+                    now_ms: later,
+                })
+                .await
+                .unwrap();
+        }
+        let st = store.lock();
+        assert!(st.calls.is_empty() && st.sessions.keys().all(|k| k.0 == Uuid::from_u128(9)));
+        assert!(st.lists.keys().all(|k| k.0.org == Uuid::from_u128(9)));
+        assert!(st.bodies.keys().all(|k| k.0 == Uuid::from_u128(9)));
+        assert!(!st.lists.is_empty() && !st.bodies.is_empty() && !st.index.is_empty() && !st.sessions.is_empty());
     }
 }

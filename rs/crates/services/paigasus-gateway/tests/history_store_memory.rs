@@ -142,6 +142,41 @@ async fn concurrent_reserves_all_land() {
 }
 
 #[tokio::test]
+async fn a_cap_trim_in_the_principal_history_keeps_the_event_in_its_session_history() {
+    contract::a_cap_trim_in_the_principal_history_keeps_the_event_in_its_session_history(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_cut_of_two_flagged_events_gives_one_truncated_entry_per_scope_and_tool() {
+    contract::a_cut_of_two_flagged_events_gives_one_truncated_entry_per_scope_and_tool(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_reserve_on_a_new_session_writes_its_state() {
+    contract::a_reserve_on_a_new_session_writes_its_state(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_reserve_with_a_lower_turn_does_not_lower_the_turn() {
+    contract::a_reserve_with_a_lower_turn_does_not_lower_the_turn(&harness()).await;
+}
+
+#[tokio::test]
+async fn an_append_on_a_new_session_writes_its_state() {
+    contract::an_append_on_a_new_session_writes_its_state(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event() {
+    contract::a_second_allow_settle_of_a_call_id_relinks_it_to_the_new_event(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_first_settle_wins() {
+    contract::the_first_settle_wins(&harness()).await;
+}
+
+#[tokio::test]
 async fn run_all_passes_on_one_shared_store() {
     contract::run_all(&harness()).await;
 }
