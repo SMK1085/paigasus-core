@@ -155,6 +155,20 @@ pub trait BuiltInStage: Send + Sync {
     fn run(&self, batch: &DetectBatch) -> PipelineOutput;
 }
 
+/// The pipeline stage that gave a finding (§ 6.6.2). The metric label of a finding follows its
+/// stage, not the detector name in the finding: a webhook that names `kernel` still counts as
+/// `webhook` (A2, D37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Stage {
+    /// The built-in stage. Its detector names are fixed by this crate.
+    BuiltIn,
+    /// A configured webhook (SMA-856).
+    Webhook,
+    /// The judge (SMA-857).
+    Judge,
+}
+
 /// The output of a detector run: per subject, the findings and the hosts. The hosts are `Some`
 /// only for a call that the built-in stage scanned in full.
 #[derive(Default, Clone, PartialEq, Eq)]
@@ -163,6 +177,18 @@ pub struct PipelineOutput {
     pub findings: Vec<Vec<Finding>>,
     /// The hosts, per subject.
     pub hosts: Vec<Option<HostSet>>,
+    /// The stage of each finding, in the shape of `findings`. The pipeline sets it. A
+    /// [`BuiltInStage`] leaves it empty, because all of its findings are of [`Stage::BuiltIn`].
+    pub stages: Vec<Vec<Stage>>,
+}
+
+impl PipelineOutput {
+    /// The stage of finding `j` of subject `i`. A finding with no stage entry is of the built-in
+    /// stage, the only stage that does not go through the pipeline's own bookkeeping.
+    #[must_use]
+    pub fn stage_of(&self, i: usize, j: usize) -> Stage {
+        self.stages.get(i).and_then(|s| s.get(j)).copied().unwrap_or(Stage::BuiltIn)
+    }
 }
 
 impl fmt::Debug for PipelineOutput {
@@ -214,6 +240,7 @@ mod tests {
         let out = PipelineOutput {
             findings: batch.earlier.clone(),
             hosts: vec![Some(seen), None],
+            stages: vec![vec![Stage::Webhook]],
         };
         let text = format!("{out:?}");
         assert_eq!(text, "PipelineOutput { subjects: 1, findings: 1, hosts: 1 }");
@@ -224,6 +251,20 @@ mod tests {
     fn detector_errors_print_only_their_variant() {
         let all = [DetectorError::Failed, DetectorError::WrongShape, DetectorError::Timeout, DetectorError::Panicked];
         assert_eq!(all.map(|e| format!("{e:?}")), ["Failed", "WrongShape", "Timeout", "Panicked"]);
+    }
+
+    #[test]
+    fn a_finding_without_a_stage_entry_is_built_in() {
+        let out = PipelineOutput {
+            findings: vec![vec![detector_error_finding(), detector_error_finding()]],
+            hosts: vec![None],
+            stages: vec![vec![Stage::Webhook]],
+        };
+        assert_eq!((out.stage_of(0, 0), out.stage_of(0, 1), out.stage_of(1, 0)), (Stage::Webhook, Stage::BuiltIn, Stage::BuiltIn));
+    }
+
+    fn detector_error_finding() -> Finding {
+        Finding::new("kernel", "detector_error", Severity::High, "")
     }
 
     #[test]

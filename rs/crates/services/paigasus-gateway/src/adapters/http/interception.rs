@@ -127,7 +127,8 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
     let (decisions, basis) = if n == 0 {
         (Vec::new(), Basis::Decider)
     } else {
-        let fut = ti.decider.decide(Arc::clone(&ctx), turn, calls.calls.clone());
+        // The body is the hold: its decide_timeout starts now (D35).
+        let fut = ti.decider.decide_by(Arc::clone(&ctx), turn, calls.calls.clone(), Instant::now());
         match tokio::time::timeout(limits.decide_timeout, fut).await {
             Ok(Ok(d)) if d.len() == n => (d, Basis::Decider),
             _ => {
@@ -214,7 +215,10 @@ impl Relay {
         while self.pending.is_none() {
             let Some((hold, calls)) = self.decide_queue.pop_front() else { return };
             if self.icpt.is_deciding(hold) {
-                let fut = self.ti.decider.decide(Arc::clone(&self.ctx), Arc::clone(&self.turn), calls);
+                // The deadline of the hold counts from its completion, not from now: it can have
+                // waited behind an earlier hold (D35, P-10).
+                let hold_start = self.icpt.deciding_since(hold).unwrap_or_else(Instant::now);
+                let fut = self.ti.decider.decide_by(Arc::clone(&self.ctx), Arc::clone(&self.turn), calls, hold_start);
                 self.pending = Some((hold, fut));
             }
         }
@@ -593,6 +597,51 @@ mod tests {
             .expect("a report for read_file");
         assert!(read_file_report.contains(r#""decision":"allow","basis":"decider""#), "{read_file_report}");
         assert!(text.contains(r#""name":"read_file","input":{}"#), "the allowed call is forwarded: {text}");
+    }
+
+    /// Records the hold start that the relay gives and the instant of the call, and allows
+    /// everything after `wait`.
+    struct HoldStarts {
+        wait: Duration,
+        seen: Arc<std::sync::Mutex<Vec<(Instant, Instant)>>>,
+    }
+
+    impl ToolCallDecider for HoldStarts {
+        fn decide(&self, _ctx: Arc<DecisionContext>, _turn: Arc<ToolTurn>, _calls: Vec<ToolCall>) -> DecideFuture {
+            unreachable!("the relay calls decide_by")
+        }
+
+        fn decide_by(&self, _ctx: Arc<DecisionContext>, _turn: Arc<ToolTurn>, calls: Vec<ToolCall>, hold_start: Instant) -> DecideFuture {
+            self.seen.lock().expect("lock").push((hold_start, Instant::now()));
+            let wait = self.wait;
+            Box::pin(async move {
+                tokio::time::sleep(wait).await;
+                Ok(vec![DecidedCall::from(Decision::Allow); calls.len()])
+            })
+        }
+    }
+
+    /// SMA-855 D35, P-10: the second hold of a stream waits behind the first decision, and the
+    /// relay still gives its own completion instant as the hold start, not the instant its
+    /// decision starts. The first decision takes 300 ms; the assertion needs only 200 ms of the
+    /// wait, so a loaded runner (which only makes the wait longer) cannot red it.
+    #[tokio::test]
+    async fn a_queued_hold_is_decided_by_its_own_completion() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let decider = Arc::new(HoldStarts {
+            wait: Duration::from_millis(300),
+            seen: Arc::clone(&seen),
+        });
+        let text = run(decider, Limits::defaults(), two_tool_blocks("read_file", "list_dir", Duration::ZERO)).await;
+        assert!(text.contains(r#""name":"list_dir","input":{}"#), "{text}");
+        let seen = seen.lock().expect("lock").clone();
+        assert_eq!(seen.len(), 2, "two holds, two decide_by calls");
+        let (hold_start, called) = seen[1];
+        assert!(
+            called.saturating_duration_since(hold_start) >= Duration::from_millis(200),
+            "{:?}",
+            called.saturating_duration_since(hold_start)
+        );
     }
 
     /// Counts the decide calls of the Cedar decider.

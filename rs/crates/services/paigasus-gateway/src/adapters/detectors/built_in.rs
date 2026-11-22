@@ -44,6 +44,7 @@ impl BuiltInStage for BuiltInDetector {
         let mut out = PipelineOutput {
             findings: Vec::with_capacity(batch.subjects.len()),
             hosts: Vec::with_capacity(batch.subjects.len()),
+            stages: Vec::new(),
         };
         // The budget runs over the argument bytes in subject order. A call that does not fit in
         // full is not scanned, and a later call that fits is still scanned.

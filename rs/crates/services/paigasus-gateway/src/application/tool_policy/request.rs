@@ -274,7 +274,7 @@ impl RequestToolPolicy {
         let (body, entries) = if let ToolTurn::Parsed(facts) = turn {
             // One finding per colliding tool name (SMA-755 § 5.9).
             for _ in name_collisions(&facts.definitions) {
-                count_finding("request", &FindingRecord::new(NAME_COLLISION, Some(Severity::High), DETECTOR_KERNEL, ""), false);
+                count_finding("request", &FindingRecord::new(NAME_COLLISION, Some(Severity::High), DETECTOR_KERNEL, ""), None);
             }
             let plan = plan_request(&snapshot, format, facts, &[], &Instant::now);
             if let Some(cause) = plan.refusal() {

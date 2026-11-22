@@ -221,6 +221,17 @@ impl Interceptor {
         matches!(self.holds.get(&hold), Some(Track::Deciding { .. }))
     }
 
+    /// When `hold` completed, while it waits for its decision (SMA-855 plan P-10). The hold's
+    /// `decide_timeout` counts from this instant, so the decider computes its own deadline from it
+    /// (D35). `None` when the hold is not deciding.
+    #[must_use]
+    pub fn deciding_since(&self, hold: HoldKey) -> Option<Instant> {
+        match self.holds.get(&hold) {
+            Some(Track::Deciding { since, .. }) => Some(*since),
+            _ => None,
+        }
+    }
+
     #[doc(hidden)]
     #[must_use]
     pub fn queued_bytes(&self) -> usize {
@@ -1072,6 +1083,24 @@ mod tests {
         assert!(i.is_deciding(k));
         i.tick(t0 + Duration::from_secs(6));
         assert!(!i.is_deciding(k), "a timed-out hold is no longer deciding");
+    }
+
+    #[test]
+    fn deciding_since_is_the_hold_completion() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
+        let k = HoldKey::Choice(0);
+        assert_eq!(i.deciding_since(k), None, "no hold");
+        i.push(call(0, 0, "read", "{}").as_bytes(), t0);
+        assert_eq!(i.deciding_since(k), None, "assembling is not deciding");
+        let done = t0 + Duration::from_millis(700);
+        i.push(finish(0).as_bytes(), done);
+        assert_eq!(i.deciding_since(k), Some(done), "the instant of the completion, not of the first frame");
+        // A later tick does not move it.
+        i.tick(done + Duration::from_secs(1));
+        assert_eq!(i.deciding_since(k), Some(done));
+        i.decided(k, Ok(plain(vec![Decision::Allow])), done + Duration::from_secs(2));
+        assert_eq!(i.deciding_since(k), None, "after the decision");
     }
 
     #[test]

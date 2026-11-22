@@ -18,7 +18,7 @@ use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_KERNEL, Finding, INJEC
 use paigasus_observability::names;
 use tokio::time::Instant;
 
-use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, Side};
+use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, Side, Stage};
 
 /// The detector names that are always known (D37): the kernel, the built-in stage and the five
 /// built-ins.
@@ -126,20 +126,28 @@ impl DetectorPipeline {
             Ok(out) => PipelineOutput {
                 findings: out.findings.into_iter().map(|f| self.check(DETECTOR_BUILT_IN, f)).collect(),
                 hosts: out.hosts,
+                stages: Vec::new(),
             },
             Err(e) => PipelineOutput {
                 findings: failed("built_in", DETECTOR_BUILT_IN, e, n),
                 hosts: vec![None; n],
+                stages: Vec::new(),
             },
         };
+        // The stage travels with each finding, so the metric label of a webhook finding is
+        // `webhook` whatever detector name it gives (D37 accepts `kernel`).
+        out.stages = out.findings.iter().map(|f| vec![Stage::BuiltIn; f.len()]).collect();
         // The webhooks and the judge get the call subjects only: never a result text (D40).
         let calls: Vec<usize> = (0..n).filter(|&i| batch.subjects[i].is_call()).collect();
         if calls.is_empty() || (self.webhooks.is_empty() && self.judge.is_none()) {
             return out;
         }
         let late = self.late_stages(&batch, &calls, &out.findings, (run_start + self.timeout).min(deadline)).await;
-        for stage in late {
-            for (j, found) in stage.into_iter().enumerate() {
+        // `late` holds one entry per webhook, then one for the judge.
+        for (k, found_by) in late.into_iter().enumerate() {
+            let stage = if k < self.webhooks.len() { Stage::Webhook } else { Stage::Judge };
+            for (j, found) in found_by.into_iter().enumerate() {
+                out.stages[calls[j]].extend(std::iter::repeat_n(stage, found.len()));
                 out.findings[calls[j]].extend(found);
             }
         }
@@ -534,6 +542,12 @@ mod tests {
         assert_eq!(pairs(&out.findings[0]), [(SECRET_IN_ARGS, SECRET_IN_ARGS), ("hook_a", "hook_kind"), ("judge", "judge_kind")]);
         assert_eq!(pairs(&out.findings[1]), [(INJECTION_MARKERS, INJECTION_MARKERS)], "a result gets no webhook or judge finding");
         assert_eq!(pairs(&out.findings[2]), [("hook_a", "hook_kind"), ("judge", "judge_kind")]);
+        // The stage of each finding travels with it, in the shape of the findings.
+        use crate::domain::detectors::Stage;
+        assert_eq!(
+            out.stages,
+            [vec![Stage::BuiltIn, Stage::Webhook, Stage::Judge], vec![Stage::BuiltIn], vec![Stage::Webhook, Stage::Judge]]
+        );
     }
 
     #[tokio::test]

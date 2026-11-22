@@ -23,12 +23,14 @@ use tokio_util::task::TaskTracker;
 
 use crate::adapters::decision_log::jetstream;
 use crate::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, prime_decision_log_metrics, run_relay, run_writer};
+use crate::adapters::detectors::BuiltInDetector;
 use crate::adapters::http::interception::ToolInterception;
 use crate::adapters::iam::client::build_channel;
 use crate::adapters::nats::PolicyEvents;
 use crate::adapters::policy_source::file::FilePolicySource;
 use crate::adapters::policy_source::iam::IamPolicySource;
 use crate::application::decision_log::DecisionRecorder;
+use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
 use crate::config::{GatewayConfig, PolicySourceConfig};
 use crate::domain::decision_log::{Entropy, TracingDecisionLog};
@@ -244,6 +246,9 @@ pub struct ToolPolicyRuntime {
     pub cedar: Option<Arc<CedarDecider>>,
     /// The one decision recorder (P-8). `None` with the tool policy off: nothing is recorded.
     pub recorder: Option<Arc<DecisionRecorder>>,
+    /// The one detector pipeline (SMA-855 § 6.6.4). `None` with the tool policy off or with
+    /// `[tool_policy.detectors] enabled = false`.
+    pub detectors: Option<Arc<DetectorPipeline>>,
 }
 
 /// The tool interception of the composition root, only with `[tool_interception] enabled = true`.
@@ -276,6 +281,7 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
             decider: Arc::new(AllowAll),
             cedar: None,
             recorder: None,
+            detectors: None,
         });
     }
     let settings = config.tool_policy.settings();
@@ -307,13 +313,36 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
         );
     }
     prime_tool_policy_metrics();
-    let cedar = Arc::new(CedarDecider::new(Arc::clone(&recorder)));
+    let detectors = build_detectors(config);
+    let mut cedar = CedarDecider::new(Arc::clone(&recorder));
+    if let Some(pipeline) = &detectors {
+        cedar = cedar.with_detectors(Arc::clone(pipeline), config.tool_interception.limits().decide_timeout, config.tool_policy.detector_settings());
+    }
+    let cedar = Arc::new(cedar);
     Ok(ToolPolicyRuntime {
         policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder))))),
         decider: Arc::clone(&cedar) as Arc<dyn ToolCallDecider>,
         cedar: Some(cedar),
         recorder: Some(recorder),
+        detectors,
     })
+}
+
+/// The one detector pipeline of the gateway (SMA-855 § 6.6.4): the built-in stage only, no webhook
+/// and no judge yet. With `[tool_policy.detectors] enabled = false` there is none, and one info
+/// line says so at boot.
+fn build_detectors(config: &GatewayConfig) -> Option<Arc<DetectorPipeline>> {
+    let settings = config.tool_policy.detector_settings();
+    if !settings.enabled {
+        tracing::info!("tool-policy detectors are off: findings come only from the kernel");
+        return None;
+    }
+    Some(Arc::new(DetectorPipeline::new(
+        Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
+        Vec::new(),
+        None,
+        settings.timeout,
+    )))
 }
 
 /// SMA-752 § 6.3.5: the NATS invalidation subscription for `cache`, only with `[tool_policy]
@@ -444,6 +473,37 @@ mod tool_policy_tests {
         assert!(Arc::ptr_eq(cedar.recorder(), &recorder), "the decider");
         let cedar_as_dyn: Arc<dyn ToolCallDecider> = Arc::clone(cedar) as Arc<dyn ToolCallDecider>;
         assert!(std::ptr::addr_eq(Arc::as_ptr(&cedar_as_dyn), Arc::as_ptr(&rt.decider)), "the runtime decider is the Cedar decider");
+    }
+
+    /// SMA-855 § 6.6.4: with the detectors on (the default), one pipeline, and the Cedar decider
+    /// holds that same pipeline.
+    #[test]
+    fn detectors_on_build_one_pipeline_for_the_decider() {
+        let rt = build_tool_policy(&enabled_config(), rec()).expect("builds");
+        let pipeline = rt.detectors.as_ref().expect("the detectors are on by default");
+        let held = rt.cedar.as_ref().and_then(|c| c.pipeline()).expect("the decider holds the pipeline");
+        assert!(Arc::ptr_eq(pipeline, held));
+    }
+
+    /// `[tool_policy.detectors] enabled = false`: no pipeline, and one info line at boot.
+    #[test]
+    fn detectors_off_builds_no_pipeline_and_logs_once() {
+        let cfg = config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n[tool_policy.detectors]\nenabled = false\n"
+            ),
+            true,
+        );
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        let rt = build_tool_policy(&cfg, rec()).expect("builds");
+        assert!(rt.detectors.is_none());
+        assert!(rt.cedar.as_ref().expect("the Cedar decider").pipeline().is_none());
+        let text = logs.text();
+        assert_eq!(text.matches("tool-policy detectors are off: findings come only from the kernel").count(), 1, "{text}");
+        // With the detectors on, the line does not appear.
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        build_tool_policy(&enabled_config(), rec()).expect("builds");
+        assert!(!logs.text().contains("tool-policy detectors are off"));
     }
 
     /// With the tool policy off nothing is recorded: no recorder is kept.
