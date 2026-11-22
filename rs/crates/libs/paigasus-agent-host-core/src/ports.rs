@@ -17,7 +17,7 @@ use crate::claim::{Claim, ClaimConfig};
 pub use crate::fault::FaultPoint;
 use crate::ids::{EventId, InboxId, OutboxMessageId, TimerId};
 use crate::inbox::{Inbox, NewInboxEvent};
-use crate::lease::{ClaimError, CompleteError, HeartbeatError, LeaseHandle};
+use crate::lease::{ClaimError, HeartbeatError, LeaseHandle};
 use crate::memory::{CapError, MemoryCaps, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use crate::outbox::OutboxMessage;
 use crate::run::{BackOff, CommitError, Committed, RunRecord, ScreenOut, ScreenResult};
@@ -83,15 +83,12 @@ pub trait LeaseRepository: Send + Sync {
 }
 
 /// The store of claims. Owner: SMA-787.
-/// `complete` is replaced by `RunCommitter` in SMA-790.
+/// A claim ends through `RunCommitter` (SMA-790 §6.8), which replaced `complete`.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait ClaimRepository: Send + Sync {
     /// Claim a batch of events. Returns `None` when there is nothing to claim.
     async fn claim(&self, handle: &mut LeaseHandle, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError>;
-    /// Complete a claim. Returns the IDs of the events that it finished.
-    /// A poisoned handle gives `LeaseLost` with no SQL.
-    async fn complete(&self, handle: &mut LeaseHandle, claim: Claim) -> Result<Vec<EventId>, CompleteError>;
 }
 
 /// The read side of the timer store. Owner: SMA-788.

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The concurrent stress test of the lease and the claim (spec §10.2). Eight tasks, each with its
-//! own pinned connection and its own `LeaseKeeper`, run acquire, claim, complete and release on
+//! own pinned connection and its own `LeaseKeeper`, run acquire, claim, commit and release on
 //! one inbox, while a writer inserts events. A seeded LCG decides when a task expires its own
-//! lease from a separate connection between its claim and its complete. Each task records every
-//! successful complete. After a drain, the test checks the history against the `run` rows.
+//! lease from a separate connection between its claim and its commit. Each task records every
+//! successful commit. After a drain, the test checks the history against the `run` rows.
 //!
 //! The binary has `retries = 0` in `rs/.config/nextest.toml`: a race that reds one run must not
 //! pass on a retry. Set `LEASE_STRESS_SEED` to replay the fault decisions of a failed run. The
@@ -20,13 +20,17 @@ use std::time::Duration;
 
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
+use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
 use paigasus_agent_host::application::lease_keeper::{KeeperTiming, LeaseKeeper};
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::ids::{EventId, InboxId, ThreadId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
-use paigasus_agent_host_core::lease::{ClaimError, CompleteError};
-use paigasus_agent_host_core::ports::{ClaimRepository, InboxRepository, InsertOutcome, LeaseRepository};
+use paigasus_agent_host_core::lease::ClaimError;
+use paigasus_agent_host_core::memory::MemoryScope;
+use paigasus_agent_host_core::ports::{ClaimRepository, InboxRepository, InsertOutcome, LeaseRepository, RunCommitter};
+use paigasus_agent_host_core::run::CommitError;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use support::commit::{committer, completed_record, inbox_scope};
 use support::inbox::{insert_inbox, migrated_postgres};
 use support::lease::{expire, expire_token, insert_pending_event, insert_thread, lease_state, snapshot, terminal_event_ids};
 use uuid::Uuid;
@@ -45,7 +49,7 @@ const SEQ_INBOX: Uuid = Uuid::from_u128(8);
 const SEQ_EVENT: Uuid = Uuid::from_u128(0x2000);
 /// The statement timeout of one heartbeat. It is shorter than the heartbeat interval (§8.6).
 const HB_TIMEOUT: Duration = Duration::from_millis(500);
-/// The upper bound of drain rounds. Each round completes one claim.
+/// The upper bound of drain rounds. Each round commits one claim.
 const DRAIN_ROUNDS: usize = 500;
 /// How long a task that expired its own lease waits for another task to take the lease.
 const TAKEOVER_WAIT: Duration = Duration::from_millis(100);
@@ -89,9 +93,9 @@ fn seed() -> u64 {
     u64::try_from(nanos % u128::from(u64::MAX)).expect("fits")
 }
 
-/// One successful complete.
+/// One successful commit.
 #[derive(Debug)]
-struct Completed {
+struct Committed {
     run: Uuid,
     token: i64,
     done: Vec<Uuid>,
@@ -100,28 +104,28 @@ struct Completed {
 /// The history of one task.
 #[derive(Debug, Default)]
 struct Log {
-    completes: Vec<Completed>,
+    commits: Vec<Committed>,
     takes: usize,
-    /// A complete that lost the lease after the task expired it.
+    /// A commit that lost the lease after the task expired it.
     stale: usize,
-    /// A stale complete that started while another task held a live lease with a newer token.
-    /// Only the token half of the complete fence refuses it.
+    /// A stale commit that started while another task held a live lease with a newer token.
+    /// Only the token half of the commit fence refuses it.
     stale_under_new_holder: usize,
-    /// A stale complete that started while the lease row still had the own token, expired.
-    /// The expiry half of the complete fence refuses it (unless a take came in between).
+    /// A stale commit that started while the lease row still had the own token, expired.
+    /// The expiry half of the commit fence refuses it (unless a take came in between).
     stale_own_row: usize,
-    /// A claim or a complete that lost the lease with no expire. Only a local deadline under
+    /// A claim or a commit that lost the lease with no expire. Only a local deadline under
     /// heavy load can cause it. It is not a safety violation.
     lost_without_expire: usize,
     /// A planned expire that found its token already replaced by another take. The test then
-    /// expires nothing, and the complete is still stale.
+    /// expires nothing, and the commit is still stale.
     expire_found_new_token: usize,
 }
 
 /// After an expire, waits up to `TAKEOVER_WAIT` for another task to take the lease. It returns
 /// true when the lease row then has a live lease with a token other than `own`. The caller
-/// completes after this read, so a true result means that the new holder was live before the
-/// stale complete started. (Its lease lives 3 s, far longer than one round.)
+/// commits after this read, so a true result means that the new holder was live before the
+/// stale commit started. (Its lease lives 3 s, far longer than one round.)
 async fn wait_for_new_holder(db: &DatabaseConnection, own: i64) -> bool {
     let deadline = std::time::Instant::now() + TAKEOVER_WAIT;
     loop {
@@ -135,7 +139,7 @@ async fn wait_for_new_holder(db: &DatabaseConnection, own: i64) -> bool {
     }
 }
 
-async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed: u64) -> Log {
+async fn worker(w: usize, store: Arc<PgLeaseStore>, committer: Arc<PgRunCommitter>, scope: MemoryScope, db: DatabaseConnection, seed: u64) -> Log {
     let worker_seed = seed ^ (u64::try_from(w).expect("w") + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     // Two generators: the fault decisions do not depend on how many acquires failed.
     let mut rng = Lcg(worker_seed);
@@ -148,20 +152,20 @@ async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed
             continue;
         };
         log.takes += 1;
-        let keeper = LeaseKeeper::start(handle, store.clone(), store.clone(), timing());
+        let keeper = LeaseKeeper::start(handle, store.clone(), store.clone(), committer.clone(), timing());
         match keeper.claim(&cfg()).await {
             Ok(Some(claim)) => {
                 let expired = rng.below(4) == 0;
                 let (run, token) = (claim.run.uuid(), claim.lease_token.0);
                 // True when another task holds a live lease with a newer token at the stale
-                // complete. Then only the token half of the complete fence can refuse it.
+                // commit. Then only the token half of the commit fence can refuse it.
                 let mut overlap = false;
                 // True when the lease row still has the own token, read after the expire and
-                // before the complete. Then the expiry half of the fence refuses it.
+                // before the commit. Then the expiry half of the fence refuses it.
                 let mut own_row = false;
                 if expired {
                     // Expire only the own token: if another task already took the lease, its
-                    // live lease stays, and the complete is stale anyway.
+                    // live lease stays, and the commit is stale anyway.
                     if !expire_token(&db, INBOX, token).await {
                         log.expire_found_new_token += 1;
                     }
@@ -171,16 +175,16 @@ async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed
                         own_row = lease_state(&db, INBOX).await.is_some_and(|(t, live)| !live && t == token);
                     }
                 }
-                match keeper.complete(claim).await {
-                    Ok(done) => {
-                        assert!(!expired, "seed {seed}: worker {w} completed run {run} after its lease was expired");
-                        log.completes.push(Completed {
+                match keeper.commit(completed_record(&claim, scope.clone())).await {
+                    Ok(c) => {
+                        assert!(!expired, "seed {seed}: worker {w} committed run {run} after its lease was expired");
+                        log.commits.push(Committed {
                             run,
                             token,
-                            done: done.iter().map(EventId::uuid).collect(),
+                            done: c.done.iter().map(EventId::uuid).collect(),
                         });
                     }
-                    Err(CompleteError::LeaseLost) if expired => {
+                    Err(CommitError::LeaseLost) if expired => {
                         log.stale += 1;
                         if overlap {
                             log.stale_under_new_holder += 1;
@@ -189,8 +193,8 @@ async fn worker(w: usize, store: Arc<PgLeaseStore>, db: DatabaseConnection, seed
                             log.stale_own_row += 1;
                         }
                     }
-                    Err(CompleteError::LeaseLost) => log.lost_without_expire += 1,
-                    Err(e) => panic!("seed {seed}: worker {w} complete: {e}"),
+                    Err(CommitError::LeaseLost) => log.lost_without_expire += 1,
+                    Err(e) => panic!("seed {seed}: worker {w} commit: {e}"),
                 }
             }
             Ok(None) => {}
@@ -230,8 +234,8 @@ async fn writer(repo: PgInboxRepository) -> Vec<Uuid> {
     ids
 }
 
-/// One fresh worker with no keeper claims and completes until no event is claimable.
-async fn drain(store: &PgLeaseStore, db: &DatabaseConnection) -> Vec<Completed> {
+/// One fresh worker with no keeper claims and commits until no event is claimable.
+async fn drain(store: &PgLeaseStore, committer: &PgRunCommitter, scope: &MemoryScope, db: &DatabaseConnection) -> Vec<Committed> {
     let ttl = Duration::from_secs(60);
     let mut handle = match store.acquire(&inbox(), "drain", ttl).await.expect("drain acquire") {
         Some(handle) => handle,
@@ -240,26 +244,28 @@ async fn drain(store: &PgLeaseStore, db: &DatabaseConnection) -> Vec<Completed> 
             store.acquire(&inbox(), "drain", ttl).await.expect("drain acquire").expect("a take after expire")
         }
     };
-    let mut completes = Vec::new();
+    let mut commits = Vec::new();
     for _ in 0..DRAIN_ROUNDS {
         let Some(claim) = store.claim(&mut handle, &cfg()).await.expect("drain claim") else {
             store.release(handle).await.expect("drain release");
-            return completes;
+            return commits;
         };
         let (run, token) = (claim.run.uuid(), claim.lease_token.0);
-        let done = store.complete(&mut handle, claim).await.expect("drain complete");
-        completes.push(Completed {
+        let c = committer.commit(&mut handle, completed_record(&claim, scope.clone())).await.expect("drain commit");
+        // A raw handle has no keeper, so the drain finishes the claim on it.
+        handle.record_complete();
+        commits.push(Committed {
             run,
             token,
-            done: done.iter().map(EventId::uuid).collect(),
+            done: c.done.iter().map(EventId::uuid).collect(),
         });
     }
     panic!("the drain did not end within {DRAIN_ROUNDS} rounds");
 }
 
 /// The sequential overlap phase. A claims under its own keeper, the test expires the lease, B
-/// takes it and holds a live lease, and then A completes. Only the token half of the complete
-/// fence refuses this complete. It gives one overlap on every run, so the coverage floor does
+/// takes it and holds a live lease, and then A commits. Only the token half of the commit
+/// fence refuses this commit. It gives one overlap on every run, so the coverage floor does
 /// not depend on a random coincidence.
 async fn sequential_overlap(url: &str, db: &DatabaseConnection) -> usize {
     insert_inbox(db, ORG, SEQ_INBOX, Uuid::from_u128(12), Uuid::from_u128(13)).await;
@@ -269,11 +275,12 @@ async fn sequential_overlap(url: &str, db: &DatabaseConnection) -> usize {
     let store_a = Arc::new(PgLeaseStore::new(support::connect_pinned(url).await, HB_TIMEOUT));
     let store_b = PgLeaseStore::new(support::connect_pinned(url).await, HB_TIMEOUT);
     let a = store_a.acquire(&seq, "seq-a", ttl).await.expect("A acquire").expect("A takes the lease");
+    let scope = inbox_scope(db, &seq).await;
     // A long heartbeat interval: the first heartbeat of A comes after 20 s, so no heartbeat of A
-    // can see B's take and cancel the keeper before the complete. The stale complete then always
-    // reaches the token fence of `PgLeaseStore::complete`.
+    // can see B's take and cancel the keeper before the commit. The stale commit then always
+    // reaches the token fence of `PgRunCommitter::commit`.
     let seq_timing = KeeperTiming::new(Duration::from_secs(60), Duration::from_secs(20)).expect("timing");
-    let keeper = LeaseKeeper::start(a, store_a.clone(), store_a.clone(), seq_timing);
+    let keeper = LeaseKeeper::start(a, store_a.clone(), store_a.clone(), committer(db), seq_timing);
     let claim = keeper.claim(&cfg()).await.expect("A claim").expect("A claims the event");
     let a_token = claim.lease_token.0;
     expire(db, SEQ_INBOX).await;
@@ -281,9 +288,13 @@ async fn sequential_overlap(url: &str, db: &DatabaseConnection) -> usize {
     let state = lease_state(db, SEQ_INBOX).await.expect("lease row");
     assert!(state.1 && state.0 != a_token, "B does not hold a live lease with a new token: {state:?}");
     let before = snapshot(db, SEQ_INBOX).await;
-    assert!(!keeper.cancellation().is_cancelled(), "the keeper of A must not stop before the complete reaches the store");
-    assert_eq!(keeper.complete(claim).await, Err(CompleteError::LeaseLost), "A completed under the live lease of B");
-    assert_eq!(before, snapshot(db, SEQ_INBOX).await, "the stale complete of A changed a row");
+    assert!(!keeper.cancellation().is_cancelled(), "the keeper of A must not stop before the commit reaches the store");
+    assert_eq!(
+        keeper.commit(completed_record(&claim, scope)).await,
+        Err(CommitError::LeaseLost),
+        "A committed under the live lease of B"
+    );
+    assert_eq!(before, snapshot(db, SEQ_INBOX).await, "the stale commit of A changed a row");
     keeper.release().await.expect("A release");
     store_b.release(b).await.expect("B release");
     1
@@ -294,7 +305,7 @@ async fn rows(db: &DatabaseConnection, sql: &str) -> Vec<sea_orm::QueryResult> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_workers_never_complete_one_event_twice() {
+async fn concurrent_workers_never_commit_one_event_twice() {
     let Some((_node, url, db)) = migrated_postgres().await else { return };
     let seed = seed();
     eprintln!("lease_stress_pg: seed {seed} (replay with LEASE_STRESS_SEED={seed})");
@@ -303,12 +314,14 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     insert_thread(&db, INBOX, THREAD).await;
     insert_thread(&db, FOREIGN_INBOX, FOREIGN_THREAD).await;
 
+    let scope = inbox_scope(&db, &inbox()).await;
+    let committer = committer(&db);
     let started = std::time::Instant::now();
     let writer = tokio::spawn(writer(PgInboxRepository::new(db.clone())));
     let mut tasks = Vec::with_capacity(WORKERS);
     for w in 0..WORKERS {
         let store = Arc::new(PgLeaseStore::new(support::connect_pinned(&url).await, HB_TIMEOUT));
-        tasks.push(tokio::spawn(worker(w, store, db.clone(), seed)));
+        tasks.push(tokio::spawn(worker(w, store, committer.clone(), scope.clone(), db.clone(), seed)));
     }
     let inserted = writer.await.expect("writer");
     let mut logs = Vec::with_capacity(WORKERS);
@@ -316,29 +329,29 @@ async fn concurrent_workers_never_complete_one_event_twice() {
         logs.push(task.await.expect("worker"));
     }
     let drain_store = PgLeaseStore::new(support::connect_pinned(&url).await, HB_TIMEOUT);
-    let drained = drain(&drain_store, &db).await;
+    let drained = drain(&drain_store, &committer, &scope, &db).await;
 
-    let worker_completes: usize = logs.iter().map(|l| l.completes.len()).sum();
+    let worker_commits: usize = logs.iter().map(|l| l.commits.len()).sum();
     let sum = |f: fn(&Log) -> usize| logs.iter().map(f).sum::<usize>();
     let (takes, stale, lost) = (sum(|l| l.takes), sum(|l| l.stale), sum(|l| l.lost_without_expire));
     let (overlap, own_row) = (sum(|l| l.stale_under_new_holder), sum(|l| l.stale_own_row));
     let replaced = sum(|l| l.expire_found_new_token);
     eprintln!(
-        "lease_stress_pg: seed {seed}, {:?}: takes {takes}, worker completes {worker_completes}, drain completes {}, \
-         stale completes {stale} ({overlap} under a new holder, {own_row} on the own expired row), lost with no expire {lost}, expires that found a new token {replaced}",
+        "lease_stress_pg: seed {seed}, {:?}: takes {takes}, worker commits {worker_commits}, drain commits {}, \
+         stale commits {stale} ({overlap} under a new holder, {own_row} on the own expired row), lost with no expire {lost}, expires that found a new token {replaced}",
         started.elapsed(),
         drained.len()
     );
-    let history: Vec<&Completed> = logs.iter().flat_map(|l| l.completes.iter()).chain(drained.iter()).collect();
+    let history: Vec<&Committed> = logs.iter().flat_map(|l| l.commits.iter()).chain(drained.iter()).collect();
 
-    // No event id is in two successful completes.
+    // No event id is in two successful commits.
     let mut done_by: HashMap<Uuid, Uuid> = HashMap::new();
     for c in &history {
         for id in &c.done {
-            assert!(done_by.insert(*id, c.run).is_none(), "seed {seed}: event {id} is in two successful completes");
+            assert!(done_by.insert(*id, c.run).is_none(), "seed {seed}: event {id} is in two successful commits");
         }
     }
-    // The recorded tokens are unique: one lease generation completes at most one run.
+    // The recorded tokens are unique: one lease generation commits at most one run.
     let mut tokens = HashSet::new();
     for c in &history {
         assert!(tokens.insert(c.token), "seed {seed}: token {} completed two runs", c.token);
@@ -353,14 +366,14 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     for c in &history {
         assert_eq!(completed.get(&c.run), Some(&c.token), "seed {seed}: run {} is not completed with token {}", c.run, c.token);
     }
-    assert_eq!(completed.len(), history.len(), "seed {seed}: a run is completed that no recorded complete returned");
+    assert_eq!(completed.len(), history.len(), "seed {seed}: a run is completed that no recorded commit returned");
     // The `done` events are exactly the recorded ones, each marked by the run that returned it.
     let done_rows: HashMap<Uuid, Uuid> = rows(&db, &format!("SELECT id, claimed_run_id FROM inbox_event WHERE inbox_id = '{INBOX}' AND status = 'done'"))
         .await
         .iter()
         .map(|r| (r.try_get("", "id").expect("id"), r.try_get("", "claimed_run_id").expect("claimed_run_id")))
         .collect();
-    assert_eq!(done_rows, done_by, "seed {seed}: the done events differ from the recorded completes");
+    assert_eq!(done_rows, done_by, "seed {seed}: the done events differ from the recorded commits");
     // Every claimed event is on the thread of its run (AG5).
     let mixed = support::scalar_i64(
         &db,
@@ -383,15 +396,15 @@ async fn concurrent_workers_never_complete_one_event_twice() {
     // The random overlaps depend on timing. The sequential phase adds one on every run.
     let random_overlap = overlap;
     let overlap = overlap + sequential_overlap(&url, &db).await;
-    // The complete of the sequential phase is a stale complete too, so the stale floor does not
+    // The commit of the sequential phase is a stale commit too, so the stale floor does not
     // depend on the LCG either.
     let stale = stale + 1;
     eprintln!("lease_stress_pg: seed {seed}: overlaps {overlap} ({random_overlap} random, 1 sequential)");
 
     // Coverage: the run did contend.
-    assert!(worker_completes >= 1, "seed {seed}: coverage: no worker completed a claim");
-    assert!(stale >= 1, "seed {seed}: coverage: no stale complete");
-    assert!(overlap >= 1, "seed {seed}: coverage: no stale complete under a live new holder");
+    assert!(worker_commits >= 1, "seed {seed}: coverage: no worker committed a claim");
+    assert!(stale >= 1, "seed {seed}: coverage: no stale commit");
+    assert!(overlap >= 1, "seed {seed}: coverage: no stale commit under a live new holder");
     // `own_row` is printed, not asserted: a take can come in before the read, and one run
-    // measured only 1. `complete_pg` and `lease_property_pg` pin the expiry half of the fence.
+    // measured only 1. `run_commit_pg` and `lease_property_pg` pin the expiry half of the fence.
 }

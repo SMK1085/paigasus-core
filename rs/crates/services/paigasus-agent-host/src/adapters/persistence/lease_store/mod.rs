@@ -4,7 +4,6 @@
 //! time that decides that a lease is valid is the database clock (AG4).
 
 mod claim;
-mod complete;
 mod take;
 
 use std::time::Duration;
@@ -51,7 +50,7 @@ pub(crate) const RELEASE_SQL: &str = "UPDATE inbox_lease SET expires_at = clock_
 pub(crate) const DISCARD_RUN_SQL: &str = "UPDATE run SET status = 'discarded', finished_at = now() \
      WHERE id = $1 AND status = 'running' AND lease_token = $2";
 
-/// Await the commit of the transaction of `claim`, `complete` or a run commit (spec §8.4, §8.5).
+/// Await the commit of the transaction of a claim or of a run commit (spec §8.4, SMA-790 §6.8).
 /// The handle is poisoned unless the commit returns `Ok`. This covers a failed commit and a future
 /// that the caller drops while the commit is pending: in both cases the database may have
 /// committed, so the token or the open claim of the handle may be stale.

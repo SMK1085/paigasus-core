@@ -6,9 +6,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use async_trait::async_trait;
 use paigasus_agent_host_core::claim::{Claim, ClaimConfig};
 use paigasus_agent_host_core::ids::{InboxId, RunId, ThreadId};
 use paigasus_agent_host_core::lease::{ClaimError, LeaseHandle};
+use paigasus_agent_host_core::ports::ClaimRepository;
 use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseTransaction, Statement, TransactionTrait, Value};
@@ -121,7 +123,7 @@ impl PgLeaseStore {
             Step::Commit { token, dead, claim } => {
                 // The database may have rotated the token and opened the run. If the commit fails
                 // or the caller drops this future during it, the handle keeps the old token and no
-                // open claim, so it is poisoned (as in `complete`).
+                // open claim, so it is poisoned (as in the run commit).
                 commit_or_poison(handle, txn.commit()).await.map_err(store)?;
                 handle.record_claim(token, claim.as_ref().map(|c| c.run.clone()));
                 if !dead.is_empty() {
@@ -136,6 +138,13 @@ impl PgLeaseStore {
                 Ok(claim)
             }
         }
+    }
+}
+
+#[async_trait]
+impl ClaimRepository for PgLeaseStore {
+    async fn claim(&self, handle: &mut LeaseHandle, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError> {
+        self.claim_events(handle, cfg).await
     }
 }
 
@@ -263,4 +272,32 @@ async fn run_thread(txn: &DatabaseTransaction, inbox: Uuid, resolved: Option<Uui
     let new = mint_uuid();
     txn.execute_raw(stmt(INSERT_THREAD_SQL, [new.into(), inbox.into(), resolved.into()])).await.map_err(store)?;
     Ok((new, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn handle() -> LeaseHandle {
+        LeaseHandle::new(InboxId::new(Uuid::nil(), Uuid::nil()), LeaseToken(1), "h".to_owned())
+    }
+
+    #[tokio::test]
+    async fn a_commit_that_the_caller_drops_poisons_the_handle() {
+        let mut h = handle();
+        let pending = std::future::pending::<Result<(), String>>();
+        let outcome = tokio::time::timeout(Duration::from_millis(20), commit_or_poison(&mut h, pending)).await;
+        assert!(outcome.is_err(), "the commit never returns");
+        assert!(h.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_poisons_and_a_good_commit_does_not() {
+        let mut h = handle();
+        assert_eq!(commit_or_poison(&mut h, async { Ok::<(), String>(()) }).await, Ok(()));
+        assert!(!h.is_poisoned());
+        assert!(commit_or_poison(&mut h, async { Err::<(), String>("x".into()) }).await.is_err());
+        assert!(h.is_poisoned());
+    }
 }

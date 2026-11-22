@@ -9,16 +9,30 @@ use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
 use paigasus_agent_host_core::claim::Claim;
 use paigasus_agent_host_core::fault::NoFaults;
-use paigasus_agent_host_core::ids::{AgentId, PrincipalId};
+use paigasus_agent_host_core::ids::{AgentId, InboxId, PrincipalId};
 use paigasus_agent_host_core::memory::{MemoryCaps, MemoryChangeSet, MemoryCommitSet, MemoryScope};
 use paigasus_agent_host_core::run::{RunClass, RunRecord, RunUsage};
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use uuid::Uuid;
 
 /// The memory scope of one agent and one principal of an organization.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
 pub fn scope_of(org: Uuid, agent: Uuid, principal: Uuid) -> MemoryScope {
     MemoryScope::new(AgentId::new(org, agent), PrincipalId::from_uuid(principal))
+}
+
+/// The memory scope of an inbox: `(org_id, agent_id, principal_id)` of its row. A run commit
+/// refuses every other scope.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn inbox_scope(db: &DatabaseConnection, inbox: &InboxId) -> MemoryScope {
+    let sql = format!("SELECT org_id, agent_id, principal_id FROM inbox WHERE id = '{}'", inbox.uuid());
+    let row = db
+        .query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql))
+        .await
+        .expect("read the inbox")
+        .expect("the inbox row");
+    let get = |column: &str| row.try_get::<Uuid>("", column).expect("uuid column");
+    scope_of(get("org_id"), get("agent_id"), get("principal_id"))
 }
 
 /// A `Completed` record of the claim: no output, no usage, an empty session and an empty memory

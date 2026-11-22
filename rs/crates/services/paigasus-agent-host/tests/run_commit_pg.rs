@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The fenced run commit and the failure commit against a real Postgres (spec §6.7, §6.8).
+//! The fenced run commit and the failure commit against a real Postgres (spec §6.7, §6.8). The
+//! tests of the SMA-787 `complete` moved here when the run commit replaced it: the claimed events
+//! only, the thread update and the `Queue` mid-run policy (SMA-787 spec §8.5, G6).
 
 mod support;
 
@@ -16,13 +18,13 @@ use paigasus_agent_host_core::ids::{EventId, InboxId};
 use paigasus_agent_host_core::lease::LeaseHandle;
 use paigasus_agent_host_core::memory::{Expected, MemoryCaps, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use paigasus_agent_host_core::ports::{LeaseRepository, MemoryApplyError, MemoryStore, RunCommitter};
-use paigasus_agent_host_core::run::{BackOff, CommitError, EventDelay, FlaggedEvent, RunClass, RunRecord, RunUsage, ScreenOut, ScreenResult, SessionRow};
+use paigasus_agent_host_core::run::{BackOff, CommitError, EventDelay, FlaggedEvent, LeaseToken, RunClass, RunRecord, RunUsage, ScreenOut, ScreenResult, SessionRow};
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use serde_json::json;
-use support::commit::{committer, completed_record, scope_of};
+use support::commit::{committer, completed_record, inbox_scope, scope_of};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{counter, expire, insert_pending_event, insert_thread, lease_state, snapshot};
+use support::lease::{counter, expire, insert_event_on_thread, insert_pending_event, insert_thread, lease_state, snapshot};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(30);
@@ -383,9 +385,19 @@ async fn a_failed_commit_statement_is_outcome_unknown_and_poisons() {
     .await;
     let mut record = completed_record(&s.claim, scope());
     record.session = rows();
-    let res = s.committer.commit_record(&mut s.handle, record).await;
+    let res = s.committer.commit_record(&mut s.handle, record.clone()).await;
     assert_eq!(res, Err(CommitError::OutcomeUnknown));
     assert!(s.handle.is_poisoned());
+    // With the trigger gone, the same commit would pass. The poisoned handle sends no SQL and
+    // counts nothing.
+    exec(&s.db, "DROP TRIGGER refuse_session ON session_event").await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    assert_eq!(s.committer.commit_record(&mut s.handle, record).await, Err(CommitError::LeaseLost));
+    assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, None), 0, "the poisoned path counts nothing");
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE status = 'pending'").await, 2);
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM run WHERE status = 'running'").await, 1);
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM session_event").await, 0);
 }
 
 #[tokio::test]
@@ -717,4 +729,174 @@ async fn a_stale_worker_changes_no_attempt_of_the_new_holder() {
     assert_eq!(s.committer.release_after_shutdown(a_handle).await, Err(CommitError::LeaseLost));
     assert_eq!(before, snapshot(&s.db, u(INBOX)).await);
     assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, Some(("operation", "release_after_shutdown"))), 1);
+}
+
+// The tests of the SMA-787 `complete`, moved to the commit (SMA-790 §6.8). Each test inserts its
+// own events, so it starts from an inbox with no event and claims itself.
+
+/// One test: a migrated database, one inbox with no event, its lease, its scope and a committer.
+struct Bare {
+    _node: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+    db: DatabaseConnection,
+    store: PgLeaseStore,
+    handle: LeaseHandle,
+    scope: MemoryScope,
+    committer: Arc<PgRunCommitter>,
+}
+
+async fn bare() -> Option<Bare> {
+    let (node, _url, db) = migrated_postgres().await?;
+    insert_inbox(&db, u(ORG), u(INBOX), u(AGENT), u(PRINCIPAL)).await;
+    let store = PgLeaseStore::new(db.clone(), HB_TIMEOUT);
+    let handle = take_as(&store, "w1").await;
+    let scope = inbox_scope(&db, handle.inbox()).await;
+    let committer = committer(&db);
+    Some(Bare {
+        _node: node,
+        db,
+        store,
+        handle,
+        scope,
+        committer,
+    })
+}
+
+async fn take_as(store: &PgLeaseStore, holder: &str) -> LeaseHandle {
+    store.acquire(&InboxId::new(u(ORG), u(INBOX)), holder, TTL).await.expect("acquire").expect("some")
+}
+
+async fn status_count(db: &DatabaseConnection, status: &str) -> i64 {
+    n(db, &format!("SELECT count(*) AS n FROM inbox_event WHERE status = '{status}'")).await
+}
+
+/// An old thread (last run two days ago) with one pending event on it.
+async fn insert_expired_thread_with_event(db: &DatabaseConnection, thread: Uuid, event: Uuid) {
+    insert_thread(db, u(INBOX), thread).await;
+    exec(db, &format!("UPDATE thread SET last_run_at = now() - interval '2 days' WHERE id = '{thread}'")).await;
+    insert_event_on_thread(db, u(INBOX), event, 10, thread).await;
+}
+
+impl Bare {
+    async fn claim(&mut self) -> Claim {
+        self.store.claim_events(&mut self.handle, &cfg()).await.expect("claim").expect("some")
+    }
+
+    /// Commit a `Completed` record of `claim`. A raw handle has no keeper, so the test finishes
+    /// the claim on the handle after `Ok`.
+    async fn commit(&mut self, claim: &Claim) -> Vec<EventId> {
+        let c = self.committer.commit(&mut self.handle, completed_record(claim, self.scope.clone())).await.expect("commit");
+        self.handle.record_complete();
+        ids(c.done)
+    }
+}
+
+#[tokio::test]
+async fn commit_marks_only_the_claimed_events_done() {
+    let Some(mut b) = bare().await else { return };
+    insert_pending_event(&b.db, u(INBOX), u(10), 20).await;
+    insert_pending_event(&b.db, u(INBOX), u(11), 10).await;
+    let claim = b.claim().await;
+    let run = claim.run.uuid();
+    let c = b.committer.commit(&mut b.handle, completed_record(&claim, b.scope.clone())).await.expect("commit");
+    // `UPDATE ... RETURNING` has no defined order, and the port does not promise one.
+    assert_eq!(ids(c.done), vec![EventId::from_uuid(u(10)), EventId::from_uuid(u(11))]);
+    assert_eq!(status_count(&b.db, "done").await, 2);
+    assert_eq!(
+        n(&b.db, &format!("SELECT count(*) AS n FROM run WHERE id = '{run}' AND status = 'completed' AND finished_at IS NOT NULL")).await,
+        1
+    );
+    // The adapter does not finish the claim on the handle: the keeper does (spec §6.8).
+    assert_eq!(b.handle.open_claim(), Some(claim.run));
+}
+
+#[tokio::test]
+async fn commit_sets_last_run_at_and_the_successor() {
+    let Some(mut b) = bare().await else { return };
+    insert_expired_thread_with_event(&b.db, u(70), u(10)).await;
+    let claim = b.claim().await;
+    let new = claim.thread.uuid();
+    assert_ne!(new, u(70));
+    b.commit(&claim).await;
+    assert_eq!(n(&b.db, &format!("SELECT count(*) AS n FROM thread WHERE id = '{new}' AND last_run_at IS NOT NULL")).await, 1);
+    assert_eq!(n(&b.db, &format!("SELECT count(*) AS n FROM thread WHERE id = '{}' AND successor_id = '{new}'", u(70))).await, 1);
+}
+
+#[tokio::test]
+async fn commit_does_not_overwrite_a_successor() {
+    let Some(mut b) = bare().await else { return };
+    insert_expired_thread_with_event(&b.db, u(70), u(10)).await;
+    let claim = b.claim().await;
+    insert_thread(&b.db, u(INBOX), u(71)).await;
+    exec(&b.db, &format!("UPDATE thread SET successor_id = '{}' WHERE id = '{}'", u(71), u(70))).await;
+    b.commit(&claim).await;
+    assert_eq!(n(&b.db, &format!("SELECT count(*) AS n FROM thread WHERE id = '{}' AND successor_id = '{}'", u(70), u(71))).await, 1);
+}
+
+#[tokio::test]
+async fn an_old_claim_on_a_new_handle_is_lease_lost() {
+    let Some(mut b) = bare().await else { return };
+    insert_pending_event(&b.db, u(INBOX), u(10), 10).await;
+    let c1 = b.claim().await;
+    expire(&b.db, u(INBOX)).await;
+    let mut h2 = take_as(&b.store, "w2").await;
+    let c2 = b.store.claim_events(&mut h2, &cfg()).await.expect("claim").expect("some");
+    assert_ne!(c1.run, c2.run);
+    assert_eq!(b.committer.commit(&mut h2, completed_record(&c1, b.scope.clone())).await, Err(CommitError::LeaseLost));
+    assert_eq!(status_count(&b.db, "pending").await, 1);
+    assert_eq!(n(&b.db, "SELECT count(*) AS n FROM run WHERE status = 'running'").await, 2);
+    assert_eq!(n(&b.db, &format!("SELECT count(*) AS n FROM inbox_event WHERE claimed_run_id = '{}'", c2.run.uuid())).await, 1);
+}
+
+#[tokio::test]
+async fn queue_keeps_a_mid_run_event_pending() {
+    let Some(mut b) = bare().await else { return };
+    insert_pending_event(&b.db, u(INBOX), u(10), 20).await;
+    let claim = b.claim().await;
+    let thread = claim.thread;
+    insert_event_on_thread(&b.db, u(INBOX), u(11), 10, thread.uuid()).await;
+    assert_eq!(b.commit(&claim).await, vec![EventId::from_uuid(u(10))]);
+    assert_eq!(status_count(&b.db, "pending").await, 1);
+    let next = b.claim().await;
+    assert_eq!(next.lease_token, LeaseToken(2));
+    assert_eq!(next.thread, thread);
+    assert!(!next.fresh_thread);
+    assert!(next.events.iter().map(|e| e.id).eq([EventId::from_uuid(u(11))]));
+}
+
+#[tokio::test]
+async fn a_crash_retry_reports_a_fresh_thread() {
+    let Some(mut b) = bare().await else { return };
+    insert_pending_event(&b.db, u(INBOX), u(10), 10).await;
+    let c1 = b.claim().await;
+    expire(&b.db, u(INBOX)).await;
+    let mut h2 = take_as(&b.store, "w2").await;
+    let c2 = b.store.claim_events(&mut h2, &cfg()).await.expect("claim").expect("some");
+    assert_eq!(c2.thread, c1.thread);
+    assert!(c2.fresh_thread);
+    assert!(c2.events.iter().map(|e| e.id).eq([EventId::from_uuid(u(10))]));
+    assert_eq!(n(&b.db, &format!("SELECT attempts::bigint AS n FROM inbox_event WHERE id = '{}'", u(10))).await, 2);
+}
+
+#[tokio::test]
+async fn a_done_event_in_the_claim_is_not_marked_again() {
+    let Some(mut b) = bare().await else { return };
+    insert_pending_event(&b.db, u(INBOX), u(10), 20).await;
+    insert_pending_event(&b.db, u(INBOX), u(11), 10).await;
+    let claim = b.claim().await;
+    exec(&b.db, &format!("UPDATE inbox_event SET status = 'done' WHERE id = '{}'", u(11))).await;
+    assert_eq!(b.commit(&claim).await, vec![EventId::from_uuid(u(10))]);
+    assert_eq!(status_count(&b.db, "done").await, 2);
+}
+
+/// The id list is a guard of its own: an event that the run claimed but the record does not list
+/// as passed stays pending. (`claimed_run_id` alone would mark it.)
+#[tokio::test]
+async fn commit_marks_only_the_ids_of_the_claim_value() {
+    let Some(mut b) = bare().await else { return };
+    insert_pending_event(&b.db, u(INBOX), u(10), 20).await;
+    insert_pending_event(&b.db, u(INBOX), u(11), 10).await;
+    let mut claim = b.claim().await;
+    claim.events.truncate(1);
+    assert_eq!(b.commit(&claim).await, vec![EventId::from_uuid(u(10))]);
+    assert_eq!(status_count(&b.db, "pending").await, 1);
 }
