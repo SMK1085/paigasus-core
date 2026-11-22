@@ -34,7 +34,7 @@
 //!   bucket in the start command instead, so the bucket exists before the first request.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
@@ -103,15 +103,19 @@ async fn start_rustfs() -> Option<S3Node> {
         .with_env_var("RUSTFS_SECRET_KEY", SECRET_KEY);
     let node = paigasus_test_docker::start_or_skip(image, "memory_s3 rustfs").await?;
     let port = paigasus_test_docker::mapped_port(&node, RUSTFS_PORT, "rustfs").await;
-    let deadline = Instant::now() + READY_BUDGET;
-    loop {
-        let (alias, _) = exec(&node, &["rc", "alias", "set", "local", "http://127.0.0.1:9000", ACCESS_KEY, SECRET_KEY]).await;
-        if alias == Some(0) && exec(&node, &["rc", "bucket", "list", "local"]).await.0 == Some(0) {
-            break;
+    // The time limit also covers an `exec` that does not end.
+    let ready = async {
+        loop {
+            let (alias, _) = exec(&node, &["rc", "alias", "set", "local", "http://127.0.0.1:9000", ACCESS_KEY, SECRET_KEY]).await;
+            if alias == Some(0) && exec(&node, &["rc", "bucket", "list", "local"]).await.0 == Some(0) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(Instant::now() < deadline, "rustfs was not ready within {READY_BUDGET:?}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    };
+    tokio::time::timeout(READY_BUDGET, ready)
+        .await
+        .unwrap_or_else(|_| panic!("rustfs was not ready within {READY_BUDGET:?}"));
     let (created, out) = exec(&node, &["rc", "bucket", "create", &format!("local/{BUCKET}")]).await;
     assert_eq!(created, Some(0), "rc bucket create: {out}");
     Some(S3Node {
@@ -146,11 +150,15 @@ async fn start_versitygw(tag: &str) -> Option<S3Node> {
         bucket: BUCKET.to_owned(),
     };
     let store = build_store(&s3_config(&s3), env(&s3)).expect("build the client");
-    let deadline = Instant::now() + READY_BUDGET;
-    while store.list(None).try_next().await.is_err() {
-        assert!(Instant::now() < deadline, "versitygw {tag} was not ready within {READY_BUDGET:?}");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    // The time limit also covers a `list` that does not end.
+    let ready = async {
+        while store.list(None).try_next().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    tokio::time::timeout(READY_BUDGET, ready)
+        .await
+        .unwrap_or_else(|_| panic!("versitygw {tag} was not ready within {READY_BUDGET:?}"));
     Some(s3)
 }
 

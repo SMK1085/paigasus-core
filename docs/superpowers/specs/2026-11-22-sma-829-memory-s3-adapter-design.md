@@ -408,7 +408,7 @@ section, `memory.s3`:
 | `memory.s3.prefix` | string | required | The rules of §6.2. |
 | `memory.s3.region` | string | `"us-east-1"` | |
 | `memory.s3.endpoint` | URL | none (AWS) | `http` or `https`, no userinfo, no query, no fragment. `http` needs `allow_http`. |
-| `memory.s3.path_style` | bool | `true` when `endpoint` is set, else `false` | With `false` and an `endpoint`, the endpoint must already hold the bucket (`aws/builder.rs:1294`). The doc says this. |
+| `memory.s3.path_style` | bool | `true` when `endpoint` is set or the bucket name has a `.`, else `false` | With `false` and an `endpoint`, the endpoint must already hold the bucket (`aws/builder.rs:1294`). The doc says this. A dotted bucket with no `endpoint` gives `<a.b>.s3.<region>.amazonaws.com` in virtual-hosted style (`aws/builder.rs:1297`), and the AWS wildcard certificate does not match that name. |
 | `memory.s3.allow_http` | bool | `false` | For local tests and dev only. |
 | `memory.s3.extra_ca_bundle_path` | path | none | A PEM bundle. It **ADDs** to the platform roots. The `extra_` prefix marks the ADD side, per `rs/CLAUDE.md`. |
 | `memory.s3.apply_deadline_secs` | integer | `10` | 1 or more, and less than `lease.ttl_secs` (default 30). |

@@ -38,7 +38,10 @@ fn generic_class(source: &(dyn std::error::Error + 'static)) -> String {
         if let Some(http) = err.downcast_ref::<HttpError>() {
             match http.kind() {
                 HttpErrorKind::Timeout => return TIMEOUT_CLASS.to_owned(),
-                HttpErrorKind::Connect | HttpErrorKind::Request | HttpErrorKind::Interrupted | HttpErrorKind::Decode => return "transport".to_owned(),
+                // `Unknown` is an error that reqwest cannot sort. The server can still get the request.
+                HttpErrorKind::Connect | HttpErrorKind::Request | HttpErrorKind::Interrupted | HttpErrorKind::Decode | HttpErrorKind::Unknown => {
+                    return "transport".to_owned();
+                }
                 _ => {}
             }
         }
@@ -133,6 +136,8 @@ mod tests {
             (Error::Generic { store: "S3", source: leaky() }, "other"),
             (http(HttpErrorKind::Timeout), "timeout"),
             (http(HttpErrorKind::Connect), "transport"),
+            // reqwest gives `Unknown` for an error that it cannot sort. The request can be sent.
+            (http(HttpErrorKind::Unknown), "transport"),
         ]
     }
 

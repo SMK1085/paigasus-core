@@ -191,6 +191,7 @@ The order of `precheck` (spec §6.5 phase 1, with the order correction of the De
 The rules of `result_of` (spec §6.5 "The result"): `confirmed` counts `Confirmed`. All `Confirmed` gives `Ok(())`. `confirmed == 0` and no `Unknown` gives the error of the first `Failed` in set order. Else `Partial { applied: confirmed, failed_at, cause }`, where `failed_at` and `cause` are those of the first `Failed` or `Unknown` in set order. `NotStarted` is never `failed_at`.
 
 The rules of `put_outcome` (spec §6.5): `Mine` → `Confirmed`. `Other` or `Absent` with `refused` → `Failed(Conflict { path })`. `Other` or `Absent` without `refused` → `Failed(cause)`. `Foreign` or `ReadFailed` → `Unknown(cause)`. The rules of `delete_outcome`: `Absent` → `Confirmed`; `Expected` → `Failed(cause)`; `Other` and `ReadFailed` → `Unknown(cause)` (Decisions section).
+  - **Shipped (spec §6.5, rulings F1 and F3):** `put_outcome` also takes `uncertain` and `update`. A `timeout` or `transport` error with `Absent` is `Unknown`. An uncertain update with `Other` is also `Unknown`.
 
 - [ ] **Step 1: Write the failing table tests**
 
@@ -244,6 +245,7 @@ Message: `feat(rs): add the pure pre-check of the S3 memory store (SMA-829)`.
 The rules (spec §6.2 to §6.4, §6.6):
 - `get`: `GET` the file key. `NotFound` → `Ok(None)`. A missing ETag → `Store("the object has no ETag")`. A header that `decode` refuses → `Store("object is not a memory file")` and count `reason = header`.
 - `list(scope, dir)`: list `dir_path`. For each entry: `listed_key` against the dir path (`OutsideBase` → `Store("the store listed a key outside the scope")`); `Refused` → skip, count `key`; `content_size == None` → skip, count `size`; a missing ETag → `Store`. An `Err` from the stream → `Store(store_text("the memory listing failed", e))`, and when the class is `unparsable_key` count `unparsable`. Sort by path.
+  - **Shipped:** `listing(scope_base, list_base)` checks the key against the dir path, but makes the `MemoryPath` from the scope path. So `scope/a/x` lists as `/a/x`.
 - `usage`: `files` and `bytes` over `listing(scope_path)`.
 - `delete_scope`: a raw listing of the scope path (no skip, no count); delete each key with no condition, at most 8 at a time (`const DELETE_CONCURRENCY: usize = 8`); then list again. Any key left → `Store("keys remain after the scope delete")` (AG9). A listing error → `Store`.
 
@@ -351,6 +353,7 @@ Faults:
 - `a_timed_out_put_that_landed_is_ok`: `fault_put(1, WriteThenFail(Generic with HttpError Timeout))` → `Ok(())`.
 - `a_timed_out_put_with_a_failed_check_is_partial`: `WriteThenFail(timeout)` and `fail_next_get()` → `Partial { applied: 0, failed_at: /a }`.
 - `a_timed_out_put_that_did_not_land_is_a_bare_store_error`: `fault_put(1, Fail(timeout))` → `Store(..)` whose text holds `timeout`.
+  - **Shipped (spec §6.5, ruling F1):** this test is `a_timed_out_put_that_did_not_land_is_partial`, and the result is `Partial { applied: 0 }`. `a_definite_put_failure_that_did_not_land_is_a_bare_store_error` keeps the bare `Store` case.
 - `the_deadline_bounds_apply` (`#[tokio::test(start_paused = true)]`): deadline 2 s, `fault_put(2, Stall)` on `[Put /a, Put /b]` (both start at once; `/a` lands, `/b` stalls). The call is wrapped in an outer `tokio::time::timeout(Duration::from_secs(60), …)`, and the test asserts that the outer timeout does not expire, so a missing deadline fails and does not hang. Result: `Partial { applied: 1, failed_at: /b }` whose cause text holds `timeout`, and the elapsed paused time is `>= 2 s` and `< 2.1 s`.
 - `an_expired_deadline_before_the_first_write_is_a_bare_store_error`: a `ScriptedStore` whose `list` stalls (add `stall_list(&self)`), deadline 1 s, the same outer timeout → bare `Store` with `timeout`.
 - `partial_increments_the_counter`: the `the_second_put_fails` set under a `DebuggingRecorder` → `agent_host_memory_s3_partial_applies_total == 1`; a bare `Conflict` → 0.
@@ -594,6 +597,7 @@ On `rustfs` (each one skips through `start_or_skip` and runs with `PAIGASUS_REQU
 - `rustfs_stores_the_envelope_under_the_scope_key`: after a create of `/tasks/t1.md`, the raw `get` of `<prefix>/<org>/<agent>/<principal>/tasks/t1.md` starts with `paigasus-memory/1 `.
 - `rustfs_version_is_equal_for_list_get_and_head`: for one object, the listed ETag, the `get` ETag and the `head` ETag are byte-equal (spec §6.3). If they differ, change `version_of` to one normal form, add the unit test `version_of_normalizes_<form>` that pins it, and record the form.
 - `rustfs_folder_marker_is_skipped_and_erased`: a raw `…/notes/` key; `list(root)` does not show it; `delete_scope` removes it; the raw listing of the scope is empty.
+  - **Shipped (spec §6.6, measured on rustfs 1.0.6):** `object_store` strips the trailing `/`, so the marker stays. The test is `rustfs_folder_marker_is_skipped_and_not_erased`: `delete_scope` returns `Store("keys remain after the scope delete")`.
 - `rustfs_empty_segment_key_makes_list_fail`: a raw `…/a//b` key; if the store keeps it, `list` returns `Store` with `unparsable_key`; if the store normalizes it, assert the measured behaviour and record it in the test doc.
 - `rustfs_file_and_directory_of_one_name`: `/notes` present; `[Put /notes/x Absent, Delete /notes v]`. Assert the measured result: on a flat-namespace store a bare `Store` error with `/notes` still present (the `Delete` is not sent); on a key-value store `Ok(())`.
 - `rustfs_delete_scope_removes_more_than_one_listing_page` (Review Focus 3): 1,001 raw objects under one scope (through the `ObjectStore`, 16 at a time), then `delete_scope` is `Ok` and the raw listing is empty.

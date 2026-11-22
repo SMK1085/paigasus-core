@@ -21,6 +21,8 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -154,20 +156,32 @@ impl S3MemoryStore {
     /// finish, and the rest stay `NotStarted`. When the deadline expires, no new write starts: each
     /// write in flight is dropped and becomes `Unknown`, and each write that did not start becomes
     /// `Failed`.
+    ///
+    /// `FuturesUnordered` polls a future first only in a later `next`. So each write checks the
+    /// stop flag at its first poll, before its first request. A write starts only at that poll.
     async fn run_phase(&self, scope: &MemoryScope, set: &MemoryCommitSet, indexes: &[usize], outcomes: &mut [Outcome], deadline: Instant) {
         let changes = set.changes.changes();
+        // Atomics, not `Cell`: the future of `apply` must be `Send`. All access is in one task.
+        let stopped = AtomicBool::new(false);
+        let started: Vec<AtomicBool> = changes.iter().map(|_| AtomicBool::new(false)).collect();
+        let (stop_flag, start_flags) = (&stopped, &started);
         let mut waiting = indexes.iter().copied();
         let mut running = FuturesUnordered::new();
         let mut in_flight = Vec::new();
-        let mut stopped = false;
         loop {
             if Instant::now() >= deadline {
                 break;
             }
-            while !stopped && running.len() < WRITE_CONCURRENCY {
+            while !stopped.load(Relaxed) && running.len() < WRITE_CONCURRENCY {
                 let Some(i) = waiting.next() else { break };
                 in_flight.push(i);
-                running.push(async move { (i, self.write(scope, &changes[i]).await) });
+                running.push(async move {
+                    if stop_flag.load(Relaxed) {
+                        return (i, Outcome::NotStarted);
+                    }
+                    start_flags[i].store(true, Relaxed);
+                    (i, self.write(scope, &changes[i]).await)
+                });
             }
             if running.is_empty() {
                 return;
@@ -175,17 +189,25 @@ impl S3MemoryStore {
             match tokio::time::timeout_at(deadline, running.next()).await {
                 Ok(Some((i, outcome))) => {
                     in_flight.retain(|&j| j != i);
-                    stopped |= matches!(outcome, Outcome::Failed(_) | Outcome::Unknown(_));
+                    if matches!(outcome, Outcome::Failed(_) | Outcome::Unknown(_)) {
+                        stopped.store(true, Relaxed);
+                    }
                     outcomes[i] = outcome;
                 }
                 Ok(None) => return,
                 Err(_) => break,
             }
         }
-        // The deadline expired. Drop the writes in flight: their outcome is not known.
+        // The deadline expired. Drop the writes in flight: the outcome of a started write is not
+        // known. A write that did not start is the same as a write that waits.
         drop(running);
+        let stopped = stopped.load(Relaxed);
         for i in in_flight {
-            outcomes[i] = Outcome::Unknown(MemoryApplyError::Store(deadline_text()));
+            if started[i].load(Relaxed) {
+                outcomes[i] = Outcome::Unknown(MemoryApplyError::Store(deadline_text()));
+            } else if !stopped {
+                outcomes[i] = Outcome::Failed(MemoryApplyError::Store(deadline_text()));
+            }
         }
         if !stopped {
             for i in waiting {
@@ -982,10 +1004,10 @@ mod tests {
         let set = set_of(&scope(), changes);
         let r = store.apply(&set, &MemoryCaps::default()).await;
         let puts = scripted.calls().iter().filter(|c| c.starts_with("PUT ")).count();
-        // The first batch starts at once. After the failure no new write starts.
-        assert_eq!(puts, WRITE_CONCURRENCY, "{:?}", scripted.calls());
-        let (applied, failed_at, _) = partial_parts(r);
-        assert_eq!((applied, failed_at), (WRITE_CONCURRENCY - 1, mp("/f00")));
+        // The first PUT fails before the other admitted writes are polled. They must not start.
+        assert_eq!(puts, 1, "{:?}", scripted.calls());
+        // The failed PUT did not land, and no write started after it, so the store holds nothing.
+        assert!(matches!(r, Err(MemoryApplyError::Store(_))), "{r:?}");
     }
 
     #[tokio::test(start_paused = true)]

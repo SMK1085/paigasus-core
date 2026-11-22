@@ -190,8 +190,9 @@ pub struct MemoryS3Config {
     /// `https`, and no user name, password, query or fragment.
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Use path-style addressing. The default is `true` when `endpoint` is set, and `false`
-    /// when it is not. With `false` and an `endpoint`, the endpoint must already hold the bucket.
+    /// Use path-style addressing. The default is `true` when `endpoint` is set or the bucket name
+    /// has a `.`, else `false`. With `false` and an `endpoint`, the endpoint must already hold
+    /// the bucket.
     #[serde(default)]
     pub path_style: Option<bool>,
     /// Allow an `http` endpoint. For local tests and development only.
@@ -218,7 +219,9 @@ impl MemoryS3Config {
     /// Whether the client uses path-style addressing.
     #[must_use]
     pub fn path_style(&self) -> bool {
-        self.path_style.unwrap_or(self.endpoint.is_some())
+        // A bucket name with a `.` gives a host name that the AWS wildcard certificate does not
+        // match, so the AWS default is path-style for it.
+        self.path_style.unwrap_or(self.endpoint.is_some() || self.bucket.contains('.'))
     }
 
     /// The parsed key prefix. Call it only after [`Config::validate`] returned `Ok`.
@@ -1291,6 +1294,27 @@ mod tests {
             assert!(!cfg.memory.s3.as_ref().expect("s3 section").path_style());
             Ok(())
         });
+    }
+
+    #[test]
+    fn a_dotted_aws_bucket_defaults_to_path_style() {
+        // `<a.b>.s3.<region>.amazonaws.com` does not match the AWS wildcard certificate.
+        let s3 = |bucket: &str, endpoint: Option<&str>, path_style: Option<bool>| MemoryS3Config {
+            bucket: bucket.into(),
+            prefix: "mem".into(),
+            region: default_s3_region(),
+            endpoint: endpoint.map(Into::into),
+            path_style,
+            allow_http: false,
+            extra_ca_bundle_path: None,
+            apply_deadline_secs: 10,
+        };
+        assert!(s3("team.memory", None, None).path_style());
+        assert!(!s3("team-memory", None, None).path_style());
+        assert!(s3("team-memory", Some("https://s3.example"), None).path_style());
+        // An explicit value wins.
+        assert!(!s3("team.memory", None, Some(false)).path_style());
+        assert!(!s3("team.memory", Some("https://team.memory.s3.example"), Some(false)).path_style());
     }
 
     #[test]
