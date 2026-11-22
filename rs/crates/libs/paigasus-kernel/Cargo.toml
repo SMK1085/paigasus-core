@@ -34,11 +34,14 @@ cedar-policy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, features = ["raw_value"], optional = true }
 unicode-normalization = { version = "0.1.25", optional = true }
+# Feature `detectors` only (SMA-855): host extraction and the built-in token forms. Both are
+# already in `rs/Cargo.lock`, so no new package enters the lockfile.
+regex = { version = "1.13", optional = true }
+url = { workspace = true, optional = true }
 
 [features]
-# The finding types and the strict JSON reading, with no Cedar (SMA-855). `regex` and `url` join
-# in the task that adds the built-in detectors.
-detectors = ["dep:serde", "dep:serde_json", "dep:unicode-normalization"]
+# The finding types, the strict JSON reading and the host extraction, with no Cedar (SMA-855).
+detectors = ["dep:serde", "dep:serde_json", "dep:unicode-normalization", "dep:regex", "dep:url"]
 tool-policy = ["detectors", "dep:cedar-policy", "dep:serde", "dep:serde_json", "dep:unicode-normalization"]
 
 [package.metadata.docs.rs]

@@ -2,14 +2,19 @@
 //! The strict JSON reading that the tool policy and the detectors share (§ 6.1.4): a duplicate
 //! key, a bad nesting depth and the exact reading of a number. It has no Cedar type.
 
+#[cfg(feature = "tool-policy")]
 use std::collections::HashSet;
+#[cfg(feature = "tool-policy")]
 use std::fmt;
 
+#[cfg(feature = "tool-policy")]
 use serde::de::{Deserialize, Deserializer, Error as _, MapAccess, Visitor};
+#[cfg(feature = "tool-policy")]
 use serde_json::value::RawValue;
 
 /// Arguments nested deeper than this are unparsed. `RawValue` skips the 128 level limit of
 /// `serde_json`, so the walk checks the depth itself before it recurses.
+#[cfg(feature = "tool-policy")]
 pub(crate) const MAX_NESTING: usize = 128;
 /// The largest exponent the number reader tracks. A larger one saturates here. No text length
 /// reaches this bound, so the length of the fraction never cancels a saturated exponent.
@@ -111,11 +116,14 @@ fn classify(text: &str) -> Option<NumberClass> {
 }
 
 /// The arguments are not one strict JSON object.
+#[cfg(feature = "tool-policy")]
 pub(crate) struct Unparsed;
 
 /// The members of one JSON object, in order. A duplicate key is an error.
+#[cfg(feature = "tool-policy")]
 struct Entries<'a>(Vec<(String, &'a RawValue)>);
 
+#[cfg(feature = "tool-policy")]
 impl<'de> Deserialize<'de> for Entries<'de> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct V;
@@ -140,20 +148,24 @@ impl<'de> Deserialize<'de> for Entries<'de> {
     }
 }
 
+#[cfg(feature = "tool-policy")]
 pub(crate) fn first_byte(text: &str) -> u8 {
     text.as_bytes().first().copied().unwrap_or(0)
 }
 
+#[cfg(feature = "tool-policy")]
 pub(crate) fn strict_entries(text: &str) -> Result<Vec<(String, &RawValue)>, Unparsed> {
     serde_json::from_str::<Entries<'_>>(text).map(|e| e.0).map_err(|_| Unparsed)
 }
 
+#[cfg(feature = "tool-policy")]
 pub(crate) fn elements(text: &str) -> Result<Vec<&RawValue>, Unparsed> {
     serde_json::from_str::<Vec<&RawValue>>(text).map_err(|_| Unparsed)
 }
 
 /// Whether the brackets of one valid JSON text nest at most `MAX_NESTING` levels. Iterative, so a
 /// deep text cannot overflow the stack. A bracket inside a string does not count.
+#[cfg(feature = "tool-policy")]
 pub(crate) fn nesting_ok(text: &str) -> bool {
     let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
     for b in text.bytes() {

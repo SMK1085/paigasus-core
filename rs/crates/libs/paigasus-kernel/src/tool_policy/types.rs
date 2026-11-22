@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::CedarUid;
-
 use crate::detect::Severity;
+
 pub use crate::detect::{Declared, NAME_COLLISION, ToolInput, UNPARSED_ARGUMENTS};
 
 /// One tool call to decide.
