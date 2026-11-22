@@ -46,6 +46,9 @@ fn principal_of(ctx: &DecisionContext) -> Option<CedarUid> {
 }
 
 fn session_of(ctx: &DecisionContext) -> SessionInfo {
+    if let Some(s) = ctx.session.as_deref() {
+        return s.info.clone();
+    }
     match ctx.policy.as_deref().map(|p| &p.set) {
         Some(PolicySet::Available { facts, .. }) => facts.session.clone(),
         _ => SessionInfo::placeholder(),
@@ -202,7 +205,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
-    use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, Facts, RequestInfo, ToolPolicies};
+    use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, Facts, Findings, RequestInfo, ToolPolicies};
 
     use super::*;
     use crate::decision_log::record::{ArgumentDigest, CallFacts, CedarDetail, DecisionDetail};
@@ -282,6 +285,17 @@ mod tests {
 
     fn detail(basis: RecordBasis, effect: Effect) -> Arc<DecisionDetail> {
         Arc::new(DecisionDetail::new(basis, Some(cedar(effect)), Some(ArgumentDigest::new([7; 32], "k1"))))
+    }
+
+    #[test]
+    fn the_record_takes_the_session_of_the_context() {
+        let (c, _) = available_ctx(TenantMode::Enforce);
+        let sid = Uuid::from_u128(77);
+        let session = crate::session::SessionContext::new(Uuid::from_u128(9), sid, 5, Findings::new(), crate::session::StoreBudget::new(Duration::from_secs(1)));
+        let with = c.clone().with_session(Arc::new(session));
+        assert_eq!(session_of(&with), SessionInfo::new(sid.to_string(), 5));
+        assert_eq!(session_of(&c), SessionInfo::new("s-1", 3));
+        assert_eq!(session_of(&ctx()), SessionInfo::placeholder());
     }
 
     #[test]

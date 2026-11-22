@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::decision_log::DecisionDetail;
 use crate::interceptor::DeciderError;
 use crate::policy::PolicySnapshot;
+use crate::session::SessionContext;
 use crate::turn::ToolTurn;
 use crate::types::{Decision, ToolCall};
 
@@ -35,6 +36,8 @@ pub struct DecisionContext {
     pub ingress: String,
     /// The model of the request (SMA-755). Empty by default.
     pub model: String,
+    /// The session of the request (SMA-753). `None` when the gateway keeps no session.
+    pub session: Option<Arc<SessionContext>>,
 }
 
 impl DecisionContext {
@@ -48,6 +51,7 @@ impl DecisionContext {
             api_key_id: None,
             ingress: String::new(),
             model: String::new(),
+            session: None,
         }
     }
 
@@ -64,6 +68,13 @@ impl DecisionContext {
     #[must_use]
     pub fn with_policy(mut self, snapshot: Arc<PolicySnapshot>) -> Self {
         self.policy = Some(snapshot);
+        self
+    }
+
+    /// Attach the session of the request (SMA-753).
+    #[must_use]
+    pub fn with_session(mut self, s: Arc<SessionContext>) -> Self {
+        self.session = Some(s);
         self
     }
 }
