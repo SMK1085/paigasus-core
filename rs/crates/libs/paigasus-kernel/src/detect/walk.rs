@@ -11,6 +11,7 @@ use std::fmt;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 use super::ToolInput;
+use super::input::nesting_ok;
 
 /// One string of the arguments.
 pub(crate) struct Leaf<'a> {
@@ -102,11 +103,17 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
     }
 }
 
-/// The parsed tree and whether an object repeats a key. `None` is invalid JSON. `serde_json`
-/// stops at 128 levels, so a deeper text is `None` too.
+/// The parsed tree and whether an object repeats a key. `None` is invalid JSON, or JSON that
+/// nests deeper than 128 levels. The strict reader allows exactly 128 levels (`nesting_ok`), so
+/// the walk checks that first and then lifts the 127 level limit of `serde_json`. The check
+/// bounds the recursion.
 fn parse(text: &str) -> Option<(Node, bool)> {
+    if !nesting_ok(text) {
+        return None;
+    }
     let duplicate = Cell::new(false);
     let mut de = serde_json::Deserializer::from_str(text);
+    de.disable_recursion_limit();
     let node = Seed(&duplicate).deserialize(&mut de).and_then(|n| de.end().map(|()| n)).ok()?;
     Some((node, duplicate.get()))
 }
@@ -124,6 +131,63 @@ pub(crate) fn input_mode(input: &ToolInput) -> InputMode {
         },
         _ => InputMode::Text,
     }
+}
+
+fn hex4(b: &[u8]) -> Option<u32> {
+    let digits = b.get(..4)?;
+    digits.iter().try_fold(0u32, |acc, d| Some(acc * 16 + char::from(*d).to_digit(16)?))
+}
+
+/// The low surrogate of a `\uXXXX` escape at `b[i..]`, if there is one.
+fn low_surrogate(b: &[u8], i: usize) -> Option<u32> {
+    if b.get(i) != Some(&b'\\') || b.get(i + 1) != Some(&b'u') {
+        return None;
+    }
+    hex4(b.get(i + 2..)?).filter(|l| (0xDC00..0xE000).contains(l))
+}
+
+/// Decode `\/`, `\\` and `\uXXXX` in a text that is not valid JSON, in one pass. A surrogate pair
+/// gives one character. A lone surrogate gives U+FFFD. Any other backslash stays as it is.
+fn decode_raw(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' {
+            let run = text[i..].find('\\').unwrap_or(text.len() - i);
+            out.push_str(&text[i..i + run]);
+            i += run;
+            continue;
+        }
+        let unit = (b.get(i + 1) == Some(&b'u')).then(|| b.get(i + 2..).and_then(hex4)).flatten();
+        match (b.get(i + 1), unit) {
+            (Some(b'/'), _) => {
+                out.push('/');
+                i += 2;
+            }
+            (Some(b'\\'), _) => {
+                out.push('\\');
+                i += 2;
+            }
+            (_, Some(unit)) => {
+                i += 6;
+                let ch = match unit {
+                    0xD800..0xDC00 => low_surrogate(b, i).and_then(|low| {
+                        i += 6;
+                        char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))
+                    }),
+                    0xDC00..0xE000 => None,
+                    u => char::from_u32(u),
+                };
+                out.push(ch.unwrap_or('\u{FFFD}'));
+            }
+            _ => {
+                out.push('\\');
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn escape_into(out: &mut String, key: &str) {
@@ -168,7 +232,7 @@ pub(crate) fn walk_strings(input: &ToolInput, f: &mut dyn FnMut(Leaf<'_>)) {
         ToolInput::Json(text) => match parse(text) {
             Some((node, _)) => visit(&node, None, &mut String::new(), f),
             None => {
-                let raw = text.replace("\\/", "/");
+                let raw = decode_raw(text);
                 f(Leaf { key: None, pointer: "", text: &raw });
             }
         },
@@ -216,6 +280,26 @@ mod tests {
                 (Some("k".into()), "/a~1b/1/k".into(), "y".into()),
             ]
         );
+    }
+
+    #[test]
+    fn depth_128_is_walked_and_129_is_raw() {
+        let nest = |n: usize| format!("{}\"x\"{}", "[".repeat(n), "]".repeat(n));
+        assert_eq!(mode(&nest(127)), InputMode::NotObject);
+        assert_eq!(mode(&nest(128)), InputMode::NotObject);
+        assert_eq!(mode(&nest(129)), InputMode::Raw);
+        let got = leaves(&ToolInput::Json(nest(128)));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].2, "x");
+    }
+
+    #[test]
+    fn raw_text_decodes_slash_backslash_and_unicode_escapes() {
+        let raw = |t: &str| leaves(&ToolInput::Json(format!("{t} \"")))[0].2.clone();
+        assert_eq!(raw(r"a\/b e \\ \\u0065"), "a/b e \\ \\u0065 \"");
+        assert_eq!(raw(r"😀"), "\u{1F600} \"");
+        assert_eq!(raw(r"\ud800x \udc00 \u12 \q"), "\u{FFFD}x \u{FFFD} \\u12 \\q \"");
+        assert_eq!(raw("é日本\\"), "é日本\\ \"");
     }
 
     #[test]

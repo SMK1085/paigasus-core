@@ -14,13 +14,14 @@ use serde_json::value::RawValue;
 
 /// Arguments nested deeper than this are unparsed. `RawValue` skips the 128 level limit of
 /// `serde_json`, so the walk checks the depth itself before it recurses.
-#[cfg(feature = "tool-policy")]
 pub(crate) const MAX_NESTING: usize = 128;
 /// The largest exponent the number reader tracks. A larger one saturates here. No text length
 /// reaches this bound, so the length of the fraction never cancels a saturated exponent.
+#[cfg(any(feature = "tool-policy", test))]
 const EXPONENT_CAP: i64 = i64::MAX / 4;
 
 /// How a JSON number maps into Cedar, by value.
+#[cfg(any(feature = "tool-policy", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NumberClass {
     Long(i64),
@@ -30,15 +31,18 @@ pub(crate) enum NumberClass {
 /// Classify a JSON number by its value, from its text, with no float. The text comes from a valid
 /// JSON document. A value that `Long` or `decimal` cannot hold exactly, or text that this reader
 /// cannot split into digits and an exponent, gives `Text` with the original text.
+#[cfg(any(feature = "tool-policy", test))]
 pub(crate) fn classify_number(text: &str) -> NumberClass {
     classify(text).unwrap_or_else(|| NumberClass::Text(text.to_owned()))
 }
 
+#[cfg(any(feature = "tool-policy", test))]
 fn is_digits(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The `i64` for a sign and a magnitude, if it fits.
+#[cfg(any(feature = "tool-policy", test))]
 fn to_i64(negative: bool, magnitude: u128) -> Option<i64> {
     if negative {
         (magnitude <= 1u128 << 63).then(|| (-(magnitude as i128)) as i64)
@@ -48,6 +52,7 @@ fn to_i64(negative: bool, magnitude: u128) -> Option<i64> {
 }
 
 /// `Some(class)` for a number that `Long` or `decimal` holds exactly; `None` means "keep the text".
+#[cfg(any(feature = "tool-policy", test))]
 fn classify(text: &str) -> Option<NumberClass> {
     let (negative, rest) = match text.strip_prefix('-') {
         Some(r) => (true, r),
@@ -165,7 +170,6 @@ pub(crate) fn elements(text: &str) -> Result<Vec<&RawValue>, Unparsed> {
 
 /// Whether the brackets of one valid JSON text nest at most `MAX_NESTING` levels. Iterative, so a
 /// deep text cannot overflow the stack. A bracket inside a string does not count.
-#[cfg(feature = "tool-policy")]
 pub(crate) fn nesting_ok(text: &str) -> bool {
     let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
     for b in text.bytes() {

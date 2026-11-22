@@ -32,7 +32,8 @@ thiserror = { workspace = true }
 cedar-policy = { workspace = true, optional = true }
 # `serde` is named only for the duplicate-key visitor in `detect::input`.
 serde = { workspace = true, optional = true }
-serde_json = { workspace = true, features = ["raw_value"], optional = true }
+# `unbounded_depth` lets the detector walk read the 128 levels that the strict reader accepts.
+serde_json = { workspace = true, features = ["raw_value", "unbounded_depth"], optional = true }
 unicode-normalization = { version = "0.1.25", optional = true }
 # Feature `detectors` only (SMA-855): host extraction and the built-in token forms. Both are
 # already in `rs/Cargo.lock`, so no new package enters the lockfile.

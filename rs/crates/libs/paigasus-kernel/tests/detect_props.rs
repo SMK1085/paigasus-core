@@ -12,14 +12,14 @@ const POOL: [&str; 14] = [
     "///////////////////////",
     "[",
     "]",
-    "\\\\u00",
-    "\\\\ud800",
+    "\\u00",
+    "\\ud800",
     "é",
     "日本",
     "http://a.example/",
     "https://B.example:80/x?y=1",
     "a b",
-    "ftp:\\\\\\\\h.example",
+    "ftp:\\\\h.example",
 ];
 
 fn json_text() -> impl Strategy<Value = String> {

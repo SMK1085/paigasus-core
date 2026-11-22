@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::net::Ipv6Addr;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -86,43 +87,68 @@ impl HostSet {
     }
 }
 
+/// The longest authority (user information, host and port) that the extraction parses. A longer
+/// one marks the set as overflowed, so the finding path reports it. A real host is at most 253
+/// bytes, so the bound leaves room for long user information.
+const AUTHORITY_MAX: usize = 1024;
+
+/// A character that ends a candidate.
 fn is_terminator(c: char) -> bool {
     c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`')
 }
 
-/// Trim the end of a candidate (step 2), until nothing changes.
+/// A character that ends the authority of a URL: a terminator, or the start of the path, query or
+/// fragment (a backslash is a slash for a special scheme).
+fn ends_authority(c: char) -> bool {
+    is_terminator(c) || matches!(c, '/' | '\\' | '?' | '#')
+}
+
+/// Trim the end of a candidate (step 2), until nothing changes. The count of each bracket is made
+/// once and then updated per removed character, so the cost is linear.
 fn trim_end(mut s: &str) -> &str {
-    while let Some(last) = s.chars().next_back() {
-        let rest = &s[..s.len() - last.len_utf8()];
-        let open = match last {
-            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' => None,
-            ')' => Some('('),
-            ']' => Some('['),
-            '}' => Some('{'),
-            _ => return s,
-        };
-        if let Some(o) = open {
-            let opens = rest.chars().filter(|c| *c == o).count();
-            let closes = rest.chars().filter(|c| *c == last).count();
-            if opens > closes {
-                return s;
-            }
+    // The counts of `(`, `[`, `{`, `)`, `]` and `}`.
+    let mut count = [0usize; 6];
+    for c in s.chars() {
+        if let Some(k) = "([{)]}".find(c) {
+            count[k] += 1;
         }
-        s = rest;
+    }
+    while let Some(last) = s.chars().next_back() {
+        match last {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' => {}
+            ')' | ']' | '}' => {
+                let k = "([{)]}".find(last).unwrap_or(3);
+                // `count[k]` includes this character. Keep it when the open partner outnumbers the
+                // other closers before it.
+                if count[k - 3] > count[k] - 1 {
+                    return s;
+                }
+                count[k] -= 1;
+            }
+            _ => return s,
+        }
+        s = &s[..s.len() - last.len_utf8()];
     }
     s
 }
 
-/// The trimmed URL candidates of a text.
-fn candidates(text: &str) -> Vec<&str> {
-    SCHEME
-        .find_iter(text)
-        .map(|m| {
-            let tail = &text[m.start()..];
-            let end = tail.find(is_terminator).unwrap_or(tail.len());
-            trim_end(&tail[..end])
-        })
-        .collect()
+/// The URL candidates of a text: for each scheme match, the scheme and the authority, trimmed.
+/// The second value is true when an authority is longer than `AUTHORITY_MAX`. Such a candidate
+/// is not parsed. The cost is linear: one pass finds the end characters, and each match then
+/// takes one binary search.
+fn candidates(text: &str) -> (Vec<&str>, bool) {
+    let ends: Vec<usize> = text.char_indices().filter(|(_, c)| ends_authority(*c)).map(|(i, _)| i).collect();
+    let mut overflow = false;
+    let mut out = Vec::new();
+    for m in SCHEME.find_iter(text) {
+        let end = ends.get(ends.partition_point(|p| *p < m.end())).copied().unwrap_or(text.len());
+        if end - m.end() > AUTHORITY_MAX {
+            overflow = true;
+        } else {
+            out.push(trim_end(&text[m.start()..end]));
+        }
+    }
+    (out, overflow)
 }
 
 /// The normalised host of a parsed URL.
@@ -134,34 +160,54 @@ fn host_of(url: &Url) -> Option<String> {
 
 /// Add the hosts of the URLs in `text`.
 pub fn hosts_in_text(text: &str, into: &mut HostSet) {
-    for c in candidates(text) {
+    let (found, overflow) = candidates(text);
+    for c in found {
         if let Some(host) = Url::parse(c).ok().as_ref().and_then(host_of) {
             into.insert(&host);
         }
     }
+    into.overflow |= overflow;
 }
 
-/// The host of a bare value under a key of `BARE_HOST_KEYS` (D15).
-fn bare_host(key: &str, text: &str) -> Option<String> {
+/// Add the host of a bare value under a key of `BARE_HOST_KEYS` (D15). A value that starts with a
+/// scheme is a URL, which `hosts_in_text` reads.
+fn bare_host(key: &str, text: &str, into: &mut HostSet) {
     if !BARE_HOST_KEYS.iter().any(|k| k.eq_ignore_ascii_case(key)) {
-        return None;
+        return;
     }
     let value = text.trim();
-    if value.is_empty() || value.chars().any(char::is_whitespace) || SCHEME.is_match(value) {
-        return None;
+    if value.is_empty() || value.chars().any(char::is_whitespace) || SCHEME.find(value).is_some_and(|m| m.start() == 0) {
+        return;
     }
-    let url = Url::parse(&format!("http://{}", trim_end(value))).ok()?;
-    let host = host_of(&url)?;
+    let end = value.find(ends_authority).unwrap_or(value.len());
+    if end > AUTHORITY_MAX {
+        into.overflow = true;
+        return;
+    }
+    let authority = &value[..end];
+    let authority = if authority.parse::<Ipv6Addr>().is_ok() {
+        format!("[{authority}]")
+    } else {
+        trim_end(authority).to_owned()
+    };
+    let Ok(url) = Url::parse(&format!("http://{authority}")) else {
+        return;
+    };
+    let Some(host) = host_of(&url) else {
+        return;
+    };
     let is_ip = matches!(url.host(), Some(Host::Ipv4(_) | Host::Ipv6(_)));
-    (host.contains('.') || is_ip).then_some(host)
+    if host.contains('.') || is_ip {
+        into.insert(&host);
+    }
 }
 
 /// The hosts of one leaf.
 fn leaf_hosts(key: Option<&str>, text: &str) -> HostSet {
     let mut set = HostSet::new();
     hosts_in_text(text, &mut set);
-    if let Some(host) = key.and_then(|k| bare_host(k, text)) {
-        set.insert(&host);
+    if let Some(key) = key {
+        bare_host(key, text, &mut set);
     }
     set
 }
@@ -225,8 +271,11 @@ mod tests {
         for tail in [".", ",", ";", ":", "!", "?", ")", "]", "}", "'", "*"] {
             assert_eq!(text_hosts(&format!("https://t.example/p{tail}")), ["t.example"], "{tail}");
         }
-        assert_eq!(candidates("https://w.example/a_(b)"), ["https://w.example/a_(b)"]);
-        assert_eq!(candidates("(https://w.example/a)"), ["https://w.example/a"]);
+        // A candidate is the scheme and the authority. The path does not matter for the host.
+        assert_eq!(candidates("https://w.example/a_(b)").0, ["https://w.example"]);
+        assert_eq!(candidates("(https://w.example)").0, ["https://w.example"]);
+        assert_eq!(candidates("https://[::1])").0, ["https://[::1]"]);
+        assert_eq!(candidates("https://w.example.),;").0, ["https://w.example"]);
     }
     #[test]
     fn scheme_allow_list() {
@@ -258,7 +307,8 @@ mod tests {
     }
     #[test]
     fn duplicate_keys_behind_escapes_are_walked() {
-        assert_eq!(hosts(r#"{"a":"x","a":"https://dup.example/"}"#), ["dup.example"]);
+        assert_eq!(hosts(r#"{"a":"x","a":"https:\/\/dup.example\/"}"#), ["dup.example"]);
+        assert_eq!(hosts(r#"{"a":"x","a":"https://\u0064up.example/"}"#), ["dup.example"]);
     }
     #[test]
     fn the_cap_keeps_255_and_the_sentinel() {
@@ -298,5 +348,77 @@ mod tests {
         assert_eq!(got, [("p.example".to_owned(), Some("/a~1b/0".to_owned()))]);
         let got = hosts_with_pointers(&ToolInput::Text("http://t.example".to_owned()));
         assert_eq!(got, [("t.example".to_owned(), None)]);
+    }
+
+    #[test]
+    fn a_bare_host_with_a_scheme_later_in_the_value_counts() {
+        assert_eq!(hosts(r#"{"url":"evil.example/?next=https://ok.example"}"#), ["evil.example", "ok.example"]);
+        assert_eq!(hosts(r#"{"url":"https://ok.example/x"}"#), ["ok.example"]);
+    }
+
+    #[test]
+    fn a_bare_ipv6_address_counts() {
+        assert_eq!(hosts(r#"{"host":"::1"}"#), ["[::1]"]);
+        assert_eq!(hosts(r#"{"host":"[::1]:8080"}"#), ["[::1]"]);
+    }
+
+    #[test]
+    fn depth_128_is_walked_for_hosts() {
+        let nest = |n: usize| format!("{}\"https://\\u0065vil.example/\"{}", "[".repeat(n), "]".repeat(n));
+        assert_eq!(hosts(&nest(128)), ["evil.example"]);
+        assert_eq!(hosts(&nest(129)), ["evil.example"]);
+    }
+
+    #[test]
+    fn raw_text_decodes_unicode_escapes_in_hosts() {
+        assert_eq!(hosts(r#"{"a":"https://\u0065vil.example/ "#), ["evil.example"]);
+        assert_eq!(hosts(r#"{"a":"https:\\\\b.example "#), ["b.example"]);
+        assert!(hosts(r#"{"a":"https://\ud800.example/ "#).iter().all(|h| !h.contains("ud800")));
+    }
+
+    #[test]
+    fn a_long_authority_marks_the_set_as_overflowed() {
+        let long = format!("https://u:{}@x.example/", "p".repeat(AUTHORITY_MAX + 1));
+        let h = call_hosts(&ToolInput::Text(long));
+        assert!(h.overflowed());
+        assert!(h.contains(HOSTS_OVERFLOW));
+        let ok = format!("https://u:{}@x.example/", "p".repeat(AUTHORITY_MAX - 20));
+        let h = call_hosts(&ToolInput::Text(ok));
+        assert!(!h.overflowed());
+        assert_eq!(h.iter().collect::<Vec<_>>(), ["x.example"]);
+        let bare = call_hosts(&ToolInput::Json(format!(r#"{{"url":"{}.example"}}"#, "a".repeat(AUTHORITY_MAX + 1))));
+        assert!(bare.overflowed());
+    }
+
+    /// The time for `f`, the best of five runs.
+    fn best_of_five(f: impl Fn()) -> std::time::Duration {
+        (0..5)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                f();
+                t.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn extraction_time_is_linear_in_the_input_size() {
+        type Make = Box<dyn Fn(usize) -> String>;
+        let cases: [(&str, Make); 4] = [
+            ("scheme repeat", Box::new(|n| "http:".repeat(n))),
+            ("closer repeat", Box::new(|n| format!("https://x.example{}", ")".repeat(n)))),
+            ("long authority", Box::new(|n| format!("https://{}@x.example/", "a:".repeat(n)))),
+            ("slash repeat", Box::new(|n| format!("https://x.example/{}", "/http:".repeat(n)))),
+        ];
+        for (name, make) in &cases {
+            let (small, large) = (make(20_000), make(80_000));
+            let t1 = best_of_five(|| drop(call_hosts(&ToolInput::Text(small.clone()))));
+            let t4 = best_of_five(|| drop(call_hosts(&ToolInput::Text(large.clone()))));
+            // Linear is about 4. Quadratic is about 16. A floor of 5 ms keeps a fast run from
+            // giving a noisy ratio.
+            let floor = std::time::Duration::from_millis(5);
+            assert!(t4 < t1.max(floor) * 10, "{name}: {t1:?} for N, {t4:?} for 4N");
+        }
     }
 }

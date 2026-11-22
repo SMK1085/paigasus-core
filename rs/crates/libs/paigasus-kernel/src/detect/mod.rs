@@ -3,9 +3,6 @@
 //! Cedar type, so a build with only this feature never gets Cedar.
 
 mod hosts;
-// The classifier and the strict reader have a caller only in the tool policy. Their own tests
-// run under `detectors` alone, so there the module is built for tests only.
-#[cfg(any(feature = "tool-policy", test))]
 pub(crate) mod input;
 mod types;
 mod walk;
