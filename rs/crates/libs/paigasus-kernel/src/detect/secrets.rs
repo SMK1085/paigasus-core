@@ -36,7 +36,8 @@ const PATTERNS: [(&str, &str); 12] = [
     // The legacy OpenAI form: 20 characters, the marker `T3BlbkFJ`, 20 characters.
     ("openai_api_key", r"(?-u:\b)sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}(?-u:\b)"),
     // https://cloud.google.com/docs/authentication/api-keys
-    ("google_api_key", r"(?-u:\b)AIza[0-9A-Za-z_-]{35}(?-u:\b)"),
+    // The key can end in `-`, so a word boundary cannot close it: the end class does.
+    ("google_api_key", r"(?-u:\b)AIza[0-9A-Za-z_-]{35}(?:[^0-9A-Za-z_-]|$)"),
     // https://docs.stripe.com/keys
     ("stripe_secret_key", r"(?-u:\b)(sk|rk)_live_[0-9A-Za-z]{24,}(?-u:\b)"),
     // https://www.rfc-editor.org/rfc/rfc7468#section-11 (the label of a private key)
@@ -51,6 +52,24 @@ static SET: LazyLock<Option<RegexSet>> = LazyLock::new(|| RegexSet::new(PATTERNS
 #[cfg(test)]
 fn rule_ids() -> Vec<&'static str> {
     PATTERNS.iter().map(|(rule, _)| *rule).collect()
+}
+
+/// The pointer cut before the first reference token that is itself a secret. A key that is a
+/// secret would else appear in the pointer of the key and of every value below it. The cut
+/// pointer is the pointer of the object that holds that key. It runs once per evidence entry, and
+/// the walk makes at most 16, so the cost stays linear.
+fn safe_pointer<'p>(set: &RegexSet, pointer: &'p str) -> &'p str {
+    let mut start = 0;
+    while start < pointer.len() {
+        let rest = &pointer[start + 1..];
+        let end = rest.find('/').map_or(pointer.len(), |i| start + 1 + i);
+        let token = pointer[start + 1..end].replace("~1", "/").replace("~0", "~");
+        if set.is_match(&token) {
+            return &pointer[..start];
+        }
+        start = end;
+    }
+    pointer
 }
 
 /// `secret_in_args`: a known token form in a string value or an object key of the arguments, or in
@@ -72,7 +91,7 @@ pub fn secret_in_args(subject: &CallSubject<'_>) -> Option<Finding> {
         if !matched.matched_any() {
             return;
         }
-        let pointer = if leaf.is_key { leaf.pointer.rfind('/').map_or("", |i| &leaf.pointer[..i]) } else { leaf.pointer };
+        let pointer = safe_pointer(set, leaf.pointer);
         let mut last = None;
         for index in matched.iter() {
             let rule = PATTERNS[index].0;
@@ -174,6 +193,43 @@ mod tests {
             assert!(run(&json_with(&miss)).is_none(), "{rule} near miss");
             assert!(run(&ToolInput::Text(pos)).is_some(), "{rule} text");
         }
+    }
+
+    #[test]
+    fn a_google_key_that_ends_in_a_dash_is_found() {
+        let key = format!("AI{}{}-", "za", n('f', 34));
+        for input in [
+            json_with(&key),
+            ToolInput::Json(format!(r#"["{key}"]"#)),
+            ToolInput::Text(key.clone()),
+            ToolInput::Text(format!("'{key}'")),
+        ] {
+            assert_eq!(run(&input).expect("finding").evidence[0].rule, "google_api_key");
+        }
+        let too_long = format!("{key}x");
+        assert!(run(&json_with(&too_long)).is_none());
+    }
+
+    #[test]
+    fn a_secret_ancestor_key_never_reaches_a_pointer() {
+        let aws = aws_token();
+        let ghp = format!("gh{}_{}", "p", n('a', 36));
+        let inputs = [
+            format!(r#"{{"{aws}":"{aws}"}}"#),
+            format!(r#"{{"{aws}":{{"note":"{ghp}"}}}}"#),
+            format!(r#"{{"{aws}":{{"{ghp}":1}}}}"#),
+            format!(r#"{{"{aws}":[{{"k":"{aws}"}}]}}"#),
+            format!(r#"{{"ok":{{"{aws}":{{"x":"{ghp}"}}}}}}"#),
+        ];
+        for text in inputs {
+            let f = run(&ToolInput::Json(text.clone())).expect("finding");
+            for e in &f.evidence {
+                let Location::Argument { pointer } = &e.location else { panic!("not an argument") };
+                assert!(!pointer.contains(&aws[4..]) && !pointer.contains(&ghp[4..]), "{text}: {pointer}");
+            }
+        }
+        let f = run(&ToolInput::Json(format!(r#"{{"ok":{{"{aws}":{{"x":"{ghp}"}}}}}}"#))).expect("finding");
+        assert!(f.evidence.iter().any(|e| e.location == Location::Argument { pointer: "/ok".into() }));
     }
 
     #[test]
