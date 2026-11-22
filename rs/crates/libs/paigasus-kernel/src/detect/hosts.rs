@@ -52,12 +52,12 @@ impl HostSet {
     /// The number of entries that `iter` gives.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.hosts.len()
+        if self.overflow { self.hosts.len().min(HOSTS_CAP - 1) + 1 } else { self.hosts.len() }
     }
     /// Whether the set has no host.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.hosts.is_empty()
+        self.len() == 0
     }
     /// Whether `host` is in the set. The sentinel is in an overflowed set.
     #[must_use]
@@ -177,6 +177,12 @@ fn bare_host(key: &str, text: &str, into: &mut HostSet) {
     }
     let value = text.trim();
     if value.is_empty() || value.chars().any(char::is_whitespace) || SCHEME.find(value).is_some_and(|m| m.start() == 0) {
+        return;
+    }
+    // A scheme-relative value (`//host/x`, `\\host`) has the authority after the slashes, as the
+    // scheme pattern allows `[/\\]*`.
+    let value = value.trim_start_matches(['/', '\\']);
+    if value.is_empty() {
         return;
     }
     let end = value.find(ends_authority).unwrap_or(value.len());
@@ -357,6 +363,13 @@ mod tests {
     }
 
     #[test]
+    fn a_scheme_relative_bare_host_counts() {
+        assert_eq!(hosts(r#"{"url":"//evil.example/x"}"#), ["evil.example"]);
+        assert_eq!(hosts(r#"{"url":"\\\\evil.example/x"}"#), ["evil.example"]);
+        assert!(hosts(r#"{"url":"///"}"#).is_empty());
+    }
+
+    #[test]
     fn a_bare_ipv6_address_counts() {
         assert_eq!(hosts(r#"{"host":"::1"}"#), ["[::1]"]);
         assert_eq!(hosts(r#"{"host":"[::1]:8080"}"#), ["[::1]"]);
@@ -388,6 +401,14 @@ mod tests {
         assert_eq!(h.iter().collect::<Vec<_>>(), ["x.example"]);
         let bare = call_hosts(&ToolInput::Json(format!(r#"{{"url":"{}.example"}}"#, "a".repeat(AUTHORITY_MAX + 1))));
         assert!(bare.overflowed());
+        // One overflowing authority and no host: the set is not empty, and `len` counts the sentinel.
+        let only = call_hosts(&ToolInput::Text(format!("https://{}", "a".repeat(AUTHORITY_MAX + 1))));
+        assert!(only.overflowed() && !only.is_empty());
+        assert_eq!((only.len(), only.iter().count()), (1, 1));
+        let mut one = HostSet::new();
+        one.insert("a.example");
+        one.extend(&only);
+        assert_eq!((one.len(), one.iter().count()), (2, 2));
     }
 
     /// The time for `f`, the best of five runs.
