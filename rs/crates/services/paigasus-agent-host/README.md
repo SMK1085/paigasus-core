@@ -66,8 +66,9 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 Set `memory.backend = "s3"` and the `memory.s3` section to keep the agent memory in an S3 bucket.
 The store works with AWS S3 and with S3-compatible stores.
 
-- A backend switch does not move data. The old backend keeps its files, and the new backend starts empty.
+- A backend switch does not move data. The old backend keeps its files. The destination shows the data that it already holds. Only a fresh destination starts empty. A switch back shows the old data again.
 - The bucket must not keep object versions. The boot probe refuses a bucket that keeps versions.
+- When the probe refuses a versioned bucket, its first `PUT` already made an object version. The cleanup delete adds only a delete marker. Each boot uses a new probe key. So after such a refusal, remove the probe versions and delete markers under `<prefix>/_probe/` with an S3 tool.
 - The store must give strong read-after-write consistency for `GET`, `HEAD` and `LIST`. AWS S3 does.
 - Each object starts with a 51-byte header line. So the objects are not plain Markdown. Do not read them as plain files.
 - Do not write objects under the prefix. If a foreign object is there, the store handles it as follows.
@@ -90,6 +91,7 @@ endpoint for credentials. Off AWS, the boot probe then fails with `unauthenticat
 **Other variables that change the client.** These variables are not on the credential list. The host does not turn them off.
 
 - The HTTP client reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, and their lower-case forms. This is the default of `reqwest`. Set `NO_PROXY` for the store endpoint if the host must not use a proxy for it.
+- The credential client reads the same variables. With an HTTP proxy, add the local AWS credential hosts to `NO_PROXY`. Then the credential request does not go through the proxy. An EKS Pod Identity request holds a token in its `Authorization` header. The hosts are `169.254.169.254` (EC2 instance metadata), `169.254.170.2` (ECS, from `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`) and the host of `AWS_CONTAINER_CREDENTIALS_FULL_URI`. For EKS Pod Identity, that host is `169.254.170.23`.
 - When `REQUEST_METHOD` is set, the client uses no proxy (a guard for CGI).
 - On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` change the system trust roots. The client reads them through `rustls-native-certs`.
 

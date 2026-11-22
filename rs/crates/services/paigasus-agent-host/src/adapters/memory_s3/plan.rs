@@ -156,16 +156,14 @@ pub enum Seen {
 }
 
 /// The outcome of a `Put` whose request failed (spec §6.5). `uncertain` is true when the error
-/// class is `timeout` or `transport`: the server can still commit the write after the client
-/// gave up, so an absent object does not prove that the write failed. `update` is true when the
-/// `Put` expects a version (an `If-Match` `PUT`). Such a `PUT` can still land on the object that
-/// the check `GET` found, so another writer's object does not prove that the update failed
-/// (ruling F3). A create-only `PUT` (`If-None-Match`) cannot land on an object that exists.
-pub fn put_outcome(refused: bool, uncertain: bool, update: bool, cause: MemoryApplyError, seen: Seen, path: &MemoryPath) -> Outcome {
+/// class is `timeout`, `transport` or a 5xx other than 501: the server can still commit the write
+/// after the client gave up. So an absent object does not prove that the write failed. Another
+/// writer's object does not prove it either. An `If-Match` `PUT` can still land on that object
+/// (ruling F3). A pending create can land after the other writer deletes its object (ruling F6).
+pub fn put_outcome(refused: bool, uncertain: bool, cause: MemoryApplyError, seen: Seen, path: &MemoryPath) -> Outcome {
     match seen {
         Seen::Mine => Outcome::Confirmed,
-        Seen::Absent if uncertain => Outcome::Unknown(cause),
-        Seen::Other if uncertain && update => Outcome::Unknown(cause),
+        Seen::Absent | Seen::Other if uncertain => Outcome::Unknown(cause),
         Seen::Other | Seen::Absent if refused => Outcome::Failed(MemoryApplyError::Conflict { path: path.clone() }),
         Seen::Other | Seen::Absent => Outcome::Failed(cause),
         Seen::Foreign | Seen::ReadFailed => Outcome::Unknown(cause),
@@ -186,7 +184,8 @@ pub enum SeenAfterDelete {
 }
 
 /// The outcome of a `Delete` whose request failed. `uncertain` is true when the error class is
-/// `timeout` or `transport`: the server can still run the `DELETE` after the client gave up.
+/// `timeout`, `transport` or a 5xx other than 501: the server can still run the `DELETE` after
+/// the client gave up.
 pub fn delete_outcome(cause: MemoryApplyError, uncertain: bool, seen: SeenAfterDelete) -> Outcome {
     match seen {
         SeenAfterDelete::Absent => Outcome::Confirmed,
@@ -413,18 +412,16 @@ mod tests {
         let path = p("/a");
         let cause = store("c");
         // A definite error gives the same rows for a create and an update.
-        for update in [false, true] {
-            let o = |refused, seen| put_outcome(refused, false, update, cause.clone(), seen, &path);
-            assert_eq!(o(true, Seen::Mine), Outcome::Confirmed);
-            assert_eq!(o(false, Seen::Mine), Outcome::Confirmed);
-            for seen in [Seen::Other, Seen::Absent] {
-                assert_eq!(o(true, seen), Outcome::Failed(conflict("/a")));
-                assert_eq!(o(false, seen), Outcome::Failed(cause.clone()));
-            }
-            for seen in [Seen::Foreign, Seen::ReadFailed] {
-                assert_eq!(o(true, seen), Outcome::Unknown(cause.clone()));
-                assert_eq!(o(false, seen), Outcome::Unknown(cause.clone()));
-            }
+        let o = |refused, seen| put_outcome(refused, false, cause.clone(), seen, &path);
+        assert_eq!(o(true, Seen::Mine), Outcome::Confirmed);
+        assert_eq!(o(false, Seen::Mine), Outcome::Confirmed);
+        for seen in [Seen::Other, Seen::Absent] {
+            assert_eq!(o(true, seen), Outcome::Failed(conflict("/a")));
+            assert_eq!(o(false, seen), Outcome::Failed(cause.clone()));
+        }
+        for seen in [Seen::Foreign, Seen::ReadFailed] {
+            assert_eq!(o(true, seen), Outcome::Unknown(cause.clone()));
+            assert_eq!(o(false, seen), Outcome::Unknown(cause.clone()));
         }
     }
 
@@ -433,21 +430,18 @@ mod tests {
         // Ruling F1: after a timeout or a transport error the server can still commit.
         let path = p("/a");
         let cause = store("c");
-        for update in [false, true] {
-            assert_eq!(put_outcome(false, true, update, cause.clone(), Seen::Absent, &path), Outcome::Unknown(cause.clone()));
-            // A write ID of this write is still proof.
-            assert_eq!(put_outcome(false, true, update, cause.clone(), Seen::Mine, &path), Outcome::Confirmed);
-        }
-        // A create-only PUT cannot land on another writer's object, so that object is a failure.
-        assert_eq!(put_outcome(false, true, false, cause.clone(), Seen::Other, &path), Outcome::Failed(cause));
+        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Absent, &path), Outcome::Unknown(cause.clone()));
+        // A write ID of this write is still proof.
+        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Mine, &path), Outcome::Confirmed);
     }
 
     #[test]
-    fn an_uncertain_update_that_finds_another_object_is_unknown() {
+    fn an_uncertain_put_that_finds_another_object_is_unknown() {
         // Ruling F3: an If-Match PUT can still land on the object that the check GET found.
+        // Ruling F6: a pending create can land after the other writer deletes its object.
         let path = p("/a");
         let cause = store("c");
-        assert_eq!(put_outcome(false, true, true, cause.clone(), Seen::Other, &path), Outcome::Unknown(cause));
+        assert_eq!(put_outcome(false, true, cause.clone(), Seen::Other, &path), Outcome::Unknown(cause));
     }
 
     #[test]

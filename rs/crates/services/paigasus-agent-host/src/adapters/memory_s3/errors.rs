@@ -69,10 +69,17 @@ pub fn is_refusal(e: &Error) -> bool {
     matches!(e, Error::AlreadyExists { .. } | Error::Precondition { .. })
 }
 
-/// True when the class is `timeout` or `transport`. The server can still run the request after
-/// the client gave up, so a check read cannot prove that the request failed.
+/// True when the class is `timeout`, `transport` or a 5xx status other than 501. The server can
+/// still run the request after the client gave up, so a check read cannot prove that the request
+/// failed. A 5xx does not prove that the write stopped. A 501 does: the store does not do the
+/// operation. A 4xx refusal is not uncertain.
 pub fn is_uncertain(e: &Error) -> bool {
-    matches!(class(e).as_str(), TIMEOUT_CLASS | "transport")
+    let class = class(e);
+    match class.as_str() {
+        TIMEOUT_CLASS | "transport" => true,
+        "status=501" => false,
+        other => other.strip_prefix("status=5").is_some(),
+    }
 }
 
 /// The text of a `Store(String)`: the fixed sentence and the class in brackets.
@@ -171,6 +178,31 @@ mod tests {
     fn only_timeout_and_transport_are_uncertain() {
         for (e, want) in all_kinds() {
             assert_eq!(is_uncertain(&e), matches!(want, "timeout" | "transport"), "{want}");
+        }
+    }
+
+    fn status(code: &str) -> Error {
+        Error::Generic {
+            store: "S3",
+            source: Box::new(Leaky(format!("Server returned non-2xx status code: {code} Reason: {SECRET}"))),
+        }
+    }
+
+    #[test]
+    fn a_5xx_other_than_501_is_uncertain() {
+        // A 5xx does not prove that the write stopped. A 501 and a 4xx refusal do.
+        let rows = [
+            ("500", true),
+            ("502", true),
+            ("503", true),
+            ("504", true),
+            ("501", false),
+            ("403", false),
+            ("409", false),
+            ("412", false),
+        ];
+        for (code, want) in rows {
+            assert_eq!(is_uncertain(&status(code)), want, "{code}");
         }
     }
 

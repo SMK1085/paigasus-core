@@ -54,7 +54,8 @@ adapter makes the sequential case correct and documents each race.
 
 - The run loop and `RunCommitter` (SMA-790). This issue adds `MemoryCommit::External` and builds it
   at boot. SMA-790 calls `apply` in the run commit (SMA-789 §6.12).
-- Data migration between backends. A backend switch shows an empty store (SMA-789 §6.8).
+- Data migration between backends. A backend switch does not move data. The destination shows the
+  data that it already holds, and only a fresh destination starts empty (SMA-789 §6.8).
 - Atomic or concurrent-safe guards and caps on S3. They are best effort (§6.7).
 - A conditional `DELETE` request. `object_store` has none (§5). Delete is read-then-delete.
 - Multipart upload. A memory file is at most 64 KiB by default.
@@ -265,16 +266,22 @@ starts only after every `Put` succeeded.
   - It holds another write ID, or the object is absent, and the error was a refusal: a real
     `Conflict`. The store did not write this `Put`.
   - It holds another write ID or is absent, and the error was not a refusal: the `Put` **failed**,
-    and the store did not write it. **Ruling F1:** when the class is `timeout` or `transport` and
-    the object is absent, the outcome is **unknown**, not failed. The server can commit the write
-    after the client gave up. The result is `Partial { applied: 0 }`. **Ruling F3:** an update
-    (`Put { Version(v) }`) of class `timeout` or `transport` whose object holds another write ID is
-    also **unknown**, because its `If-Match` `PUT` can still land on that object.
+    and the store did not write it. **The uncertain classes** are `timeout`, `transport` and a
+    `status=5NN` other than `status=501`. A 500, 502, 503 or 504 does not prove that the upstream
+    write stopped. A 501 does: the store does not do the operation. A 4xx refusal (403, 409, 412)
+    is not uncertain. **Ruling F1:** when the class is uncertain and the object is absent, the
+    outcome is **unknown**, not failed. The server can commit the write after the client gave up.
+    The result is `Partial { applied: 0 }`. **Ruling F3:** an update (`Put { Version(v) }`) of an
+    uncertain class whose object holds another write ID is also **unknown**, because its
+    `If-Match` `PUT` can still land on that object. **Ruling F6:** an uncertain create that finds
+    another object is **unknown**. A pending create can land after the other writer deletes its
+    object. So for an uncertain class, absent and another write ID give the same outcome for a
+    create and an update.
   - The `GET` itself fails, or the object is foreign: the outcome is **unknown**.
 - `Delete { v }`: `HEAD` the key. Absent, or an ETag that is not `v`, is `Conflict`. Else `DELETE`
   (a single-object `DELETE`; §6.8 turns off bulk delete). A `DELETE` error is checked with a
   `HEAD`: absent means the delete succeeded; present with `v` means it failed; a failed `HEAD` is
-  unknown. **Ruling F1:** when the class is `timeout` or `transport` and the `HEAD` shows `v`, the
+  unknown. **Ruling F1:** when the class is uncertain (see above) and the `HEAD` shows `v`, the
   outcome is unknown, not failed.
 - **The result.** `confirmed` is the count of writes that succeeded.
   - When every write succeeded: `Ok(())`.
@@ -391,7 +398,10 @@ Every refusal of steps 1 to 6 fails the boot. The error text names the endpoint,
 step, with a sentence for each step. For steps 2 and 4: "The memory store at {endpoint}, bucket
 {bucket}, does not support conditional writes: it accepted a {create-only | conditional} put that it
 must refuse. The S3 memory backend needs If-None-Match and If-Match on PutObject." A 501
-(`not_implemented`) at step 1, 3 or 4 gets the same text. Any other failure (network, 403, no
+(`status=501` or `not_implemented`) at step 1, 3 or 4 gets its own text, because the store refused
+that put: "The memory store at {endpoint}, bucket {bucket}, does not support conditional writes: it
+answered 501 Not Implemented to a {create-only | conditional} put. The S3 memory backend needs
+If-None-Match and If-Match on PutObject." Any other failure (network, 403, no
 bucket) fails the boot with the endpoint, the bucket, the step and the error class of §6.4. No text
 holds a credential (AG5), and §6.9 refuses an endpoint with userinfo.
 
@@ -407,7 +417,7 @@ section, `memory.s3`:
 | `memory.s3.bucket` | string | required | The S3 bucket-name rule: 3 to 63 characters of `[a-z0-9.-]`, starts and ends with a letter or digit, no `..`. |
 | `memory.s3.prefix` | string | required | The rules of §6.2. |
 | `memory.s3.region` | string | `"us-east-1"` | |
-| `memory.s3.endpoint` | URL | none (AWS) | `http` or `https`, no userinfo, no query, no fragment. `http` needs `allow_http`. |
+| `memory.s3.endpoint` | URL | none (AWS) | `http` or `https`, no userinfo, no query, no fragment. `http` needs `allow_http`. The builder gets the text of the parsed URL with no trailing `/`. `Url::parse` removes padding that the `object_store` URI builder refuses. With virtual-hosted style, `object_store` keeps a trailing `/` in each object key, so the client removes it. |
 | `memory.s3.path_style` | bool | `true` when `endpoint` is set or the bucket name has a `.`, else `false` | With `false` and an `endpoint`, the endpoint must already hold the bucket (`aws/builder.rs:1294`). The doc says this. A dotted bucket with no `endpoint` gives `<a.b>.s3.<region>.amazonaws.com` in virtual-hosted style (`aws/builder.rs:1297`), and the AWS wildcard certificate does not match that name. |
 | `memory.s3.allow_http` | bool | `false` | For local tests and dev only. |
 | `memory.s3.extra_ca_bundle_path` | path | none | A PEM bundle. It **ADDs** to the platform roots. The `extra_` prefix marks the ADD side, per `rs/CLAUDE.md`. |

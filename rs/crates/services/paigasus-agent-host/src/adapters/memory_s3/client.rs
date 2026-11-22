@@ -84,7 +84,7 @@ pub fn s3_builder(cfg: &MemoryS3Config, env: impl IntoIterator<Item = (String, S
             ..Default::default()
         });
     if let Some(endpoint) = &cfg.endpoint {
-        builder = builder.with_endpoint(endpoint);
+        builder = builder.with_endpoint(normalized_endpoint(endpoint)?);
     }
     // One call only: `with_client_options` replaces every client option.
     let mut options = ClientOptions::new().with_timeout(REQUEST_TIMEOUT).with_connect_timeout(CONNECT_TIMEOUT).with_allow_http(cfg.allow_http);
@@ -100,6 +100,17 @@ pub fn s3_builder(cfg: &MemoryS3Config, env: impl IntoIterator<Item = (String, S
         }
     }
     Ok(builder.with_client_options(options))
+}
+
+/// The endpoint that the builder gets: the text of the parsed URL, with no trailing `/`.
+///
+/// `Url::parse` removes leading and trailing spaces, so the config check accepts a padded value.
+/// The URI builder of `object_store` refuses padding. With virtual-hosted style, it also keeps a
+/// trailing `/` in each object key. This function gives the builder the URL that the config
+/// check validated. The error holds no endpoint text.
+fn normalized_endpoint(raw: &str) -> Result<String, ClientError> {
+    let url = reqwest::Url::parse(raw).map_err(|_| ClientError::Build { class: "endpoint".into() })?;
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 /// Build the store client.
@@ -176,6 +187,28 @@ mod tests {
         assert_eq!(b.get_config_value(&AmazonS3ConfigKey::Region).as_deref(), Some("us-east-1"));
         assert_eq!(b.get_config_value(&AmazonS3ConfigKey::DisableBulkDelete).as_deref(), Some("true"));
         assert_eq!(b.get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::AllowInvalidCertificates)).as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn the_builder_gets_the_normalized_endpoint() {
+        // (the config value, path_style, the endpoint that the builder must get)
+        let rows = [
+            ("https://s3.example", None, "https://s3.example"),
+            (" https://s3.example", None, "https://s3.example"),
+            ("https://s3.example \t", None, "https://s3.example"),
+            ("https://s3.example/", None, "https://s3.example"),
+            ("https://bucket.s3.example/", Some(false), "https://bucket.s3.example"),
+            ("https://bucket.s3.example", Some(false), "https://bucket.s3.example"),
+            ("https://s3.example/base/", None, "https://s3.example/base"),
+        ];
+        for (raw, path_style, want) in rows {
+            let mut c = cfg(Some(raw), None);
+            c.path_style = path_style;
+            let b = s3_builder(&c, env(&[])).unwrap();
+            assert_eq!(b.get_config_value(&AmazonS3ConfigKey::Endpoint).as_deref(), Some(want), "{raw:?}");
+            // The client builds, and the signer gets a URI that it can parse.
+            assert!(build_store(&c, env(&[])).is_ok(), "{raw:?}");
+        }
     }
 
     #[test]

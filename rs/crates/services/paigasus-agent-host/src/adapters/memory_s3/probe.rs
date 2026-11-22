@@ -100,9 +100,15 @@ impl fmt::Display for ProbeError {
         let ProbeError { endpoint, bucket, step, failure } = self;
         if self.no_conditional_writes() {
             let kind = if *step <= 2 { "create-only" } else { "conditional" };
+            // A 501 is a `Request` failure: the store refused the put. It did not accept it.
+            let what = if matches!(failure, ProbeFailure::Request { .. }) {
+                format!("it answered 501 Not Implemented to a {kind} put")
+            } else {
+                format!("it accepted a {kind} put that it must refuse")
+            };
             return write!(
                 f,
-                "The memory store at {endpoint}, bucket {bucket}, does not support conditional writes: it accepted a {kind} put that it must refuse. The S3 memory backend needs If-None-Match and If-Match on PutObject."
+                "The memory store at {endpoint}, bucket {bucket}, does not support conditional writes: {what}. The S3 memory backend needs If-None-Match and If-Match on PutObject."
             );
         }
         write!(f, "The memory store at {endpoint}, bucket {bucket}, failed the boot probe at step {step}: ")?;
@@ -323,7 +329,7 @@ mod tests {
         assert_eq!((e.step, &e.failure), (2, &ProbeFailure::CreateNotRefused));
         let text = e.to_string();
         assert!(text.contains("does not support conditional writes"), "{text}");
-        assert!(text.contains("create-only"), "{text}");
+        assert!(text.contains("it accepted a create-only put that it must refuse"), "{text}");
         assert_eq!(probe_keys_left(&store).await, Vec::<String>::new(), "the probe cleans up after a failure");
     }
 
@@ -334,7 +340,7 @@ mod tests {
         let e = probe(&store).await.unwrap_err();
         assert_eq!((e.step, &e.failure), (4, &ProbeFailure::StaleUpdateNotRefused));
         let text = e.to_string();
-        assert!(text.contains("conditional put"), "{text}");
+        assert!(text.contains("it accepted a conditional put that it must refuse"), "{text}");
         assert!(text.contains("does not support conditional writes"), "{text}");
     }
 
@@ -401,10 +407,10 @@ mod tests {
         };
         // (the PUT that fails, its error, the step, the class, a text that the message holds)
         let rows: Vec<(usize, Error, u8, &str, &str)> = vec![
-            (1, generic_status(501), 1, "status=501", "accepted a create-only put"),
-            (1, not_implemented(), 1, "not_implemented", "accepted a create-only put"),
-            (3, generic_status(501), 3, "status=501", "accepted a conditional put"),
-            (4, not_implemented(), 4, "not_implemented", "accepted a conditional put"),
+            (1, generic_status(501), 1, "status=501", "answered 501 Not Implemented to a create-only put"),
+            (1, not_implemented(), 1, "not_implemented", "answered 501 Not Implemented to a create-only put"),
+            (3, generic_status(501), 3, "status=501", "answered 501 Not Implemented to a conditional put"),
+            (4, not_implemented(), 4, "not_implemented", "answered 501 Not Implemented to a conditional put"),
             (1, denied(), 1, "permission_denied", "failed the boot probe at step 1: permission_denied."),
             (5, generic_status(503), 5, "status=503", "failed the boot probe at step 5: status=503."),
         ];
@@ -415,7 +421,8 @@ mod tests {
             assert_eq!((e.step, &e.failure), (step, &ProbeFailure::Request { class: class.to_owned() }), "PUT {nth}");
             let message = e.to_string();
             assert!(message.contains(text), "{message}");
-            assert_eq!(message.contains(conditional), text.starts_with("accepted"), "{message}");
+            assert_eq!(message.contains(conditional), text.starts_with("answered"), "{message}");
+            assert!(!(message.contains(conditional) && message.contains("accepted")), "{message}");
             assert_eq!(probe_keys_left(&store).await, Vec::<String>::new(), "PUT {nth}");
         }
     }

@@ -239,9 +239,8 @@ impl S3MemoryStore {
                     Ok(_) => Outcome::Confirmed,
                     Err(e) => {
                         let cause = MemoryApplyError::Store(store_text("the memory write failed", &e));
-                        let update = matches!(expected, Expected::Version(_));
                         let seen = self.seen_after_put(&key, &id).await;
-                        put_outcome(is_refusal(&e), is_uncertain(&e), update, cause, seen, path)
+                        put_outcome(is_refusal(&e), is_uncertain(&e), cause, seen, path)
                     }
                 }
             }
@@ -725,6 +724,13 @@ mod tests {
         }
     }
 
+    fn status_error(code: u16) -> Error {
+        Error::Generic {
+            store: "S3",
+            source: format!("Server returned non-2xx status code: {code} Status").into(),
+        }
+    }
+
     fn timeout_error() -> Error {
         Error::Generic {
             store: "S3",
@@ -969,6 +975,40 @@ mod tests {
         assert_eq!((applied, failed_at), (0, mp("/a")));
         assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
         assert_eq!(content(&store, "/a").await.as_deref(), Some("old"));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_create_that_finds_another_object_is_partial() {
+        // Ruling F6: a pending create can land after the other writer deletes its object.
+        let (scripted, store) = hashed();
+        scripted.on(Hook::BeforeFirstPut, other_writer("/a", "other"));
+        scripted.fault_put(1, Fault::Fail(timeout_error()));
+        let set = set_of(&scope(), vec![put_change("/a", "mine", Expected::Absent)]);
+        let (applied, failed_at, cause) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+        assert!(cause_text(&cause).contains("timeout"), "{cause:?}");
+    }
+
+    #[tokio::test]
+    async fn a_5xx_put_that_did_not_land_is_partial() {
+        // A 5xx does not prove that the write stopped.
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::Fail(status_error(503)));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        let (applied, failed_at, cause) = partial_parts(store.apply(&set, &MemoryCaps::default()).await);
+        assert_eq!((applied, failed_at), (0, mp("/a")));
+        assert!(cause_text(&cause).contains("status=503"), "{cause:?}");
+    }
+
+    #[tokio::test]
+    async fn a_501_put_that_did_not_land_is_a_bare_store_error() {
+        let (scripted, store) = hashed();
+        scripted.fault_put(1, Fault::Fail(status_error(501)));
+        let set = set_of(&scope(), vec![put_change("/a", "1", Expected::Absent)]);
+        match store.apply(&set, &MemoryCaps::default()).await {
+            Err(MemoryApplyError::Store(text)) => assert_eq!(text, "the memory write failed (status=501)"),
+            other => panic!("not a bare Store: {other:?}"),
+        }
     }
 
     #[tokio::test]
