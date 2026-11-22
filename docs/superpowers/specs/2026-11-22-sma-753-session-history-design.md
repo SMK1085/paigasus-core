@@ -345,9 +345,12 @@ as `charge()` does in SMA-677, so it is not on the latency path.
 - A lost settle leaves the event `pending`. A pending event still counts, so a lost settle never
   lowers a count or a sum. A pending event has no `c:` link, so a later result for it gets
   `forged_history`.
-- A call that the interceptor forwards with no decision (`Verdict::PassThrough` under
-  `on_failure = allow`, `interceptor.rs:495-498`) gets an append-only event at the report site, so
-  it still counts.
+- A complete call that the interceptor forwards with no decision (a decider error or a decide
+  timeout under `on_failure = allow`) gets an append-only event and a `c:` link at the report site,
+  so it still counts.
+- A truncated or oversized hold under `on_failure = allow` (`Verdict::PassThrough`,
+  `interceptor.rs:495-498`) has no complete call and makes no report entry. It gets no event, so it
+  does not count (R10).
 
 **Time.** The caller passes `now` in milliseconds from the gateway `Clock`. The scripts never call
 Redis `TIME`. The contract suite uses a fixed clock for window edges, and two store clients with
@@ -431,13 +434,16 @@ deadline = "1s"             # must be shorter than [tool_interception] decide_ti
 ```
 
 - With no `[tool_history]` table, there is no history. A condition then has a missing slot (D10).
-- The memory backend is for development and for one replica. The chart refuses `memory` when the
-  gateway has more than one replica.
+- The memory backend is for development and for one replica. The chart does not deploy the
+  gateway (`charts/paigasus/values.yaml`), so no chart can check the replica count. The runbook
+  states the rule, and the gateway logs a warning at boot with `backend = "memory"`.
 - The Redis backend uses its own `BreakerMetrics` role, `tool_history`.
 
 **IAM setting.** The constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` becomes the IAM config
-setting `tool_policies.history_conditions`, default `false`. The chart sets it to `true` only when
-the gateway's `[tool_history]` table is set.
+setting `tool_policies.history_conditions`, default `false`. The chart exposes it as an IAM value.
+The chart does not deploy the gateway, so it cannot tie the setting to `[tool_history]`. The
+operator turns on history in the gateway first and in IAM second. This is the same pattern as the
+DPoP setting (SMA-700, `values.yaml`). The runbook states the order.
 
 ### D13. Metrics
 
@@ -464,7 +470,7 @@ The builder can add metrics. These names are the minimum.
 | `policy_source/iam.rs` and `file.rs` | remove the R5 refusal; parse the conditions. The retention check is in the application layer, so both sources get it. |
 | decision log | fill `session_id` and `turn` |
 | IAM | the setting `tool_policies.history_conditions` (D12); tests for both values; `docs/ops/RUNBOOK-tool-policies.md` |
-| `charts/` | the IAM setting; the memory-backend refusal |
+| `charts/` | the IAM value `tool_policies.history_conditions` |
 | `rs/.config/nextest.toml` | the new Docker test binaries; the cap test with `retries = 0` |
 | policy compiler corpus | new cases (§ 9) |
 
@@ -507,8 +513,10 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
 - **IAM setting back to `false`.** IAM then refuses every save with a condition. Existing compiled
   sets stay in force. A later catalog write that recompiles such a set is refused
   (`sets.rs:21-24`). The runbook states this.
-- One Helm release rolls IAM and the gateway together. The chart therefore sets the IAM setting
-  from the gateway's `[tool_history]` table. A history-off gateway never meets a history-on IAM.
+- The chart deploys IAM only, so nothing enforces the order between IAM and the gateway. A
+  history-off gateway can meet a history-on IAM when an operator gets the order wrong. A tenant set
+  with a condition then has missing slots (D10), so only its history policies fail closed. The
+  runbook states the order for turning history on (gateway first) and off (IAM first).
 
 ## 9. Tests
 
@@ -570,7 +578,24 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
   choice. Counts then grow n times. The runbook states this.
 - R9. A `response` event depends on the client. A client that leaves out a result keeps
   `formerly(...::response)` false.
-- R10. `on_failure = allow` weakens A2 and A3 for decide timeouts (D10).
+- R10. `on_failure = allow` weakens A2 and A3 for decide timeouts (D10). A truncated or oversized
+  hold that passes through under `on_failure = allow` is not counted at all (D8).
+
+## 13. Changes after Gate 1
+
+The PR 1 plan found three facts in the code. They correct the spec, and they do not change a
+decision of Sven.
+
+- The chart does not deploy the gateway. D12 and § 8 no longer say that the chart ties the IAM
+  setting to the gateway or refuses the memory backend.
+- A truncated pass-through hold has no complete call, so it gets no event (D8, R10).
+- `RequestToolPolicy::apply` takes `&DecisionContext`, so it returns the session in its outcome, and
+  the pipeline puts it into the context (an implementation detail of D4).
+- R11 (new). A request-side decision (for example, the replacement of a tool result) cannot act on
+  `forged_history` or `mixed_sessions`. Request-side decisions use only the optimistic set
+  (SMA-752 D5, `optimistic.rs`), and that set drops every forbid that reads `context.findings`. The
+  findings still reach the response-side decisions of the same request. A change needs a change of
+  SMA-752 D5, which is out of scope.
 
 ## 12. Changelog of revision 2
 
