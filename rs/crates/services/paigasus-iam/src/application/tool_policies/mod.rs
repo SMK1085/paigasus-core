@@ -1453,6 +1453,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_catalog_write_that_adds_an_input_property_writes_a_catalog_change_version() {
+        // SMA-855 F16: the catalog coupling stays exact. An added input property only adds a
+        // Record attribute, which `outputs_equivalent_for_recompile` accepts, but the coupling
+        // uses `outputs_identical` and so still writes a new version.
+        let h = harness();
+        put_search(&h, 0).await;
+        accepted(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        let mut wider = search_schema();
+        wider["properties"]["page"] = json!({"type": "integer"});
+        let out = accepted(h.svc.put_tool(&h.actor, h.org, "search", ToolKind::Function, Some(wider), 1).await);
+        assert_eq!((out.catalog_revision, out.set_version), (2, 2));
+        let versions = h.repo.versions(&tenant(&h));
+        assert_eq!(versions.len(), 2);
+        assert_eq!((versions[1].origin, versions[1].catalog_revision), (VersionOrigin::CatalogChange, Some(2)));
+        let old = decode_compiled(&versions[0].compiled).unwrap();
+        let new = decode_compiled(&versions[1].compiled).unwrap();
+        assert!(
+            paigasus_iam_core::tool_policy::outputs_equivalent_for_recompile(&old, &new),
+            "the control: the change is additive, so only the exact comparator tells the two apart"
+        );
+        assert!(!outputs_identical(&old, &new));
+    }
+
+    #[tokio::test]
     async fn a_catalog_write_over_a_live_history_set_is_rejected_with_the_history_code() {
         // F17: a live set that PR 1 stored with a history rule. The coupling compile of a catalog
         // write gives the history rule again, so R19 refuses it as `tool-catalog-breaks-policy`.

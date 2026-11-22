@@ -18,7 +18,7 @@ pub mod schema;
 pub mod starter;
 
 pub use check::{MAX_PREDICATE_DEPTH, REASON_FLOOR_PERMIT, REASON_INVALID, check_compiled};
-pub use compare::outputs_identical;
+pub use compare::{outputs_equivalent_for_recompile, outputs_identical};
 pub use import::{CatalogProblem, ImportFormat, ImportedTools, build_manual, parse_import};
 pub use json_schema::{MappingError, map_input_schema};
 pub use model::{
