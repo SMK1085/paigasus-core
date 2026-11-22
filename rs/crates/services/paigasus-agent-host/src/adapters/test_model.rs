@@ -8,6 +8,7 @@
 //! - [`FileBarrier`] is a `FaultPoint`: at its stage it creates a file and then waits for ever, so
 //!   that the test can kill the process at a known place.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -77,12 +78,29 @@ impl FileBarrier {
         parse_stage(stage).map(|stage| Self { stage, path })
     }
 
-    /// The barrier of [`BARRIER_STAGE_ENV`] and [`BARRIER_FILE_ENV`]. `None` when a variable is
-    /// not set or the stage is unknown.
+    /// The barrier of [`BARRIER_STAGE_ENV`] and [`BARRIER_FILE_ENV`]. See [`Self::from_vars`].
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        let stage = std::env::var(BARRIER_STAGE_ENV).ok()?;
-        let path = std::env::var_os(BARRIER_FILE_ENV)?;
+        Self::from_vars(std::env::var(BARRIER_STAGE_ENV).ok(), std::env::var_os(BARRIER_FILE_ENV))
+    }
+
+    /// The barrier of a stage value and a file value. `None` when a value is absent or the stage
+    /// is unknown. When exactly one value is set, or the stage is unknown, it logs a warning: a
+    /// typo in one variable name must not turn the barrier off in silence.
+    #[must_use]
+    pub fn from_vars(stage: Option<String>, path: Option<OsString>) -> Option<Self> {
+        let (stage, path) = match (stage, path) {
+            (Some(stage), Some(path)) => (stage, path),
+            (None, None) => return None,
+            (Some(_), None) => {
+                tracing::warn!(set = BARRIER_STAGE_ENV, missing = BARRIER_FILE_ENV, "only one test barrier variable is set; the barrier is off");
+                return None;
+            }
+            (None, Some(_)) => {
+                tracing::warn!(set = BARRIER_FILE_ENV, missing = BARRIER_STAGE_ENV, "only one test barrier variable is set; the barrier is off");
+                return None;
+            }
+        };
         let barrier = Self::new(&stage, PathBuf::from(path));
         if barrier.is_none() {
             tracing::warn!(%stage, "the test barrier stage is unknown; the barrier is off");
@@ -140,6 +158,49 @@ mod tests {
         assert_eq!(parse_stage("after_run"), Some(FaultStage::AfterRun));
         assert_eq!(parse_stage("before_commit"), Some(FaultStage::BeforeCommit));
         assert_eq!(parse_stage("after_commit"), Some(FaultStage::AfterCommit));
+    }
+
+    /// Counts the WARN events that reach it.
+    #[derive(Default)]
+    struct WarnCounter(std::sync::atomic::AtomicUsize);
+
+    impl tracing::Subscriber for WarnCounter {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// The barrier of `stage` and `path`, and the number of warnings that the call logged.
+    fn from_vars_warnings(stage: Option<&str>, path: Option<&str>) -> (Option<FileBarrier>, usize) {
+        let counter = std::sync::Arc::new(WarnCounter::default());
+        let barrier = tracing::subscriber::with_default(counter.clone(), || FileBarrier::from_vars(stage.map(str::to_owned), path.map(std::ffi::OsString::from)));
+        (barrier, counter.0.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[test]
+    fn exactly_one_barrier_variable_is_a_warning() {
+        // A typo in one name must not turn the barrier off in silence.
+        assert_eq!(from_vars_warnings(Some("after_run"), None), (None, 1), "a stage with no file");
+        assert_eq!(from_vars_warnings(None, Some("/x")), (None, 1), "a file with no stage");
+        assert_eq!(from_vars_warnings(Some("later"), Some("/x")), (None, 1), "an unknown stage");
+        assert_eq!(from_vars_warnings(None, None), (None, 0), "no variable is the normal case");
+        assert_eq!(
+            from_vars_warnings(Some("after_run"), Some("/x")),
+            (FileBarrier::new("after_run", PathBuf::from("/x")), 0),
+            "both variables give a barrier"
+        );
     }
 
     #[tokio::test]
