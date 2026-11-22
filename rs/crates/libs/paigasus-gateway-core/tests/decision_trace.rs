@@ -86,7 +86,7 @@ fn a_response_record_gives_the_golden_line() {
         line(&record_a()),
         concat!(
             r#"@1763460000 scope(principal: Pgs::Iam::Principal::"0190a1e5-0000-7000-8000-000000000004", resource: Pgs::Iam::Organization::"0190a100-0000-7000-8000-0000000000a1") "#,
-            r#"request_context(input: {}, findings: ["name_collision"], call: { declared: "yes" }, request: { scope: "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1", ingress: "chat_completions", model: "gpt-4o" }, session: { id: "", turn: 0 }) "#,
+            r#"request_context(input: {}, findings: ["name_collision"], max_severity: 3, call: { declared: "yes", hosts: [] }, request: { scope: "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1", ingress: "chat_completions", model: "gpt-4o" }, session: { id: "", turn: 0 }) "#,
             r#"Pgs::Gateway::Action::"read_file"::request(input: {}, callerPrincipal: Pgs::Iam::Principal::"0190a1e5-0000-7000-8000-000000000004", callerResource: Pgs::Iam::Organization::"0190a100-0000-7000-8000-0000000000a1", requestId: "req-1", sessionId: "")"#
         )
     );
@@ -95,7 +95,7 @@ fn a_response_record_gives_the_golden_line() {
 #[test]
 fn no_cedar_detail_gives_empty_findings_and_unknown_declared() {
     let r = rec(Duration::from_secs(5), "search", "m");
-    assert!(line(&r).contains(r#"findings: [], call: { declared: "unknown" }"#));
+    assert!(line(&r).contains(r#"findings: [], max_severity: -1, call: { declared: "unknown", hosts: [] }"#));
 }
 
 #[test]
@@ -103,6 +103,45 @@ fn several_findings_are_listed_in_order() {
     let mut r = record_a();
     r.cedar.as_mut().unwrap().findings = vec![FindingRecord::new("b", Some(Severity::Low), "kernel", ""), FindingRecord::new("a", Some(Severity::Low), "kernel", "")];
     assert!(line(&r).contains(r#"findings: ["a", "b"]"#));
+}
+
+#[test]
+fn the_trace_line_holds_max_severity_and_empty_hosts() {
+    let mut r = record_a();
+    let c = r.cedar.as_mut().unwrap();
+    c.findings = vec![FindingRecord::new("secret_in_args", Some(Severity::High), "built_in", "1")];
+    c.max_severity = Some(Severity::High);
+    c.declared = Declared::Yes;
+    assert!(line(&r).contains(r#"findings: ["secret_in_args"], max_severity: 3, call: { declared: "yes", hosts: [] }"#));
+    r.cedar.as_mut().unwrap().max_severity = Some(Severity::Info);
+    assert!(line(&r).contains("max_severity: 0,"));
+}
+
+#[test]
+fn no_max_severity_gives_minus_one() {
+    let mut r = record_a();
+    r.cedar.as_mut().unwrap().max_severity = None;
+    assert!(line(&r).contains("max_severity: -1,"));
+}
+
+#[test]
+fn detection_off_traces_minus_one_even_with_findings() {
+    let mut r = record_a();
+    let c = r.cedar.as_mut().unwrap();
+    c.detection_disabled = true;
+    c.max_severity = None;
+    assert!(!c.findings.is_empty());
+    assert!(line(&r).contains("max_severity: -1,"));
+}
+
+#[test]
+fn one_kind_of_two_detectors_is_listed_once() {
+    let mut r = record_a();
+    r.cedar.as_mut().unwrap().findings = vec![
+        FindingRecord::new("secret_in_args", Some(Severity::High), "built_in", "1"),
+        FindingRecord::new("secret_in_args", Some(Severity::High), "custom", "2"),
+    ];
+    assert!(line(&r).contains(r#"findings: ["secret_in_args"], "#));
 }
 
 #[test]

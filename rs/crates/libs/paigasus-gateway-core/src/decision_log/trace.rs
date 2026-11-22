@@ -5,6 +5,7 @@
 use std::fmt;
 use std::time::SystemTime;
 
+use paigasus_kernel::detect::{NO_SEVERITY, Severity};
 use uuid::Uuid;
 
 use super::record::{DecisionRecord, Side};
@@ -116,18 +117,22 @@ pub fn encode(record: &DecisionRecord) -> Encoded {
     let ts = unix_seconds(record.decided_at);
     let p = format!("{}::\"{}\"", principal.entity_type, escape(&principal.entity_id));
     let o = format!("Pgs::Iam::Organization::\"{}\"", org.as_hyphenated());
-    let (findings, declared) = match &record.cedar {
+    let (findings, declared, max_severity) = match &record.cedar {
         Some(c) => {
             // `context.findings` is a set of kinds: one kind of two detectors is listed once.
             let kinds: std::collections::BTreeSet<&str> = c.findings.iter().map(|f| f.kind.as_str()).collect();
-            (kinds.iter().map(|k| format!("\"{}\"", escape(k))).collect::<Vec<_>>().join(", "), c.declared.as_str())
+            (
+                kinds.iter().map(|k| format!("\"{}\"", escape(k))).collect::<Vec<_>>().join(", "),
+                c.declared.as_str(),
+                c.max_severity.map_or(NO_SEVERITY, Severity::as_long),
+            )
         }
-        None => (String::new(), "unknown"),
+        None => (String::new(), "unknown", NO_SEVERITY),
     };
     let session = escape(&record.session.id);
     let text = format!(
         "@{ts} scope(principal: {p}, resource: {o}) \
-         request_context(input: {{}}, findings: [{findings}], call: {{ declared: \"{declared}\" }}, \
+         request_context(input: {{}}, findings: [{findings}], max_severity: {max_severity}, call: {{ declared: \"{declared}\", hosts: [] }}, \
          request: {{ scope: \"{scope}\", ingress: \"{ingress}\", model: \"{model}\" }}, \
          session: {{ id: \"{session}\", turn: {turn} }}) \
          Pgs::Gateway::Action::\"{action}\"::request(input: {{}}, callerPrincipal: {p}, callerResource: {o}, requestId: \"{rid}\", sessionId: \"{session}\")",

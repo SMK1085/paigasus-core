@@ -10,7 +10,7 @@ namespace Pgs::Iam {
 }
 
 namespace Pgs::Gateway {
-  type CallInfo = { declared: String };
+  type CallInfo = { declared: String, hosts: Set<String> };
   type RequestInfo = { ingress: String, model: String, scope: String };
   type SessionInfo = { id: String, turn: Long };
 
@@ -22,6 +22,7 @@ namespace Pgs::Gateway {
     context: {
       input: { q?: String, n?: Long },
       findings: Set<String>,
+      max_severity: Long,
       call: CallInfo,
       request: RequestInfo,
       session: SessionInfo
@@ -34,6 +35,7 @@ namespace Pgs::Gateway {
     context: {
       input: { path?: String },
       findings: Set<String>,
+      max_severity: Long,
       call: CallInfo,
       request: RequestInfo,
       session: SessionInfo
