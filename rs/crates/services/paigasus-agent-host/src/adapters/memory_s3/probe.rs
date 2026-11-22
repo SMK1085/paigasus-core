@@ -360,6 +360,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_different_listed_etag_form_fails_at_step_5() {
+        let store = ScriptedStore::new(EtagMode::Counter);
+        store.list_etags_unquoted();
+        let e = probe(&store).await.unwrap_err();
+        assert_eq!((e.step, &e.failure), (5, &ProbeFailure::EtagFormDiffers));
+        assert!(e.to_string().contains("not the same"), "{e}");
+        assert_eq!(probe_keys_left(&store).await, Vec::<String>::new(), "the probe cleans up after a failure");
+    }
+
+    #[tokio::test]
     async fn a_delete_that_does_nothing_fails_at_step_6() {
         let store = ScriptedStore::new(EtagMode::Counter);
         store.ignore_deletes();

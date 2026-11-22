@@ -79,6 +79,7 @@ struct State {
     ignore_update: bool,
     return_version: bool,
     refuse_listed: bool,
+    unquoted_listing: bool,
     listed_etags: BTreeSet<String>,
     flat: bool,
     calls: Vec<String>,
@@ -185,6 +186,12 @@ impl ScriptedStore {
     /// From now on the store refuses an `Update` with an ETag that a listing gave.
     pub fn refuse_update_with_listed_etag(&self) {
         lock(&self.state).refuse_listed = true;
+    }
+
+    /// From now on a listing gives each ETag without its quotes, as a store with another ETag
+    /// form for the listing than for the `GET` and the `HEAD`.
+    pub fn list_etags_unquoted(&self) {
+        lock(&self.state).unquoted_listing = true;
     }
 
     /// From now on the store cannot hold a key `K` and a key under `K/` at the same time, as a
@@ -414,7 +421,10 @@ impl ObjectStore for ScriptedStore {
             .objects
             .iter()
             .filter(|(key, _)| key.prefix_match(prefix).is_some_and(|mut rest| rest.next().is_some()))
-            .map(|(key, (bytes, etag))| Ok(meta(key, bytes, etag)))
+            .map(|(key, (bytes, etag))| {
+                let shown = if state.unquoted_listing { etag.trim_matches('"') } else { etag };
+                Ok(meta(key, bytes, shown))
+            })
             .collect();
         let listed: Vec<String> = items.iter().filter_map(|m| m.as_ref().ok()?.e_tag.clone()).collect();
         state.listed_etags.extend(listed);
