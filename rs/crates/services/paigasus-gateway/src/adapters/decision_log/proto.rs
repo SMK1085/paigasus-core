@@ -116,6 +116,7 @@ fn cedar_to_pb(c: &CedarDetail) -> pb::CedarDetail {
         findings: c.findings.iter().map(finding_to_pb).collect(),
         declared: c.declared.as_str().to_owned(),
         action_group: i(group),
+        detection_disabled: c.detection_disabled,
         decide_duration: Some(prost_types::Duration {
             seconds: i64::try_from(c.decide_duration.as_secs()).unwrap_or(i64::MAX),
             nanos: i32::try_from(c.decide_duration.subsec_nanos()).unwrap_or(0),
@@ -257,8 +258,10 @@ fn cedar_from(c: pb::CedarDetail) -> Result<CedarDetail, MapError> {
     };
     // The proto has no `max_severity`: it is derived from the findings (§ 6.11.2). A finding of
     // an event older than SMA-855 has no severity, so its kind's fixed severity is inferred.
+    // With the detectors off the kernel wrote -1 whatever the findings hold, so the value stays
+    // `None` (controller ruling on § 6.11.1). An older event has the flag `false`.
     let findings = c.findings.into_iter().map(finding_from).collect::<Result<Vec<_>, _>>()?;
-    let (max_severity, severity_inferred) = derive_max_severity(&findings);
+    let (max_severity, severity_inferred) = if c.detection_disabled { (None, false) } else { derive_max_severity(&findings) };
     let mut detail = CedarDetail::new(
         effect,
         c.determining.iter().map(policy_ref_from).collect::<Result<_, _>>()?,
@@ -271,6 +274,7 @@ fn cedar_from(c: pb::CedarDetail) -> Result<CedarDetail, MapError> {
         decide_duration,
     );
     detail.severity_inferred = severity_inferred;
+    detail.detection_disabled = c.detection_disabled;
     Ok(detail)
 }
 
@@ -548,7 +552,7 @@ mod tests {
         let c = round_trip_cedar(old_event());
         assert_eq!(c.findings.len(), 2);
         assert!(c.findings.iter().all(|f| f.severity.is_none() && f.detector.is_empty() && f.version.is_empty()));
-        assert_eq!((c.max_severity, c.severity_inferred), (Some(Severity::High), true));
+        assert_eq!((c.max_severity, c.severity_inferred, c.detection_disabled), (Some(Severity::High), true, false));
         let mut only_unparsed = old_event();
         only_unparsed.cedar.as_mut().unwrap().findings.remove(0);
         assert_eq!(round_trip_cedar(only_unparsed).max_severity, Some(Severity::Info));
@@ -556,6 +560,27 @@ mod tests {
         none.cedar.as_mut().unwrap().findings.clear();
         let c = round_trip_cedar(none);
         assert_eq!((c.max_severity, c.severity_inferred), (None, false));
+    }
+
+    #[test]
+    fn a_detection_off_record_survives_the_round_trip() {
+        let mut r = response_record();
+        let c = r.cedar.as_mut().unwrap();
+        c.max_severity = None;
+        c.detection_disabled = true;
+        assert!(!c.findings.is_empty(), "the findings keep their severities");
+        assert!(to_event(&r).cedar.expect("cedar").detection_disabled);
+        let back = round_trip(&r);
+        assert_eq!(back, r);
+        let c = back.cedar.expect("cedar");
+        assert_eq!((c.max_severity, c.severity_inferred, c.detection_disabled), (None, false, true));
+    }
+
+    #[test]
+    fn a_detection_on_record_writes_the_flag_false() {
+        let r = response_record();
+        assert!(!to_event(&r).cedar.expect("cedar").detection_disabled);
+        assert!(!round_trip(&r).cedar.expect("cedar").detection_disabled);
     }
 
     #[test]

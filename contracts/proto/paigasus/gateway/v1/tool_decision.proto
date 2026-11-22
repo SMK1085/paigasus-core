@@ -58,6 +58,9 @@ message CedarDetail {
   string declared = 6; // yes | no | unknown
   ActionGroup action_group = 7;
   google.protobuf.Duration decide_duration = 8;
+  // SMA-855: the detectors were off (Facts.detection false), so the kernel wrote
+  // max_severity -1 although the findings can hold severities. False for an older event.
+  bool detection_disabled = 9;
 }
 
 message PolicyRef {

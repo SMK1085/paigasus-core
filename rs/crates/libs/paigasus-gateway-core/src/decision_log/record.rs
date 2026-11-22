@@ -197,13 +197,18 @@ pub struct CedarDetail {
     ///
     /// With the detectors off (`Facts.detection` false), the kernel writes -1 although the
     /// findings can hold severities (for example `unparsed_arguments`). The record keeps both as
-    /// the verdict gives them, so this field is then `None` while `findings` is not empty. The
-    /// proto has no field for this value: a decode derives it from the findings
-    /// ([`derive_max_severity`]), so such a record decodes with a `Some` value.
+    /// the verdict gives them, so this field is then `None` while `findings` is not empty, and
+    /// `detection_disabled` is `true`. The proto has no field for this value: a decode derives it
+    /// from the findings ([`derive_max_severity`]), except when `detection_disabled` is set.
     pub max_severity: Option<Severity>,
     /// `max_severity` was derived on decode from a finding of unknown severity (an event older
     /// than SMA-855). Always `false` on the write path.
     pub severity_inferred: bool,
+    /// The detectors were off for the decision (`Facts.detection` false), so the kernel wrote
+    /// `max_severity` -1 whatever the findings hold. `decide_calls` sets it from the facts, so the
+    /// record states the fact and does not guess it from the findings. A decode of a flagged
+    /// event keeps `max_severity` `None`. `new` sets it to `false`.
+    pub detection_disabled: bool,
     pub declared: Declared,
     pub action_group: ActionGroup,
     pub decide_duration: Duration,
@@ -233,6 +238,7 @@ impl CedarDetail {
             findings,
             max_severity,
             severity_inferred: false,
+            detection_disabled: false,
             declared,
             action_group,
             decide_duration,

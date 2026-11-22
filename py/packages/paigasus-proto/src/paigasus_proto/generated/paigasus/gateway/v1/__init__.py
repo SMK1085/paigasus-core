@@ -360,6 +360,12 @@ class CedarDetail(betterproto2.Message):
         optional=True,
     )
 
+    detection_disabled: "bool" = betterproto2.field(9, betterproto2.TYPE_BOOL)
+    """
+    SMA-855: the detectors were off (Facts.detection false), so the kernel wrote
+    max_severity -1 although the findings can hold severities. False for an older event.
+    """
+
 
 default_message_pool.register_message("paigasus.gateway.v1", "CedarDetail", CedarDetail)
 

@@ -131,7 +131,7 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
             let given = call_findings(c, &collisions);
             let v = decide(&inv, facts, &kernel_findings(&given), policies);
             let duration = now().saturating_duration_since(started);
-            let cedar = CedarDetail::new(
+            let mut cedar = CedarDetail::new(
                 v.decision,
                 v.determining.clone(),
                 v.errored.clone(),
@@ -142,6 +142,7 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
                 v.action_group,
                 duration,
             );
+            cedar.detection_disabled = !facts.detection;
             outcome(v, cedar, *tenant, snapshot.mode, snapshot.on_unavailable)
         })
         .collect()
@@ -367,6 +368,7 @@ mod tests {
             [("name_collision", Some(Severity::High), "kernel"), ("unparsed_arguments", Some(Severity::Medium), "kernel")]
         );
         assert_eq!(out[0].cedar.as_ref().expect("cedar").max_severity, Some(Severity::High));
+        assert!(!out[0].cedar.as_ref().expect("cedar").detection_disabled);
     }
 
     #[test]
@@ -386,6 +388,7 @@ mod tests {
         let c = out[0].cedar.as_ref().expect("cedar");
         assert_eq!(c.max_severity, out[0].verdict.as_ref().expect("verdict").max_severity);
         assert_eq!(c.max_severity, None);
+        assert!(c.detection_disabled);
         assert_eq!(
             kinds_and_severities(&out[0]),
             [("name_collision", Some(Severity::High), "kernel"), ("unparsed_arguments", Some(Severity::Medium), "kernel")]
