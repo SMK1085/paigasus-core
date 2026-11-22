@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The session history store contract suite (SMA-753) on `MemorySessionStore`.
+
+mod support;
+
+use std::sync::Arc;
+
+use paigasus_gateway::adapters::history::memory::MemorySessionStore;
+use paigasus_gateway::domain::tool_history::{Scope, SessionStore, StoredEvent};
+use support::history_contract::{self as contract, Harness};
+use uuid::Uuid;
+
+struct MemoryHarness {
+    store: Arc<MemorySessionStore>,
+}
+
+#[async_trait::async_trait]
+impl Harness for MemoryHarness {
+    async fn store(&self) -> Arc<dyn SessionStore> {
+        self.store.clone()
+    }
+
+    async fn events(&self, org: Uuid, scope: Scope, scope_id: &str, tool: &str) -> Vec<StoredEvent> {
+        self.store.events(org, scope, scope_id, tool)
+    }
+
+    async fn ttls_ms(&self, org: Uuid, now_ms: u64) -> Vec<Option<u64>> {
+        self.store.ttls_ms(org, now_ms)
+    }
+}
+
+fn harness() -> MemoryHarness {
+    MemoryHarness {
+        store: Arc::new(MemorySessionStore::new()),
+    }
+}
+
+#[tokio::test]
+async fn a_reserve_appends_one_pending_event_per_history() {
+    contract::a_reserve_appends_one_pending_event_per_history(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_caller_without_a_key_writes_the_principal_history_once() {
+    contract::a_caller_without_a_key_writes_the_principal_history_once(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_split_by_tool_keeps_other_tools() {
+    contract::the_split_by_tool_keeps_other_tools(&harness()).await;
+}
+
+#[tokio::test]
+async fn retention_trims_only_events_older_than_25_hours() {
+    contract::retention_trims_only_events_older_than_25_hours(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_cap_keeps_the_newest_10_000_events_per_tool() {
+    contract::the_cap_keeps_the_newest_10_000_events_per_tool(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_truncated_flag_needs_a_lost_event_inside_the_window() {
+    contract::the_truncated_flag_needs_a_lost_event_inside_the_window(&harness()).await;
+}
+
+#[tokio::test]
+async fn settle_sets_the_verdict_and_writes_the_call_link() {
+    contract::settle_sets_the_verdict_and_writes_the_call_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn settle_twice_is_idempotent() {
+    contract::settle_twice_is_idempotent(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_deny_settle_writes_no_call_link() {
+    contract::a_deny_settle_writes_no_call_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_lost_settle_leaves_the_event_pending_and_no_call_link() {
+    contract::a_lost_settle_leaves_the_event_pending_and_no_call_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_settle_for_an_unknown_event_writes_nothing() {
+    contract::a_settle_for_an_unknown_event_writes_nothing(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_reserve_writes_decision_links() {
+    contract::the_reserve_writes_decision_links(&harness()).await;
+}
+
+#[tokio::test]
+async fn links_are_isolated_per_principal_and_org() {
+    contract::links_are_isolated_per_principal_and_org(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_result_event_is_written_once_per_call_id() {
+    contract::a_result_event_is_written_once_per_call_id(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_write_without_results_and_without_turn_writes_nothing() {
+    contract::a_write_without_results_and_without_turn_writes_nothing(&harness()).await;
+}
+
+#[tokio::test]
+async fn touch_keeps_the_latest_activity_and_the_highest_turn() {
+    contract::touch_keeps_the_latest_activity_and_the_highest_turn(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_future_event_survives_a_reserve_with_an_older_clock() {
+    contract::a_future_event_survives_a_reserve_with_an_older_clock(&harness()).await;
+}
+
+#[tokio::test]
+async fn every_written_key_expires_after_the_retention() {
+    contract::every_written_key_expires_after_the_retention(&harness()).await;
+}
+
+#[tokio::test]
+async fn append_writes_an_allowed_event_and_its_call_link() {
+    contract::append_writes_an_allowed_event_and_its_call_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_local_shell_settle_links_the_item_id_too() {
+    contract::a_local_shell_settle_links_the_item_id_too(&harness()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_reserves_all_land() {
+    contract::concurrent_reserves_all_land(&harness()).await;
+}
+
+#[tokio::test]
+async fn run_all_passes_on_one_shared_store() {
+    contract::run_all(&harness()).await;
+}
