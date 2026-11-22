@@ -433,13 +433,14 @@ mod tests {
             ("slash repeat", Box::new(|n| format!("https://x.example/{}", "/http:".repeat(n)))),
         ];
         for (name, make) in &cases {
-            let (small, large) = (make(20_000), make(80_000));
+            let (small, large) = (make(5_000), make(80_000));
             let t1 = best_of_five(|| drop(call_hosts(&ToolInput::Text(small.clone()))));
-            let t4 = best_of_five(|| drop(call_hosts(&ToolInput::Text(large.clone()))));
-            // Linear is about 4. Quadratic is about 16. A floor of 5 ms keeps a fast run from
-            // giving a noisy ratio.
+            let t16 = best_of_five(|| drop(call_hosts(&ToolInput::Text(large.clone()))));
+            // The size grows 16 times. Linear time grows about 16 times, quadratic time about 256
+            // times. The limit of 40 leaves a margin of 2.5 for a loaded host. A floor of 5 ms on
+            // the small run keeps a very fast run from giving a noisy limit.
             let floor = std::time::Duration::from_millis(5);
-            assert!(t4 < t1.max(floor) * 10, "{name}: {t1:?} for N, {t4:?} for 4N");
+            assert!(t16 < t1.max(floor) * 40, "{name}: {t1:?} for N, {t16:?} for 16N");
         }
     }
 }
