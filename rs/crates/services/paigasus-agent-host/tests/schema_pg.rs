@@ -321,6 +321,10 @@ async fn m0004_down_drops_only_the_timer_table() {
     assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox_event') IS NOT NULL AS v").await, "m0003 must stay");
 }
 
+fn session_event_sql(inbox: Uuid, thread: Uuid, seq: i64, run: Uuid) -> String {
+    format!("INSERT INTO session_event (inbox_id, thread_id, sequence, run_id, kind, payload) VALUES ('{inbox}', '{thread}', {seq}, '{run}', 'user_message', '{{}}')")
+}
+
 #[tokio::test]
 async fn m0005_adds_session_event_and_the_run_columns() {
     let Some((_node, _url, db)) = migrated_postgres().await else {
@@ -335,16 +339,7 @@ async fn m0005_adds_session_event_and_the_run_columns() {
     two_inboxes(&db).await;
     insert_thread(&db, id(500), id(1)).await;
     insert_run(&db, id(600), id(1), id(500)).await.expect("insert run");
-    let row = |inbox: Uuid, seq: i64| {
-        format!(
-            "INSERT INTO session_event (inbox_id, thread_id, sequence, run_id, kind, payload) VALUES ('{inbox}', '{}', {seq}, '{}', 'user_message', '{{}}')",
-            id(500),
-            id(600)
-        )
-    };
-    // A session row that names another inbox is refused by the composite keys.
-    let err = db.execute_unprepared(&row(id(2), 0)).await.expect_err("must fail");
-    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+    let row = |inbox: Uuid, seq: i64| session_event_sql(inbox, id(500), seq, id(600));
     // The primary key refuses a second row with the same (thread, sequence).
     db.execute_unprepared(&row(id(1), 0)).await.expect("first row");
     let err = db.execute_unprepared(&row(id(1), 0)).await.expect_err("must fail");
@@ -368,4 +363,37 @@ async fn down_of_m0005_drops_session_event_and_the_run_columns() {
     );
     assert!(support::scalar_bool(&db, "SELECT to_regclass('run') IS NOT NULL AS v").await, "m0003 must stay");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('timer') IS NOT NULL AS v").await, "m0004 must stay");
+}
+
+/// Thread 500 and run 600 are of inbox 1. Thread 501 and run 601 are of inbox 2.
+async fn session_fence_fixture(db: &DatabaseConnection) {
+    two_inboxes(db).await;
+    insert_thread(db, id(500), id(1)).await;
+    insert_run(db, id(600), id(1), id(500)).await.expect("insert run 600");
+    insert_thread(db, id(501), id(2)).await;
+    insert_run(db, id(601), id(2), id(501)).await.expect("insert run 601");
+}
+
+#[tokio::test]
+async fn a_session_event_cannot_name_a_thread_of_another_inbox() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    session_fence_fixture(&db).await;
+    // Inbox 1, run 600 of inbox 1, thread 501 of inbox 2: only the thread key fails.
+    let err = db.execute_unprepared(&session_event_sql(id(1), id(501), 0, id(600))).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+}
+
+#[tokio::test]
+async fn a_session_event_cannot_name_a_run_of_another_inbox() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    session_fence_fixture(&db).await;
+    // Inbox 1, thread 500 of inbox 1, run 601 of inbox 2: only the run key fails.
+    let err = db.execute_unprepared(&session_event_sql(id(1), id(500), 0, id(601))).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
 }
