@@ -17,6 +17,7 @@ pub mod mid_run;
 pub mod outbox;
 pub mod ports;
 pub mod render;
+pub mod retry;
 pub mod run;
 pub mod screen;
 pub mod timer;
