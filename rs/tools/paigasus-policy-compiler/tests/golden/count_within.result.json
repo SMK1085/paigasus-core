@@ -1,7 +1,7 @@
 {
   "outcome": "accepted",
   "protocol_version": 1,
-  "compiler_generation": 2,
+  "compiler_generation": 3,
   "compiled": {
     "cedar_policies": "@id(\"search-rate\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.p_search_hrate_0__temporal_0 };",
     "cedar_schema_json": {
@@ -13,6 +13,13 @@
               "declared": {
                 "type": "EntityOrCommon",
                 "name": "__cedar::String"
+              },
+              "hosts": {
+                "type": "Set",
+                "element": {
+                  "type": "EntityOrCommon",
+                  "name": "__cedar::String"
+                }
               }
             }
           },
@@ -80,6 +87,10 @@
                     "name": "__cedar::String",
                     "required": false
                   },
+                  "max_severity": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::Long"
+                  },
                   "request": {
                     "type": "EntityOrCommon",
                     "name": "RequestInfo"
@@ -122,6 +133,10 @@
                     "type": "EntityOrCommon",
                     "name": "__cedar::String",
                     "required": false
+                  },
+                  "max_severity": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::Long"
                   },
                   "request": {
                     "type": "EntityOrCommon",
@@ -174,6 +189,10 @@
                     "type": "EntityOrCommon",
                     "name": "__cedar::String",
                     "required": false
+                  },
+                  "max_severity": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::Long"
                   },
                   "p_search_hrate_0__temporal_0": {
                     "type": "Boolean"
@@ -235,6 +254,10 @@
                     "type": "EntityOrCommon",
                     "name": "__cedar::String",
                     "required": false
+                  },
+                  "max_severity": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::Long"
                   },
                   "request": {
                     "type": "EntityOrCommon",

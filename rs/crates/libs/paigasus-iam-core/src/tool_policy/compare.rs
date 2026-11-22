@@ -18,8 +18,12 @@ pub fn outputs_identical(a: &CompiledOutput, b: &CompiledOutput) -> bool {
     a.cedar_policies == b.cedar_policies && canonical_json(&a.cedar_schema_json) == canonical_json(&b.cedar_schema_json) && a.conditions == b.conditions
 }
 
-/// True when `new` gives the same enforcement as `old` for every policy that `old` accepted:
-/// the same policy text, the same conditions, and a schema that only adds Record attributes.
+/// True when `new` has the same policy text and conditions as `old`, with a schema that only
+/// adds attributes to Record types.
+///
+/// This is not a proof of the same enforcement. A policy that tests `context has <new
+/// attribute>` (or `has` on a new attribute of a common type) can change its meaning when the
+/// gateway fills the attribute. That is a known residual (SMA-855 spec section 6.13.2).
 ///
 /// Only the re-compile job calls this (SMA-855 spec section 6.13.2, D28). The catalog coupling
 /// and the diff report keep [`outputs_identical`], so a catalog write that adds an input
@@ -258,9 +262,20 @@ mod tests {
         output(3, POLICY, schema)
     }
 
+    /// `schema` (revision 2) without the two attributes that revision 2 added: the revision-1
+    /// shape. The tests below add them again, so a test of an added attribute does not only
+    /// replace a key that is already there.
+    fn revision_1(mut schema: Value) -> Value {
+        for action in schema["Pgs::Gateway"]["actions"].as_object_mut().unwrap().values_mut() {
+            assert!(action["appliesTo"]["context"]["attributes"].as_object_mut().unwrap().remove("max_severity").is_some());
+        }
+        assert!(schema["Pgs::Gateway"]["commonTypes"]["CallInfo"]["attributes"].as_object_mut().unwrap().remove("hosts").is_some());
+        schema
+    }
+
     /// The revision-1 base schema.
     fn base() -> Value {
-        base_schema_json()
+        revision_1(base_schema_json())
     }
 
     fn eq(old: Value, new: Value) -> bool {
@@ -295,7 +310,14 @@ mod tests {
     /// A tenant schema with one function tool `t` that has `input` as its JSON Schema.
     fn tool_schema(input: Value) -> Value {
         let entry = build_manual("t", ToolKind::Function, Some(input), &CatalogLimits::default()).unwrap();
-        tenant_schema_json(&[entry])
+        revision_1(tenant_schema_json(&[entry]))
+    }
+
+    #[test]
+    fn the_revision_2_shape_of_these_tests_is_the_generated_schema() {
+        assert_eq!(revision_2(base()), base_schema_json());
+        let entry = build_manual("t", ToolKind::Function, Some(json!({"type": "object"})), &CatalogLimits::default()).unwrap();
+        assert_eq!(revision_2(revision_1(tenant_schema_json(std::slice::from_ref(&entry)))), tenant_schema_json(&[entry]));
     }
 
     #[test]

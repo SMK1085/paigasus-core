@@ -202,7 +202,150 @@ set again without the temporal block. Then write the catalog.
 A catalog change that would break your live set is refused with `tool-catalog-breaks-policy`.
 Change the policy first, then change the catalog.
 
-## 4. Held versions
+## 4. Detector findings
+
+The gateway runs detectors on each tool call and on each tool result. A detector gives a finding.
+A finding has a kind and a severity. A finding does not block anything by itself. A finding blocks
+a call or a tool result only when one of your policies reads it.
+
+Your policies read the findings in three context attributes:
+
+- `context.findings` is the set of the finding kinds, for example
+  `["secret_in_args", "unseen_host"]`. `context.findings.isEmpty()` is the plain test for "no
+  findings".
+- `context.max_severity` is the highest severity of the findings, as a number: `info` is 0, `low`
+  is 1, `medium` is 2 and `high` is 3. It is -1 when there are no findings. So every comparison
+  with a real level is false for a call with no findings.
+- `context.call.hosts` is the set of the hosts in the call arguments, with no duplicates and in
+  sorted order. It holds each host, also a host that the history holds. It is empty for a call
+  with no host.
+
+### The finding kinds
+
+| Kind | Detector | Severity | Meaning |
+|---|---|---|---|
+| `name_collision` | `kernel` | high | Two tool definitions have the same name. The platform floor blocks this already. |
+| `unparsed_arguments` | `kernel` | info or medium | `info`: the call has text input (`custom` or `apply_patch`). `medium`: the arguments are not valid JSON, or they have a duplicate key. |
+| `undeclared_tool` | `undeclared_tool` | medium | The model calls a tool that the client did not offer. |
+| `invalid_args` | `invalid_args` | low | The arguments do not agree with the JSON Schema of the tool. |
+| `unseen_host` | `unseen_host` | medium | A host in the arguments is not in the history of the request. |
+| `secret_in_args` | `secret_in_args` | high | The arguments hold a credential, for example a cloud access key. |
+| `injection_markers` | `injection_markers` | high or medium | A tool result holds a marker of a prompt injection. Only hidden Unicode tag text is `high`. |
+| `detector_error` | the detector that failed, `built_in` or `kernel` | high | A detector failed, or a scan limit stopped it. |
+
+`unparsed_arguments` is `info` for every `custom` and `apply_patch` call. So for these calls,
+`context.findings.isEmpty()` is always false, and `context.max_severity >= 0` is always true. Do
+not use these two tests to find a problem. Use `context.max_severity >= 1` or a test of a kind.
+
+### The starter policy
+
+This policy blocks a call or a tool result that has a `high` finding:
+
+```
+@id("detectors-block-high")
+forbid (principal, action, resource)
+when { context.max_severity >= 3 };
+```
+
+Add it to your set. Put your organization in `log_only` mode first. Read the decision log for one
+week. Then change the mode to `enforce`.
+
+This policy is a `forbid`, so it never removes a tool definition from a request. It blocks calls,
+and it replaces tool results.
+
+What the policy blocks:
+
+- `secret_in_args` and `name_collision`.
+- `injection_markers` only for hidden Unicode tag text (rule `unicode_tags`). The other markers
+  are `medium`: chat template tokens, turn markers, close tags and phrases such as "ignore the
+  previous instructions". These markers occur in normal source code, tests and documentation, and
+  a coding agent reads such files as tool results. So they are signals only. The meaning of a text
+  is the job of a judge (SMA-857).
+- `detector_error`. It is `high`, so a detector error blocks under this policy. That is fail
+  closed. A detector error occurs when a detector fails, when a scan limit stops a scan, when the
+  scan of the request fails, when a URL has an authority that is too long, or when a call has more
+  than 256 hosts. At the default
+  limits, the gateway scans a request in full. A larger request limit or a smaller
+  `max_scan_bytes` of the operator can give a scan limit on old tool results.
+
+### When the detectors run
+
+- The detectors that read tool results run only when your mode is `log_only` or `enforce`. In
+  mode `off`, the gateway does not scan the tool results. So the findings of a tool result are in
+  the decision log only when your set is live and your mode is `log_only` or `enforce`.
+- The platform operator can stop all detectors with `[tool_policy.detectors] enabled = false`.
+  Then `context.max_severity` is -1 and `context.call.hosts` is `[]`, also when a finding of the
+  kernel such as `name_collision` exists. `context.findings` still holds the kernel kinds. So a
+  policy on `max_severity` or on `context.call.hosts` has no effect while the detectors are off.
+
+### How a tool result is decided
+
+A tool result with findings is decided with the call that the result answers. The gateway
+evaluates your set two times: one time with the findings and one time without them. The gateway
+replaces the result when the findings cause the deny. A forbid that applies also without the
+findings does not replace the result. In `log_only` mode, the gateway records the replacement,
+but it does not replace the result.
+
+- A tool result whose earlier call is not in the request is decided with the tool name of the
+  result, or with the empty tool name. So a policy that names a tool does not apply to it.
+- A tool result with no call id and no tool name is never replaced. The gateway records it in the
+  decision log with its findings.
+
+### What one aggregated `max_severity` cannot express
+
+`context.max_severity` tells how bad the worst finding is. It does not tell which kind the worst
+finding is. So a policy cannot say "block on `high`, but not when the only `high` finding is
+`detector_error`" with `max_severity` alone. If you want to allow a call when a detector fails
+(fail open), use a policy on the kinds:
+
+```
+@id("detectors-block-kinds")
+forbid (principal, action, resource)
+when { context.findings.containsAny(["secret_in_args", "injection_markers", "name_collision"]) };
+```
+
+This policy blocks every `injection_markers` finding, also the `medium` ones, because a kind in
+`context.findings` does not carry its severity.
+
+### Host rules
+
+An allow list of hosts for one tool:
+
+```
+@id("fetch-hosts")
+forbid (principal, action == Pgs::Gateway::Action::"fetch", resource)
+unless { ["docs.example.com", "api.example.com"].containsAll(context.call.hosts) };
+```
+
+An allow list finds only the hosts that the gateway can extract:
+
+- The gateway reads a host from a URL with the scheme `http`, `https`, `ws`, `wss` or `ftp`.
+- The gateway also reads a bare host, with no scheme, from a string value under one of these keys:
+  `url`, `uri`, `href`, `link`, `host`, `hostname`, `domain`, `endpoint`, `base_url` and
+  `website`. A bare host under a different key is not in `context.call.hosts`.
+- A host in a base64 string or in a different encoded string is not in `context.call.hosts`.
+
+A deny list of hosts fails open when a call has more than 256 hosts. Then `context.call.hosts`
+holds the first 255 hosts in sorted order and the value `<overflow>`, so a denied host can be
+absent from the set. Always pair a deny list with a test for `detector_error`:
+
+```
+@id("fetch-deny-hosts")
+forbid (principal, action == Pgs::Gateway::Action::"fetch", resource)
+when { context.call.hosts.containsAny(["evil.example"]) || context.findings.contains("detector_error") };
+```
+
+`unseen_host` has these limits:
+
+- The client writes the history of the request. So `unseen_host` is a hint, not a proof. A
+  client can put any host into the history.
+- With a Responses `previous_response_id`, the earlier turns are not in the request. Then
+  `unseen_host` occurs frequently.
+- A host does not count as seen when it is only in a tool result with a finding of `medium` or
+  higher. An attacker can split the URL and the instruction into two tool results to get past
+  this rule.
+
+## 5. Held versions
 
 A new compiler or schema version can change how IAM compiles your set. IAM compiles your live
 set again after such a change. If the output is the same, your set gets a new live version with no
@@ -243,7 +386,7 @@ An accept of a held version that still exists but is no longer current returns
 after IAM made the held version, or when a save of the set commits during the accept. List the
 held versions again and use the current row, or save the set.
 
-## 5. Error and rejection codes
+## 6. Error and rejection codes
 
 A rejection is a successful response with the rejected list. An error uses the status shown.
 

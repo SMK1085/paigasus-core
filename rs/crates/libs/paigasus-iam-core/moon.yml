@@ -24,7 +24,10 @@ tasks:
     # SMA-774 — `tool_policy::schema`'s `the_base_schema_fixture_is_current` reads the base
     # schema fixture of the policy compiler, which is outside this project. `tool_policy::protocol`
     # reads every protocol fixture, and `tests/tool_policy_cross_version.rs` reads the compiler's
-    # golden results and golden tenant schema.
+    # golden results and golden tenant schema. SMA-855 — `tests/detector_policies.rs` reads the
+    # shared detector policy fixture of the gateway and the tenant guide that holds each policy.
     inputs:
       - '/rs/tools/paigasus-policy-compiler/protocol/fixtures/**/*'
       - '/rs/tools/paigasus-policy-compiler/tests/golden/**/*'
+      - '/rs/crates/services/paigasus-gateway/tests/fixtures/detector-policies.cedar'
+      - '/docs/tool-policies/tenant-guide.md'

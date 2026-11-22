@@ -155,7 +155,7 @@ async fn the_boot_probe_reads_the_current_generation() {
         ..ToolPoliciesConfig::default()
     };
     let compiler = probe(&config).await.expect("the boot probe accepts the real compiler");
-    assert_eq!(compiler.generation(), 2);
+    assert_eq!(compiler.generation(), 3);
 }
 
 /// Saves a policy that reads a field the JSON Schema mapping dropped. Prints the real message.

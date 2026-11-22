@@ -351,3 +351,39 @@ more effects.
 The first rollout of this release must finish before any compiler or schema change ships. No
 change of the Dogwood version and no change of the compiler output may merge without a bump of
 `COMPILER_GENERATION`. The golden test enforces this.
+
+### The detector release: generation 3 and schema revision 2 (SMA-855)
+
+This release changes the compiler generation from 2 to 3 and the tool schema revision from 1 to 2
+in one release. The new schema adds two attributes: `context.max_severity` and
+`context.call.hosts`. It removes or changes no attribute.
+
+- Deploy the gateway first, then IAM. A gateway of an older release does not fill the two
+  attributes. A tenant `forbid` that reads them then errors and denies the call. That is fail
+  closed, but it blocks calls.
+- The job compares the old and the new output with an additive rule. The policy text and the
+  conditions must be the same, and the new schema may only add attributes to Record types. So one
+  boot run re-compiles every live set to an identical live version at generation 3 and
+  revision 2. It writes no held row, and no admin action is necessary.
+- Each set gets a new live version. So every gateway reloads every organization at about the same
+  time.
+- Until the job reaches a set, a catalog write on that set is refused with
+  `tool-policy-recompile-pending`, as on every bump.
+- After the rollout, start the job one more time with `POST /v1/tool-policy-recompile`, as
+  "When the job runs" says.
+- Before you roll back IAM or the gateway, find the live sets that read the new attributes:
+
+  ```sql
+  SELECT kind, org_id, version
+  FROM tool_policy_set_version
+  WHERE status = 'live'
+    AND (source LIKE '%max_severity%' OR source LIKE '%hosts%');
+  ```
+
+  Each row is a set that fails closed on a gateway without the attributes. An IAM at revision 1
+  refuses to compile it. The organization must change the set first. The query also finds other
+  text that holds `hosts`, so read each row before you act.
+- An IAM rollback after this release makes every set stale for the older IAM. Its job returns
+  `older_replica` and writes nothing, and every catalog write is refused with
+  `tool-policy-recompile-pending` until an admin saves the set (see "Rollback of a compiler
+  change"). Roll back IAM first, then the gateway.

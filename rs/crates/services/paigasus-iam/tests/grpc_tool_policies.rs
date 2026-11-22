@@ -390,7 +390,12 @@ async fn every_rejection_reason_reaches_the_wire_in_the_rejected_oneof() {
 /// The compile result fixture that holds two history conditions.
 fn history_accepted() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tools/paigasus-policy-compiler/protocol/fixtures/result_tenant_accepted.json");
-    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    // The fixture is the output of the real compiler. The scripted fake keeps generation 2
+    // (SMA-855 P-7), so the replayed result carries the generation of the fake.
+    let mut result: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+    result["compiler_generation"] = 2.into();
+    result.to_string()
 }
 
 // ---- the sets -------------------------------------------------------------------------------

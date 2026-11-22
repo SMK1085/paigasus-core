@@ -628,3 +628,141 @@ async fn two_concurrent_runs_write_one_held_row() {
     let lock = PgRecompileLock::new(e.db.clone());
     assert!(acquire_within(&lock).await);
 }
+
+/// The output of an echo compiler for `source`, at schema revision 1: the current schema without
+/// the two attributes that revision 2 added (SMA-855 spec section 6.13.1).
+fn revision_1_output(key: ToolPolicySetKey, source: &str) -> paigasus_iam_core::tool_policy::CompiledOutput {
+    use paigasus_iam_core::tool_policy::{CompiledOutput, base_schema_json, tenant_schema_json};
+    let mut schema = match key {
+        ToolPolicySetKey::Tenant(_) => tenant_schema_json(&[]),
+        ToolPolicySetKey::Floor => base_schema_json(),
+    };
+    let gateway = &mut schema["Pgs::Gateway"];
+    for action in gateway["actions"].as_object_mut().unwrap().values_mut() {
+        assert!(action["appliesTo"]["context"]["attributes"].as_object_mut().unwrap().remove("max_severity").is_some());
+    }
+    assert!(gateway["commonTypes"]["CallInfo"]["attributes"].as_object_mut().unwrap().remove("hosts").is_some());
+    CompiledOutput {
+        cedar_policies: source.to_owned(),
+        cedar_schema_json: schema,
+        conditions: Vec::new(),
+    }
+}
+
+/// A live version 1 at compiler generation 2 and schema revision 1, with the revision-1 output
+/// of `source` as its compiled bytes: a set that the release before SMA-855 saved.
+fn revision_1_live(key: ToolPolicySetKey, source: &str) -> ToolPolicyVersion {
+    use paigasus_proto::paigasus::iam::v1 as pb;
+    use prost::Message;
+    let out = revision_1_output(key, source);
+    let (kind, org_id) = match key {
+        ToolPolicySetKey::Tenant(org) => (pb::ToolPolicySetKind::Tenant, org.to_string()),
+        ToolPolicySetKey::Floor => (pb::ToolPolicySetKind::Floor, String::new()),
+    };
+    let compiled = pb::CompiledToolPolicySet {
+        kind: kind as i32,
+        org_id,
+        version: 1,
+        compiler_generation: 2,
+        schema_revision: 1,
+        catalog_revision: 0,
+        cedar_policies: out.cedar_policies,
+        cedar_schema: out.cedar_schema_json.to_string(),
+        conditions: Vec::new(),
+        max_window_ms: 3_600_000,
+        catalog_names: Vec::new(),
+    }
+    .encode_to_vec();
+    ToolPolicyVersion {
+        source: source.to_owned(),
+        compiled,
+        compiler_generation: 2,
+        schema_revision: 1,
+        ..live(key, 1, VersionOrigin::Save)
+    }
+}
+
+/// SMA-855 spec section 7.5 and D28: the release bumps the compiler generation (2 to 3) and the
+/// schema revision (1 to 2), and the schema only adds attributes. One boot run then writes an
+/// identical live version for every set. No held row exists, every set is current, and a
+/// catalog write succeeds.
+#[tokio::test]
+async fn an_additive_revision_and_generation_bump_keeps_every_live_set_current() {
+    use paigasus_iam::application::error::TenancyError;
+    use paigasus_iam::application::tool_policies::{RecompileOutcome, RecompileRun, SetRecompile, WriteResult};
+    use paigasus_iam_core::tool_policy::{STARTER_TOOL_POLICY_SOURCE, TOOL_SCHEMA_REVISION, ToolKind};
+    use paigasus_proto::paigasus::iam::v1 as pb;
+    use prost::Message;
+
+    const FLOOR: &str = "@id(\"floor-deny\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource);\n";
+    assert_eq!(TOOL_SCHEMA_REVISION, 2, "this test is the revision-2 rollout");
+
+    let Some(e) = env().await else { return };
+    let mut orgs = [seed_org(&e.db).await, seed_org(&e.db).await];
+    orgs.sort();
+    e.put_live(&revision_1_live(ToolPolicySetKey::Floor, FLOOR)).await.unwrap();
+    for org in orgs {
+        e.put_live(&revision_1_live(ToolPolicySetKey::Tenant(org), STARTER_TOOL_POLICY_SOURCE)).await.unwrap();
+    }
+
+    let svc = service_with(
+        &e.db,
+        GatedCompiler {
+            generation: 3,
+            suffix: "",
+            gate: None,
+        },
+    );
+    let actor = paigasus_kernel::Prn::build("iam", "", None, "principal", Uuid::from_u128(1)).unwrap();
+    let search = || Some(serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}));
+
+    // The control: before the run, every set is stale, so a catalog write is refused.
+    let refused = svc.put_tool(&actor, orgs[0], "search", ToolKind::Function, search(), 0).await;
+    assert!(matches!(refused, Err(TenancyError::ToolPolicyRecompilePending)), "{refused:?}");
+
+    let run = svc.run_recompile_at_boot(std::future::pending()).await.expect("the run");
+    let identical = |key| SetRecompile {
+        key,
+        base_version: 1,
+        outcome: RecompileOutcome::Identical { version: 2 },
+    };
+    assert_eq!(
+        run,
+        RecompileRun::Ran(vec![
+            identical(ToolPolicySetKey::Floor),
+            identical(ToolPolicySetKey::Tenant(orgs[0])),
+            identical(ToolPolicySetKey::Tenant(orgs[1]))
+        ])
+    );
+
+    assert_eq!(
+        scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version WHERE status IN ('held', 'discarded')".into(), "n").await,
+        0
+    );
+    assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version WHERE status = 'live'".into(), "n").await, 3);
+    assert_eq!(
+        scalar(
+            &e.db,
+            "SELECT count(*) AS n FROM tool_policy_set_version WHERE status = 'live' AND version = 2 AND compiler_generation = 3 AND schema_revision = 2".into(),
+            "n"
+        )
+        .await,
+        3
+    );
+    assert!(e.repo.stale_live_versions(3, TOOL_SCHEMA_REVISION).await.unwrap().is_empty(), "every live set is current");
+    for key in [ToolPolicySetKey::Floor, ToolPolicySetKey::Tenant(orgs[0]), ToolPolicySetKey::Tenant(orgs[1])] {
+        let v = e.repo.live(&key).await.unwrap().expect("a live version");
+        assert_eq!((v.version, v.origin, v.compiler_generation, v.schema_revision), (2, VersionOrigin::Recompile, 3, 2), "{key:?}");
+        let set = pb::CompiledToolPolicySet::decode(v.compiled.as_slice()).expect("decode");
+        assert_eq!((set.compiler_generation, set.schema_revision), (3, 2), "{key:?}");
+        let schema: serde_json::Value = serde_json::from_str(&set.cedar_schema).unwrap();
+        assert!(
+            schema["Pgs::Gateway"]["commonTypes"]["CallInfo"]["attributes"]["hosts"].is_object(),
+            "{key:?} stores the revision-2 schema"
+        );
+    }
+
+    // A catalog write now succeeds.
+    let written = svc.put_tool(&actor, orgs[0], "search", ToolKind::Function, search(), 0).await.expect("the catalog write");
+    assert!(matches!(written, WriteResult::Accepted(_)), "{written:?}");
+}

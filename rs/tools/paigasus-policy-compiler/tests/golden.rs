@@ -21,7 +21,7 @@ const DAY_MS: u64 = 86_400_000;
 const BIN: &str = env!("CARGO_BIN_EXE_paigasus-policy-compiler");
 
 /// The `blake3` hash of the golden results that `COMPILER_GENERATION` pins.
-const EXPECTED_GOLDEN_HASH: &str = "a6febbf59a02503592af1cd03cab26535a8fdcd267e921bea0dad3a26e3e7385";
+const EXPECTED_GOLDEN_HASH: &str = "b163461c7d755ea5de7aa2704244f1446a3b026e9f4651a2d37a895344bef415";
 
 fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -134,7 +134,7 @@ fn golden_output_is_pinned_to_the_compiler_generation() {
     let actual_hash = hasher.finalize().to_hex().to_string();
     assert_eq!(
         (COMPILER_GENERATION, actual_hash.as_str()),
-        (2, EXPECTED_GOLDEN_HASH),
+        (3, EXPECTED_GOLDEN_HASH),
         "the golden compiler output changed. Do these three steps in order: \
          (1) bump COMPILER_GENERATION in src/lib.rs; \
          (2) rewrite the result files with PAIGASUS_WRITE_FIXTURES=1 cargo test --locked; \
@@ -261,7 +261,7 @@ fn revision_prints_generation_and_commit() {
     let actual: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
     assert_eq!(
         actual,
-        serde_json::json!({ "compiler_generation": 2, "protocol_version": 1, "revision": "2+dogwood.8ffd2106daf0+proto.1" })
+        serde_json::json!({ "compiler_generation": 3, "protocol_version": 1, "revision": "3+dogwood.8ffd2106daf0+proto.1" })
     );
-    assert_eq!(revision_string(), "2+dogwood.8ffd2106daf0+proto.1");
+    assert_eq!(revision_string(), "3+dogwood.8ffd2106daf0+proto.1");
 }

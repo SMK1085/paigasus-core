@@ -25,6 +25,10 @@
                 "required": false,
                 "type": "String"
               },
+              "max_severity": {
+                "required": true,
+                "type": "Long"
+              },
               "request": {
                 "required": true,
                 "type": "RequestInfo"
@@ -67,6 +71,10 @@
               "input_text": {
                 "required": false,
                 "type": "String"
+              },
+              "max_severity": {
+                "required": true,
+                "type": "Long"
               },
               "request": {
                 "required": true,
@@ -119,6 +127,10 @@
               "input_text": {
                 "required": false,
                 "type": "String"
+              },
+              "max_severity": {
+                "required": true,
+                "type": "Long"
               },
               "request": {
                 "required": true,
@@ -177,6 +189,10 @@
                 "required": false,
                 "type": "String"
               },
+              "max_severity": {
+                "required": true,
+                "type": "Long"
+              },
               "request": {
                 "required": true,
                 "type": "RequestInfo"
@@ -208,6 +224,13 @@
           "declared": {
             "required": true,
             "type": "String"
+          },
+          "hosts": {
+            "element": {
+              "type": "String"
+            },
+            "required": true,
+            "type": "Set"
           }
         },
         "type": "Record"

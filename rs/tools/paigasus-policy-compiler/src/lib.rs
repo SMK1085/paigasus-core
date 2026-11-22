@@ -9,7 +9,7 @@ pub mod translate;
 /// The compiler generation (spec 2026-11-15 iam-tool-policy-sets, section 6.2). Bump it when
 /// the compiler output can change: a Dogwood bump, a translation change or a protocol change.
 /// `golden_output_is_pinned_to_the_compiler_generation` in `tests/golden.rs` pins it.
-pub const COMPILER_GENERATION: u32 = 2;
+pub const COMPILER_GENERATION: u32 = 3;
 
 /// The version of the JSON protocol with IAM (spec section 5.2).
 pub const PROTOCOL_VERSION: u32 = 1;

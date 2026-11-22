@@ -498,6 +498,11 @@ mod tests {
     /// A live version 1 of the set of `key`, not stored. Its output is the identity output of
     /// `source`.
     fn live_row(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32, schema_revision: u32) -> ToolPolicyVersion {
+        live_row_with(h, key, source, generation, schema_revision, &identity(&key, source))
+    }
+
+    /// A live version 1 of the set of `key`, not stored, with `output` as its compiled output.
+    fn live_row_with(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32, schema_revision: u32, output: &CompiledOutput) -> ToolPolicyVersion {
         let catalog_revision = matches!(key, ToolPolicySetKey::Tenant(_)).then_some(0);
         let meta = CompiledMeta {
             key,
@@ -512,7 +517,7 @@ mod tests {
             key,
             version: 1,
             source: source.to_owned(),
-            compiled: encode_compiled(&meta, &identity(&key, source)),
+            compiled: encode_compiled(&meta, output),
             compiler_generation: generation,
             schema_revision,
             catalog_revision,
@@ -637,36 +642,42 @@ mod tests {
         assert_eq!((state.live_version, state.last_version), (1, 2));
     }
 
-    /// `schema` with the two SMA-855 attributes added: `max_severity` in the context of every
-    /// action and `hosts` in `CallInfo`. The policy text and the conditions do not change.
-    fn with_added_attributes(mut schema: serde_json::Value) -> serde_json::Value {
+    /// `schema` without the two attributes of schema revision 2 (SMA-855): `max_severity` in the
+    /// context of every action and `hosts` in `CallInfo`. This is the revision-1 shape. The
+    /// policy text and the conditions do not change.
+    fn without_revision_2_attributes(mut schema: serde_json::Value) -> serde_json::Value {
         let gateway = &mut schema["Pgs::Gateway"];
         for action in gateway["actions"].as_object_mut().unwrap().values_mut() {
-            action["appliesTo"]["context"]["attributes"]
-                .as_object_mut()
-                .unwrap()
-                .insert("max_severity".into(), json!({"type": "Long", "required": true}));
+            assert!(action["appliesTo"]["context"]["attributes"].as_object_mut().unwrap().remove("max_severity").is_some());
         }
-        gateway["commonTypes"]["CallInfo"]["attributes"]
-            .as_object_mut()
-            .unwrap()
-            .insert("hosts".into(), json!({"type": "Set", "element": {"type": "String"}, "required": true}));
+        assert!(gateway["commonTypes"]["CallInfo"]["attributes"].as_object_mut().unwrap().remove("hosts").is_some());
         schema
     }
 
-    /// The identity output of `source` for `key`, with the added attributes.
-    fn additive(key: &ToolPolicySetKey, source: &str) -> CompiledOutput {
+    /// The identity output of `source` for `key` at schema revision 1.
+    fn revision_1(key: &ToolPolicySetKey, source: &str) -> CompiledOutput {
         let mut out = identity(key, source);
-        out.cedar_schema_json = with_added_attributes(out.cedar_schema_json);
+        out.cedar_schema_json = without_revision_2_attributes(out.cedar_schema_json);
         out
+    }
+
+    /// A live version 1 of the set of `key` at schema revision 1, with the revision-1 output.
+    fn seed_revision_1(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32) {
+        h.repo.seed_live(live_row_with(h, key, source, generation, 1, &revision_1(&key, source)));
+    }
+
+    /// The output of `source` for `key` from the current generator: revision 1 plus the two
+    /// added attributes.
+    fn additive(key: &ToolPolicySetKey, source: &str) -> CompiledOutput {
+        identity(key, source)
     }
 
     #[tokio::test]
     async fn an_additive_schema_change_writes_an_identical_version() {
         let h = harness();
-        stale_tenant(&h);
+        seed_revision_1(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 0);
         let out = additive(&tenant(&h), STARTER_TOOL_POLICY_SOURCE);
-        assert!(!outputs_identical(&identity(&tenant(&h), STARTER_TOOL_POLICY_SOURCE), &out), "the control: the schema differs");
+        assert!(!outputs_identical(&revision_1(&tenant(&h), STARTER_TOOL_POLICY_SOURCE), &out), "the control: the schema differs");
         h.compiler.push(Ok(CompileOutcome::Accepted(out.clone())));
         assert_eq!(ran(boot_run(&h).await), one(tenant(&h), RecompileOutcome::Identical { version: 2 }));
         assert!(h.repo.held_rows(&tenant(&h)).is_empty());
@@ -679,10 +690,11 @@ mod tests {
     async fn a_generation_and_revision_bump_with_an_additive_schema_writes_identical() {
         // P-7, the shape of Task 17: the rows are at generation 2 and schema revision 1, the
         // compiler is at generation 3, and the output only adds the two attributes.
+        assert_eq!(TOOL_SCHEMA_REVISION, 2, "the rows below are stale by the schema revision too");
         let h = harness();
         h.compiler.set_generation(3);
-        seed(&h, ToolPolicySetKey::Floor, FLOOR_DENY, 2, 1);
-        seed(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 2, 1);
+        seed_revision_1(&h, ToolPolicySetKey::Floor, FLOOR_DENY, 2);
+        seed_revision_1(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 2);
         // The job compiles the floor first, then the tenant set.
         h.compiler.push(Ok(CompileOutcome::Accepted(additive(&ToolPolicySetKey::Floor, FLOOR_DENY))));
         h.compiler.push(Ok(CompileOutcome::Accepted(additive(&tenant(&h), STARTER_TOOL_POLICY_SOURCE))));
@@ -711,8 +723,8 @@ mod tests {
         // The control: the same bump, but one policy text changes in the tenant output.
         let h = harness();
         h.compiler.set_generation(3);
-        seed(&h, ToolPolicySetKey::Floor, FLOOR_DENY, 2, 1);
-        seed(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 2, 1);
+        seed_revision_1(&h, ToolPolicySetKey::Floor, FLOOR_DENY, 2);
+        seed_revision_1(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 2);
         h.compiler.push(Ok(CompileOutcome::Accepted(additive(&ToolPolicySetKey::Floor, FLOOR_DENY))));
         let mut changed = additive(&tenant(&h), STARTER_TOOL_POLICY_SOURCE);
         changed.cedar_policies = changed.cedar_policies.replacen("permit", "forbid", 1);

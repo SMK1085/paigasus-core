@@ -362,7 +362,11 @@ async fn fixture_results_pass_through() {
     let dir = TempDir::new().expect("tempdir");
     for (name, accepted) in [("result_tenant_accepted.json", true), ("result_floor_rejected.json", false)] {
         let result_file = dir.path().join(name);
-        std::fs::write(&result_file, serde_json::to_vec(&fixture(name)).expect("serialize")).expect("write the result");
+        // The fixture is the output of the real compiler. The scripted fake keeps generation 2
+        // (SMA-855 P-7), so the replayed result carries the generation of the fake.
+        let mut result = fixture(name);
+        result["compiler_generation"] = 2.into();
+        std::fs::write(&result_file, serde_json::to_vec(&result).expect("serialize")).expect("write the result");
         let compiler = probed(&fake_compiler(&dir, REVISION_OK, &format!("/bin/cat > /dev/null; exec /bin/cat {}", result_file.display()))).await;
         assert_eq!(compiler.generation(), 2);
         match compiler.compile(&request("request_tenant_accepted.json")).await {
