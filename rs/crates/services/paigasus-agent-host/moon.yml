@@ -50,7 +50,11 @@ tasks:
     # onto the inherited `cargo nextest run --locked --no-tests=pass`, so a full `command:` here
     # would double the command.
     args: ['--features', 'test-model']
-    deps: ['^:build']
+    # `~:build` too (SMA-790, CI run 45141492979): `build` (no feature) and this task both write
+    # `rs/target/debug/paigasus-agent-host`. Run in parallel, the plain build could finish last
+    # and the boot tests then started a binary with no `scripted` model. With this dep the
+    # test task's own `test-model` compile always writes the binary last.
+    deps: ['^:build', '~:build']
     inputs:
       # SMA-787 Task 17: a unit test pins the NATS constants to this file.
       - '/ops/nats/subjects.env'
