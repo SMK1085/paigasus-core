@@ -137,15 +137,17 @@ impl DecisionRecorder {
     }
 
     /// One request-side entry. `cedar` is the detail of the entry (SMA-855 § 6.11.2), `None` for an
-    /// entry that no decision with findings made.
+    /// entry that no decision with findings made. The tracing line is written exactly when the
+    /// entry has a detail: a Cedar decision with findings made it (§ 6.11.2, as R11).
     pub fn record_request(&self, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry, cedar: Option<&CedarDetail>) {
-        self.emit(org_of(&ctx.scope), false, |h| build_request(h, ctx, mode, e, cedar));
+        self.emit(org_of(&ctx.scope), cedar.is_some(), |h| build_request(h, ctx, mode, e, cedar));
     }
 
     /// One tool result with findings that the gateway did not replace: a `SCREEN_RESULT` record
-    /// with applied `Allow` (SMA-855 § 6.11.2).
+    /// with applied `Allow` (SMA-855 § 6.11.2). It always has a detail, so it always writes the
+    /// tracing line.
     pub fn record_screen(&self, ctx: &DecisionContext, mode: Option<TenantMode>, r: &ScreenRecord) {
-        self.emit(org_of(&ctx.scope), false, |h| build_screen(h, ctx, mode, r));
+        self.emit(org_of(&ctx.scope), true, |h| build_screen(h, ctx, mode, r));
     }
 
     pub fn record_refusal(&self, ctx: &DecisionContext, mode: Option<TenantMode>) {

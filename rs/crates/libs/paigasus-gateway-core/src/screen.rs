@@ -449,24 +449,54 @@ mod tests {
             (C, chat(json!({"text":"hidden"})), true, None),
             (R, responses(json!({"text":"hidden"})), true, None),
             (A, anthropic(json!({"text":"hidden"})), true, None),
-            // An Anthropic document and a search_result block next to a text block.
+            // An Anthropic document with a base64 (PDF), URL or file source: not read (fail closed).
             (
                 A,
-                anthropic(json!([{"type":"text","text":"seen"},{"type":"document","source":{"type":"text","media_type":"text/plain","data":"hidden"}}])),
+                anthropic(json!([{"type":"text","text":"seen"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGlkZGVu"}}])),
                 true,
                 Some("seen"),
             ),
+            (A, anthropic(json!([{"type":"document","source":{"type":"url","url":"https://d.example/a.pdf"}}])), true, None),
+            (A, anthropic(json!([{"type":"document","source":{"type":"file","file_id":"f1"}}])), true, None),
+            // A search_result with a block that is not text in its content.
             (
                 A,
-                anthropic(json!([{"type":"search_result","source":"https://s.example","title":"t","content":[{"type":"text","text":"hidden"}]}])),
+                anthropic(json!([{"type":"search_result","source":"s","title":"t","content":[{"type":"document","source":{"type":"file","file_id":"f1"}}]}])),
                 true,
-                None,
+                Some("t\ns"),
             ),
+            // The same block types are not read in a chat result.
+            (C, chat(json!([{"type":"tool_reference","tool_name":"x"}])), true, None),
             // A Responses file part.
             (R, responses(json!([{"type":"input_file","file_data":"hidden"}])), true, None),
             // A text part whose text is not a string.
             (C, chat(json!([{"type":"text","text":{"x":"hidden"}}])), true, None),
             // Controls: a string, the text parts and an image part are read in full.
+            // Controller ruling (Task 22 review): the Anthropic RAG blocks are read. A search_result
+            // gives its title, its source and its text blocks; a document with a text or content
+            // source gives its title, its context and that text; a tool_reference holds no text.
+            (
+                A,
+                anthropic(json!([{"type":"search_result","source":"https://s.example","title":"t","content":[{"type":"text","text":"r1"},{"type":"text","text":"r2"}]}])),
+                false,
+                Some("t\nhttps://s.example\nr1\nr2"),
+            ),
+            (
+                A,
+                anthropic(json!([{"type":"text","text":"seen"},{"type":"document","title":"d","context":"c","source":{"type":"text","media_type":"text/plain","data":"plain"}}])),
+                false,
+                Some("seen\nd\nc\nplain"),
+            ),
+            (
+                A,
+                anthropic(
+                    json!([{"type":"document","source":{"type":"content","content":[{"type":"text","text":"n1"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}]}}]),
+                ),
+                false,
+                Some("n1"),
+            ),
+            (A, anthropic(json!([{"type":"document","source":{"type":"content","content":"n2"}}])), false, Some("n2")),
+            (A, anthropic(json!([{"type":"tool_reference","tool_name":"x"}])), false, None),
             (C, chat(json!("seen")), false, Some("seen")),
             (
                 A,

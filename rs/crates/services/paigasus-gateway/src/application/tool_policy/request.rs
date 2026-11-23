@@ -27,7 +27,7 @@ use super::decider::count_finding;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
 use crate::config::{DetectorSettings, ToolPolicySettings};
-use crate::domain::detectors::{DetectBatch, SCAN_LIMIT, Side as DetectSide, Stage, Subject, UNSCANNED_SHAPE};
+use crate::domain::detectors::{DetectBatch, PipelineOutput, SCAN_LIMIT, Side as DetectSide, Stage, Subject, UNSCANNED_SHAPE};
 use crate::domain::org_of;
 use crate::domain::tool_policy::TenantSettings;
 
@@ -110,6 +110,35 @@ impl Screened {
 /// The `detector_error` finding of the built-in stage for the result at `index`, with this rule.
 fn result_error(rule: &'static str, index: usize) -> Finding {
     detector_error(DETECTOR_BUILT_IN).with_evidence(Evidence::result(rule, index))
+}
+
+/// Put the pipeline output of the result subjects back on their results: subject `j` is the
+/// result `indexes[j]`. The pipeline gives one vector per subject. Any other count is a defect: a
+/// debug build panics, and a release build does what [`place_findings_unchecked`] does (A3).
+fn place_findings(indexes: &[usize], out: &PipelineOutput, findings: &mut [Vec<Finding>], stages: &mut [Vec<Stage>]) {
+    debug_assert_eq!(out.findings.len(), indexes.len(), "one output vector per result subject");
+    place_findings_unchecked(indexes, out, findings, stages);
+}
+
+/// [`place_findings`] after the count check, and its release path: a subject with no output vector
+/// gets one `detector_error` (detector `built_in`), so a short output never drops a result
+/// silently. An output vector past the last subject is ignored.
+fn place_findings_unchecked(indexes: &[usize], out: &PipelineOutput, findings: &mut [Vec<Finding>], stages: &mut [Vec<Stage>]) {
+    for (j, &index) in indexes.iter().enumerate() {
+        let (Some(f), Some(s)) = (findings.get_mut(index), stages.get_mut(index)) else {
+            continue;
+        };
+        match out.findings.get(j) {
+            Some(found) => {
+                s.extend((0..found.len()).map(|k| out.stage_of(j, k)));
+                f.extend(found.iter().cloned());
+            }
+            None => {
+                f.push(detector_error(DETECTOR_BUILT_IN));
+                s.push(Stage::BuiltIn);
+            }
+        }
+    }
 }
 
 /// The tool name of the result at `index`: its own name, else the name of the earlier call with its
@@ -363,12 +392,7 @@ impl RequestToolPolicy {
             };
             let batch = DetectBatch::new(DetectSide::Request, org, ctx.request_id.clone(), subjects, None);
             let out = pipeline.run(batch, tokio::time::Instant::now() + self.detectors.timeout).await;
-            for (j, (index, found)) in indexes.iter().zip(&out.findings).enumerate() {
-                if let (Some(f), Some(s)) = (findings.get_mut(*index), stages.get_mut(*index)) {
-                    s.extend((0..found.len()).map(|k| out.stage_of(j, k)));
-                    f.extend(found.iter().cloned());
-                }
-            }
+            place_findings(&indexes, &out, &mut findings, &mut stages);
         }
         for (rule, list) in [(SCAN_LIMIT, &screen.limited), (UNSCANNED_SHAPE, &screen.unscanned)] {
             for &index in list {
@@ -1169,7 +1193,7 @@ mod tests {
     use crate::application::tool_policy::testing::SlowDetector;
     use crate::config::DETECTOR_MARGIN_MS;
     use crate::domain::decision_log::MemoryDecisionLog;
-    use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, PipelineOutput};
+    use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector};
 
     /// The starter policy of § 6.12: permit all, forbid a high finding.
     const STARTER: &str = r#"@id("all") permit(principal, action, resource); @id("detectors-block-high") forbid (principal, action, resource) when { context.max_severity >= 3 };"#;
@@ -1426,21 +1450,116 @@ mod tests {
         let (policy, stage, log) = screening(testing::PERMIT_ALL, TenantMode::LogOnly);
         // An object content (chat).
         run(&policy, chat_results("hi", "read", &[("c1", json!({"text": "hidden"}))])).await.expect("forwarded");
-        // An Anthropic document block.
-        let anthropic = Bytes::from(
-            json!({"model":"m","max_tokens":1,"messages":[
-                {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]},
-                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"document","source":{"type":"text","media_type":"text/plain","data":"hidden"}}]}]}]})
-            .to_string(),
-        );
-        let turn = parse_request(Format::AnthropicMessages, &anthropic);
-        policy.apply(&ctx(), "m", Format::AnthropicMessages, &turn, anthropic).await.expect("forwarded");
+        // An Anthropic document block with a base64 PDF source: not read (fail closed).
+        run_anthropic(&policy, json!([{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGlkZGVu"}}]))
+            .await
+            .expect("forwarded");
         let screens = of_action(&log, RecordedAction::ScreenResult);
         assert_eq!(screens.len(), 2, "{:?}", log.records());
         for r in &screens {
             assert_eq!(found(r), [(DETECTOR_ERROR.to_owned(), DETECTOR_BUILT_IN.to_owned())]);
         }
         assert_eq!(stage.runs(), 0, "no text to scan, so no pipeline run");
+    }
+
+    /// An Anthropic request with one `read` call and its result with this content.
+    async fn run_anthropic(policy: &RequestToolPolicy, content: Value) -> Result<RequestOutcome, Refused> {
+        let body = Bytes::from(
+            json!({"model":"m","max_tokens":1,"messages":[
+                {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":content}]}]})
+            .to_string(),
+        );
+        let turn = parse_request(Format::AnthropicMessages, &body);
+        policy.apply(&ctx(), "m", Format::AnthropicMessages, &turn, body).await
+    }
+
+    /// Controller ruling (Task 22 review): the Anthropic RAG blocks are scanned, so a clean one
+    /// gives no `detector_error` and an injection in one is found. A `tool_reference` holds no text.
+    #[tokio::test]
+    async fn anthropic_rag_blocks_are_scanned() {
+        let search = |text: &str| json!([{"type":"search_result","source":"https://s.example/a","title":"t","content":[{"type":"text","text":text}]}]);
+        let document = |text: &str| json!([{"type":"document","source":{"type":"text","media_type":"text/plain","data":text}}]);
+        let nested = |text: &str| json!([{"type":"document","source":{"type":"content","content":[{"type":"text","text":text}]}}]);
+        for (name, content) in [("search_result", search(MEDIUM)), ("text document", document(MEDIUM)), ("content document", nested(MEDIUM))] {
+            let (policy, stage, log) = screening(testing::PERMIT_ALL, TenantMode::LogOnly);
+            run_anthropic(&policy, content).await.expect("forwarded");
+            assert_eq!(stage.runs(), 1, "{name}");
+            let screens = of_action(&log, RecordedAction::ScreenResult);
+            assert_eq!(screens.len(), 1, "{name}: {:?}", log.records());
+            assert_eq!(found(&screens[0]), [(INJECTION_MARKERS.to_owned(), INJECTION_MARKERS.to_owned())], "{name}");
+        }
+        let tool_reference = json!([{"type":"tool_reference","tool_name":"other"}]);
+        for (name, content) in [("search_result", search("clean")), ("text document", document("clean")), ("tool_reference", tool_reference)] {
+            let (policy, _stage, log) = screening(testing::PERMIT_ALL, TenantMode::LogOnly);
+            run_anthropic(&policy, content).await.expect("forwarded");
+            assert!(log.records().is_empty(), "{name}: no finding, so no record: {:?}", log.records());
+        }
+        // The host of a clean search_result is seen.
+        let (policy, _stage, _log) = screening(testing::PERMIT_ALL, TenantMode::LogOnly);
+        let out = run_anthropic(&policy, search("clean")).await.expect("forwarded");
+        assert_eq!(seen(&out), Some(vec!["s.example".to_owned()]));
+    }
+
+    /// § 6.11.2: a request-side record with a Cedar detail writes the tracing line, with the kinds
+    /// and the severities only. An entry with no detail writes none (R11).
+    #[tokio::test]
+    async fn a_request_record_with_a_detail_writes_the_tracing_line() {
+        const CANARY: &str = "CANARY_RESULT_TEXT";
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        let (policy, _stage, _log) = screening(STARTER, TenantMode::Enforce);
+        let hidden = tags(CANARY);
+        run(&policy, chat_results("hi", "read", &[("c1", json!(hidden)), ("c2", json!(format!("{MEDIUM} {CANARY}")))]))
+            .await
+            .expect("forwarded");
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains("tool-policy decision")).collect();
+        assert_eq!(lines.len(), 2, "one REPLACE_RESULT and one SCREEN_RESULT line: {text}");
+        let block = lines.iter().find(|l| l.contains(r#"verdict="block""#)).unwrap_or_else(|| panic!("the REPLACE_RESULT line: {text}"));
+        let allow = lines.iter().find(|l| l.contains(r#"verdict="allow""#)).unwrap_or_else(|| panic!("the SCREEN_RESULT line: {text}"));
+        assert!(block.contains("findings=injection_markers:high"), "{block}");
+        assert!(allow.contains("findings=injection_markers:medium"), "{allow}");
+        for line in &lines {
+            for leak in [CANARY, hidden.as_str(), "im_start"] {
+                assert!(!line.contains(leak), "{leak:?} must not be logged: {line}");
+            }
+        }
+        // Control: a removal entry has no detail, so it writes no tracing line.
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        let (policy, _stage, log) = screening(FORBID_X, TenantMode::Enforce);
+        run(&policy, chat_request(&["x", "y"], "")).await.expect("forwarded");
+        assert_eq!(of_action(&log, RecordedAction::RemoveDefinition).len(), 1);
+        assert!(!logs.text().contains("tool-policy decision"), "{}", logs.text());
+    }
+
+    /// The release path of a short pipeline output (A3): `place_findings` checks the count with a
+    /// `debug_assert!` first.
+    #[test]
+    fn a_short_pipeline_output_gives_detector_error_to_each_subject_without_output() {
+        let medium = Finding::new(INJECTION_MARKERS, INJECTION_MARKERS, Severity::Medium, "v1");
+        let out = PipelineOutput {
+            findings: vec![vec![medium.clone()]],
+            hosts: vec![None],
+            stages: Vec::new(),
+        };
+        let mut findings = vec![Vec::new(); 4];
+        let mut stages = vec![Vec::new(); 4];
+        // Subjects for results 1 and 3; the output has a vector for the first subject only.
+        place_findings_unchecked(&[1, 3], &out, &mut findings, &mut stages);
+        assert_eq!(findings[1], [medium]);
+        assert_eq!(findings[3], [detector_error(DETECTOR_BUILT_IN)]);
+        assert!(findings[0].is_empty() && findings[2].is_empty());
+        assert_eq!(stages[3], [Stage::BuiltIn]);
+        assert_eq!(stages.iter().map(Vec::len).collect::<Vec<_>>(), findings.iter().map(Vec::len).collect::<Vec<_>>());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one output vector per result subject")]
+    fn a_short_pipeline_output_panics_in_a_debug_build() {
+        let mut findings = vec![Vec::new(); 2];
+        let mut stages = vec![Vec::new(); 2];
+        place_findings(&[0, 1], &PipelineOutput::default(), &mut findings, &mut stages);
     }
 
     /// The time bound (§ 6.8.3): the webhooks and the judge get no result subject (D40), so a slow

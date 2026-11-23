@@ -200,31 +200,106 @@ fn content_texts<'a>(content: Option<&'a Value>, ty: &str) -> Vec<&'a str> {
 }
 
 /// The part types of a tool result that hold no text: an image. Any other part type that is not
-/// the text type of the format holds content the screen cannot read.
+/// the text type of the format holds content the screen cannot read, except the Anthropic blocks
+/// of [`anthropic_part_texts`].
 const NO_TEXT_PARTS: [&str; 3] = ["image", "image_url", "input_image"];
 
 /// The texts of the content of a tool result, and whether they are all of it: `false` for a
-/// content that is not a string, an array or null, and for an array part that is not a text part
-/// of type `ty` with a string `text` or an image part.
-fn result_texts<'a>(content: Option<&'a Value>, ty: &str) -> (Vec<&'a str>, bool) {
+/// content that is not a string, an array or null, and for an array part that the screen cannot
+/// read (see [`part_texts`]). `anthropic` turns on the Anthropic result blocks.
+fn result_texts<'a>(content: Option<&'a Value>, ty: &str, anthropic: bool) -> (Vec<&'a str>, bool) {
+    let mut out = Vec::new();
+    let complete = content_parts(content, ty, anthropic, &mut out);
+    (out, complete)
+}
+
+/// Push the texts of a content value: a string, or an array of parts. Return whether all of it was
+/// read. An absent or null content holds nothing, so it is read in full.
+fn content_parts<'a>(content: Option<&'a Value>, ty: &str, anthropic: bool, out: &mut Vec<&'a str>) -> bool {
     match content {
-        None | Some(Value::Null) => (Vec::new(), true),
-        Some(Value::String(s)) => (vec![s.as_str()], true),
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => {
+            out.push(s);
+            true
+        }
         Some(Value::Array(parts)) => {
-            let mut out = Vec::new();
+            // No early stop: a part that cannot be read does not hide the texts of later parts.
             let mut complete = true;
             for p in parts {
-                let part_ty = p.get("type").and_then(Value::as_str);
-                match (part_ty, p.get("text").and_then(Value::as_str)) {
-                    (Some(t), Some(text)) if t == ty => out.push(text),
-                    (Some(t), _) if NO_TEXT_PARTS.contains(&t) => {}
-                    _ => complete = false,
-                }
+                complete &= part_texts(p, ty, anthropic, out);
             }
-            (out, complete)
+            complete
         }
-        Some(_) => (Vec::new(), false),
+        Some(_) => false,
     }
+}
+
+/// Push the texts of one part of a tool result. Return whether all of it was read: `true` for a
+/// text part of type `ty` with a string `text` and for an image part, `false` for any other part,
+/// except the Anthropic blocks when `anthropic` is set.
+fn part_texts<'a>(p: &'a Value, ty: &str, anthropic: bool, out: &mut Vec<&'a str>) -> bool {
+    let Some(part_ty) = p.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    if part_ty == ty {
+        return match p.get("text") {
+            Some(Value::String(t)) => {
+                out.push(t);
+                true
+            }
+            _ => false,
+        };
+    }
+    if NO_TEXT_PARTS.contains(&part_ty) {
+        return true;
+    }
+    anthropic && anthropic_part_texts(p, part_ty, out)
+}
+
+/// The Anthropic result blocks that hold readable text (controller ruling, Task 22 review):
+/// - `search_result`: its `title`, its `source` and the text blocks of its `content`;
+/// - `document` with a `source` of type `text` (`data`) or `content` (text blocks): that text, and
+///   its `title` and `context`. A document with a base64, URL or file source is not read (fail
+///   closed);
+/// - `tool_reference`: a tool name and no free text, so there is nothing to read.
+fn anthropic_part_texts<'a>(p: &'a Value, part_ty: &str, out: &mut Vec<&'a str>) -> bool {
+    match part_ty {
+        "tool_reference" => true,
+        "search_result" => {
+            let strings = strings_of(p, &["title", "source"], out);
+            content_parts(p.get("content"), "text", false, out) && strings
+        }
+        "document" => {
+            let strings = strings_of(p, &["title", "context"], out);
+            let source = p.get("source");
+            let read = match source.and_then(|s| s.get("type")).and_then(Value::as_str) {
+                Some("text") => match source.and_then(|s| s.get("data")) {
+                    Some(Value::String(d)) => {
+                        out.push(d);
+                        true
+                    }
+                    _ => false,
+                },
+                Some("content") => content_parts(source.and_then(|s| s.get("content")), "text", false, out),
+                _ => false,
+            };
+            read && strings
+        }
+        _ => false,
+    }
+}
+
+/// Push the string values of these keys of `p`. Return `false` when one of them holds another
+/// value (it cannot be read); an absent or null key holds nothing.
+fn strings_of<'a>(p: &'a Value, keys: &[&str], out: &mut Vec<&'a str>) -> bool {
+    keys.iter().fold(true, |complete, k| match p.get(*k) {
+        None | Some(Value::Null) => complete,
+        Some(Value::String(s)) => {
+            out.push(s);
+            complete
+        }
+        Some(_) => false,
+    })
 }
 
 /// Give each text of a seen message source to the sink.
@@ -245,7 +320,7 @@ fn seen_role(role: Option<&str>) -> bool {
 /// [`result_texts`]).
 fn responses_result_texts(item: &Map<String, Value>, shape: ResultShape) -> (Vec<&str>, bool) {
     match shape {
-        ResultShape::Text => result_texts(item.get("output"), "input_text"),
+        ResultShape::Text => result_texts(item.get("output"), "input_text", false),
         ResultShape::ShellChunks => {
             let mut out = Vec::new();
             let mut complete = true;
@@ -362,7 +437,7 @@ fn openai<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> R
                     (None, opt_str(m.get("name"), "name")?)
                 };
                 if let Some(s) = sink.as_deref_mut() {
-                    let (parts, complete) = result_texts(m.get("content"), "text");
+                    let (parts, complete) = result_texts(m.get("content"), "text", false);
                     s.result(f.tool_results.len(), &parts, complete);
                 }
                 f.tool_results.push(ToolResultRef {
@@ -675,7 +750,7 @@ fn anthropic<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -
                 Some("tool_result") => {
                     let call_id = opt_str(b.get("tool_use_id"), "tool_use_id")?;
                     if let Some(s) = sink.as_deref_mut() {
-                        let (parts, complete) = result_texts(b.get("content"), "text");
+                        let (parts, complete) = result_texts(b.get("content"), "text", true);
                         s.result(f.tool_results.len(), &parts, complete);
                     }
                     f.tool_results.push(ToolResultRef {
