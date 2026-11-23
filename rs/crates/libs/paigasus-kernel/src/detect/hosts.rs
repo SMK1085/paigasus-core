@@ -134,18 +134,15 @@ fn trim_end(mut s: &str) -> &str {
 
 /// The URL candidates of a text: for each scheme match, the scheme and the authority, trimmed.
 /// The second value is true when an authority is longer than `AUTHORITY_MAX`. Such a candidate
-/// is not parsed. The cost is linear: one pass finds the end characters, and one cursor moves
-/// forward over them, because the matches come in order.
+/// is not parsed. The cost is linear and needs no memory per end character: one lazy iterator
+/// moves forward over the end characters, because the matches come in order.
 fn candidates(text: &str) -> (Vec<&str>, bool) {
-    let ends: Vec<usize> = text.char_indices().filter(|(_, c)| ends_authority(*c)).map(|(i, _)| i).collect();
+    let mut ends = text.char_indices().filter(|(_, c)| ends_authority(*c)).map(|(i, _)| i).peekable();
     let mut overflow = false;
     let mut out = Vec::new();
-    let mut cursor = 0;
     for m in SCHEME.find_iter(text) {
-        while ends.get(cursor).is_some_and(|p| *p < m.end()) {
-            cursor += 1;
-        }
-        let end = ends.get(cursor).copied().unwrap_or(text.len());
+        while ends.next_if(|p| *p < m.end()).is_some() {}
+        let end = ends.peek().copied().unwrap_or(text.len());
         if end - m.end() > AUTHORITY_MAX {
             overflow = true;
         } else {

@@ -392,8 +392,13 @@ in one release. The new schema adds two attributes: `context.max_severity` and
   closed, but it blocks calls.
 - The job compares the old and the new output with an additive rule. The policy text and the
   conditions must be the same, and the new schema may only add attributes to Record types. So one
-  boot run re-compiles every live set to an identical live version at generation 3 and
-  revision 2. It writes no held row, and no admin action is necessary.
+  boot run re-compiles every live set that still compiles to an identical live version at
+  generation 3 and revision 2. For these sets it writes no held row, and no admin action is
+  necessary. A set that holds a history rule does not compile (section 5): the job holds it as
+  `held_failed`, and its catalog writes stay refused with `tool-policy-recompile-pending`. After
+  the run, read the `results` of `POST /v1/tool-policy-recompile` or the metric
+  `iam_tool_policy_recompile_results_total`. For each `held_failed` set, do the steps of
+  section 5.
 - Each set gets a new live version. So every gateway reloads every organization at about the same
   time.
 - Until the job reaches a set, a catalog write on that set is refused with
