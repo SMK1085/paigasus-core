@@ -31,7 +31,7 @@
 ## Review Focus
 
 1. **A decide timeout under `on_failure = allow` after the reserve ran.** The reserved event stays `pending` and the report site appends a second, allowed event. The call counts twice, never zero (spec D8: a lost settle never lowers a count). Test: Task 12 `a_timed_out_hold_under_allow_appends_and_keeps_the_pending_event`.
-2. **A notice inside other assistant text, or a tampered notice.** Chat puts the notice after the model text (`"<text>\n\n<notice>"`). A changed name, code or uuid, or extra text on the line, must not give a reference. Test: Task 4 `a_ref_is_read_only_from_an_exact_notice_line`.
+2. **A notice inside other assistant text, or a changed notice.** Chat puts the notice after the model text (`"<text>\n\n<notice>"`). Extra text on the line gives no reference. `notice_ref` checks only the syntax: a malformed name, an unknown block code or a malformed UUID gives none. A changed tool name or code still gives the UUID. The session lookup then rejects it: a reference counts only when the link table has it for the same principal in the same org. Test: Task 4 `a_ref_is_read_only_from_an_exact_notice_line`.
 3. **A slow or blackholed Redis on the request side.** One lookup can spend the whole budget. The request continues with no session, and every later store call of that request is skipped. Test: Task 10 `a_slow_lookup_spends_the_budget_and_skips_the_rest`.
 4. **The same tool result sent twice**, in one request or in two requests. Only one result event is written. Tests: Task 6 `a_result_sent_twice_in_one_request_is_linked_once`, Task 7 contract case `a_result_event_is_written_once_per_call_id`.
 5. **Hostile call ids** (very long, non-ASCII, with `:` or `*`). Key names use a SHA-256 hex digest, so the length and the characters are fixed. Test: Task 6 `link_digest_is_64_lower_hex_for_any_id`.
@@ -291,8 +291,9 @@ fn a_legacy_function_result_and_a_legacy_function_call_are_ignored() {}
 fn refs_are_read_from_every_text_form() { /* chat string, chat parts, anthropic string, anthropic text blocks, responses output_text, responses string content */ }
 #[test]
 fn a_ref_is_read_only_from_an_exact_notice_line() {
-    // "model text\n\n<notice with ref>" gives the ref; the same notice with a changed name,
-    // a changed code, a bad uuid or trailing text gives none; a notice in a user message gives none.
+    // "model text\n\n<notice with ref>" gives the ref; the same notice with a bad uuid, an unknown
+    // code, a malformed name or trailing text gives none; a notice in a user message gives none.
+    // A changed (but well-formed) name or code still gives the uuid: the session lookup rejects it, not notice_ref.
 }
 #[test]
 fn each_list_is_capped_at_128_and_counts_the_rest() {
@@ -469,7 +470,7 @@ pub enum HistoryStoreError {
 pub trait SessionStore: Send + Sync {
     /// Read only. One answer per id, in order. `sessions` holds the state of every session that a link names.
     async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError>;
-    /// After the admission: touch the session when `turn` is Some, and write each result event once per call id.
+    /// After the admission: touch the session when `turn` is Some, and write each result event once per call event.
     async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError>;
     /// Inside the decide future: one pending call event per call in every history, and its `d:` link.
     async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError>;
@@ -499,7 +500,7 @@ pub fn link_session(req: &LookupRequest, reply: &LookupReply, new_session: Uuid)
 - No candidate: `session = new_session`, `turn = 1`, `joined = false`.
 - One or more: the candidate whose `SessionState.last_ms` is largest. A candidate with no `SessionState` has `last_ms = 0`. A tie goes to the larger uuid (a UUIDv7 that is later). `turn` = that state's `turn + 1`, or 1 when it has no state. `mixed_sessions` = more than one distinct candidate.
 - `forged_results` = the number of `results` entries that are `None`.
-- `results` = the linked results with `result_written == false`, one per call id (the first one), with the tool of the link. The tool name of the result message is never used (D5).
+- `results` = the linked results with `result_written == false`, one per call event (from the first of its linked call ids), with the tool of the link. The tool name of the result message is never used (D5).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -679,7 +680,7 @@ Scripts. The caller passes `now_ms`; no script calls `TIME`. Rust builds every k
 -- return {written, trimmed_retention, trimmed_cap, flagged pairs...}
 ```
 
-`LOOKUP_SCRIPT` (read only): `HMGET` `s t e r` of each `c:` key, `GET` each `d:` key, then `HMGET last_ms turn` of each distinct session found. The `s:` key names are built in the script from a prefix in `ARGV`; this is allowed because Redis Cluster is not supported (N4). `SETTLE_SCRIPT`: per item, only if `EXISTS e-key`: `HSET e-key v verdict`, and for an `allow` with a call id, `HSET` the `c:` link and `EXPIRE`; with an `item_id` too, the same for the `c:` key of the item id. `APPEND_SCRIPT` writes the second `c:` link in the same way. Each `c:` key has its own `r` guard, so a client that sends one result by the call id and one by the item id gets two result events: the count goes up, never down. Both scripts are idempotent.
+`LOOKUP_SCRIPT` (read only): `HMGET` `s t e r` of each `c:` key, `GET` each `d:` key, then `HMGET last_ms turn` of each distinct session found. The `s:` key names are built in the script from a prefix in `ARGV`; this is allowed because Redis Cluster is not supported (N4). `SETTLE_SCRIPT`: per item, only if `EXISTS e-key`: `HSET e-key v verdict`, and for an `allow` with a call id, `HSET` the `c:` link and `EXPIRE`; with an `item_id` too, the same for the `c:` key of the item id. `APPEND_SCRIPT` writes the second `c:` link in the same way. The guard sits on the call event, not on the link, so a client that sends one result by the call id and one by the item id gets one result event: the count does not go up. Both scripts are idempotent.
 
 - [ ] **Step 1: Write the failing tests**
 

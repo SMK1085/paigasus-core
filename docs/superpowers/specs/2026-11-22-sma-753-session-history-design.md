@@ -230,7 +230,9 @@ The event body is stored once. The three histories refer to it by id.
 
 - A result event is written only for a call id that has a `c:` link. An unlinked result gives only
   the `forged_history` finding. So a client cannot add events with forged results (§ 12, B1).
-- A result event is written once for each call id. A repeated result writes nothing.
+- A result event is written once for each call event. The call ids that name the same call event
+  (for example the call id and the item id of a local shell call) give one result event. A repeated
+  result writes nothing. The guard sits on the call event, not on the link.
 - The tool name in the result message is never used. The client could change it.
 - A result that the request-side plan replaces with a notice still makes a result event. The
   client did send it.
@@ -594,8 +596,8 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
        `action == Pgs::Gateway::Action::"send"`, also errors when it reads a slot. A tenant set may
        move to mode `log_only` instead. In PR 1, `log_only` only observes the slot policies.
      - For a rollback to a build before PR 1, publish a condition-free version of each set with a
-       condition. A tenant set may move to mode `off` instead. Mode `off` stops all tool-policy checks
-       for that tenant during the rollback, not only the history rules.
+       condition. A tenant set may move to mode `off` instead. Mode `off` stops the tenant's
+       tool-policy checks during the rollback. The floor checks stay active.
      - The floor has no alternative. The floor must be condition-free.
   3. Read the floor and each tenant set again. Verify that no compiled set has a condition, and that
      no policy reads a `context.<slot>` attribute. Exempt, by name, each tenant that step 2 moved to

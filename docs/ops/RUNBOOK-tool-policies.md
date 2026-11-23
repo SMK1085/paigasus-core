@@ -489,8 +489,8 @@ Use this procedure for each of three cases:
      to mode `log_only` instead. In this build, `log_only` only observes the slot policies, so the
      tenant set blocks no call through them.
    - For a rollback to a build before SMA-753 PR 1, publish a condition-free version of each set with
-     a condition. A tenant set may move to mode `off` instead. Mode `off` stops all tool-policy checks
-     for that tenant during the rollback, not only the history rules.
+     a condition. A tenant set may move to mode `off` instead. Mode `off` stops the tenant's
+     tool-policy checks during the rollback. The floor checks stay active.
    - The floor has no alternative. The floor must be condition-free.
 3. Read the floor (`GET /v1/tool-policy-floor`) and each tenant set
    (`GET /v1/organizations/{id}/tool-policy-set`) again. Verify that no compiled set has a condition,
