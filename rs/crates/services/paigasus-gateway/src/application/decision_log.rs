@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
-use paigasus_gateway_core::decision_log::{ArgumentDigest, DecisionRecord, RecordHeader, ReportedCall, build_refusal, build_request, build_response, response_org};
-use paigasus_gateway_core::{DecisionContext, RequestEntry, TenantMode};
+use paigasus_gateway_core::decision_log::{ArgumentDigest, CedarDetail, DecisionRecord, RecordHeader, ReportedCall, build_refusal, build_request, build_response, build_screen, response_org};
+use paigasus_gateway_core::{DecisionContext, RequestEntry, ScreenRecord, TenantMode};
 use paigasus_kernel::mint_uuid7;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
@@ -136,8 +136,16 @@ impl DecisionRecorder {
         self.emit(response_org(ctx).or_else(|| org_of(&ctx.scope)), r.detail.is_some(), |h| build_response(h, ctx, r));
     }
 
-    pub fn record_request(&self, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry) {
-        self.emit(org_of(&ctx.scope), false, |h| build_request(h, ctx, mode, e));
+    /// One request-side entry. `cedar` is the detail of the entry (SMA-855 § 6.11.2), `None` for an
+    /// entry that no decision with findings made.
+    pub fn record_request(&self, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry, cedar: Option<&CedarDetail>) {
+        self.emit(org_of(&ctx.scope), false, |h| build_request(h, ctx, mode, e, cedar));
+    }
+
+    /// One tool result with findings that the gateway did not replace: a `SCREEN_RESULT` record
+    /// with applied `Allow` (SMA-855 § 6.11.2).
+    pub fn record_screen(&self, ctx: &DecisionContext, mode: Option<TenantMode>, r: &ScreenRecord) {
+        self.emit(org_of(&ctx.scope), false, |h| build_screen(h, ctx, mode, r));
     }
 
     pub fn record_refusal(&self, ctx: &DecisionContext, mode: Option<TenantMode>) {

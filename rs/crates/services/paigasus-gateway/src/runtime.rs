@@ -320,7 +320,10 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
     }
     let cedar = Arc::new(cedar);
     Ok(ToolPolicyRuntime {
-        policy: Some((Arc::clone(&cache), Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder))))),
+        policy: Some((
+            Arc::clone(&cache),
+            Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder)).with_detectors(detectors.clone(), config.tool_policy.detector_settings())),
+        )),
         decider: Arc::clone(&cedar) as Arc<dyn ToolCallDecider>,
         cedar: Some(cedar),
         recorder: Some(recorder),

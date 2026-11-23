@@ -169,8 +169,10 @@ pub(crate) fn walk<'a>(format: Format, v: &'a Value, sink: Option<&mut (dyn Text
 /// Receives the texts that the request screen reads. The texts borrow from the parsed request.
 pub(crate) trait TextSink<'a> {
     /// The text parts of the tool result with this index in `TurnFacts.tool_results`. A result
-    /// with no text (a screenshot, an approval) gives no parts.
-    fn result(&mut self, index: usize, parts: &[&'a str]);
+    /// with no text (a screenshot, an approval) gives no parts. `complete` is `false` when the
+    /// result holds content that the walker cannot read as text (an object `content`, a
+    /// `document` block): the parts then miss some of the result, and the screen reports it.
+    fn result(&mut self, index: usize, parts: &[&'a str], complete: bool);
     /// One text of a seen message source (§ 6.3.3).
     fn message(&mut self, text: &'a str);
 }
@@ -197,6 +199,34 @@ fn content_texts<'a>(content: Option<&'a Value>, ty: &str) -> Vec<&'a str> {
     out
 }
 
+/// The part types of a tool result that hold no text: an image. Any other part type that is not
+/// the text type of the format holds content the screen cannot read.
+const NO_TEXT_PARTS: [&str; 3] = ["image", "image_url", "input_image"];
+
+/// The texts of the content of a tool result, and whether they are all of it: `false` for a
+/// content that is not a string, an array or null, and for an array part that is not a text part
+/// of type `ty` with a string `text` or an image part.
+fn result_texts<'a>(content: Option<&'a Value>, ty: &str) -> (Vec<&'a str>, bool) {
+    match content {
+        None | Some(Value::Null) => (Vec::new(), true),
+        Some(Value::String(s)) => (vec![s.as_str()], true),
+        Some(Value::Array(parts)) => {
+            let mut out = Vec::new();
+            let mut complete = true;
+            for p in parts {
+                let part_ty = p.get("type").and_then(Value::as_str);
+                match (part_ty, p.get("text").and_then(Value::as_str)) {
+                    (Some(t), Some(text)) if t == ty => out.push(text),
+                    (Some(t), _) if NO_TEXT_PARTS.contains(&t) => {}
+                    _ => complete = false,
+                }
+            }
+            (out, complete)
+        }
+        Some(_) => (Vec::new(), false),
+    }
+}
+
 /// Give each text of a seen message source to the sink.
 fn sink_messages<'a>(sink: &mut Option<&mut (dyn TextSink<'a> + '_)>, content: Option<&'a Value>, ty: &str) {
     if let Some(s) = sink.as_deref_mut() {
@@ -211,24 +241,35 @@ fn seen_role(role: Option<&str>) -> bool {
     matches!(role, Some("system" | "developer" | "user"))
 }
 
-/// The text parts of a Responses result item of this shape.
-fn responses_result_texts(item: &Map<String, Value>, shape: ResultShape) -> Vec<&str> {
+/// The text parts of a Responses result item of this shape, and whether they are all of it (see
+/// [`result_texts`]).
+fn responses_result_texts(item: &Map<String, Value>, shape: ResultShape) -> (Vec<&str>, bool) {
     match shape {
-        ResultShape::Text => content_texts(item.get("output"), "input_text"),
+        ResultShape::Text => result_texts(item.get("output"), "input_text"),
         ResultShape::ShellChunks => {
             let mut out = Vec::new();
-            if let Some(Value::Array(chunks)) = item.get("output") {
-                for c in chunks {
-                    for k in ["stdout", "stderr"] {
-                        if let Some(t) = c.get(k).and_then(Value::as_str) {
-                            out.push(t);
+            let mut complete = true;
+            match item.get("output") {
+                None | Some(Value::Null) => {}
+                Some(Value::Array(chunks)) => {
+                    for c in chunks {
+                        if !c.is_object() {
+                            complete = false;
+                        }
+                        for k in ["stdout", "stderr"] {
+                            match c.get(k) {
+                                None | Some(Value::Null) => {}
+                                Some(Value::String(t)) => out.push(t.as_str()),
+                                Some(_) => complete = false,
+                            }
                         }
                     }
                 }
+                Some(_) => complete = false,
             }
-            out
+            (out, complete)
         }
-        ResultShape::Screenshot | ResultShape::Approval => Vec::new(),
+        ResultShape::Screenshot | ResultShape::Approval => (Vec::new(), true),
     }
 }
 
@@ -321,7 +362,8 @@ fn openai<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> R
                     (None, opt_str(m.get("name"), "name")?)
                 };
                 if let Some(s) = sink.as_deref_mut() {
-                    s.result(f.tool_results.len(), &content_texts(m.get("content"), "text"));
+                    let (parts, complete) = result_texts(m.get("content"), "text");
+                    s.result(f.tool_results.len(), &parts, complete);
                 }
                 f.tool_results.push(ToolResultRef {
                     call_id,
@@ -426,7 +468,8 @@ fn responses<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -
             let item_id = if ty == "local_shell_call_output" { opt_str(item.get("id"), "id")? } else { None };
             let call_id = opt_str(item.get(key), key)?;
             if let Some(s) = sink.as_deref_mut() {
-                s.result(f.tool_results.len(), &responses_result_texts(item, shape));
+                let (parts, complete) = responses_result_texts(item, shape);
+                s.result(f.tool_results.len(), &parts, complete);
             }
             f.tool_results.push(ToolResultRef { call_id, name: None, item_id, shape });
             continue;
@@ -632,7 +675,8 @@ fn anthropic<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -
                 Some("tool_result") => {
                     let call_id = opt_str(b.get("tool_use_id"), "tool_use_id")?;
                     if let Some(s) = sink.as_deref_mut() {
-                        s.result(f.tool_results.len(), &content_texts(b.get("content"), "text"));
+                        let (parts, complete) = result_texts(b.get("content"), "text");
+                        s.result(f.tool_results.len(), &parts, complete);
                     }
                     f.tool_results.push(ToolResultRef {
                         call_id,

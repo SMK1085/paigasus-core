@@ -17,6 +17,14 @@ use paigasus_kernel::tool_policy::ToolInvocation;
 use serde_json::Value;
 use uuid::Uuid;
 
+/// The rule of the `detector_error` finding for a subject that the scan budget does not cover
+/// (§ 6.10): a call on the response side, a result on the request side.
+pub const SCAN_LIMIT: &str = "scan_limit";
+
+/// The rule of the `detector_error` finding for a tool result that holds content the request screen
+/// cannot read as text (an object `content`, a `document` block).
+pub const UNSCANNED_SHAPE: &str = "unscanned_shape";
+
 /// The side of the relay that screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

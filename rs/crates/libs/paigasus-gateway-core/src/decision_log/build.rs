@@ -6,9 +6,9 @@ use paigasus_kernel::tool_policy::{SessionInfo, normalise};
 use paigasus_kernel::{CedarUid, Prn, to_cedar_uid};
 use uuid::Uuid;
 
-use super::record::{AppliedEffect, DecisionRecord, Prevention, RecordBasis, RecordHeader, RecordedAction, ReportedCall, Side, ToolRef};
+use super::record::{AppliedEffect, CedarDetail, DecisionRecord, Prevention, RecordBasis, RecordHeader, RecordedAction, ReportedCall, Side, ToolRef};
 use crate::decider::DecisionContext;
-use crate::policy::{PolicySet, TenantMode};
+use crate::policy::{PolicySet, ScreenRecord, TenantMode};
 use crate::report::{ReportDecision, RequestAction, RequestEntry, sanitize_name};
 use crate::types::{Basis, BlockCode, ToolCallKind};
 
@@ -168,9 +168,10 @@ fn recorded(a: RequestAction) -> RecordedAction {
     }
 }
 
-/// The record of one request-side change (P-5).
+/// The record of one request-side change (P-5). `cedar` is the decision detail of the entry: verdict
+/// A of a result that was replaced with findings (SMA-855 § 6.11.2), else `None`.
 #[must_use]
-pub fn build_request(h: RecordHeader, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry) -> DecisionRecord {
+pub fn build_request(h: RecordHeader, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry, cedar: Option<&CedarDetail>) -> DecisionRecord {
     let mut rec = base(h, ctx, Side::Request, mode, tool_ref(&e.tool, None, None, None));
     rec.applied = if e.enforced { AppliedEffect::Block } else { AppliedEffect::Observe };
     rec.block_code = Some(BlockCode::Policy);
@@ -182,6 +183,21 @@ pub fn build_request(h: RecordHeader, ctx: &DecisionContext, mode: Option<Tenant
         Prevention::NotApplicable
     };
     rec.request_action = Some(recorded(e.action));
+    rec.cedar = cedar.cloned();
+    rec
+}
+
+/// The record of a tool result with findings that the gateway did not replace (SMA-855 § 6.11.2):
+/// applied `Allow`, no block code, nothing prevented. It is not a report entry.
+#[must_use]
+pub fn build_screen(h: RecordHeader, ctx: &DecisionContext, mode: Option<TenantMode>, r: &ScreenRecord) -> DecisionRecord {
+    let mut rec = base(h, ctx, Side::Request, mode, tool_ref(&r.tool, None, None, None));
+    rec.applied = AppliedEffect::Allow;
+    rec.block_code = None;
+    rec.basis = RecordBasis::Policy;
+    rec.prevention = Prevention::NotApplicable;
+    rec.request_action = Some(RecordedAction::ScreenResult);
+    rec.cedar = Some(r.cedar.clone());
     rec
 }
 
@@ -380,7 +396,7 @@ mod tests {
     #[test]
     fn a_request_entry_record() {
         let e = RequestEntry::new("Get_Weather".into(), RequestAction::RemoveDefinition, false, RequestReason::ToolCallDenied);
-        let rec = build_request(header(None), &ctx(), None, &e);
+        let rec = build_request(header(None), &ctx(), None, &e, None);
         assert_eq!(rec.side, Side::Request);
         assert_eq!(rec.applied, AppliedEffect::Observe);
         assert_eq!((rec.block_code, rec.basis), (Some(BlockCode::Policy), RecordBasis::Policy));
@@ -391,8 +407,33 @@ mod tests {
         assert_eq!(rec.principal, Some(to_cedar_uid(&Prn::parse(PRN).unwrap())));
         assert_eq!(rec.session, SessionInfo::placeholder());
         let e = RequestEntry::new("x".into(), RequestAction::ResetToolChoice, true, RequestReason::ToolCallDenied);
-        let rec = build_request(header(None), &ctx(), Some(TenantMode::Enforce), &e);
+        let rec = build_request(header(None), &ctx(), Some(TenantMode::Enforce), &e, None);
         assert_eq!((rec.applied, rec.mode), (AppliedEffect::Block, Some(TenantMode::Enforce)));
+    }
+
+    #[test]
+    fn a_request_entry_record_carries_its_detail() {
+        let e = RequestEntry::new("x".into(), RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked);
+        let detail = cedar(Effect::Deny);
+        let rec = build_request(header(None), &ctx(), Some(TenantMode::Enforce), &e, Some(&detail));
+        assert_eq!(rec.cedar, Some(detail));
+        assert_eq!((rec.applied, rec.request_action), (AppliedEffect::Block, Some(RecordedAction::ReplaceResult)));
+    }
+
+    #[test]
+    fn a_screen_record() {
+        let r = ScreenRecord {
+            tool: "Get_Weather".into(),
+            cedar: cedar(Effect::Allow),
+        };
+        let rec = build_screen(header(None), &ctx(), Some(TenantMode::LogOnly), &r);
+        assert_eq!(rec.side, Side::Request);
+        assert_eq!(rec.request_action, Some(RecordedAction::ScreenResult));
+        assert_eq!((rec.applied, rec.block_code, rec.prevention), (AppliedEffect::Allow, None, Prevention::NotApplicable));
+        assert_eq!((rec.basis, rec.mode), (RecordBasis::Policy, Some(TenantMode::LogOnly)));
+        assert_eq!(rec.tool.name, "Get_Weather");
+        assert_eq!(rec.cedar, Some(r.cedar));
+        assert_eq!(rec.arguments, None);
     }
 
     #[test]
@@ -403,6 +444,7 @@ mod tests {
                 &ctx(),
                 Some(TenantMode::Enforce),
                 &RequestEntry::new("x".into(), action, enforced, RequestReason::ToolCallDenied),
+                None,
             )
         };
         assert_eq!(mk(RequestAction::ReplaceResult, true).prevention, Prevention::NotApplicable);
@@ -434,7 +476,7 @@ mod tests {
     #[test]
     fn a_one_mib_name_is_capped() {
         let e = RequestEntry::new("a".repeat(1 << 20), RequestAction::RemoveDefinition, true, RequestReason::ToolCallDenied);
-        let rec = build_request(header(None), &ctx(), None, &e);
+        let rec = build_request(header(None), &ctx(), None, &e, None);
         assert_eq!(rec.tool.name.len(), 128);
         assert!(rec.tool.action_id.len() <= MAX_FIELD_BYTES);
         assert!(rec.tool.truncated);

@@ -25,17 +25,23 @@ pub struct RequestScreen {
     /// The indexes of the results that did not fit in the scan budget, in scan order (P-3). Each
     /// one gets a `detector_error` finding (rule `scan_limit`, § 6.10).
     pub limited: Vec<usize>,
+    /// The indexes of the results that hold content the screen cannot read as text (an object
+    /// `content`, an Anthropic `document` or `search_result` block, a Responses `input_file`), in
+    /// result order. Each one gets a `detector_error` finding: it must not pass unscanned and
+    /// unreported. The text parts of such a result that the screen can read are still scanned.
+    pub unscanned: Vec<usize>,
 }
 
 impl fmt::Debug for RequestScreen {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "RequestScreen {{ results: {}, texts: {}, message_hosts: {}, limited: {} }}",
+            "RequestScreen {{ results: {}, texts: {}, message_hosts: {}, limited: {}, unscanned: {} }}",
             self.result_texts.len(),
             self.result_texts.iter().filter(|t| t.is_some()).count(),
             self.message_hosts.len(),
-            self.limited.len()
+            self.limited.len(),
+            self.unscanned.len()
         )
     }
 }
@@ -69,9 +75,13 @@ pub fn screen_request(format: Format, body: &[u8], turn: &TurnFacts, max_scan_by
         return Err(ScreenError::KeyMismatch);
     }
     let mut parts: Vec<Vec<&str>> = vec![Vec::new(); facts.tool_results.len()];
-    for (index, p) in sink.results {
+    let mut unscanned = Vec::new();
+    for (index, p, complete) in sink.results {
         if let Some(slot) = parts.get_mut(index) {
             *slot = p;
+            if !complete {
+                unscanned.push(index);
+            }
         }
     }
     let mut left = max_scan_bytes;
@@ -97,19 +107,24 @@ pub fn screen_request(format: Format, body: &[u8], turn: &TurnFacts, max_scan_by
             hosts_in_text(text, &mut message_hosts);
         }
     }
-    Ok(RequestScreen { result_texts, message_hosts, limited })
+    Ok(RequestScreen {
+        result_texts,
+        message_hosts,
+        limited,
+        unscanned,
+    })
 }
 
 /// The sink of the screen: borrowed texts, copied only when they fit in the budget.
 #[derive(Default)]
 struct Collect<'a> {
-    results: Vec<(usize, Vec<&'a str>)>,
+    results: Vec<(usize, Vec<&'a str>, bool)>,
     messages: Vec<&'a str>,
 }
 
 impl<'a> TextSink<'a> for Collect<'a> {
-    fn result(&mut self, index: usize, parts: &[&'a str]) {
-        self.results.push((index, parts.to_vec()));
+    fn result(&mut self, index: usize, parts: &[&'a str], complete: bool) {
+        self.results.push((index, parts.to_vec(), complete));
     }
     fn message(&mut self, text: &'a str) {
         self.messages.push(text);
@@ -421,6 +436,58 @@ mod tests {
         assert!(s.result_texts[0].is_none());
     }
 
+    /// Carried from the Task 14 review: a result shape that the screen cannot read must not pass
+    /// unscanned and unreported. The readable text parts of such a result are still scanned.
+    #[test]
+    fn a_result_shape_that_the_screen_cannot_read_is_unscanned() {
+        use Format::{AnthropicMessages as A, OpenAiChat as C, OpenAiResponses as R};
+        let anthropic = |content: Value| json!({"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":content}]}]});
+        let responses = |output: Value| json!({"model":"m","input":[{"type":"function_call_output","call_id":"c1","output":output}]});
+        let chat = |content: Value| json!({"messages":[{"role":"tool","tool_call_id":"a","content":content}]});
+        let cases: Vec<(Format, Value, bool, Option<&str>)> = vec![
+            // An object content: nothing is read.
+            (C, chat(json!({"text":"hidden"})), true, None),
+            (R, responses(json!({"text":"hidden"})), true, None),
+            (A, anthropic(json!({"text":"hidden"})), true, None),
+            // An Anthropic document and a search_result block next to a text block.
+            (
+                A,
+                anthropic(json!([{"type":"text","text":"seen"},{"type":"document","source":{"type":"text","media_type":"text/plain","data":"hidden"}}])),
+                true,
+                Some("seen"),
+            ),
+            (
+                A,
+                anthropic(json!([{"type":"search_result","source":"https://s.example","title":"t","content":[{"type":"text","text":"hidden"}]}])),
+                true,
+                None,
+            ),
+            // A Responses file part.
+            (R, responses(json!([{"type":"input_file","file_data":"hidden"}])), true, None),
+            // A text part whose text is not a string.
+            (C, chat(json!([{"type":"text","text":{"x":"hidden"}}])), true, None),
+            // Controls: a string, the text parts and an image part are read in full.
+            (C, chat(json!("seen")), false, Some("seen")),
+            (
+                A,
+                anthropic(json!([{"type":"text","text":"seen"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}])),
+                false,
+                Some("seen"),
+            ),
+            (
+                R,
+                responses(json!([{"type":"input_text","text":"seen"},{"type":"input_image","image_url":"data:x"}])),
+                false,
+                Some("seen"),
+            ),
+        ];
+        for (format, body, unscanned, text) in cases {
+            let s = screen(format, &body);
+            assert_eq!(s.unscanned == [0], unscanned, "{format:?} {body}");
+            assert_eq!(texts(&s), [text], "{format:?} {body}");
+        }
+    }
+
     #[test]
     fn a_large_adversarial_request_screens_in_linear_time() {
         let mut messages: Vec<Value> = (0..20_000)
@@ -526,7 +593,7 @@ mod tests {
             {"role":"user","content":"https://canary-msg.example/"}]});
         let s = screen(Format::OpenAiChat, &body);
         let debug = format!("{s:?}");
-        assert_eq!(debug, "RequestScreen { results: 1, texts: 1, message_hosts: 1, limited: 0 }");
+        assert_eq!(debug, "RequestScreen { results: 1, texts: 1, message_hosts: 1, limited: 0, unscanned: 0 }");
         let seen = SeenHosts(Arc::new(seen_hosts(&s, &[vec![]], &|_| false)));
         let debug = format!("{seen:?}");
         assert_eq!(debug, "SeenHosts { len: 2 }");

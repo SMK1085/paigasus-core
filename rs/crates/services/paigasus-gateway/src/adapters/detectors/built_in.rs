@@ -8,8 +8,7 @@ use paigasus_kernel::detect::{CallSubject, DETECTOR_BUILT_IN, Evidence, Finding,
 
 use crate::domain::detectors::{BuiltInStage, DetectBatch, PipelineOutput, Subject};
 
-/// The rule of the `detector_error` finding for a call that the budget does not cover (§ 6.10).
-pub const SCAN_LIMIT: &str = "scan_limit";
+pub use crate::domain::detectors::SCAN_LIMIT;
 
 /// The kernel built-ins. `max_scan_bytes` bounds the argument bytes that one run scans.
 #[derive(Debug, Clone, Copy)]

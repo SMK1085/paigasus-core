@@ -457,7 +457,7 @@ mod tests {
 
     fn request_record() -> DecisionRecord {
         let e = RequestEntry::new("Get_Weather".into(), RequestAction::ReplaceResult, false, RequestReason::ToolCallDenied);
-        build_request(header(), &ctx(), Some(TenantMode::Enforce), &e)
+        build_request(header(), &ctx(), Some(TenantMode::Enforce), &e, None)
     }
 
     fn round_trip(r: &DecisionRecord) -> DecisionRecord {
