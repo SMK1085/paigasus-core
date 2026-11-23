@@ -57,12 +57,22 @@
 # source = "urn:paigasus:agents:nats:iam-org"
 
 # [memory]
-# backend = "postgres"      # the only backend for now. A backend switch does not move data.
+# backend = "postgres"      # "postgres" or "s3". A backend switch does not move data. "s3" needs [memory.s3]
 # [memory.caps]
 # max_file_bytes = 65536          # greater than 0
 # max_store_bytes = 1048576       # greater than 0
 # max_store_files = 512           # greater than 0
 # max_loaded_file_bytes = 8192    # the cut of a file loaded at run start (not view). Greater than 0, at most max_file_bytes
+
+# [memory.s3]                                   # only with backend = "s3". No credential key exists: see the README
+# bucket = "paigasus-mem"                       # required. 3 to 63 characters of a-z, 0-9, "." and "-"
+# prefix = "mem"                                # required. The key prefix. The prefixes of two deployments must not nest
+# region = "us-east-1"
+# endpoint = "http://127.0.0.1:9000"            # not set means AWS. No user name, query or fragment
+# path_style = true                             # default: true with an endpoint or a dotted bucket, else false
+# allow_http = false                            # an http endpoint needs true. For local tests and development only
+# extra_ca_bundle_path = "/etc/ssl/extra.pem"   # ADDs to the platform roots. Roots only. Read once at boot
+# apply_deadline_secs = 10                      # at least 1, less than lease.ttl_secs
 
 # [timers]
 # enabled = true                          # run the scheduler loop. false stops only the loop. The tools still work

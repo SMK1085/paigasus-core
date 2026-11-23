@@ -18,6 +18,7 @@ use std::time::Duration;
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
 use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
 use paigasus_agent_host::adapters::iam::IamClient;
+use paigasus_agent_host::adapters::memory_commit::MemoryCommit;
 use paigasus_agent_host::adapters::nats::consumer::{NatsSource, bind_channels, connect_and_check};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
@@ -273,9 +274,21 @@ async fn boot(db: &sea_orm::DatabaseConnection, config: &Config, slot: &BootSlot
         None
     };
     tracing::info!(worker_enabled = config.worker.enabled, "worker.enabled is read, and SMA-787 starts no worker");
-    let state = AppState { db: db.clone(), inboxes, ingress };
+    let memory = MemoryCommit::build(&config.memory, db.clone(), utf8_env()).await?;
+    let state = AppState {
+        db: db.clone(),
+        inboxes,
+        ingress,
+        memory,
+    };
     slot.install(app_router(state, None))?;
     Ok(BootTasks { nats, scheduler })
+}
+
+/// The process environment as UTF-8 pairs. `std::env::vars()` panics on a non-UTF-8 value, so a pair
+/// with a non-UTF-8 part is dropped.
+fn utf8_env() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
 }
 
 /// Wait for the server tasks, at most [`DRAIN_TIMEOUT`]. A task that ignores the shutdown watch
@@ -369,6 +382,14 @@ fn describe_agent_host_metrics() {
         "Unix time in seconds of the last scheduler pass that finished."
     );
     describe_counter!(names::AGENT_HOST_TIMER_TOOL_CALLS_TOTAL, "Timer tool calls, labeled by tool and outcome (ok or refused).");
+    describe_counter!(
+        names::AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
+        "Objects under a memory scope that a read skipped or refused, labeled by reason. It counts events at each read, not distinct objects."
+    );
+    describe_counter!(
+        names::AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL,
+        "S3 memory change sets that were partly applied. The store may hold part of the set."
+    );
     // The name is provisional until SMA-798 moves it to `names::`.
     describe_counter!(
         "agent_host_memory_refusals_total",

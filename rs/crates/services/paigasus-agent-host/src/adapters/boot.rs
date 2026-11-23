@@ -147,6 +147,7 @@ mod tests {
                 db: DatabaseConnection::default(),
                 inboxes: Arc::new(PgInboxRepository::new(DatabaseConnection::default())),
                 ingress: None,
+                memory: crate::adapters::memory_commit::MemoryCommit::InTransaction(crate::adapters::persistence::memory::PgMemoryStore::new(DatabaseConnection::default())),
             },
             None,
         ))
