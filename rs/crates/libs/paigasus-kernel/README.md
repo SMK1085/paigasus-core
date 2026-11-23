@@ -15,6 +15,14 @@ The `tool-policy` feature is off by default (SMA-752). It adds the Cedar decisio
 Only the gateway turns it on. A binding crate (wasm, Python, Node) must not turn it on.
 The `repo:wasm-getrandom-free` gate fails if a binding crate pulls `cedar-policy` (D21).
 
+## The `detectors` feature
+
+The `detectors` feature is off by default (SMA-855). It holds the pure detector code for tool
+calls: host extraction and the built-in token forms. It pulls `serde`, `serde_json`,
+`unicode-normalization`, `regex` and `url`. The `tool-policy` feature turns it on.
+A binding crate (wasm, Python, Node) must not turn it on.
+The `repo:wasm-getrandom-free` gate fails if the feature reaches a binding crate.
+
 ## macOS wheels of version 0.2.0
 
 The `paigasus-py-bindings` 0.2.0 macOS wheels (arm64 and x86_64) have a Mach-O string table
