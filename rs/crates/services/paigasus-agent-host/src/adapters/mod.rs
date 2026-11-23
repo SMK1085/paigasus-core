@@ -8,6 +8,7 @@ pub mod http;
 pub mod iam;
 pub mod id;
 pub mod memory_commit;
+pub mod memory_s3;
 pub mod nats;
 pub mod persistence;
 #[cfg(feature = "test-model")]

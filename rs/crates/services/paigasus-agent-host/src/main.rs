@@ -313,10 +313,16 @@ fn fault_point() -> Arc<dyn FaultPoint> {
 
 /// Build the worker pool on the real adapters. The take, the heartbeat and the release use the
 /// lease pool. The claim, the run and the commit use the main pool.
-fn worker_pool_task(db: &DatabaseConnection, lease_db: DatabaseConnection, config: &Config, agents: Vec<AgentDefinition>, models: Arc<ModelRegistry>) -> anyhow::Result<WorkerPoolTask> {
+fn worker_pool_task(
+    db: &DatabaseConnection,
+    lease_db: DatabaseConnection,
+    config: &Config,
+    agents: Vec<AgentDefinition>,
+    models: Arc<ModelRegistry>,
+    memory: MemoryCommit,
+) -> anyhow::Result<WorkerPoolTask> {
     let faults = fault_point();
     let caps = config.memory.caps.to_caps();
-    let memory = MemoryCommit::from_config(&config.memory, db.clone());
     let heartbeat_timeout = config.lease.heartbeat_statement_timeout();
     let resolver = ConfigAgentResolver::new(db.clone(), agents);
     let leases = Arc::new(PgLeaseStore::new(lease_db, heartbeat_timeout).serving(resolver.served()));
@@ -400,14 +406,28 @@ async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, con
         tracing::info!("timers.enabled is false; the scheduler loop is off");
         None
     };
+    // One commit mode for the process: `memory.backend` selects it, and the worker pool and the
+    // application state share it. For `s3` the build runs the boot probe (SMA-829).
+    let memory = MemoryCommit::build(&config.memory, db.clone(), utf8_env()).await?;
     // `serve` sets `lease_db` only when the pool starts: `worker.enabled` and an agent.
     let workers = match lease_db {
-        Some(lease_db) => Some(worker_pool_task(db, lease_db, config, agents, models)?),
+        Some(lease_db) => Some(worker_pool_task(db, lease_db, config, agents, models, memory.clone())?),
         None => None,
     };
-    let state = AppState { db: db.clone(), inboxes, ingress };
+    let state = AppState {
+        db: db.clone(),
+        inboxes,
+        ingress,
+        memory,
+    };
     slot.install(app_router(state, None))?;
     Ok(BootTasks { nats, scheduler, workers })
+}
+
+/// The process environment as UTF-8 pairs. `std::env::vars()` panics on a non-UTF-8 value, so a pair
+/// with a non-UTF-8 part is dropped.
+fn utf8_env() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
 }
 
 /// Wait for the server tasks, at most [`DRAIN_TIMEOUT`]. A task that ignores the shutdown watch
@@ -516,6 +536,14 @@ fn describe_agent_host_metrics() {
         "Age in seconds of the oldest due pending event of the agents that this host serves. It is 0 when nothing is due."
     );
     describe_histogram!(names::AGENT_HOST_EVENT_ATTEMPTS, "The attempts of an inbox event when it goes to done or dead.");
+    describe_counter!(
+        names::AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
+        "Objects under a memory scope that a read skipped or refused, labeled by reason. It counts events at each read, not distinct objects."
+    );
+    describe_counter!(
+        names::AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL,
+        "S3 memory change sets that were partly applied. The store may hold part of the set."
+    );
     // The name is provisional until SMA-798 moves it to `names::`.
     describe_counter!(
         "agent_host_memory_refusals_total",

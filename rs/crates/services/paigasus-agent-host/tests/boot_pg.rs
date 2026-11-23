@@ -330,6 +330,41 @@ async fn an_agent_with_an_unregistered_model_fails_the_boot() {
     wait_for_log(&child, "gpt-x").await;
 }
 
+/// The worker cannot commit an external memory store yet, so the S3 store plus an agent (the pool
+/// starts) stops the boot before the database is touched. The config unit test
+/// `the_worker_refuses_the_s3_memory_store` covers the S3 store with no agent.
+#[tokio::test]
+async fn the_s3_memory_store_with_an_agent_fails_the_boot() {
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("agent-host-boot-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create the config dir");
+    let id = paigasus_agent_host_core::ids::AgentId::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).as_prn().canonical();
+    std::fs::write(
+        dir.join("agent-host.toml"),
+        format!(
+            "[memory]\nbackend = \"s3\"\n[memory.s3]\nbucket = \"paigasus-mem\"\nprefix = \"mem\"\n\n[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\n"
+        ),
+    )
+    .expect("write agent-host.toml");
+
+    let (mut child, _port) = support::spawn_service_in(&url, Some(&dir), &[]);
+    let started = std::time::Instant::now();
+    let exit = loop {
+        if let Some(exit) = child.child.try_wait().expect("try_wait") {
+            break exit;
+        }
+        assert!(started.elapsed() < Duration::from_secs(60), "the S3 store with an agent must stop the boot; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!exit.success(), "the boot must fail, got {exit}; log:\n{}", child.tail());
+    // The reader threads can lag the exit by a moment.
+    wait_for_log(&child, "the worker supports only the Postgres memory store for now").await;
+}
+
 /// The composition root end to end: with one agent on the file-scripted model, the pool starts
 /// and a run moves a pending event to `done`.
 #[cfg(feature = "test-model")]

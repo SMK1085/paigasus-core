@@ -17,6 +17,7 @@ use paigasus_agent_host_core::timer::{TimerCaps, WALK_BOUND};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::adapters::memory_s3::keys::{KeyPrefix, PrefixError};
 use crate::adapters::nats::channels::filters_overlap;
 use crate::adapters::nats::{DURABLE_NAME, STREAM_NAME};
 use crate::adapters::persistence::scheduler::SchedulerSettings;
@@ -173,13 +174,120 @@ pub struct MemoryConfig {
     /// The store backend. A backend switch does not move data (spec 6.8).
     pub backend: MemoryBackend,
     pub caps: MemoryCapsConfig,
+    /// The S3 settings. Required when `backend` is `s3`. Not allowed with another backend.
+    #[serde(default)]
+    pub s3: Option<MemoryS3Config>,
 }
 
-/// The memory backends. Only Postgres exists now. SMA-829 adds `s3`.
+/// The memory backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryBackend {
     Postgres,
+    S3,
+}
+
+/// The settings of the S3 memory backend. No credential key exists here: the client reads
+/// credentials only from the environment (see the README).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MemoryS3Config {
+    /// The bucket name. 3 to 63 characters of `a-z`, `0-9`, `.` and `-`. It starts and ends with a
+    /// letter or a digit. It has no `..`.
+    pub bucket: String,
+    /// The key prefix of the store. The rules of `KeyPrefix::parse` apply.
+    pub prefix: String,
+    /// The region. The default is `us-east-1`.
+    #[serde(default = "default_s3_region")]
+    pub region: String,
+    /// The endpoint URL of an S3-compatible store. Not set means AWS. It has the scheme `http` or
+    /// `https`, and no user name, password, query or fragment.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Use path-style addressing. The default is `true` when `endpoint` is set or the bucket name
+    /// has a `.`, else `false`. With `false` and an `endpoint`, the endpoint must already hold
+    /// the bucket.
+    #[serde(default)]
+    pub path_style: Option<bool>,
+    /// Allow an `http` endpoint. For local tests and development only.
+    #[serde(default)]
+    pub allow_http: bool,
+    /// A PEM file of extra trust anchors. It ADDs to the platform roots. It does not replace them.
+    /// The bundle must hold roots only. The client reads the file once at boot.
+    #[serde(default)]
+    pub extra_ca_bundle_path: Option<String>,
+    /// The time limit of one change set, in seconds. At least 1, and less than `lease.ttl_secs`.
+    #[serde(default = "default_s3_apply_deadline_secs")]
+    pub apply_deadline_secs: u64,
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".to_string()
+}
+
+fn default_s3_apply_deadline_secs() -> u64 {
+    10
+}
+
+impl MemoryS3Config {
+    /// Whether the client uses path-style addressing.
+    #[must_use]
+    pub fn path_style(&self) -> bool {
+        // A bucket name with a `.` gives a host name that the AWS wildcard certificate does not
+        // match, so the AWS default is path-style for it.
+        self.path_style.unwrap_or(self.endpoint.is_some() || self.bucket.contains('.'))
+    }
+
+    /// The parsed key prefix. Call it only after [`Config::validate`] returned `Ok`.
+    #[must_use]
+    pub fn prefix(&self) -> KeyPrefix {
+        KeyPrefix::parse(&self.prefix).expect("memory.s3.prefix is valid: call Config::validate first")
+    }
+
+    /// The checks of the S3 section. The error texts hold no endpoint text.
+    fn validate(&self, lease_ttl_secs: u64) -> Result<(), ConfigError> {
+        let b = &self.bucket;
+        let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+        if !(3..=63).contains(&b.len())
+            || !b.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+            || !edge(b.chars().next())
+            || !edge(b.chars().next_back())
+            || b.contains("..")
+        {
+            return Err(ConfigError::MemoryS3Bucket(b.clone()));
+        }
+        KeyPrefix::parse(&self.prefix).map_err(ConfigError::MemoryS3Prefix)?;
+        if let Some(endpoint) = &self.endpoint {
+            let url = reqwest::Url::parse(endpoint).map_err(|_| ConfigError::MemoryS3EndpointUnparsable)?;
+            if url.scheme() != "http" && url.scheme() != "https" {
+                return Err(ConfigError::MemoryS3EndpointScheme);
+            }
+            if !url.username().is_empty() || url.password().is_some() {
+                return Err(ConfigError::MemoryS3EndpointUserinfo);
+            }
+            if url.query().is_some() {
+                return Err(ConfigError::MemoryS3EndpointQuery);
+            }
+            if url.fragment().is_some() {
+                return Err(ConfigError::MemoryS3EndpointFragment);
+            }
+            if url.scheme() == "http" && !self.allow_http {
+                return Err(ConfigError::MemoryS3HttpNotAllowed);
+            }
+        }
+        // `Some("")` is what an empty environment variable gives. Padding would reach `fs::read`.
+        if let Some(path) = self.extra_ca_bundle_path.as_deref()
+            && (path.is_empty() || path != path.trim())
+        {
+            return Err(ConfigError::MemoryS3CaPathBlank);
+        }
+        if self.apply_deadline_secs < 1 || self.apply_deadline_secs >= lease_ttl_secs {
+            return Err(ConfigError::MemoryS3DeadlineOutOfRange {
+                deadline: self.apply_deadline_secs,
+                ttl: lease_ttl_secs,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// The memory limits. Every value is greater than 0. `max_loaded_file_bytes` is at most `max_file_bytes`.
@@ -467,6 +575,36 @@ pub enum ConfigError {
     MemoryCapZero(&'static str),
     #[error("memory.caps.max_loaded_file_bytes must not be greater than memory.caps.max_file_bytes")]
     MemoryLoadedOverFile,
+    #[error("memory.backend = \"s3\" needs a [memory.s3] section")]
+    MemoryS3Missing,
+    #[error("the [memory.s3] section is set, but memory.backend is not \"s3\"")]
+    MemoryS3Unused,
+    #[error("memory.s3.bucket \"{0}\" is not a valid bucket name: use 3 to 63 characters of a-z, 0-9, \".\" and \"-\", start and end with a letter or digit, and do not use \"..\"")]
+    MemoryS3Bucket(String),
+    #[error("memory.s3.prefix is not valid: {0}")]
+    MemoryS3Prefix(PrefixError),
+    #[error("memory.s3.endpoint is not a valid URL")]
+    MemoryS3EndpointUnparsable,
+    #[error("memory.s3.endpoint must use the scheme http or https")]
+    MemoryS3EndpointScheme,
+    #[error("memory.s3.endpoint must not hold a user name or a password")]
+    MemoryS3EndpointUserinfo,
+    #[error("memory.s3.endpoint must not hold a query")]
+    MemoryS3EndpointQuery,
+    #[error("memory.s3.endpoint must not hold a fragment")]
+    MemoryS3EndpointFragment,
+    #[error("memory.s3.endpoint uses http: set memory.s3.allow_http = true to allow it")]
+    MemoryS3HttpNotAllowed,
+    #[error("memory.s3.extra_ca_bundle_path must not be empty or have spaces at the start or end (leave the key out to add no bundle)")]
+    MemoryS3CaPathBlank,
+    #[error("memory.s3.apply_deadline_secs must be at least 1 and less than lease.ttl_secs (got {deadline}, lease.ttl_secs is {ttl})")]
+    MemoryS3DeadlineOutOfRange { deadline: u64, ttl: u64 },
+    /// The worker pool starts and the S3 memory store is selected. The run commit of the worker
+    /// supports only the Postgres store until its S3 commit semantics are decided.
+    #[error(
+        "memory.backend is \"s3\", and the worker pool starts (worker.enabled is true and an [[agents]] entry exists): the worker supports only the Postgres memory store for now. Set memory.backend = \"postgres\", or set worker.enabled = false"
+    )]
+    WorkerNeedsPostgresMemory,
     #[error("timers.{key} must be between {min} and {max} (got {value})")]
     TimerValueOutOfRange { key: &'static str, value: u64, min: u64, max: u64 },
     #[error("{key} must be between {min} and {max} (got {value})")]
@@ -793,6 +931,12 @@ impl Config {
         if caps.max_loaded_file_bytes > caps.max_file_bytes {
             return Err(ConfigError::MemoryLoadedOverFile);
         }
+        match (self.memory.backend, &self.memory.s3) {
+            (MemoryBackend::S3, None) => return Err(ConfigError::MemoryS3Missing),
+            (MemoryBackend::Postgres, Some(_)) => return Err(ConfigError::MemoryS3Unused),
+            (MemoryBackend::S3, Some(s3)) => s3.validate(lease.ttl_secs)?,
+            (MemoryBackend::Postgres, None) => {}
+        }
         let t = &self.timers;
         for (key, value, min, max) in [
             ("poll_interval_secs", t.poll_interval_secs, 1, 300),
@@ -830,6 +974,12 @@ impl Config {
             });
         }
         self.agent_definitions()?;
+        // The worker pool starts only with `worker.enabled` and an agent (see `serve`). Its run
+        // commit cannot commit an external memory store yet, so that pair stops the boot. The S3
+        // store stays usable when the pool does not start.
+        if matches!(self.memory.backend, MemoryBackend::S3) && self.worker.enabled && !self.agents.is_empty() {
+            return Err(ConfigError::WorkerNeedsPostgresMemory);
+        }
         Ok(())
     }
 
@@ -988,6 +1138,7 @@ mod tests {
             assert_eq!(caps.max_store_files, 512);
             assert_eq!(caps.max_loaded_file_bytes, 8_192);
             assert_eq!(caps, MemoryCaps::default());
+            assert_eq!(cfg.memory.s3, None);
             assert_eq!(cfg.validate(), Ok(()));
             Ok(())
         });
@@ -1341,18 +1492,174 @@ mod tests {
         });
     }
 
+    const S3_BASE: &str = "[memory]\nbackend = \"s3\"\n[memory.s3]\nbucket = \"paigasus-mem\"\nprefix = \"mem\"\n";
+
     #[test]
-    fn memory_backend_s3_is_refused_for_now() {
+    fn memory_s3_loads_from_toml() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file(
+                "agent-host.toml",
+                "[memory]\nbackend = \"s3\"\n[memory.s3]\nbucket = \"paigasus-mem\"\nprefix = \"mem\"\nendpoint = \"http://127.0.0.1:9000\"\nallow_http = true\n",
+            )?;
+            let cfg = with_url();
+            assert_eq!(cfg.validate(), Ok(()));
+            assert_eq!(cfg.memory.backend, MemoryBackend::S3);
+            let s3 = cfg.memory.s3.as_ref().expect("s3 section");
+            assert_eq!(s3.region, "us-east-1");
+            assert_eq!(s3.apply_deadline_secs, 10);
+            assert!(s3.path_style());
+            assert_eq!(s3.prefix().as_str(), "mem");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn memory_s3_loads_from_the_environment() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
             jail.set_env("AGENT_HOST_MEMORY__BACKEND", "s3");
-            let err = Config::load().expect_err("s3 is not a backend yet");
-            assert!(err.to_string().contains("s3"), "the error must name the value: {err}");
-            // Positive control: the postgres value loads.
-            jail.set_env("AGENT_HOST_MEMORY__BACKEND", "postgres");
-            assert!(Config::load().is_ok());
+            jail.set_env("AGENT_HOST_MEMORY__S3__BUCKET", "paigasus-mem");
+            jail.set_env("AGENT_HOST_MEMORY__S3__PREFIX", "mem");
+            let cfg = with_url();
+            assert_eq!(cfg.validate(), Ok(()));
+            assert!(!cfg.memory.s3.as_ref().expect("s3 section").path_style());
             Ok(())
         });
+    }
+
+    #[test]
+    fn a_dotted_aws_bucket_defaults_to_path_style() {
+        // `<a.b>.s3.<region>.amazonaws.com` does not match the AWS wildcard certificate.
+        let s3 = |bucket: &str, endpoint: Option<&str>, path_style: Option<bool>| MemoryS3Config {
+            bucket: bucket.into(),
+            prefix: "mem".into(),
+            region: default_s3_region(),
+            endpoint: endpoint.map(Into::into),
+            path_style,
+            allow_http: false,
+            extra_ca_bundle_path: None,
+            apply_deadline_secs: 10,
+        };
+        assert!(s3("team.memory", None, None).path_style());
+        assert!(!s3("team-memory", None, None).path_style());
+        assert!(s3("team-memory", Some("https://s3.example"), None).path_style());
+        // An explicit value wins.
+        assert!(!s3("team.memory", None, Some(false)).path_style());
+        assert!(!s3("team.memory", Some("https://team.memory.s3.example"), Some(false)).path_style());
+    }
+
+    #[test]
+    fn an_aws_variable_changes_no_setting() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AWS_REGION", "eu-west-1");
+            jail.set_env("AWS_ENDPOINT_URL", "http://evil");
+            jail.create_file("agent-host.toml", S3_BASE)?;
+            let cfg = with_url();
+            let s3 = cfg.memory.s3.as_ref().expect("s3 section");
+            assert_eq!(s3.region, "us-east-1");
+            assert_eq!(s3.endpoint, None);
+            Ok(())
+        });
+    }
+
+    /// Load `S3_BASE` with `extra` lines added to the `[memory.s3]` table, or with the whole text replaced.
+    fn s3_cfg(toml: &str, ttl: Option<u64>) -> Config {
+        let mut cfg = None;
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("agent-host.toml", toml)?;
+            if let Some(ttl) = ttl {
+                jail.set_env("AGENT_HOST_LEASE__TTL_SECS", ttl.to_string());
+            }
+            cfg = Some(with_url());
+            Ok(())
+        });
+        cfg.expect("config")
+    }
+
+    fn s3_with(extra: &str) -> Config {
+        s3_cfg(&format!("{S3_BASE}{extra}"), None)
+    }
+
+    #[test]
+    fn the_worker_refuses_the_s3_memory_store() {
+        let agent = agent_toml(&agent_prn(7), "[]");
+        // The pool starts (default `worker.enabled = true`, one agent): the boot is refused.
+        let refused = s3_cfg(&format!("{S3_BASE}{agent}"), None).validate();
+        assert_eq!(refused, Err(ConfigError::WorkerNeedsPostgresMemory));
+        let text = refused.unwrap_err().to_string();
+        assert!(
+            text.contains("memory.backend") && text.contains("worker.enabled") && text.contains("only the Postgres memory store"),
+            "{text}"
+        );
+        // No agent: the pool does not start, so the S3 store is allowed.
+        assert_eq!(s3_with("").validate(), Ok(()));
+        // An agent with `worker.enabled = false`: the pool does not start either.
+        assert_eq!(s3_cfg(&format!("[worker]\nenabled = false\n{S3_BASE}{agent}"), None).validate(), Ok(()));
+        // Positive control: the Postgres store with an agent is valid.
+        assert_eq!(s3_cfg(&agent, None).validate(), Ok(()));
+    }
+
+    #[test]
+    fn memory_s3_refusals() {
+        use crate::adapters::memory_s3::keys::PrefixError;
+        // Positive control: the base config is valid.
+        assert_eq!(s3_with("").validate(), Ok(()));
+        // No section.
+        assert_eq!(s3_cfg("[memory]\nbackend = \"s3\"\n", None).validate(), Err(ConfigError::MemoryS3Missing));
+        // A section with the postgres backend.
+        let unused = S3_BASE.replace("backend = \"s3\"", "backend = \"postgres\"");
+        assert_eq!(s3_cfg(&unused, None).validate(), Err(ConfigError::MemoryS3Unused));
+        // Buckets.
+        let long = "a".repeat(64);
+        for bucket in ["ab", long.as_str(), "Ab-c", "-abc", "abc-", "a..b", "a_b"] {
+            let toml = S3_BASE.replace("paigasus-mem", bucket);
+            assert!(matches!(s3_cfg(&toml, None).validate(), Err(ConfigError::MemoryS3Bucket(_))), "bucket {bucket}");
+        }
+        // The prefix.
+        let toml = S3_BASE.replace("\"mem\"", "\"a//b\"");
+        assert_eq!(s3_cfg(&toml, None).validate(), Err(ConfigError::MemoryS3Prefix(PrefixError::EmptySegment)));
+        // The endpoint.
+        let endpoint = |value: &str, allow_http: bool| s3_with(&format!("endpoint = \"{value}\"\nallow_http = {allow_http}\n")).validate();
+        assert_eq!(endpoint("not a url", true), Err(ConfigError::MemoryS3EndpointUnparsable));
+        assert_eq!(endpoint("ftp://h", true), Err(ConfigError::MemoryS3EndpointScheme));
+        assert_eq!(endpoint("https://u:p@h", false), Err(ConfigError::MemoryS3EndpointUserinfo));
+        assert_eq!(endpoint("https://h?x=1", false), Err(ConfigError::MemoryS3EndpointQuery));
+        assert_eq!(endpoint("https://h#f", false), Err(ConfigError::MemoryS3EndpointFragment));
+        assert_eq!(endpoint("http://h", false), Err(ConfigError::MemoryS3HttpNotAllowed));
+        assert_eq!(endpoint("http://h", true), Ok(()));
+        // The CA path.
+        for path in ["", " /x"] {
+            assert_eq!(
+                s3_with(&format!("extra_ca_bundle_path = \"{path}\"\n")).validate(),
+                Err(ConfigError::MemoryS3CaPathBlank),
+                "path {path:?}"
+            );
+        }
+        assert_eq!(s3_with("extra_ca_bundle_path = \"/x\"\n").validate(), Ok(()));
+        // The deadline.
+        assert_eq!(s3_with("apply_deadline_secs = 0\n").validate(), Err(ConfigError::MemoryS3DeadlineOutOfRange { deadline: 0, ttl: 30 }));
+        let at_ttl = s3_cfg(&format!("{S3_BASE}apply_deadline_secs = 30\n"), Some(30));
+        assert_eq!(at_ttl.validate(), Err(ConfigError::MemoryS3DeadlineOutOfRange { deadline: 30, ttl: 30 }));
+        let below_ttl = s3_cfg(&format!("{S3_BASE}apply_deadline_secs = 29\n"), Some(30));
+        assert_eq!(below_ttl.validate(), Ok(()));
+    }
+
+    #[test]
+    fn no_endpoint_error_text_holds_the_endpoint() {
+        let text = ConfigError::MemoryS3EndpointUserinfo.to_string();
+        assert!(!text.contains("u:p"), "{text}");
+        let cfg = s3_with("endpoint = \"https://u:p@h\"\n");
+        let err = cfg.validate().expect_err("userinfo");
+        assert!(!err.to_string().contains("u:p") && !format!("{err:?}").contains("u:p"));
+    }
+
+    #[test]
+    fn an_endpoint_with_a_trailing_slash_is_valid() {
+        let cfg = s3_with("endpoint = \"http://minio.local:9000/\"\nallow_http = true\n");
+        assert_eq!(cfg.validate(), Ok(()));
     }
 
     #[test]

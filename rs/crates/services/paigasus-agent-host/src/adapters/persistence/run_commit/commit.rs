@@ -70,6 +70,8 @@ const DONE_SQL: &str = "UPDATE inbox_event SET status = 'done' \
 
 /// The text of the scope refusal.
 const SCOPE_REFUSED: &str = "the memory scope is not the scope of the inbox";
+/// The fixed text of the guard arm for an external memory store. No key, URL or path is in it.
+const EXTERNAL_REFUSED: &str = "the worker cannot commit an external memory store";
 
 impl PgRunCommitter {
     /// Commit the end of a run in one fenced transaction (spec §6.8).
@@ -192,6 +194,10 @@ impl PgRunCommitter {
         }
         let applied = match &self.memory {
             MemoryCommit::InTransaction(store) => store.apply_in(txn, set, &self.caps).await,
+            // A guard, not a feature: `Config::validate` refuses the S3 store when the worker pool
+            // starts, until the run-commit semantics of an external store are decided. It writes
+            // nothing.
+            MemoryCommit::External(_) => return Err(CommitError::Store(EXTERNAL_REFUSED.to_string())),
         };
         applied.map_err(|e| match e {
             MemoryApplyError::Conflict { .. } | MemoryApplyError::CapExceeded(_) => CommitError::MemoryRejected(e),
