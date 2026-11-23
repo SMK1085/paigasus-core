@@ -395,12 +395,14 @@ in one release. The new schema adds two attributes: `context.max_severity` and
   boot run re-compiles every live set that still compiles to an identical live version at
   generation 3 and revision 2. For these sets it writes no held row, and no admin action is
   necessary. A set that holds a history rule does not compile (section 5): the job holds it as
-  `held_failed`, and its catalog writes stay refused with `tool-policy-recompile-pending`. After
-  the run, read the `results` of `POST /v1/tool-policy-recompile` or the metric
-  `iam_tool_policy_recompile_results_total`. For each `held_failed` set, do the steps of
+  `held_failed`, and its catalog writes stay refused with `tool-policy-recompile-pending`. A
+  non-zero `held_failed` in the metric `iam_tool_policy_recompile_results_total` shows that this
+  occurred, but the metric does not name the set. A later run returns `ALREADY_PROPOSED` for a set
+  that is already held. So find the held sets with `GET /v1/held-tool-policy-versions` and read
+  their reports (see "Held versions"). For each set that a history rule stops, do the steps of
   section 5.
-- Each set gets a new live version. So every gateway reloads every organization at about the same
-  time.
+- Each set that compiles gets a new live version. So every gateway reloads every such
+  organization at about the same time.
 - Until the job reaches a set, a catalog write on that set is refused with
   `tool-policy-recompile-pending`, as on every bump.
 - After the rollout, start the job one more time with `POST /v1/tool-policy-recompile`, as
