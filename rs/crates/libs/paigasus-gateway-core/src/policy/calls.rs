@@ -5,11 +5,11 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Finding, HostSet, Severity};
-use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, Verdict, decide};
+use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, ToolPolicies, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
 use super::snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
-use crate::decision_log::{CedarDetail, records_of};
+use crate::decision_log::{CedarDetail, FindingRecord, records_of};
 use crate::turn::ToolTurn;
 use crate::types::{BlockCode, Decision, ToolCall};
 
@@ -78,6 +78,27 @@ pub(super) fn cedar_detail(v: &Verdict, given: &[Finding], declared: Declared, f
         declared,
         v.action_group,
         duration,
+    );
+    cedar.detection_disabled = !facts.detection;
+    cedar
+}
+
+/// The Cedar detail of a result decision that the plan did not evaluate, because the request
+/// used up its pair budget (§ 6.8.2, A13). No policy decided it: the effect is `Deny` (fail
+/// closed), with no determining and no errored policy, and `given` holds the `detector_error`
+/// that says why. The action group comes from the policies, with no Cedar decision.
+pub(super) fn unevaluated_detail(given: &[Finding], name: &str, policies: &ToolPolicies, facts: &Facts) -> CedarDetail {
+    let max_severity = given.iter().map(|f| f.severity).max().filter(|_| facts.detection);
+    let mut cedar = CedarDetail::new(
+        Effect::Deny,
+        Vec::new(),
+        Vec::new(),
+        false,
+        given.iter().map(FindingRecord::from_finding).collect(),
+        max_severity,
+        Declared::Unknown,
+        policies.action_group(name),
+        Duration::ZERO,
     );
     cedar.detection_disabled = !facts.detection;
     cedar

@@ -4,13 +4,16 @@
 //! `enforced` flag; `rewrite_request` applies only the enforced items. No I/O.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::{Duration, Instant};
 
 use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, Finding, Severity, call_hosts};
-use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, NAME_COLLISION, PolicyOrigin, PolicyRef, ToolInvocation, ToolPolicies, ToolVerdict, Verdict, decide, decide_tool, normalise};
+use paigasus_kernel::tool_policy::{
+    Declared, Effect, Facts, Findings, NAME_COLLISION, PolicyOrigin, PolicyRef, ToolInput, ToolInvocation, ToolPolicies, ToolVerdict, Verdict, decide, decide_tool, normalise,
+};
+use sha2::{Digest, Sha256};
 
-use super::calls::{cedar_detail, kernel_findings};
+use super::calls::{cedar_detail, kernel_findings, unevaluated_detail};
 use super::mapping::{definition_call_name, input_for, name_collisions};
 use super::snapshot::{PolicySet, PolicySnapshot, TenantMode, TenantPart};
 use crate::decision_log::CedarDetail;
@@ -198,8 +201,47 @@ fn findings_per_result(results: usize, given: &[Vec<Finding>]) -> Cow<'_, [Vec<F
     }
 }
 
+/// The most distinct differential pairs (§ 6.8.2) that one request decides. Each pair is two
+/// Cedar decisions, and the client controls how many targets and earlier calls a request has.
+/// Equal pairs are decided once (the pair cache), so only distinct pairs count. Past the budget,
+/// every target with findings that is not yet decided is not evaluated: it gets one
+/// `detector_error` (detector `built_in`, high) and is replaced, fail closed, as a `scan_limit`
+/// is (spec A13).
+pub(crate) const PAIR_BUDGET: usize = 64;
+
+/// A SHA-256 digest. A pair cache key holds digests, never the call content (A2).
+type Digest32 = [u8; 32];
+
+fn finish(h: Sha256) -> Digest32 {
+    let mut out = [0; 32];
+    out.copy_from_slice(&h.finalize());
+    out
+}
+
+/// The digest of a call as the pair decides it: the raw name, whether the input is JSON or text,
+/// and the arguments. The hosts come from the input, and `declared` is always `Unknown`.
+fn call_digest(name: &str, kind: ToolCallKind, arguments: &str) -> Digest32 {
+    let mut h = Sha256::new();
+    h.update([u8::from(matches!(input_for(kind, ""), ToolInput::Text(_)))]);
+    h.update((name.len() as u64).to_le_bytes());
+    h.update(name.as_bytes());
+    h.update(arguments.as_bytes());
+    finish(h)
+}
+
+/// The digest of a kernel finding set: each kind with its severity, in kind order.
+fn findings_digest(set: &Findings) -> Digest32 {
+    let mut h = Sha256::new();
+    for kind in set.iter() {
+        h.update((kind.len() as u64).to_le_bytes());
+        h.update(kind.as_bytes());
+        h.update(set.severity(kind).map_or(-1, Severity::as_long).to_le_bytes());
+    }
+    finish(h)
+}
+
 /// The earlier calls with this id in an index, or none.
-fn calls_of<'m, 'k>(index: &'m BTreeMap<&str, Vec<&'k PriorCall>>, id: &str) -> &'m [&'k PriorCall] {
+fn calls_of<'m, 'k>(index: &'m BTreeMap<&str, Vec<EarlierCall<'k>>>, id: &str) -> &'m [EarlierCall<'k>] {
     index.get(id).map_or(&[], Vec::as_slice)
 }
 
@@ -209,41 +251,47 @@ struct EarlierCall<'k> {
     name: &'k str,
     kind: ToolCallKind,
     arguments: &'k str,
+    /// The `call_digest`, computed once per call.
+    digest: Digest32,
 }
 
 impl<'k> EarlierCall<'k> {
     fn of(c: &'k PriorCall) -> Self {
-        Self {
-            name: &c.name,
-            kind: c.kind,
-            arguments: &c.arguments,
-        }
+        Self::new(&c.name, c.kind, &c.arguments)
     }
 
     /// D32: a result with no earlier call is decided with its own name (or the empty name).
     fn pseudo(name: &'k str) -> Self {
+        Self::new(name, ToolCallKind::Function, "{}")
+    }
+
+    fn new(name: &'k str, kind: ToolCallKind, arguments: &'k str) -> Self {
         Self {
             name,
-            kind: ToolCallKind::Function,
-            arguments: "{}",
+            kind,
+            arguments,
+            digest: call_digest(name, kind, arguments),
         }
     }
 }
 
-/// The differential pair of every earlier call of one target (§ 6.8.2).
-struct Pairs<'k> {
-    /// A's Cedar detail of each call, in call order, with the call's name.
-    details: Vec<(&'k str, CedarDetail)>,
+/// The decided pair of one distinct (call, finding set).
+struct PairOutcome {
+    /// Verdict A, with the findings.
+    a: Verdict,
+    /// The time of decision A.
+    duration: Duration,
+    /// `Some(enforced)` when the findings change the verdict in a way that counts (§ 6.8.2).
+    counts: Option<bool>,
+}
+
+/// The differential pairs of every earlier call of one target (§ 6.8.2).
+struct Pairs {
+    /// The `findings_digest` of the target's finding set.
+    findings: Digest32,
     /// The first call whose pair differs in a way that counts, and whether the item is enforced
     /// (the OR over every such call).
     hit: Option<(usize, bool)>,
-}
-
-impl<'k> Pairs<'k> {
-    /// Take the detail at `index`.
-    fn take(self, index: usize) -> Option<(&'k str, CedarDetail)> {
-        self.details.into_iter().nth(index)
-    }
 }
 
 /// Whether the plan may remove a definition of this kind and name (P-15).
@@ -294,6 +342,13 @@ struct ResultJudge<'j, 'p, 'k> {
     /// finding has no entry and keeps the SMA-752 path.
     unions: BTreeMap<(u8, &'k str), Vec<Finding>>,
     now: &'j dyn Fn() -> Instant,
+    /// The pair cache of this request, keyed by (`call_digest`, `findings_digest`). The policies
+    /// are the snapshot's for the whole `plan_request` call, so they need no part in the key.
+    cache: HashMap<(Digest32, Digest32), PairOutcome>,
+    /// The pairs decided so far (each one two Cedar decisions). At most `PAIR_BUDGET`.
+    decided: usize,
+    /// A pair past `PAIR_BUDGET` was needed: no target with findings is evaluated after this.
+    exhausted: bool,
 }
 
 impl<'k> ResultJudge<'_, '_, 'k> {
@@ -303,13 +358,13 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     /// each earlier call, or of the pseudo call named `pseudo` when there is none (§ 6.8.2, D32).
     /// A new replaced target adds one plan item and one report entry; a target with findings that
     /// is not replaced adds one screen record.
-    fn decide(&mut self, key: (u8, &'k str), target: impl FnOnce() -> ResultTarget, calls: &[&'k PriorCall], legacy: Option<&'k str>, pseudo: &'k str) -> Option<bool> {
+    fn decide(&mut self, key: (u8, &'k str), target: impl FnOnce() -> ResultTarget, calls: &[EarlierCall<'k>], legacy: Option<&'k str>, pseudo: &'k str) -> Option<bool> {
         if let Some(replaced) = self.seen.get(&key) {
             return *replaced;
         }
         let names: Vec<&'k str> = match legacy {
             Some(name) => vec![name],
-            None => calls.iter().map(|c| c.name.as_str()).collect(),
+            None => calls.iter().map(|c| c.name).collect(),
         };
         let mut hit: Option<(&'k str, bool)> = None;
         for name in names {
@@ -324,11 +379,7 @@ impl<'k> ResultJudge<'_, '_, 'k> {
         let outcome = match self.unions.remove(&key) {
             None => hit.map(|(name, enforced)| (name, enforced, None)),
             Some(given) => {
-                let calls: Vec<EarlierCall<'k>> = if calls.is_empty() {
-                    vec![EarlierCall::pseudo(pseudo)]
-                } else {
-                    calls.iter().map(|c| EarlierCall::of(c)).collect()
-                };
+                let calls: Cow<'_, [EarlierCall<'k>]> = if calls.is_empty() { Cow::Owned(vec![EarlierCall::pseudo(pseudo)]) } else { Cow::Borrowed(calls) };
                 self.screened(&calls, &given, hit)
             }
         };
@@ -343,27 +394,29 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     /// The outcome of a target with findings: the differential pairs merged with the optimistic
     /// `hit` into one item (`enforced` is the OR), with A's detail. Not replaced: a screen record.
     fn screened(&mut self, calls: &[EarlierCall<'k>], given: &[Finding], hit: Option<(&'k str, bool)>) -> Option<(&'k str, bool, Option<CedarDetail>)> {
-        let pairs = self.pairs(calls, given);
+        let first = calls.first()?;
+        let Some(pairs) = self.pairs(calls, given) else {
+            // Past the pair budget: not evaluated, replaced (fail closed, spec A13).
+            let (name, detail) = self.unevaluated(first.name, given);
+            let enforced = self.judge.floor_only || self.judge.mode == TenantMode::Enforce;
+            return Some((hit.map_or(name, |(n, _)| n), enforced || hit.is_some_and(|(_, e)| e), Some(detail)));
+        };
         match (pairs.hit, hit) {
-            // Replaced by the findings: the first call whose pair differed names the entry. `pairs`
-            // pushes one detail for every call that it sets `hit` for, so `index` is in range.
+            // Replaced by the findings: the first call whose pair differed names the entry.
             (Some((index, enforced)), optimistic) => {
-                // The invariant: a debug build panics on a defect. A release build keeps the
-                // result (the `?` below), as before.
-                debug_assert!(index < pairs.details.len(), "the differing pair has a detail");
-                let (name, detail) = pairs.take(index)?;
-                Some((name, enforced || optimistic.is_some_and(|(_, e)| e), Some(detail)))
+                let c = calls.get(index)?;
+                Some((c.name, enforced || optimistic.is_some_and(|(_, e)| e), self.detail(c, &pairs, given)))
             }
             // Replaced by the optimistic path only: A's detail of the call that it denied, so that
             // a floor deny shows its floor policy (§ 6.8.2).
             (None, Some((name, enforced))) => {
                 let n = normalise(name);
-                let index = pairs.details.iter().position(|(c, _)| normalise(c) == n).unwrap_or(0);
-                Some((name, enforced, pairs.take(index).map(|(_, d)| d)))
+                let c = calls.iter().find(|c| normalise(c.name) == n).unwrap_or(first);
+                Some((name, enforced, self.detail(c, &pairs, given)))
             }
             (None, None) => {
-                if let Some((tool, cedar)) = pairs.take(0) {
-                    self.plan.screen_records.push(ScreenRecord { tool: tool.to_owned(), cedar });
+                if let Some(cedar) = self.detail(first, &pairs, given) {
+                    self.plan.screen_records.push(ScreenRecord { tool: first.name.to_owned(), cedar });
                 }
                 None
             }
@@ -371,44 +424,87 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     }
 
     /// A result that names no call (P-6): the pair of the pseudo call, and a screen record only.
+    /// Past the pair budget, the record holds the unevaluated detail; it is still not replaced.
     fn orphan(&mut self, given: &[Finding]) {
-        if let Some((tool, cedar)) = self.pairs(&[EarlierCall::pseudo("")], given).take(0) {
-            self.plan.screen_records.push(ScreenRecord { tool: tool.to_owned(), cedar });
+        let pseudo = EarlierCall::pseudo("");
+        let cedar = match self.pairs(&[pseudo], given) {
+            Some(pairs) => self.detail(&pseudo, &pairs, given),
+            None => Some(self.unevaluated(pseudo.name, given).1),
+        };
+        if let Some(cedar) = cedar {
+            self.plan.screen_records.push(ScreenRecord { tool: pseudo.name.to_owned(), cedar });
         }
     }
 
-    /// The differential pair of each call (§ 6.8.2): A with the target's findings only, B with no
-    /// findings, both with `Declared::Unknown`. The request-level `name_collision` is in neither
-    /// (A9). Two kernel decisions per call; the clock is read around A only.
-    fn pairs(&mut self, calls: &[EarlierCall<'k>], given: &[Finding]) -> Pairs<'k> {
-        let judge = &*self.judge;
+    /// A's Cedar detail of call `c` of a decided target.
+    fn detail(&self, c: &EarlierCall<'k>, pairs: &Pairs, given: &[Finding]) -> Option<CedarDetail> {
+        let outcome = self.cache.get(&(c.digest, pairs.findings))?;
+        Some(cedar_detail(&outcome.a, given, Declared::Unknown, self.judge.facts, outcome.duration))
+    }
+
+    /// The name and detail of a target past the pair budget: its findings and one `detector_error`.
+    fn unevaluated(&self, name: &'k str, given: &[Finding]) -> (&'k str, CedarDetail) {
+        let mut given = given.to_vec();
+        given.push(Finding::new(DETECTOR_BUILT_IN, DETECTOR_ERROR, Severity::High, ""));
+        (name, unevaluated_detail(&given, name, self.judge.policies, self.judge.facts))
+    }
+
+    /// The differential pairs of a target (§ 6.8.2), from the pair cache. `None` when a pair that
+    /// is not in the cache would go past `PAIR_BUDGET`: the target is then not evaluated, and no
+    /// later target is either. The cost of one request is at most `2 * PAIR_BUDGET` Cedar
+    /// decisions, plus one cache look-up for each (target, earlier call).
+    fn pairs(&mut self, calls: &[EarlierCall<'k>], given: &[Finding]) -> Option<Pairs> {
+        if self.exhausted {
+            return None;
+        }
         let with = kernel_findings(given);
-        let without = Findings::new();
         let mut pairs = Pairs {
-            details: Vec::with_capacity(calls.len()),
+            findings: findings_digest(&with),
             hit: None,
         };
         for (index, c) in calls.iter().enumerate() {
-            let input = input_for(c.kind, c.arguments);
-            // One host pass, shared by A and B (S8).
-            let hosts = call_hosts(&input);
-            let inv = ToolInvocation::new(c.name, input, Declared::Unknown).with_hosts(hosts);
-            let started = (self.now)();
-            let a = decide(&inv, judge.facts, &with, judge.policies);
-            let duration = (self.now)().saturating_duration_since(started);
-            let b = decide(&inv, judge.facts, &without, judge.policies);
-            if let Some(policies) = difference(&a, &b) {
-                // A floor policy in the difference is enforced in every mode (SMA-752 D33). Else a
-                // floor-only snapshot ignores the difference, and the mode decides.
-                let by_floor = policies.iter().any(|p| p.set == PolicyOrigin::Floor);
-                if by_floor || !judge.floor_only {
-                    let enforced = by_floor || judge.mode == TenantMode::Enforce;
-                    pairs.hit = Some(pairs.hit.map_or((index, enforced), |(first, e)| (first, e || enforced)));
+            let key = (c.digest, pairs.findings);
+            let counts = match self.cache.get(&key) {
+                Some(outcome) => outcome.counts,
+                None => {
+                    if self.decided >= PAIR_BUDGET {
+                        self.exhausted = true;
+                        return None;
+                    }
+                    self.decided += 1;
+                    let outcome = self.decide_pair(c, &with);
+                    let counts = outcome.counts;
+                    self.cache.insert(key, outcome);
+                    counts
                 }
+            };
+            if let Some(enforced) = counts {
+                pairs.hit = Some(pairs.hit.map_or((index, enforced), |(first, e)| (first, e || enforced)));
             }
-            pairs.details.push((c.name, cedar_detail(&a, given, Declared::Unknown, judge.facts, duration)));
         }
-        pairs
+        Some(pairs)
+    }
+
+    /// One differential pair (§ 6.8.2): A with the target's findings only, B with no findings,
+    /// both with `Declared::Unknown`. The request-level `name_collision` is in neither (A9). Two
+    /// kernel decisions; the clock is read around A only.
+    fn decide_pair(&self, c: &EarlierCall<'k>, with: &Findings) -> PairOutcome {
+        let judge = &*self.judge;
+        let input = input_for(c.kind, c.arguments);
+        // One host pass, shared by A and B (S8).
+        let hosts = call_hosts(&input);
+        let inv = ToolInvocation::new(c.name, input, Declared::Unknown).with_hosts(hosts);
+        let started = (self.now)();
+        let a = decide(&inv, judge.facts, with, judge.policies);
+        let duration = (self.now)().saturating_duration_since(started);
+        let b = decide(&inv, judge.facts, &Findings::new(), judge.policies);
+        let counts = difference(&a, &b).and_then(|policies| {
+            // A floor policy in the difference is enforced in every mode (SMA-752 D33). Else a
+            // floor-only snapshot ignores the difference, and the mode decides.
+            let by_floor = policies.iter().any(|p| p.set == PolicyOrigin::Floor);
+            (by_floor || !judge.floor_only).then_some(by_floor || judge.mode == TenantMode::Enforce)
+        });
+        PairOutcome { a, duration, counts }
     }
 }
 
@@ -500,23 +596,25 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts,
     // it is replaced if any of them is denied. A legacy result carries its own name.
     // A result with findings is also decided by the differential pair (§ 6.8.2).
     // One index of the prior calls by id, built once. A duplicate id keeps every call in order.
-    let mut by_id: BTreeMap<&str, Vec<&PriorCall>> = BTreeMap::new();
+    // Each earlier call is held with its `call_digest`, computed once here.
+    let mut by_id: BTreeMap<&str, Vec<EarlierCall>> = BTreeMap::new();
     // A `local_shell_call_output` can name its call by `id` alone. The provider schema does not say
     // if that is the `call_id` or the item `id` of the call, so it is matched against both ids of
     // every earlier `local_shell_call` (fail-safe).
-    let mut shell_ids: BTreeMap<&str, Vec<&PriorCall>> = BTreeMap::new();
+    let mut shell_ids: BTreeMap<&str, Vec<EarlierCall>> = BTreeMap::new();
     // The legacy chat `function_call`s (no id) by normalised name, for the pair of a `Name` target.
-    let mut legacy: BTreeMap<String, Vec<&PriorCall>> = BTreeMap::new();
+    let mut legacy: BTreeMap<String, Vec<EarlierCall>> = BTreeMap::new();
     for c in &turn.prior_calls {
+        let earlier = EarlierCall::of(c);
         if let Some(id) = c.id.as_deref() {
-            by_id.entry(id).or_default().push(c);
+            by_id.entry(id).or_default().push(earlier);
         } else if c.kind == ToolCallKind::LegacyFunctionCall {
-            legacy.entry(normalise(&c.name)).or_default().push(c);
+            legacy.entry(normalise(&c.name)).or_default().push(earlier);
         }
         if c.local_shell {
             let ids: BTreeSet<&str> = c.id.iter().chain(&c.item_id).map(String::as_str).collect();
             for id in ids {
-                shell_ids.entry(id).or_default().push(c);
+                shell_ids.entry(id).or_default().push(earlier);
             }
         }
     }
@@ -553,6 +651,9 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts,
         seen: BTreeMap::new(),
         unions,
         now,
+        cache: HashMap::new(),
+        decided: 0,
+        exhausted: false,
     };
     // The enforced flags of the unreplaceable results, added after the loop (`results` holds `plan`).
     let mut unreplaceable: Vec<bool> = Vec::new();
@@ -1709,5 +1810,138 @@ mod tests {
     #[should_panic(expected = "one finding list per result, or none")]
     fn a_wrong_findings_count_panics_in_a_debug_build() {
         let _ = plan_with(&tenant(PERMIT_ALL, TenantMode::Enforce), Format::OpenAiChat, chat_one(), &[vec![], vec![]]);
+    }
+
+    // Spec A13: the pair cache and the pair budget. The counts come from the clock: it is read
+    // twice for each decided pair (around A), so `reads / 2` is the number of distinct pairs.
+
+    /// The plan with a clock that counts its reads and always gives one instant (duration zero).
+    fn counted(s: &PolicySnapshot, t: &TurnFacts, findings: &[Vec<Finding>]) -> (RequestPlan, usize) {
+        use std::cell::Cell;
+        let t0 = Instant::now();
+        let reads = Cell::new(0_usize);
+        let clock = || {
+            reads.set(reads.get() + 1);
+            t0
+        };
+        let p = plan_request(s, Format::OpenAiChat, t, findings, &clock);
+        (p, reads.get())
+    }
+
+    /// `n` legacy `function_call`s named `fetch` with input `{}`, and `n` legacy results whose raw
+    /// names all normalise to `fetch`. Each result is its own target, and each target has all `n`
+    /// earlier calls: `n * n` (target, call) pairs.
+    fn legacy_n_by_n(n: usize) -> TurnFacts {
+        let mut t = turn(vec![]);
+        t.prior_calls = (0..n)
+            .map(|_| PriorCall {
+                id: None,
+                name: "fetch".to_owned(),
+                arguments: "{}".to_owned(),
+                kind: ToolCallKind::LegacyFunctionCall,
+                local_shell: false,
+                item_id: None,
+            })
+            .collect();
+        t.tool_results = (0..n)
+            .map(|i| ToolResultRef {
+                call_id: None,
+                name: Some(format!("fetch{}", " ".repeat(i))),
+                item_id: None,
+                shape: ResultShape::Text,
+            })
+            .collect();
+        t
+    }
+
+    #[test]
+    fn equal_pairs_of_many_targets_are_decided_once() {
+        let s = tenant(PERMIT_ALL_STARTER, TenantMode::Enforce);
+        let (control, control_reads) = counted(&s, &legacy_n_by_n(2), &vec![vec![high()]; 2]);
+        assert_eq!(control_reads, 2, "one distinct pair");
+        assert_eq!(control.replaced.len(), 2);
+        let want = control.entry_details[0].clone().expect("detail");
+        assert!(want.findings.iter().all(|f| f.kind != DETECTOR_ERROR));
+
+        let n = 2000;
+        let (p, reads) = counted(&s, &legacy_n_by_n(n), &vec![vec![high()]; n]);
+        // 2000 x 2000 (target, call) pairs, one Cedar pair: the cache decided it once.
+        assert_eq!(reads, 2, "one distinct pair for {} (target, call) pairs", n * n);
+        assert_eq!(p.replaced.len(), n);
+        assert!(p.replaced.iter().all(|i| i.enforced));
+        assert!(p.entries.iter().all(|e| e.tool == "fetch"));
+        assert!(p.entry_details.iter().all(|d| d.as_ref() == Some(&want)), "the same outcome as the control");
+    }
+
+    /// `n` results, each with its own earlier call with distinct arguments: `n` distinct pairs.
+    fn distinct(n: usize) -> TurnFacts {
+        let mut t = turn(vec![]);
+        t.prior_calls = (0..n)
+            .map(|i| {
+                let mut c = prior(&format!("c{i}"), "fetch");
+                c.arguments = format!(r#"{{"i":{i}}}"#);
+                c
+            })
+            .collect();
+        t.tool_results = (0..n).map(|i| by_id(&format!("c{i}"))).collect();
+        t
+    }
+
+    #[test]
+    fn targets_past_the_pair_budget_get_a_detector_error_and_are_replaced() {
+        let n = PAIR_BUDGET + 6;
+        for (mode, enforced) in [(TenantMode::Enforce, true), (TenantMode::LogOnly, false)] {
+            let (p, reads) = counted(&tenant(PERMIT_ALL, mode), &distinct(n), &vec![vec![high()]; n]);
+            assert_eq!(reads, 2 * PAIR_BUDGET, "{mode:?}: no pair past the budget");
+            // The first PAIR_BUDGET targets are evaluated: `permit all` allows, so screen records.
+            assert_eq!(p.screen_records.len(), PAIR_BUDGET, "{mode:?}");
+            assert!(p.screen_records.iter().all(|r| r.cedar.effect == Effect::Allow));
+            // The others are not evaluated: replaced, fail closed, with the error in the record.
+            let past: Vec<ResultTarget> = (PAIR_BUDGET..n).map(|i| ResultTarget::CallId(format!("c{i}"))).collect();
+            assert_eq!(p.replaced.iter().map(|i| i.target.clone()).collect::<Vec<_>>(), past, "{mode:?}");
+            assert!(p.replaced.iter().all(|i| i.enforced == enforced), "{mode:?}");
+            for d in p.entry_details.iter().map(|d| d.as_ref().expect("detail")) {
+                assert_eq!((d.effect, d.determining.len(), d.max_severity), (Effect::Deny, 0, Some(Severity::High)));
+                let records: Vec<(&str, Option<Severity>, &str)> = d.findings.iter().map(|f| (f.kind.as_str(), f.severity, f.detector.as_str())).collect();
+                assert_eq!(
+                    records,
+                    [(DETECTOR_ERROR, Some(Severity::High), DETECTOR_BUILT_IN), (INJECTION_MARKERS, Some(Severity::High), INJECTION_MARKERS)]
+                );
+            }
+        }
+        // At the budget exactly, every target is evaluated.
+        let (p, reads) = counted(&tenant(PERMIT_ALL, TenantMode::Enforce), &distinct(PAIR_BUDGET), &vec![vec![high()]; PAIR_BUDGET]);
+        assert_eq!((reads, p.screen_records.len(), p.replaced.len()), (2 * PAIR_BUDGET, PAIR_BUDGET, 0));
+    }
+
+    #[test]
+    fn an_orphan_past_the_pair_budget_gets_an_unevaluated_screen_record() {
+        let mut t = distinct(PAIR_BUDGET);
+        // A result with no id is decided by the pseudo pair, which is the 65th distinct pair.
+        t.tool_results.push(ToolResultRef {
+            call_id: None,
+            name: None,
+            item_id: None,
+            shape: ResultShape::Text,
+        });
+        let (p, _) = counted(&tenant(PERMIT_ALL, TenantMode::Enforce), &t, &vec![vec![high()]; PAIR_BUDGET + 1]);
+        assert!(p.replaced.is_empty(), "P-6: never replaced");
+        let last = p.screen_records.last().expect("record");
+        assert_eq!((last.tool.as_str(), last.cedar.effect), ("", Effect::Deny));
+        assert!(last.cedar.findings.iter().any(|f| f.kind == DETECTOR_ERROR && f.detector == DETECTOR_BUILT_IN));
+    }
+
+    #[test]
+    fn a_call_digest_separates_the_name_the_input_kind_and_the_arguments() {
+        let d = call_digest("fetch", ToolCallKind::Function, "{}");
+        assert_eq!(d, call_digest("fetch", ToolCallKind::Function, "{}"));
+        assert_ne!(d, call_digest("Fetch", ToolCallKind::Function, "{}"));
+        assert_ne!(d, call_digest("fetch", ToolCallKind::Custom, "{}"));
+        assert_ne!(d, call_digest("fetch", ToolCallKind::Function, "{ }"));
+        // The name is length-prefixed: a name/argument split cannot collide.
+        assert_ne!(call_digest("ab", ToolCallKind::Function, "c"), call_digest("a", ToolCallKind::Function, "bc"));
+        let mut medium = Findings::new();
+        medium.add(INJECTION_MARKERS, Severity::Medium);
+        assert_ne!(findings_digest(&medium), findings_digest(&kernel_findings(&[high()])), "the severity is in the key");
     }
 }
