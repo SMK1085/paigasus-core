@@ -195,7 +195,8 @@ The `down` step of the migration `m0015_tool_policy_held_versions` does two dele
 
 So a rollback loses each pending proposal. The job makes them again after the next upgrade.
 
-For a gateway rollback when sets hold history rules, read section 10, "Gateway rollback".
+For a gateway rollback, or a removal of `[tool_history]`, when sets hold history rules, read section 10,
+"Gateway rollback".
 
 ### Rollback of a compiler change
 
@@ -469,17 +470,24 @@ Cedar has no condition, and no policy reads a `context.<slot>` attribute. Removi
 definitions is not enough: a policy that still reads a slot errors, and an errored forbid denies every
 call in its scope.
 
-Procedure for a gateway rollback to this build or to an older build:
+Use this procedure for each of three cases:
+
+- A gateway rollback from PR 2 to this build.
+- A gateway rollback to a build before SMA-753 PR 1.
+- Removal of the `[tool_history]` table, with a PR 1 or later build and no gateway rollback. Without
+  the table, every history slot is missing. The effect is the same as a rollback to this build.
 
 1. Set `tool_policies.history_conditions = false` in IAM. IAM then refuses each save with a condition.
    Wait until every in-flight save has finished. For a rollback to this build, this step is already
    true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1. Confirm the
    setting value anyway.
 2. Prepare the floor and the tenant sets.
-   - For a rollback from PR 2 to this build, replace each history policy whose scope is `InvokeTool`
-     or has no action constraint with a reviewed replacement that has no temporal block. A tenant
-     set may move to mode `log_only` instead. In this build, `log_only` only observes the slot
-     policies, so the tenant set blocks no call through them.
+   - For a rollback from PR 2 to this build, and for removal of `[tool_history]` with a PR 1 or later
+     build, replace every history policy, whatever its action scope, with a reviewed replacement that
+     has no temporal block. A policy scoped to one tool, for example
+     `action == Pgs::Gateway::Action::"send"`, also errors when it reads a slot. A tenant set may move
+     to mode `log_only` instead. In this build, `log_only` only observes the slot policies, so the
+     tenant set blocks no call through them.
    - For a rollback to a build before SMA-753 PR 1, publish a condition-free version of each set with
      a condition. A tenant set may move to mode `off` instead. Mode `off` stops all tool-policy checks
      for that tenant during the rollback, not only the history rules.
@@ -488,7 +496,8 @@ Procedure for a gateway rollback to this build or to an older build:
    (`GET /v1/organizations/{id}/tool-policy-set`) again. Verify that no compiled set has a condition,
    and that no policy reads a `context.<slot>` attribute. Exempt, by name, each tenant that step 2
    moved to its alternative mode. For every other set and for the floor, the check applies.
-4. Only then roll back the gateway.
+4. Only then roll back the gateway. For the removal case, remove the `[tool_history]` table and
+   restart the gateway.
 
 Step 1 comes first. While saves are enabled, another writer can save a new condition after you
 prepared a set.

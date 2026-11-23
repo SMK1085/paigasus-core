@@ -528,9 +528,9 @@ call), and a floor with a condition would fail for every tenant.
 **Limit.** A gateway build older than PR 1 still refuses the whole set. Before a rollback to such a
 build, the floor MUST be condition-free, and each tenant set with a condition MUST be condition-free
 or moved to mode `off`. The steps and the definition of "condition-free" are in § 8 ("Procedure for
-either rollback"), and RUNBOOK-tool-policies.md section 10 states the same steps. A rollback from PR 2
-to PR 1 replaces each history policy whose scope is `InvokeTool` or has no action constraint (see
-"Blast radius").
+each of the three cases"), and RUNBOOK-tool-policies.md section 10 states the same steps. A rollback
+from PR 2 to PR 1, or a removal of `[tool_history]`, replaces every history policy, whatever its
+action scope (see "Blast radius").
 
 **Effect at deploy.** IAM keeps `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` unchanged in PR 1, so IAM
 refuses each new save with a condition. But older live rows can hold conditions: SMA-774 (PR 478,
@@ -565,29 +565,34 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
 
 ## 8. Rollback
 
-- **Gateway rollback from PR 2 to PR 1**, or removal of `[tool_history]`. PR 1 loads a set with a
-  condition and leaves its slots empty (D16). So only the history policies fail closed, and the
-  other policies of the set work. A history policy over `InvokeTool` or with no action constraint
-  fails closed for every call of its tenant (a floor one: of every tenant). Before such a rollback,
-  the operator runs the procedure below. After PR 2, the removal of `[tool_history]` also only makes the
-  history slots missing (D10).
+- **Gateway rollback from PR 2 to PR 1.** PR 1 loads a set with a condition and leaves its slots
+  empty (D16). So only the history policies fail closed, and the other policies of the set work. A
+  history policy fails closed for every call in its action scope. The worst case is a policy over
+  `InvokeTool` or with no action constraint: it fails closed for every call of its tenant (a floor
+  one: of every tenant). Before such a rollback, the operator runs the procedure below.
+- **Removal of `[tool_history]` with a PR 1 or later build, and no rollback.** With no table, every
+  history slot is missing (D10, D12). This case has the same effect as a rollback to PR 1: each
+  history policy fails closed in its action scope, and the worst case is as above. Before the
+  removal, the operator runs the procedure below.
 - **Gateway rollback to a build before PR 1.** Such a build refuses a set with a condition. A
   `closed` tenant then loses its tool calls, and a floor with a condition fails for every tenant.
   Before such a rollback, the operator runs the procedure below and tells the tenants that have
   conditions.
-- **Procedure for either rollback.** A condition-free set is a new published version whose source has
-  no temporal block. Its compiled Cedar has no condition, and no policy reads a `context.<slot>`
-  attribute. Removing only the condition definitions is not enough: a policy that still reads a slot
-  errors, and an errored forbid denies every call in its scope.
+- **Procedure for each of the three cases.** A condition-free set is a new published version whose
+  source has no temporal block. Its compiled Cedar has no condition, and no policy reads a
+  `context.<slot>` attribute. Removing only the condition definitions is not enough: a policy that
+  still reads a slot errors, and an errored forbid denies every call in its scope.
 
   1. Set `tool_policies.history_conditions = false` in IAM. IAM then refuses each save with a
      condition. Wait until every in-flight save has finished. For a rollback to PR 1, this step is
      already true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1.
      Confirm the setting value anyway.
   2. Prepare the floor and the tenant sets.
-     - For a rollback from PR 2 to PR 1, replace each history policy whose scope is `InvokeTool` or
-       has no action constraint with a reviewed replacement that has no temporal block. A tenant set
-       may move to mode `log_only` instead. In PR 1, `log_only` only observes the slot policies.
+     - For a rollback from PR 2 to PR 1, and for the removal of `[tool_history]` with a PR 1 or later
+       build, replace every history policy, whatever its action scope, with a reviewed replacement
+       that has no temporal block. A policy scoped to one tool, for example
+       `action == Pgs::Gateway::Action::"send"`, also errors when it reads a slot. A tenant set may
+       move to mode `log_only` instead. In PR 1, `log_only` only observes the slot policies.
      - For a rollback to a build before PR 1, publish a condition-free version of each set with a
        condition. A tenant set may move to mode `off` instead. Mode `off` stops all tool-policy checks
        for that tenant during the rollback, not only the history rules.
@@ -595,7 +600,8 @@ does not fail. A builder target: about 60 bytes for an event with one stored fie
   3. Read the floor and each tenant set again. Verify that no compiled set has a condition, and that
      no policy reads a `context.<slot>` attribute. Exempt, by name, each tenant that step 2 moved to
      its alternative mode. For every other set and for the floor, the check applies.
-  4. Only then roll back the gateway.
+  4. Only then roll back the gateway. For the removal case, remove the `[tool_history]` table and
+     restart the gateway.
 
   Step 1 comes first. While saves are enabled, another writer can save a new condition after the
   operator prepared a set.
