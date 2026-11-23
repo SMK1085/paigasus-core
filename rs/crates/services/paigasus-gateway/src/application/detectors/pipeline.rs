@@ -32,7 +32,7 @@ const MAX_KIND: usize = 64;
 fn side_label(side: Side) -> &'static str {
     match side {
         Side::Request => "request",
-        _ => "response",
+        Side::Response => "response",
     }
 }
 

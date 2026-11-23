@@ -185,7 +185,7 @@ pub fn finding_labels(f: &FindingRecord, stage: Option<Stage>) -> (&'static str,
     let detector = match stage {
         Some(Stage::Webhook) => "webhook",
         Some(Stage::Judge) => "judge",
-        _ => DETECTOR_LABELS.iter().find(|d| **d == f.detector).copied().unwrap_or("other"),
+        None | Some(Stage::BuiltIn) => DETECTOR_LABELS.iter().find(|d| **d == f.detector).copied().unwrap_or("other"),
     };
     FINDING_TRIPLES
         .iter()
