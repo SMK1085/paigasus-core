@@ -64,6 +64,8 @@ tasks:
       - 'tool-policies/**/*'
       # SMA-755 Task 11: a unit test pins the decision stream constants to this file.
       - '/ops/nats/subjects.env'
+      # SMA-855: the e2e tests read the detector policies of the tenant guide from this file.
+      - '/docs/tool-policies/detector-policies.cedar'
     # SMA-677 D22. This task now starts Redis containers. It shares one CI runner with the two
     # console e2e tasks, and SMA-718 showed that such overlap starves the browser, so it takes the
     # same mutex as paigasus-iam-rs:test.

@@ -408,7 +408,7 @@ async fn the_canary_never_leaves_the_gateway() {
 /// The shipped floor (D15).
 const SHIPPED_FLOOR: &str = include_str!("../tool-policies/floor.cedar");
 /// The tenant guide policies (Task 17).
-const DETECTOR_POLICIES: &str = include_str!("fixtures/detector-policies.cedar");
+const DETECTOR_POLICIES: &str = include_str!("../../../../../docs/tool-policies/detector-policies.cedar");
 const PERMIT_ALL: &str = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource);"#;
 const DET_CANARY_HOST: &str = "canary-host-77e3.example";
 const DET_CANARY_PHRASE: &str = "visible-canary-phrase-5b91";

@@ -10,7 +10,7 @@ use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
 use paigasus_iam_core::tool_policy::{CatalogLimits, TOOL_SCHEMA_REVISION, ToolEntry, ToolKind, build_manual, tenant_schema_json};
 use serde_json::json;
 
-const POLICIES: &str = include_str!("../../../services/paigasus-gateway/tests/fixtures/detector-policies.cedar");
+const POLICIES: &str = include_str!("../../../../../docs/tool-policies/detector-policies.cedar");
 const GUIDE: &str = include_str!("../../../../../docs/tool-policies/tenant-guide.md");
 
 /// The `@id` values of the fixture, in file order.

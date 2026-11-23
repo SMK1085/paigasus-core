@@ -1367,7 +1367,7 @@ mod detectors {
     use super::*;
 
     /// The tenant guide policies (Task 17): one shared fixture, one policy per paragraph.
-    const DETECTOR_POLICIES: &str = include_str!("fixtures/detector-policies.cedar");
+    const DETECTOR_POLICIES: &str = include_str!("../../../../../docs/tool-policies/detector-policies.cedar");
     /// A tenant set that permits every IAM principal and forbids nothing.
     const PERMIT_ALL: &str = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource);"#;
     /// The canary host of the call arguments (one per test, A2).
