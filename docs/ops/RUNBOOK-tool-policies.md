@@ -394,10 +394,12 @@ in one release. The new schema adds two attributes: `context.max_severity` and
   conditions must be the same, and the new schema may only add attributes to Record types. So one
   boot run re-compiles every live set that still compiles to an identical live version at
   generation 3 and revision 2, when the write of that version succeeds. For these sets it writes
-  no held row, and no admin action is necessary. An `error` or `conflict` result writes nothing
-  for its set, so the set stays stale. If `iam_tool_policy_recompile_results_total` shows an
-  `error` or a `conflict`, start the job again with `POST /v1/tool-policy-recompile` (after the
-  compiler is healthy, see "The results"). A set that holds a history rule does not compile (section 5): the job holds it as
+  no held row, and no admin action is necessary. An `error` result writes nothing, so its set
+  stays stale. A `conflict` result also writes nothing: the set changed after the job read it, or
+  the organization is gone. If `iam_tool_policy_recompile_results_total` shows an `error` or a
+  `conflict`, start the job again with `POST /v1/tool-policy-recompile` (after the compiler is
+  healthy, see "The results"). The new run compiles each set that is still stale. A set that
+  holds a history rule does not compile (section 5): the job holds it as
   `held_failed`, and its catalog writes stay refused with `tool-policy-recompile-pending`. A
   non-zero `held_failed` in the metric `iam_tool_policy_recompile_results_total` shows that this
   occurred, but the metric does not name the set. A later run returns `ALREADY_PROPOSED` for a set
