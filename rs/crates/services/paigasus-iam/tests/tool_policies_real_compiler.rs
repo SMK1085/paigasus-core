@@ -227,5 +227,5 @@ async fn the_job_applies_an_identical_result_with_the_real_compiler() {
     assert_eq!(results[0].outcome, RecompileOutcome::Identical { version: 2 });
     let repo = PgToolPolicies::new(env.state.db.clone());
     let live = repo.live(&ToolPolicySetKey::Floor).await.unwrap().expect("a live floor");
-    assert_eq!((live.version, live.origin, live.compiler_generation), (2, VersionOrigin::Recompile, 2));
+    assert_eq!((live.version, live.origin, live.compiler_generation), (2, VersionOrigin::Recompile, 3));
 }
