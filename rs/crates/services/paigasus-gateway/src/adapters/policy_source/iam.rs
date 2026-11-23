@@ -115,23 +115,25 @@ fn check_kind(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<()
     Ok(())
 }
 
-/// The checks of a set with no settings (the floor). R5: a set with a history condition is
-/// refused until SMA-753 (IAM refuses to save such a set; this is defence in depth). For the
-/// floor, the global fail mode then decides.
+// SMA-753 D16, the rollback target (Sven, 2026-11-22). A set with history conditions loads as a
+// set with no conditions: the text and the catalog are used, and the conditions are ignored. This
+// build fills no history slot. The kernel builds each Cedar request with no schema, so a policy
+// that reads `context.<slot>` errors. An errored forbid denies and an errored permit does not
+// allow (SMA-752 D26). So only the history policies fail closed, and the other policies of the
+// set still decide. A floor forbid that reads a slot denies in every mode (D33). This makes this
+// build a safe rollback target for PR 2, after tenants save conditions. The kind check and the
+// org check still apply to a set with conditions. Before D16, rule R5 refused such a set.
+
+/// The checks of a set with no settings (the floor). A floor with history conditions loads, and
+/// its slots stay empty (D16, see above).
 fn check_set(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<(), SourceError> {
-    check_kind(set, kind)?;
-    if !set.conditions.is_empty() {
-        return Err(malformed("history conditions need SMA-753"));
-    }
-    Ok(())
+    check_kind(set, kind)
 }
 
 /// The tenant part of a `GetCompiledToolPolicies` answer. Version 0 is a valid empty set.
 ///
-/// The settings are read before the history check (final review I-1). R5 refuses a tenant set
-/// with a history condition, but the settings in the same answer still decide. In mode `off` the
-/// set is not used, so the answer is an empty set. In `log_only` and `enforce` the answer is
-/// `refused`: the tenant set is unavailable and the tenant's own fail mode decides.
+/// A tenant set with history conditions loads, and its slots stay empty (D16, see above). This
+/// source never sets `refused`.
 pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse) -> Result<TenantPolicies, SourceError> {
     let set = r.set.ok_or_else(|| malformed("the answer has no set"))?;
     let settings = r.settings.ok_or_else(|| malformed("the answer has no settings"))?;
@@ -154,17 +156,6 @@ pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse
     // and the text change only with the set version.
     let version = format!("t{}:{}:{}", set.version, mode.as_str(), fail);
     let settings = Some(TenantSettings { mode, on_unavailable });
-    if !set.conditions.is_empty() {
-        // R5: the gateway never uses a set with a history condition, so the text and the catalog
-        // are dropped. Mode `off` does not use the set: an empty set, not a refusal.
-        return Ok(TenantPolicies {
-            text: String::new(),
-            catalog: Vec::new(),
-            version,
-            settings,
-            refused: mode != TenantMode::Off,
-        });
-    }
     Ok(TenantPolicies {
         text: set.cedar_policies,
         catalog: set.catalog_names,
@@ -272,32 +263,23 @@ mod tests {
     }
 
     #[test]
-    fn a_set_with_a_history_condition_is_refused_but_keeps_its_settings() {
-        // R5 and final review I-1: the set is never used, and the settings of the answer stay.
+    fn a_set_with_a_history_condition_loads_with_its_text_catalog_and_settings() {
+        // D16: the set loads as a set with no conditions, in every mode. It is never refused.
         for (mode, fail, token) in [
             (ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, "t2:log_only:closed"),
             (ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, "t2:enforce:open"),
+            (ToolPolicyMode::Off, ToolPolicyFailMode::Closed, "t2:off:closed"),
         ] {
             let mut s = set(2);
             s.conditions.push(condition());
-            let t = tenant_from_response(org(), response(s, settings(mode, fail))).expect("the settings are known");
-            assert!(t.refused, "{token}");
-            assert_eq!((t.text.as_str(), t.catalog.len(), t.version.as_str()), ("", 0, token));
+            let t = tenant_from_response(org(), response(s, settings(mode, fail))).expect("loads");
+            assert!(!t.refused, "{token}");
+            assert_eq!(
+                (t.text.as_str(), t.catalog.as_slice(), t.version.as_str()),
+                ("permit(principal, action, resource);", ["read_file".to_owned()].as_slice(), token)
+            );
             assert!(t.settings.is_some());
         }
-        // Mode off does not use the set: an empty set, not a refusal.
-        let mut s = set(2);
-        s.conditions.push(condition());
-        let t = tenant_from_response(org(), response(s, settings(ToolPolicyMode::Off, ToolPolicyFailMode::Closed))).expect("off");
-        assert!(!t.refused);
-        assert_eq!((t.text.as_str(), t.catalog.len(), t.version.as_str()), ("", 0, "t2:off:closed"));
-        assert_eq!(
-            t.settings,
-            Some(TenantSettings {
-                mode: TenantMode::Off,
-                on_unavailable: OnUnavailable::Closed
-            })
-        );
         // The org check and the kind check still refuse a set with a condition.
         let mut other = set(2);
         other.conditions.push(condition());
@@ -349,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_floor_is_valid_and_a_floor_with_a_condition_is_malformed() {
+    fn an_empty_floor_is_valid_and_a_floor_with_a_condition_loads() {
         let floor = |version, conditions: Vec<HistoryCondition>| GetCompiledFloorPoliciesResponse {
             set: Some(CompiledToolPolicySet {
                 kind: ToolPolicySetKind::Floor as i32,
@@ -362,7 +344,9 @@ mod tests {
         let ok = floor_from_response(floor(4, vec![])).expect("valid");
         assert_eq!((ok.text.as_str(), ok.version.as_str()), ("forbid(principal, action, resource);", "f4"));
         assert_eq!(floor_from_response(floor(0, vec![])).expect("empty floor").version, "f0");
-        assert!(is_malformed(floor_from_response(floor(4, vec![condition()]))));
+        // D16: a floor with a condition loads with its text. Its slots stay empty.
+        let with = floor_from_response(floor(4, vec![condition()])).expect("loads");
+        assert_eq!((with.text.as_str(), with.version.as_str()), ("forbid(principal, action, resource);", "f4"));
         assert!(is_malformed(floor_from_response(GetCompiledFloorPoliciesResponse::default())));
         let tenant_kind = GetCompiledFloorPoliciesResponse { set: Some(set(1)) };
         assert!(is_malformed(floor_from_response(tenant_kind)));

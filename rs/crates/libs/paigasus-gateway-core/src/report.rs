@@ -8,6 +8,7 @@
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::sse;
 use crate::types::{Basis, BlockCode, ToolCall};
@@ -31,10 +32,43 @@ pub(crate) fn name_sha256_8(name: &str) -> String {
     Sha256::digest(name.as_bytes())[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The fixed-shape notice for a blocked call.
+/// The fixed-shape notice for a blocked call. A block that the decider made has a decision id.
+/// The notice then ends with ` ref=<uuid>`, so a later request can link the call to the decision.
 #[must_use]
-pub fn notice_line(name: &str, code: BlockCode) -> String {
-    format!("[paigasus] tool call \"{}\" was blocked ({}).", sanitize_name(name), code.as_kebab())
+pub fn notice_line(name: &str, code: BlockCode, reference: Option<Uuid>) -> String {
+    let line = format!("[paigasus] tool call \"{}\" was blocked ({}).", sanitize_name(name), code.as_kebab());
+    match reference {
+        Some(id) => format!("{line} ref={}", id.hyphenated()),
+        None => line,
+    }
+}
+
+/// The decision id in a notice, only for one whole line in the exact form of [`notice_line`] with
+/// a reference. Any other text gives `None`: a model can write text that looks like a notice.
+#[must_use]
+pub fn notice_ref(line: &str) -> Option<Uuid> {
+    let rest = line.strip_prefix("[paigasus] tool call \"")?;
+    let (name, rest) = rest.split_once('"')?;
+    if name.len() > MAX_NAME_BYTES || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b)) {
+        return None;
+    }
+    let rest = rest.strip_prefix(" was blocked (")?;
+    let (code, rest) = rest.split_once(')')?;
+    if !BlockCode::ALL.iter().any(|c| c.as_kebab() == code) {
+        return None;
+    }
+    let id = rest.strip_prefix(". ref=")?;
+    if id.len() != 36 {
+        return None;
+    }
+    Uuid::try_parse(id).ok()
+}
+
+/// A block of one call: its code, and the decision id that the notice carries (spec D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Blocked {
+    pub code: BlockCode,
+    pub reference: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,6 +305,8 @@ pub(crate) fn report_comment(entry: &ReportEntry) -> Bytes {
 mod tests {
     use super::*;
 
+    const ID: &str = "0193f6c2-8a4e-7b10-9c2d-5e8f1a2b3c4d";
+
     fn entry(name: &str) -> ReportEntry {
         ReportEntry {
             choice: 0,
@@ -323,8 +359,33 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_has_the_fixed_shape() {
-        assert_eq!(notice_line("send mail", BlockCode::HoldLimit), "[paigasus] tool call \"send_mail\" was blocked (hold-limit).");
+    fn the_notice_carries_the_reference() {
+        let id = Uuid::try_parse(ID).unwrap();
+        assert_eq!(
+            notice_line("send", BlockCode::Policy, Some(id)),
+            format!("[paigasus] tool call \"send\" was blocked (policy). ref={ID}")
+        );
+        assert_eq!(notice_line("send mail", BlockCode::HoldLimit, None), "[paigasus] tool call \"send_mail\" was blocked (hold-limit).");
+    }
+
+    #[test]
+    fn notice_ref_reads_only_the_exact_form() {
+        let id = Uuid::try_parse(ID).unwrap();
+        for code in BlockCode::ALL {
+            assert_eq!(notice_ref(&notice_line("ns.tool", code, Some(id))), Some(id));
+        }
+        // A provider can send a tool call with an empty name. The producer renders it, so the parser reads it.
+        assert_eq!(notice_ref(&notice_line("", BlockCode::ALL[0], Some(id))), Some(id));
+        for bad in [
+            format!("x [paigasus] tool call \"send\" was blocked (policy). ref={ID}"),
+            format!("[paigasus] tool call \"send\" was blocked (policy). ref={ID} "),
+            format!("[paigasus] tool call \"se nd\" was blocked (policy). ref={ID}"),
+            format!("[paigasus] tool call \"send\" was blocked (nope). ref={ID}"),
+            "[paigasus] tool call \"send\" was blocked (policy). ref=not-a-uuid".to_owned(),
+            "[paigasus] tool call \"send\" was blocked (policy).".to_owned(),
+        ] {
+            assert_eq!(notice_ref(&bad), None, "{bad}");
+        }
     }
 
     #[test]

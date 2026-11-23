@@ -179,6 +179,8 @@ pub struct CallFacts {
     pub id: Option<String>,
     pub namespace: Option<String>,
     pub name: String,
+    /// The item `id` of a Responses `local_shell_call`. `None` for every other call.
+    pub item_id: Option<String>,
 }
 
 impl CallFacts {
@@ -189,6 +191,7 @@ impl CallFacts {
             id: call.id.clone(),
             namespace: call.namespace.clone(),
             name: call.name.clone(),
+            item_id: call.item_id(),
         }
     }
 }
@@ -201,12 +204,27 @@ pub struct ReportedCall {
     pub entry: ReportEntry,
     pub call: Option<CallFacts>,
     pub detail: Option<Arc<DecisionDetail>>,
+    /// The id that the decider gave the decision of this call. `None` when the decision vector
+    /// is not aligned with the calls, or when the decider gave no id.
+    pub decision_id: Option<Uuid>,
 }
 
 impl ReportedCall {
     #[must_use]
     pub fn new(entry: ReportEntry, call: Option<CallFacts>, detail: Option<Arc<DecisionDetail>>) -> Self {
-        Self { entry, call, detail }
+        Self {
+            entry,
+            call,
+            detail,
+            decision_id: None,
+        }
+    }
+
+    /// Set the decision id of the call.
+    #[must_use]
+    pub fn with_decision_id(mut self, id: Option<Uuid>) -> Self {
+        self.decision_id = id;
+        self
     }
 }
 

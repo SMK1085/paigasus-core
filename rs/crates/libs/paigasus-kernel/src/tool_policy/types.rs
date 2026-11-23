@@ -12,6 +12,12 @@ use crate::CedarUid;
 pub const NAME_COLLISION: &str = "name_collision";
 /// The finding that the arguments of a call are not one strict JSON object.
 pub const UNPARSED_ARGUMENTS: &str = "unparsed_arguments";
+/// The finding that the calls of one history belong to more than one session.
+pub const MIXED_SESSIONS: &str = "mixed_sessions";
+/// The finding that the history of a request contains a call that the gateway did not see.
+pub const FORGED_HISTORY: &str = "forged_history";
+/// The finding that the history store cut the events of a history at a cap or at the retention limit.
+pub const HISTORY_TRUNCATED: &str = "history_truncated";
 
 /// The arguments of a tool call, as the model sent them.
 #[derive(Debug, Clone, PartialEq, Eq)]

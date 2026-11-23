@@ -10,7 +10,7 @@ mod raw;
 mod rewrite;
 mod snapshot;
 
-pub use calls::{CallOutcome, PolicyBasis, decide_calls};
+pub use calls::{CallOutcome, PolicyBasis, decide_calls, decide_calls_with};
 pub use mapping::{call_findings, ingress, invocation, name_collisions};
 pub use plan::{ChoiceRewrite, PlanItem, RefusalCause, RequestPlan, ResultTarget, plan_request};
 pub use rewrite::{result_notice, rewrite_request};

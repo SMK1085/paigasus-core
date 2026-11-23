@@ -15,7 +15,7 @@ use paigasus_gateway::application::tool_policy::{CacheSettings, Lookup, PolicyCa
 use paigasus_gateway::config::{GatewayConfig, IamClientConfig, IamTlsConfig, ToolPolicySettings};
 use paigasus_gateway::domain::tool_policy::{PolicySource, SourceError};
 use paigasus_gateway::runtime::build_tool_policy;
-use paigasus_gateway_core::{DecisionContext, Format, OnUnavailable, TenantMode, parse_request};
+use paigasus_gateway_core::{BlockCode, Decision, DecisionContext, Format, OnUnavailable, PolicyBasis, TenantMode, decide_calls, parse_body, parse_request};
 use paigasus_proto::paigasus::iam::v1 as pb;
 use paigasus_proto::paigasus::iam::v1::tool_policy_service_server::{ToolPolicyService, ToolPolicyServiceServer};
 use tonic::codegen::http;
@@ -456,7 +456,150 @@ async fn an_iam_that_is_down_at_boot_does_not_stop_the_gateway() {
         config = Some(cfg);
         Ok(())
     });
-    let runtime = build_tool_policy(&config.expect("config"), Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing())).expect("the gateway builds with IAM down");
+    let runtime = build_tool_policy(&config.expect("config"), Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()), None).expect("the gateway builds with IAM down");
     let (cache, _) = runtime.policy.expect("the tool policy is on");
     assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Unavailable));
+}
+
+// --- SMA-753 D16: a set with history conditions loads with empty slots ---------------------------
+//
+// This build fills no history slot. The kernel builds each Cedar request with no schema
+// (`decide.rs`), so a policy that reads `context.<slot>` errors. An errored forbid denies and an
+// errored permit does not allow (SMA-752 D26). So only the history policies fail closed, and the
+// other policies of the set still decide. A rollback from PR 2 to this build is then safe.
+
+fn slot_condition(policy_id: &str) -> pb::HistoryCondition {
+    pb::HistoryCondition {
+        slot: "h0".to_owned(),
+        policy_id: policy_id.to_owned(),
+        ..Default::default()
+    }
+}
+
+/// A tenant answer of IAM with one history condition on the slot `h0`.
+fn tenant_with_slot(mode: pb::ToolPolicyMode, text: &str) -> pb::GetCompiledToolPoliciesResponse {
+    let mut r = tenant_response(5, mode, text);
+    r.set.as_mut().expect("set").conditions.push(slot_condition("t"));
+    r
+}
+
+/// A floor answer of IAM with one history condition on the slot `h0`.
+fn floor_with_slot(text: &str) -> pb::GetCompiledFloorPoliciesResponse {
+    let mut r = floor_response(2, text);
+    r.set.as_mut().expect("set").conditions.push(slot_condition("floor-h"));
+    r
+}
+
+/// The outcome of [`decide_through_iam`].
+struct Decided {
+    /// The function tool names that go upstream.
+    upstream: Vec<String>,
+    mode: TenantMode,
+    /// The decision on each call, in order.
+    decisions: Vec<Decision>,
+    /// The basis on each call, in order.
+    bases: Vec<PolicyBasis>,
+    /// The `(determining, errored)` policy ids on each call, in order.
+    refs: Vec<(Vec<String>, Vec<String>)>,
+}
+
+/// One request with the function tools `tools` through the real IAM source and the policy cache,
+/// then the kernel decision on one call to each of `calls`.
+async fn decide_through_iam(s: &Server_, tools: &[&str], calls: &[&str]) -> Decided {
+    let (_dir, path) = credential("K");
+    let cfg = settings();
+    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg));
+    let policy = RequestToolPolicy::new(cache, cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()));
+
+    let defs: Vec<serde_json::Value> = tools.iter().map(|n| serde_json::json!({"type":"function","function":{"name":n,"parameters":{}}})).collect();
+    let body = Bytes::from(serde_json::json!({"model":"m","messages":[{"role":"user","content":"hi"}],"tools":defs}).to_string());
+    let turn = parse_request(Format::OpenAiChat, &body);
+    let ctx = DecisionContext::new(PRINCIPAL, ORG_PRN, Some("req-1".into()));
+    let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+    let v: serde_json::Value = serde_json::from_slice(&out.body).expect("json");
+    let upstream = v["tools"].as_array().expect("tools").iter().map(|t| t["function"]["name"].as_str().expect("name").to_owned()).collect();
+
+    let tool_calls: Vec<serde_json::Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, n)| serde_json::json!({"id":format!("c{i}"),"type":"function","function":{"name":n,"arguments":"{}"}}))
+        .collect();
+    let answer = serde_json::json!({"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":tool_calls},"finish_reason":"tool_calls"}]}).to_string();
+    let parsed = parse_body(Format::OpenAiChat, answer.as_bytes(), 1 << 20).expect("answer").calls;
+    let outcomes = decide_calls(&out.snapshot, &turn, &parsed, &std::time::Instant::now);
+    let ids = |r: &[paigasus_kernel::tool_policy::PolicyRef]| r.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+    Decided {
+        upstream,
+        mode: out.snapshot.mode,
+        decisions: outcomes.iter().map(|o| o.decision).collect(),
+        bases: outcomes.iter().map(|o| o.basis).collect(),
+        refs: outcomes
+            .iter()
+            .map(|o| o.cedar.as_ref().map_or_else(Default::default, |c| (ids(&c.determining), ids(&c.errored))))
+            .collect(),
+    }
+}
+
+const BLOCK: Decision = Decision::Block { code: BlockCode::Policy };
+const OBSERVE: Decision = Decision::Observe { would: BlockCode::Policy };
+
+#[tokio::test]
+async fn a_tenant_set_with_a_history_condition_loads_and_only_its_slot_policies_fail_closed() {
+    // `ls` has its own permit. `y` is allowed only by a permit that reads the slot. `rm` has a
+    // permit, and a forbid that reads the slot.
+    const TENANT_SLOTS: &str = r#"@id("ls") permit(principal, action == Pgs::Gateway::Action::"ls", resource);
+        @id("y") permit(principal, action == Pgs::Gateway::Action::"y", resource) when { context.h0 };
+        @id("rm-ok") permit(principal, action == Pgs::Gateway::Action::"rm", resource);
+        @id("t") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when { context.h0 };"#;
+    for (mode, want_mode, slot_effect) in [(pb::ToolPolicyMode::Enforce, TenantMode::Enforce, BLOCK), (pb::ToolPolicyMode::LogOnly, TenantMode::LogOnly, OBSERVE)] {
+        let s = start().await;
+        s.script_floor(Ok(floor_response(1, "")));
+        s.script_tenant(Ok(tenant_with_slot(mode, TENANT_SLOTS)));
+        let d = decide_through_iam(&s, &["ls", "y", "rm"], &["ls", "y", "rm"]).await;
+        assert_eq!(d.mode, want_mode);
+        // The set loads: its own permit allows `ls`, not a fail mode.
+        assert_eq!(d.decisions[0], Decision::Allow, "{want_mode:?}: an unrelated policy still allows its call");
+        assert_eq!(d.decisions[1], slot_effect, "{want_mode:?}: a permit that reads a slot does not allow");
+        assert_eq!(d.decisions[2], slot_effect, "{want_mode:?}: a forbid that reads a slot denies");
+        // How an operator sees these decisions (runbook section 10): the slot forbid has the basis
+        // `errored_forbid` and is named in `errored`; a call that only a slot permit could allow
+        // has the basis `policy` and no determining policy.
+        assert_eq!(d.bases, [PolicyBasis::Policy, PolicyBasis::Policy, PolicyBasis::ErroredForbid], "{want_mode:?}");
+        assert!(d.refs[1].0.is_empty(), "{want_mode:?}: {:?}", d.refs[1]);
+        assert!(d.refs[2].1.contains(&"t".to_owned()), "{want_mode:?}: {:?}", d.refs[2]);
+        // D6: a forbid that reads a slot is never in the optimistic set, so the request side keeps `rm`.
+        assert!(d.upstream.iter().any(|n| n == "rm"), "{want_mode:?}: {:?}", d.upstream);
+    }
+}
+
+#[tokio::test]
+async fn a_floor_with_a_history_condition_loads_and_its_slot_forbid_denies_in_every_mode() {
+    const FLOOR_SLOTS: &str = r#"@id("floor-h") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when { context.h0 };
+        @id("floor-del") forbid(principal, action == Pgs::Gateway::Action::"del", resource);"#;
+    const PERMIT: &str = r#"@id("p") permit(principal, action, resource);"#;
+    for mode in [pb::ToolPolicyMode::Enforce, pb::ToolPolicyMode::LogOnly, pb::ToolPolicyMode::Off] {
+        let s = start().await;
+        s.script_floor(Ok(floor_with_slot(FLOOR_SLOTS)));
+        s.script_tenant(Ok(tenant_response(1, mode, PERMIT)));
+        let d = decide_through_iam(&s, &["ls", "rm", "del"], &["ls", "rm", "del"]).await;
+        assert_eq!(d.decisions, [Decision::Allow, BLOCK, BLOCK], "{mode:?}: D33, the floor denies in every mode");
+        // The floor forbid with no slot still removes `del` on the request side. The slot forbid is
+        // not in the optimistic set, so `rm` stays.
+        assert_eq!(d.upstream, ["ls", "rm"], "{mode:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_negated_slot_forbid_also_denies() {
+    // `unless` on a temporal block compiles to `when { !context.<slot> }`. The negation of an
+    // empty slot errors too, so the forbid denies. It must never allow.
+    const TENANT_NOT: &str = r#"@id("p") permit(principal, action, resource);
+        @id("t") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when { !context.h0 };"#;
+    const FLOOR_NOT: &str = r#"@id("floor-h") forbid(principal, action == Pgs::Gateway::Action::"del", resource) when { !context.h0 };"#;
+    let s = start().await;
+    s.script_floor(Ok(floor_with_slot(FLOOR_NOT)));
+    s.script_tenant(Ok(tenant_with_slot(pb::ToolPolicyMode::Enforce, TENANT_NOT)));
+    let d = decide_through_iam(&s, &["ls", "rm", "del"], &["ls", "rm", "del"]).await;
+    assert_eq!(d.decisions, [Decision::Allow, BLOCK, BLOCK]);
+    assert_eq!(d.bases, [PolicyBasis::Policy, PolicyBasis::ErroredForbid, PolicyBasis::ErroredForbid]);
 }

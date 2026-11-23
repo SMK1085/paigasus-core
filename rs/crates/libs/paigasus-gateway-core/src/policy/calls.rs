@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use paigasus_kernel::tool_policy::{Effect, Verdict, decide};
+use paigasus_kernel::tool_policy::{Effect, Findings, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
 use super::snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
@@ -96,6 +96,13 @@ fn outcome(v: Verdict, cedar: CedarDetail, tenant: TenantPart, mode: TenantMode,
 /// difference is the `decide_duration` of the call. The core reads no clock of its own.
 #[must_use]
 pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+    decide_calls_with(snapshot, turn, calls, &Findings::new(), now)
+}
+
+/// `decide_calls` with request-level findings (`extra`) that every call of the hold carries, in
+/// addition to its own findings (SMA-753).
+#[must_use]
+pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
     let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
         // P-6: `closed` blocks in every tenant mode, `off` included.
         return calls
@@ -117,7 +124,11 @@ pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCal
         .map(|c| {
             let inv = invocation(c, turn);
             let started = now();
-            let v = decide(&inv, facts, &call_findings(c, &collisions), policies);
+            let mut findings = call_findings(c, &collisions);
+            for kind in extra.iter() {
+                findings.insert(kind);
+            }
+            let v = decide(&inv, facts, &findings, policies);
             let duration = now().saturating_duration_since(started);
             let cedar = CedarDetail::new(
                 v.decision,
@@ -303,6 +314,29 @@ mod tests {
         assert_eq!(floor_hit, [false, true, false]);
         let unavailable = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed);
         assert_eq!(decide_calls(&unavailable, &ToolTurn::Unavailable("test"), &[call("a"), call("b"), call("c")], &Instant::now).len(), 3);
+    }
+
+    #[test]
+    fn extra_findings_reach_every_call_of_the_hold() {
+        const TENANT_FORGED: &str = r#"
+            @id("all") permit(principal, action, resource);
+            @id("forged") forbid(principal, action, resource) when { context.findings.contains("forged_history") };
+        "#;
+        let floor = Arc::new(ToolPolicies::compile_floor(FLOOR).expect("floor"));
+        let set = PolicySet::Available {
+            policies: Arc::new(ToolPolicies::compile(floor, TENANT_FORGED, &[]).expect("compile")),
+            tenant: TenantPart::Evaluated,
+            facts: facts(),
+        };
+        let snap = PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed);
+        let turn = ToolTurn::Unavailable("test");
+        let calls = [call("a"), call("b")];
+        let mut extra = Findings::new();
+        extra.insert("forged_history");
+        let blocked = decide_calls_with(&snap, &turn, &calls, &extra, &Instant::now);
+        assert_eq!(blocked.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY]);
+        let allowed = decide_calls(&snap, &turn, &calls, &Instant::now);
+        assert_eq!(allowed.iter().map(|o| o.decision).collect::<Vec<_>>(), [Decision::Allow, Decision::Allow]);
     }
 
     #[test]

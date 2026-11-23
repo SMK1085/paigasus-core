@@ -3,8 +3,10 @@
 //! and which results it sent back. Never the content of a tool result. No request rewrite.
 
 use serde_json::{Map, Value};
+use uuid::Uuid;
 
 use crate::json::{Malformed, ResponsesDoc, opt_obj, opt_str, parse_strict, parse_strict_responses};
+use crate::report::notice_ref;
 use crate::responses::assembly::tool_call;
 use crate::responses::classify::{ItemClass, item_class};
 use crate::types::{Format, ToolCallKind};
@@ -32,6 +34,73 @@ pub struct TurnFacts {
     /// Whether an Anthropic `tools[]` entry is a server tool, which `definitions` does not list. The
     /// request plan needs it for § 6.5.1 step 5. `false` for the other formats.
     pub server_tools: bool,
+    /// The newest model turn and the results after it. Session linking reads it (SMA-753).
+    pub latest: LatestTurn,
+}
+
+/// The most ids that `LatestTurn` keeps in one list.
+pub const MAX_LINK_IDS: usize = 128;
+
+/// The newest part of the conversation: the last assistant turn and the tool results after it.
+/// It holds ids and notice references only, never the text or a result content.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LatestTurn {
+    /// The ids of the tool calls in the last assistant message, at most `MAX_LINK_IDS`.
+    pub call_ids: Vec<String>,
+    /// The call ids of the tool results after that message, at most `MAX_LINK_IDS`.
+    pub result_call_ids: Vec<String>,
+    /// The `ref=` ids in the text of that message, at most `MAX_LINK_IDS`.
+    pub refs: Vec<Uuid>,
+    pub dropped_calls: usize,
+    pub dropped_results: usize,
+    pub dropped_refs: usize,
+}
+
+fn push_capped<T>(list: &mut Vec<T>, dropped: &mut usize, v: T) {
+    if list.len() < MAX_LINK_IDS {
+        list.push(v);
+    } else {
+        *dropped += 1;
+    }
+}
+
+impl LatestTurn {
+    fn call(&mut self, id: &str) {
+        push_capped(&mut self.call_ids, &mut self.dropped_calls, id.to_owned());
+    }
+
+    fn result(&mut self, id: &str) {
+        push_capped(&mut self.result_call_ids, &mut self.dropped_results, id.to_owned());
+    }
+
+    /// Keep the `ref=` of every line of `text` that is an exact notice line.
+    fn refs_in(&mut self, text: &str) {
+        for r in text.split('\n').filter_map(notice_ref) {
+            push_capped(&mut self.refs, &mut self.dropped_refs, r);
+        }
+    }
+
+    /// Read the text of a message `content`: a string, or the parts of the given `kind`.
+    fn content(&mut self, content: Option<&Value>, kind: &str) {
+        match content {
+            Some(Value::String(t)) => self.refs_in(t),
+            Some(Value::Array(parts)) => {
+                for p in parts {
+                    if p.get("type").and_then(Value::as_str) == Some(kind)
+                        && let Some(t) = p.get("text").and_then(Value::as_str)
+                    {
+                        self.refs_in(t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn role(m: &Value) -> Option<&str> {
+    m.get("role").and_then(Value::as_str)
 }
 
 /// The caller's `tool_choice`. Names are display names (`ns.name` for a Responses namespace tool).
@@ -57,6 +126,7 @@ impl Default for TurnFacts {
             definitions_complete: true,
             tool_choice: ToolChoice::Auto,
             server_tools: false,
+            latest: LatestTurn::default(),
         }
     }
 }
@@ -243,7 +313,30 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
             _ => {}
         }
     }
+    f.latest = chat_latest(arr(top, "messages")?);
     Ok(f)
+}
+
+/// The last assistant message of a chat request and the `tool` messages after it. A legacy
+/// `function_call` has no id, and a `function` result has no call id, so both are ignored.
+fn chat_latest(messages: &[Value]) -> LatestTurn {
+    let mut l = LatestTurn::default();
+    let Some(last) = messages.iter().rposition(|m| role(m) == Some("assistant")) else { return l };
+    let m = &messages[last];
+    for c in m.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(id) = c.get("id").and_then(Value::as_str) {
+            l.call(id);
+        }
+    }
+    l.content(m.get("content"), "text");
+    for m in &messages[last + 1..] {
+        if role(m) == Some("tool")
+            && let Some(id) = m.get("tool_call_id").and_then(Value::as_str)
+        {
+            l.result(id);
+        }
+    }
+    l
 }
 
 /// The (name, arguments) of a prior OpenAI tool call: a `function` body's name and arguments, or a
@@ -350,7 +443,74 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
             }
         }
     }
+    f.latest = responses_latest(items);
     Ok(f)
+}
+
+/// What a Responses input item is to the newest model turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModelItem {
+    /// An assistant message.
+    Text,
+    Reasoning,
+    /// A client-run call item.
+    Call,
+    /// A provider-run item (`web_search_call` and the like). It is part of the model run, but it is
+    /// no client-run call and has no call id.
+    ProviderRun,
+    Other,
+}
+
+fn model_item(item: &Value) -> ModelItem {
+    let ty = item.get("type").and_then(Value::as_str);
+    match ty {
+        None | Some("message") if role(item) == Some("assistant") => ModelItem::Text,
+        Some("reasoning") => ModelItem::Reasoning,
+        Some(t) if responses_result_shape(t).is_none() && item_class(t) == ItemClass::ProviderRun => ModelItem::ProviderRun,
+        Some(t) if responses_result_shape(t).is_none() && matches!(item_class(t), ItemClass::ClientRun(k) if k != ToolCallKind::Other) => ModelItem::Call,
+        _ => ModelItem::Other,
+    }
+}
+
+/// The last model turn of a Responses request is the longest run of contiguous items that ends at
+/// the last assistant message or client-run call, and holds only assistant messages, reasoning
+/// items and client-run calls. The results are the result items after the run starts.
+fn responses_latest(items: &[Value]) -> LatestTurn {
+    let mut l = LatestTurn::default();
+    let kinds: Vec<ModelItem> = items.iter().map(model_item).collect();
+    let Some(end) = kinds.iter().rposition(|k| matches!(k, ModelItem::Text | ModelItem::Call)) else {
+        return l;
+    };
+    let start = kinds[..=end].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1);
+    for (item, kind) in items[start..=end].iter().zip(&kinds[start..=end]) {
+        match kind {
+            ModelItem::Text => l.content(item.get("content"), "output_text"),
+            ModelItem::Call => {
+                let key = if item.get("type").and_then(Value::as_str) == Some("mcp_approval_request") {
+                    "id"
+                } else {
+                    "call_id"
+                };
+                if let Some(id) = item.get(key).and_then(Value::as_str) {
+                    l.call(id);
+                }
+            }
+            ModelItem::Reasoning | ModelItem::ProviderRun | ModelItem::Other => {}
+        }
+    }
+    for item in &items[start + 1..] {
+        let Some(ty) = item.get("type").and_then(Value::as_str) else { continue };
+        let Some(shape) = responses_result_shape(ty) else { continue };
+        let key = if shape == ResultShape::Approval { "approval_request_id" } else { "call_id" };
+        let id = item
+            .get(key)
+            .and_then(Value::as_str)
+            .or_else(|| if ty == "local_shell_call_output" { item.get("id").and_then(Value::as_str) } else { None });
+        if let Some(id) = id {
+            l.result(id);
+        }
+    }
+    l
 }
 
 /// A tool name from a `{"name": ..}` object, or `None` when it is absent or not a string.
@@ -527,7 +687,33 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
             }
         }
     }
+    f.latest = anthropic_latest(arr(top, "messages")?);
     Ok(f)
+}
+
+/// The last assistant message of an Anthropic request and the `tool_result` blocks after it.
+fn anthropic_latest(messages: &[Value]) -> LatestTurn {
+    let mut l = LatestTurn::default();
+    let Some(last) = messages.iter().rposition(|m| role(m) == Some("assistant")) else { return l };
+    let content = messages[last].get("content");
+    for b in content.and_then(Value::as_array).into_iter().flatten() {
+        if b.get("type").and_then(Value::as_str) == Some("tool_use")
+            && let Some(id) = b.get("id").and_then(Value::as_str)
+        {
+            l.call(id);
+        }
+    }
+    l.content(content, "text");
+    for m in &messages[last + 1..] {
+        for b in m.get("content").and_then(Value::as_array).into_iter().flatten() {
+            if b.get("type").and_then(Value::as_str) == Some("tool_result")
+                && let Some(id) = b.get("tool_use_id").and_then(Value::as_str)
+            {
+                l.result(id);
+            }
+        }
+    }
+    l
 }
 
 #[cfg(test)]
@@ -876,5 +1062,180 @@ mod tests {
         assert_eq!(c(json!({"type":"tool"})), ToolChoice::Unknown);
         assert_eq!(c(json!({"type":"x"})), ToolChoice::Unknown);
         assert_eq!(c(json!("auto")), ToolChoice::Unknown);
+    }
+
+    fn notice(name: &str, id: uuid::Uuid) -> String {
+        crate::notice_line(name, crate::BlockCode::ALL[0], Some(id))
+    }
+
+    #[test]
+    fn chat_latest_turn_reads_the_last_assistant_message_and_later_results() {
+        let f = facts(
+            Format::OpenAiChat,
+            json!({"model":"m","messages":[
+                {"role":"user","content":"hi"},
+                {"role":"assistant","tool_calls":[{"id":"old","type":"function","function":{"name":"a","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"old","content":"SECRET"},
+                {"role":"assistant","tool_calls":[{"id":"n1","type":"function","function":{"name":"a","arguments":"{}"}},{"id":"n2","type":"function","function":{"name":"a","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"n1","content":"SECRET"},
+                {"role":"tool","tool_call_id":"n2","content":"SECRET"}]}),
+        );
+        assert_eq!(f.latest.call_ids, ["n1", "n2"]);
+        assert_eq!(f.latest.result_call_ids, ["n1", "n2"]);
+        assert!(!format!("{f:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn anthropic_latest_turn_reads_tool_use_and_later_tool_result_blocks() {
+        let f = facts(
+            Format::AnthropicMessages,
+            json!({"model":"c","messages":[
+                {"role":"assistant","content":[{"type":"tool_use","id":"old","name":"a","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"old","content":"SECRET"}]},
+                {"role":"assistant","content":[{"type":"text","text":"x"},{"type":"tool_use","id":"t1","name":"a","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"SECRET"}]}]}),
+        );
+        assert_eq!(f.latest.call_ids, ["t1"]);
+        assert_eq!(f.latest.result_call_ids, ["t1"]);
+        assert!(!format!("{f:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn responses_latest_turn_reads_the_last_run_of_model_items() {
+        let f = facts(
+            Format::OpenAiResponses,
+            json!({"model":"m","input":[
+                {"type":"message","role":"user","content":"hi"},
+                {"type":"function_call","call_id":"old","name":"a","arguments":"{}"},
+                {"type":"function_call_output","call_id":"old","output":"SECRET"},
+                {"type":"message","role":"user","content":"again"},
+                {"type":"reasoning","id":"r1","summary":[]},
+                {"type":"function_call","call_id":"c1","name":"a","arguments":"{}"},
+                {"type":"mcp_approval_request","id":"mcpr_1","server_label":"s","name":"n","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c1","output":"SECRET"},
+                {"type":"mcp_approval_response","approval_request_id":"mcpr_1","approve":true}]}),
+        );
+        assert_eq!(f.latest.call_ids, ["c1", "mcpr_1"]);
+        assert_eq!(f.latest.result_call_ids, ["c1", "mcpr_1"]);
+        assert!(!format!("{f:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn a_provider_run_item_does_not_split_the_latest_turn() {
+        let id = "0192f0a0-0000-7000-8000-000000000001";
+        let notice = format!("[paigasus] tool call \"send\" was blocked (policy). ref={id}");
+        let f = facts(
+            Format::OpenAiResponses,
+            json!({"model":"m","input":[
+                {"type":"message","role":"user","content":"hi"},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":notice}]},
+                {"type":"web_search_call","id":"ws_1","status":"completed"},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}),
+        );
+        assert_eq!(f.latest.refs, [Uuid::try_parse(id).unwrap()]);
+        assert!(f.latest.call_ids.is_empty());
+    }
+
+    #[test]
+    fn a_local_shell_output_without_call_id_uses_its_item_id() {
+        let f = facts(
+            Format::OpenAiResponses,
+            json!({"model":"m","input":[
+                {"type":"local_shell_call","id":"lsh_1","call_id":"call_1","action":{"type":"exec","command":["ls"]},"status":"completed"},
+                {"type":"local_shell_call_output","id":"lsh_1","output":"SECRET"}]}),
+        );
+        assert_eq!(f.latest.call_ids, ["call_1"]);
+        assert_eq!(f.latest.result_call_ids, ["lsh_1"]);
+    }
+
+    #[test]
+    fn a_legacy_function_result_and_a_legacy_function_call_are_ignored() {
+        let f = facts(
+            Format::OpenAiChat,
+            json!({"model":"m","messages":[
+                {"role":"assistant","function_call":{"name":"old","arguments":"{}"}},
+                {"role":"function","name":"old","content":"SECRET"}]}),
+        );
+        assert!(f.latest.call_ids.is_empty());
+        assert!(f.latest.result_call_ids.is_empty());
+    }
+
+    #[test]
+    fn refs_are_read_from_every_text_form() {
+        let ids: Vec<uuid::Uuid> = (1..=6).map(uuid::Uuid::from_u128).collect();
+        let n = |i: usize| notice("t", ids[i]);
+        let r = |f: Format, v: serde_json::Value| facts(f, v).latest.refs;
+        assert_eq!(r(Format::OpenAiChat, json!({"messages":[{"role":"assistant","content":format!("a\n{}", n(0))}]})), [ids[0]]);
+        assert_eq!(
+            r(
+                Format::OpenAiChat,
+                json!({"messages":[{"role":"assistant","content":[{"type":"text","text":n(1)},{"type":"refusal","text":n(0)}]}]})
+            ),
+            [ids[1]]
+        );
+        assert_eq!(r(Format::AnthropicMessages, json!({"messages":[{"role":"assistant","content":n(2)}]})), [ids[2]]);
+        assert_eq!(
+            r(Format::AnthropicMessages, json!({"messages":[{"role":"assistant","content":[{"type":"text","text":n(3)}]}]})),
+            [ids[3]]
+        );
+        assert_eq!(
+            r(
+                Format::OpenAiResponses,
+                json!({"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":n(4)}]}]})
+            ),
+            [ids[4]]
+        );
+        assert_eq!(r(Format::OpenAiResponses, json!({"input":[{"type":"message","role":"assistant","content":n(5)}]})), [ids[5]]);
+    }
+
+    #[test]
+    fn a_ref_is_read_only_from_an_exact_notice_line() {
+        let id = uuid::Uuid::from_u128(7);
+        let good = notice("t", id);
+        let refs = |text: String| facts(Format::OpenAiChat, json!({"messages":[{"role":"assistant","content":text}]})).latest.refs;
+        assert_eq!(refs(format!("model text\n\n{good}")), [id]);
+        for bad in [
+            good.replace("\"t\"", "\"t t\""),
+            good.replacen('(', "(nope", 1),
+            good.replace(&id.hyphenated().to_string(), "not-a-uuid"),
+            format!("{good} trailing"),
+        ] {
+            assert!(refs(bad.clone()).is_empty(), "{bad}");
+        }
+        let user = facts(Format::OpenAiChat, json!({"messages":[{"role":"user","content":good}]}));
+        assert!(user.latest.refs.is_empty());
+    }
+
+    #[test]
+    fn each_list_is_capped_at_128_and_counts_the_rest() {
+        let calls: Vec<_> = (0..130).map(|i| json!({"id":format!("c{i}"),"type":"function","function":{"name":"a","arguments":"{}"}})).collect();
+        let text = (0..131).map(|i| notice("t", uuid::Uuid::from_u128(i))).collect::<Vec<_>>().join("\n");
+        let mut messages = vec![json!({"role":"assistant","content":text,"tool_calls":calls})];
+        messages.extend((0..129).map(|i| json!({"role":"tool","tool_call_id":format!("c{i}"),"content":"x"})));
+        let f = facts(Format::OpenAiChat, json!({"messages":messages}));
+        assert_eq!((f.latest.call_ids.len(), f.latest.result_call_ids.len(), f.latest.refs.len()), (128, 128, 128));
+        assert_eq!((f.latest.dropped_calls, f.latest.dropped_results, f.latest.dropped_refs), (2, 1, 3));
+    }
+
+    #[test]
+    fn a_request_without_an_assistant_message_has_an_empty_latest_turn() {
+        for (fmt, v) in [
+            (Format::OpenAiChat, json!({"messages":[{"role":"user","content":"hi"}]})),
+            (Format::AnthropicMessages, json!({"messages":[{"role":"user","content":"hi"}]})),
+            (Format::OpenAiResponses, json!({"input":"hi"})),
+        ] {
+            assert_eq!(facts(fmt, v).latest, LatestTurn::default());
+        }
+    }
+
+    #[test]
+    fn a_local_shell_call_gives_its_item_id() {
+        let item = json!({"type":"local_shell_call","id":"lsh_1","call_id":"call_1","action":{"type":"exec","command":["ls"]},"status":"completed"});
+        let call = tool_call(0, item.as_object().unwrap(), ToolCallKind::LocalShell).unwrap();
+        assert_eq!(call.id.as_deref(), Some("call_1"));
+        assert_eq!(call.item_id().as_deref(), Some("lsh_1"));
+        assert_eq!(crate::decision_log::CallFacts::of(&call).item_id.as_deref(), Some("lsh_1"));
+        let f = json!({"type":"function_call","call_id":"c","name":"f","arguments":"{}"});
+        assert_eq!(tool_call(0, f.as_object().unwrap(), ToolCallKind::Function).unwrap().item_id(), None);
     }
 }

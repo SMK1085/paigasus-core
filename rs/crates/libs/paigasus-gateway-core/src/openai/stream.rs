@@ -107,10 +107,10 @@ impl ChoiceState {
             .known()
             .iter()
             .enumerate()
-            .filter_map(|(slot, (_, name))| verdict.block_code(slot).map(|code| notice_line(name, code)))
+            .filter_map(|(slot, (_, name))| verdict.blocked(slot).map(|b| notice_line(name, b.code, b.reference)))
             .collect();
         let body = if lines.is_empty() {
-            notice_line("unknown", verdict.block_code(0).unwrap_or(crate::types::BlockCode::Malformed))
+            notice_line("unknown", verdict.block_code(0).unwrap_or(crate::types::BlockCode::Malformed), None)
         } else {
             lines.join("\n")
         };
@@ -365,7 +365,7 @@ fn rewrite_choice(ch: &mut Value, verdict: &Verdict, st: &mut ChoiceState) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Protocol, Step, Verdict, Verdicts};
+    use crate::protocol::{Protocol, Step, Verdict, Verdicts, per_call};
     use crate::sse::Record;
     use crate::types::{BlockCode, Decision, HoldKey};
     use serde_json::{Value, json};
@@ -426,15 +426,28 @@ mod tests {
     #[test]
     fn allow_all_reemits_every_payload_unchanged() {
         let records = two_calls();
-        let (out, calls) = run(&records, |c| Verdict::PerCall(vec![Decision::Allow; c.len()]));
+        let (out, calls) = run(&records, |c| per_call(vec![Decision::Allow; c.len()]));
         let want: String = records.iter().map(|r| format!("data: {r}\n\n")).collect();
         assert_eq!(out, want);
         assert_eq!(calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["read", "rm"]);
     }
 
+    const ID: &str = "0193f6c2-8a4e-7b10-9c2d-5e8f1a2b3c4d";
+
+    #[test]
+    fn openai_stream_notice_has_the_ref() {
+        let id = uuid::Uuid::try_parse(ID).unwrap();
+        let (out, _) = run(&two_calls(), |_| {
+            Verdict::PerCall(vec![(Decision::Allow, None), (Decision::Block { code: BlockCode::Policy }, Some(id))])
+        });
+        assert!(out.contains(&format!(r#"[paigasus] tool call \"rm\" was blocked (policy). ref={ID}"#)), "{out}");
+        let (out, _) = run(&two_calls(), |_| per_call(vec![Decision::Allow, Decision::Block { code: BlockCode::Policy }]));
+        assert!(out.contains(r#"[paigasus] tool call \"rm\" was blocked (policy)."#) && !out.contains("ref="), "{out}");
+    }
+
     #[test]
     fn a_blocked_second_call_is_removed_and_its_logprobs_stripped() {
-        let (out, _) = run(&two_calls(), |_| Verdict::PerCall(vec![Decision::Allow, Decision::Block { code: BlockCode::Policy }]));
+        let (out, _) = run(&two_calls(), |_| per_call(vec![Decision::Allow, Decision::Block { code: BlockCode::Policy }]));
         assert!(!out.contains("\\\"p\\\""), "the blocked arguments leaked: {out}");
         assert!(!out.contains("\"token\":\"rm\""), "the logprobs leaked: {out}");
         assert!(out.contains("\"name\":\"read\""));

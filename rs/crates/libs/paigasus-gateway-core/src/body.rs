@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::decider::DecidedCall;
 use crate::decision_log::{CallFacts, ReportedCall};
 use crate::json::{Malformed, ResponsesDoc, check_numbers, check_numbers_responses, parse_strict, parse_strict_responses};
-use crate::report::{ReportDecision, ReportEntry, RequestEntry, report_entry, report_header};
+use crate::report::{Blocked, ReportDecision, ReportEntry, RequestEntry, report_entry, report_header};
 use crate::types::{Basis, BlockCode, Decision, Format, ToolCall};
 use crate::{anthropic, openai, responses};
 
@@ -73,27 +73,33 @@ pub fn parse_body(format: Format, body: &[u8], max_bytes: usize) -> Result<BodyC
 }
 
 impl BodyCalls {
-    /// The block code of call `i`. A forced code wins (ruling F7). A decision vector of the wrong
-    /// length blocks every call (D18).
-    fn code(&self, decisions: &[Decision], i: usize) -> Option<BlockCode> {
+    /// The block of call `i`. A forced code wins and has no reference (ruling F7, spec D1). A
+    /// decision vector of the wrong length blocks every call (D18), also without a reference.
+    fn code(&self, decided: &[DecidedCall], i: usize) -> Option<Blocked> {
         if let Some(code) = self.forced.get(i).copied().flatten() {
-            return Some(code);
+            return Some(Blocked { code, reference: None });
         }
-        if decisions.len() != self.calls.len() {
-            return Some(BlockCode::DeciderError);
+        if decided.len() != self.calls.len() {
+            return Some(Blocked {
+                code: BlockCode::DeciderError,
+                reference: None,
+            });
         }
-        match decisions[i] {
-            Decision::Block { code } => Some(code),
+        match decided[i].decision {
+            Decision::Block { code } => Some(Blocked {
+                code,
+                reference: decided[i].decision_id,
+            }),
             _ => None,
         }
     }
 
     /// The code an `Observe` decision for call `i` would have blocked with.
-    fn observed(&self, decisions: &[Decision], i: usize) -> Option<BlockCode> {
-        if decisions.len() != self.calls.len() {
+    fn observed(&self, decided: &[DecidedCall], i: usize) -> Option<BlockCode> {
+        if decided.len() != self.calls.len() {
             return None;
         }
-        match decisions[i] {
+        match decided[i].decision {
             Decision::Observe { would } => Some(would),
             _ => None,
         }
@@ -109,8 +115,8 @@ impl BodyCalls {
 
     /// The rewritten body, or `None` when nothing is blocked and the original bytes go through.
     #[must_use]
-    pub fn apply(self, decisions: &[Decision]) -> Option<Vec<u8>> {
-        let codes: Vec<Option<BlockCode>> = (0..self.calls.len()).map(|i| self.code(decisions, i)).collect();
+    pub fn apply(self, decided: &[DecidedCall]) -> Option<Vec<u8>> {
+        let codes: Vec<Option<Blocked>> = (0..self.calls.len()).map(|i| self.code(decided, i)).collect();
         if codes.iter().all(Option::is_none) {
             return None;
         }
@@ -128,22 +134,24 @@ impl BodyCalls {
     /// the wrong length has no detail, because the details do not belong to these calls.
     #[must_use]
     pub fn reported(&self, decided: &[DecidedCall], basis: Basis) -> Vec<ReportedCall> {
-        let decisions: Vec<Decision> = decided.iter().map(|d| d.decision).collect();
         let aligned = decided.len() == self.calls.len();
         let mut out: Vec<ReportedCall> = self
             .calls
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let code = self.code(&decisions, i);
+                let blocked = self.code(decided, i);
+                let code = blocked.map(|b| b.code);
                 let decision = if code.is_some() { ReportDecision::Block } else { ReportDecision::Allow };
                 // A forced `Truncated` is a hold-limit style block: `on_failure`, no Cedar detail
                 // (spec 5.4), as the stream path records it.
                 let forced = self.forced.get(i).copied().flatten().is_some();
                 let basis = if forced { Basis::OnFailure } else { basis };
-                let entry = report_entry(c, decision, basis, code.or_else(|| self.observed(&decisions, i)));
+                let entry = report_entry(c, decision, basis, code.or_else(|| self.observed(decided, i)));
                 let detail = if aligned && !forced { decided[i].detail.clone() } else { None };
-                ReportedCall::new(entry, Some(CallFacts::of(c)), detail)
+                // The decider's id stays for a forced call too: the settle marks that event `deny`.
+                let decision_id = if aligned { decided[i].decision_id } else { None };
+                ReportedCall::new(entry, Some(CallFacts::of(c)), detail).with_decision_id(decision_id)
             })
             .collect();
         out.extend(self.unenforceable.iter().cloned().map(|e| ReportedCall::new(e, None, None)));
@@ -206,7 +214,7 @@ mod tests {
     #[test]
     fn observe_keeps_the_body_bytes() {
         let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
-        assert!(b.apply(&[Decision::Observe { would: BlockCode::Policy }, Decision::Allow]).is_none());
+        assert!(b.apply(&plain(vec![Decision::Observe { would: BlockCode::Policy }, Decision::Allow])).is_none());
         let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
         let h: Vec<Value> = serde_json::from_str(&b.report(&plain(vec![Decision::Observe { would: BlockCode::Policy }, Decision::Allow]), Basis::Decider, &[])).unwrap();
         assert_eq!(
@@ -219,13 +227,13 @@ mod tests {
     #[test]
     fn allow_all_forwards_the_original_bytes() {
         let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
-        assert!(b.apply(&[Decision::Allow, Decision::Allow]).is_none());
+        assert!(b.apply(&plain(vec![Decision::Allow, Decision::Allow])).is_none());
     }
 
     #[test]
     fn a_blocked_openai_call_is_removed_and_noticed() {
         let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
-        let out = String::from_utf8(b.apply(&[Decision::Allow, block()]).unwrap()).unwrap();
+        let out = String::from_utf8(b.apply(&plain(vec![Decision::Allow, block()])).unwrap()).unwrap();
         assert!(!out.contains("SECRET"), "{out}");
         let v: Value = serde_json::from_str(&out).unwrap();
         let m = &v["choices"][0]["message"];
@@ -241,7 +249,7 @@ mod tests {
             json!({"role":"assistant","content":"I will.","tool_calls":[{"id":"c0","type":"function","function":{"name":"rm","arguments":"\"SECRET\""}}]}),
             "tool_calls",
         );
-        let out = parse_body(Format::OpenAiChat, &body, MAX).unwrap().apply(&[block()]).unwrap();
+        let out = parse_body(Format::OpenAiChat, &body, MAX).unwrap().apply(&plain(vec![block()])).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert!(v["choices"][0]["message"].get("tool_calls").is_none());
         assert_eq!(v["choices"][0]["message"]["content"], "I will.\n\n[paigasus] tool call \"rm\" was blocked (policy).");
@@ -250,7 +258,7 @@ mod tests {
 
     #[test]
     fn two_blocked_calls_make_two_notice_lines() {
-        let out = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap().apply(&[block(), block()]).unwrap();
+        let out = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap().apply(&plain(vec![block(), block()])).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(
             v["choices"][0]["message"]["content"],
@@ -266,7 +274,7 @@ mod tests {
         );
         let b = parse_body(Format::OpenAiChat, &body, MAX).unwrap();
         assert_eq!(b.calls[0].kind, ToolCallKind::LegacyFunctionCall);
-        let v: Value = serde_json::from_slice(&b.apply(&[block()]).unwrap()).unwrap();
+        let v: Value = serde_json::from_slice(&b.apply(&plain(vec![block()])).unwrap()).unwrap();
         assert!(v["choices"][0]["message"].get("function_call").is_none());
         assert_eq!(v["choices"][0]["message"]["content"][1]["type"], "text");
         assert_eq!(v["choices"][0]["finish_reason"], "stop");
@@ -275,7 +283,7 @@ mod tests {
     #[test]
     fn a_short_decision_vector_blocks_the_rest() {
         let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
-        let out = String::from_utf8(b.apply(&[Decision::Allow]).unwrap()).unwrap();
+        let out = String::from_utf8(b.apply(&plain(vec![Decision::Allow])).unwrap()).unwrap();
         assert!(!out.contains("SECRET") && out.contains("(decider-error)"));
     }
 
@@ -337,7 +345,7 @@ mod tests {
         let b = parse_body(Format::OpenAiChat, v.to_string().as_bytes(), MAX).unwrap();
         assert_eq!((b.calls[0].kind, b.calls[0].name.as_str()), (ToolCallKind::Other, "mystery"));
         assert!(b.calls[0].arguments.contains("\"payload\":1"));
-        let out: Value = serde_json::from_slice(&b.apply(&[block()]).unwrap()).unwrap();
+        let out: Value = serde_json::from_slice(&b.apply(&plain(vec![block()])).unwrap()).unwrap();
         assert_eq!(out["choices"][0]["finish_reason"], "stop");
     }
 
@@ -347,7 +355,7 @@ mod tests {
             {"index":0,"message":{"content":"a","tool_calls":[{"id":"c","type":"function","function":{"name":"rm","arguments":"{}"}}]},"finish_reason":"tool_calls"},
             {"index":1,"message":{"content":"b"},"finish_reason":"stop","logprobs":null}]});
         let b = parse_body(Format::OpenAiChat, v.to_string().as_bytes(), MAX).unwrap();
-        let out: Value = serde_json::from_slice(&b.apply(&[block()]).unwrap()).unwrap();
+        let out: Value = serde_json::from_slice(&b.apply(&plain(vec![block()])).unwrap()).unwrap();
         assert_eq!(out["choices"].as_array().unwrap().len(), 2);
         assert_eq!(out["choices"][1], v["choices"][1]);
     }
@@ -366,7 +374,7 @@ mod tests {
             (b.calls[0].position, b.calls[0].kind, b.calls[0].arguments.as_str()),
             (1, ToolCallKind::AnthropicToolUse, r#"{"path":"SECRET"}"#)
         );
-        let v: Value = serde_json::from_slice(&b.apply(&[block()]).unwrap()).unwrap();
+        let v: Value = serde_json::from_slice(&b.apply(&plain(vec![block()])).unwrap()).unwrap();
         assert_eq!(v["content"][1]["type"], "text");
         assert!(!v.to_string().contains("SECRET"));
         assert_eq!(v["stop_reason"], "end_turn");
@@ -375,7 +383,7 @@ mod tests {
     #[test]
     fn an_allowed_tool_use_keeps_the_stop_reason() {
         let body = anthropic(json!([{"type":"tool_use","id":"a","name":"read","input":{}},{"type":"tool_use","id":"b","name":"rm","input":{}}]));
-        let v: Value = serde_json::from_slice(&parse_body(Format::AnthropicMessages, &body, MAX).unwrap().apply(&[Decision::Allow, block()]).unwrap()).unwrap();
+        let v: Value = serde_json::from_slice(&parse_body(Format::AnthropicMessages, &body, MAX).unwrap().apply(&plain(vec![Decision::Allow, block()])).unwrap()).unwrap();
         assert_eq!(v["stop_reason"], "tool_use");
         assert_eq!(v["content"][0]["type"], "tool_use");
     }
@@ -460,7 +468,7 @@ mod tests {
             let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
             let h: Vec<Value> = serde_json::from_str(&b.report(&plain(decisions.clone()), Basis::OnFailure, &[])).unwrap();
             assert!(h.iter().all(|e| e["decision"] == "block" && e["code"] == "decider-error"), "{h:?}");
-            let out = String::from_utf8(b.apply(&decisions).unwrap()).unwrap();
+            let out = String::from_utf8(b.apply(&plain(decisions.clone())).unwrap()).unwrap();
             let v: Value = serde_json::from_str(&out).unwrap();
             let text = v["choices"][0]["message"]["content"].as_str().unwrap();
             assert!(text.contains("\"read\" was blocked (decider-error)") && text.contains("\"rm\" was blocked (decider-error)"), "{text}");
@@ -524,6 +532,27 @@ mod tests {
     }
 
     #[test]
+    fn a_forced_truncated_call_keeps_its_decision_id_but_gets_no_ref() {
+        let id = uuid::Uuid::from_u128(9);
+        let id2 = uuid::Uuid::from_u128(10);
+        let cut = responses_body(json!([
+            {"type":"function_call","id":"fc_1","call_id":"c1","name":"rm","arguments":"{\"p\":\"SEC","status":"incomplete"},
+            {"type":"function_call","id":"fc_2","call_id":"c2","name":"ls","arguments":"{}","status":"completed"}
+        ]));
+        let decided = vec![DecidedCall::new(Decision::Allow, None).with_decision_id(id), DecidedCall::new(block(), None).with_decision_id(id2)];
+        let b = parse_body(Format::OpenAiResponses, &cut, MAX).unwrap();
+        let reported = b.reported(&decided, Basis::Decider);
+        assert_eq!(reported.iter().map(|r| r.decision_id).collect::<Vec<_>>(), [Some(id), Some(id2)]);
+        assert_eq!(reported[0].entry.code, Some(BlockCode::Truncated));
+        let v: Value = serde_json::from_slice(&b.apply(&decided).unwrap()).unwrap();
+        assert_eq!(v["output"][0]["content"][0]["text"], "[paigasus] tool call \"rm\" was blocked (truncated).");
+        assert_eq!(v["output"][1]["content"][0]["text"], format!("[paigasus] tool call \"ls\" was blocked (policy). ref={id2}"));
+        // A decision vector of the wrong length has no ids.
+        let b = parse_body(Format::OpenAiResponses, &cut, MAX).unwrap();
+        assert!(b.reported(&decided[..1], Basis::Decider).iter().all(|r| r.decision_id.is_none()));
+    }
+
+    #[test]
     fn a_responses_body_parses_and_rewrites_through_parse_body() {
         let body = responses_body(json!([
             {"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Sure.","annotations":[]}]},
@@ -534,8 +563,11 @@ mod tests {
         assert_eq!(b.calls.iter().map(|c| (c.position, c.display_name())).collect::<Vec<_>>(), [(1, "fs.rm".to_owned())]);
         assert_eq!(b.unenforceable.len(), 1);
         assert!(b.report(&plain(vec![block()]), Basis::Decider, &[]).contains(r#""name":"fs.rm""#));
-        assert!(parse_body(Format::OpenAiResponses, &body, MAX).unwrap().apply(&[Decision::Allow]).is_none(), "allow keeps the bytes");
-        let out = b.apply(&[block()]).unwrap();
+        assert!(
+            parse_body(Format::OpenAiResponses, &body, MAX).unwrap().apply(&plain(vec![Decision::Allow])).is_none(),
+            "allow keeps the bytes"
+        );
+        let out = b.apply(&plain(vec![block()])).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert!(!String::from_utf8(out).unwrap().contains("SECRET"));
         assert_eq!(v["output"][1]["id"], "msg_paigasus_1");
@@ -549,7 +581,7 @@ mod tests {
         let report = b.report(&plain(vec![Decision::Allow]), Basis::Decider, &[]);
         assert!(report.contains(r#""decision":"block""#) && report.contains(r#""code":"truncated""#), "{report}");
         assert!(report.contains(r#""basis":"on_failure""#), "{report}");
-        let v: Value = serde_json::from_slice(&b.apply(&[Decision::Allow]).unwrap()).unwrap();
+        let v: Value = serde_json::from_slice(&b.apply(&plain(vec![Decision::Allow])).unwrap()).unwrap();
         assert_eq!(v["output"][0]["content"][0]["text"], "[paigasus] tool call \"rm\" was blocked (truncated).");
         // The Responses profile, not the chat one: a `choices` body is malformed here.
         assert!(parse_body(Format::OpenAiResponses, &two_calls(), MAX).is_err());
@@ -629,6 +661,6 @@ mod tests {
         let body = br#"{"id":"resp_1","object":"response","status":"completed","metadata":{"Id":"x"},"text":{"format":{"type":"json_schema","name":"s","schema":{"type":"object","properties":{"Name":{"type":"string"},"ID":{"type":"integer","maximum":1e300},"Type":{"type":"string"},"constructor":{"type":"string"}}}}},"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{}","annotations":[]}]}]}"#;
         let b = parse_body(Format::OpenAiResponses, body, MAX).unwrap_or_else(|e| panic!("{e}"));
         assert!(b.calls.is_empty());
-        assert!(b.apply(&[]).is_none());
+        assert!(b.apply(&plain(vec![])).is_none());
     }
 }

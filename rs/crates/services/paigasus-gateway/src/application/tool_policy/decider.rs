@@ -4,6 +4,10 @@
 //! snapshot (D30): it never reads the cache. Evaluation is synchronous inside the future, and the
 //! decider spawns nothing (SMA-749 D25).
 //!
+//! SMA-753: the decider mints the decision ids first. With a history and a session, the future then
+//! reserves one pending event per call under those ids (spec D8), and the decision reads the session
+//! findings and the reserve findings. A dropped future drops the reserve.
+//!
 //! The decider writes no log line. It counts the decision metrics and computes the keyed argument digest for
 //! the decision log. The recorder writes the per-decision line (SMA-755). Metrics never hold the arguments
 //! (ADR-0027 (i)).
@@ -13,21 +17,39 @@ use std::time::Instant;
 
 use metrics::counter;
 use paigasus_gateway_core::decision_log::{DecisionDetail, RecordBasis};
-use paigasus_gateway_core::{DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls};
+use paigasus_gateway_core::{DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, decide_calls_with};
+use paigasus_kernel::tool_policy::{FORGED_HISTORY, Findings, HISTORY_TRUNCATED, MIXED_SESSIONS, NAME_COLLISION, UNPARSED_ARGUMENTS};
 use paigasus_observability::names;
+use uuid::Uuid;
 
 use crate::application::decision_log::DecisionRecorder;
+use crate::application::tool_history::ToolHistory;
 
 /// The `ToolCallDecider` that evaluates the tool policies. It holds the one shared recorder, for
 /// the argument digest (SMA-755).
 pub struct CedarDecider {
     recorder: Arc<DecisionRecorder>,
+    /// The tool history (SMA-753). `None`: the decider reserves nothing.
+    history: Option<Arc<ToolHistory>>,
 }
 
 impl CedarDecider {
     #[must_use]
     pub fn new(recorder: Arc<DecisionRecorder>) -> Self {
-        Self { recorder }
+        Self { recorder, history: None }
+    }
+
+    /// Reserve the calls of each hold in `history` before the decision (SMA-753, spec D8).
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<ToolHistory>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// The tool history of this holder (SMA-753). A runtime test reads it to check the wiring.
+    #[must_use]
+    pub fn history(&self) -> Option<&Arc<ToolHistory>> {
+        self.history.as_ref()
     }
 
     /// The recorder of this decider. A runtime test reads it to check that the decider, the request side and
@@ -39,15 +61,18 @@ impl CedarDecider {
 }
 
 /// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9).
-pub const FINDING_KINDS: [&str; 3] = ["name_collision", "unparsed_arguments", "other"];
+pub const FINDING_KINDS: [&str; 6] = ["name_collision", "unparsed_arguments", "mixed_sessions", "forged_history", "history_truncated", "other"];
 
 /// The `kind` metric label of a finding. An unknown kind is `other`.
 #[must_use]
 pub fn finding_label(kind: &str) -> &'static str {
     match kind {
-        "name_collision" => FINDING_KINDS[0],
-        "unparsed_arguments" => FINDING_KINDS[1],
-        _ => FINDING_KINDS[2],
+        NAME_COLLISION => FINDING_KINDS[0],
+        UNPARSED_ARGUMENTS => FINDING_KINDS[1],
+        MIXED_SESSIONS => FINDING_KINDS[2],
+        FORGED_HISTORY => FINDING_KINDS[3],
+        HISTORY_TRUNCATED => FINDING_KINDS[4],
+        _ => FINDING_KINDS[5],
     }
 }
 
@@ -72,7 +97,10 @@ pub(crate) fn effect_label(d: Decision) -> &'static str {
 
 /// Decide the calls from the snapshot of `ctx`. `None` is an unavailable set under `closed`: the
 /// tool policy is on, but the request side did not run, so every call is blocked (fail closed).
-fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> Vec<DecidedCall> {
+///
+/// `extra` holds the request-level findings that every call carries (SMA-753). `ids` holds one
+/// decision id per call, minted before the reserve.
+fn decide_now(ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall], extra: &Findings, ids: Vec<Uuid>, recorder: &DecisionRecorder) -> Vec<DecidedCall> {
     let started = Instant::now();
     let fallback;
     let snapshot = match ctx.policy.as_deref() {
@@ -82,7 +110,7 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
             &fallback
         }
     };
-    let outcomes = decide_calls(snapshot, turn, calls, &Instant::now);
+    let outcomes = decide_calls_with(snapshot, turn, calls, extra, &Instant::now);
     let mode = snapshot.mode.as_str();
     // The digest is computed inside the timed region, so it is part of the overhead sample (§ 5.3).
     let digests: Vec<_> = calls.iter().map(|c| recorder.digest(&c.arguments)).collect();
@@ -105,13 +133,40 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
     outcomes
         .into_iter()
         .zip(digests)
-        .map(|(o, digest)| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, digest)))))
+        .zip(ids)
+        .map(|((o, digest), id)| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, digest)))).with_decision_id(id))
         .collect()
 }
 
 impl ToolCallDecider for CedarDecider {
     fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
-        Box::pin(std::future::ready(Ok(decide_now(&self.recorder, &ctx, &turn, &calls))))
+        // The ids come first (spec D1): the reserve writes its events under them.
+        let ids: Vec<Uuid> = calls.iter().map(|_| self.recorder.mint_decision_id()).collect();
+        let recorder = Arc::clone(&self.recorder);
+        let history = self.history.clone();
+        // The future spawns nothing (SMA-749 D25). A store error is counted inside `reserve` and
+        // changes no decision (PR 1).
+        Box::pin(async move {
+            let mut extra = Findings::new();
+            if let Some(session) = ctx.session.as_deref() {
+                for kind in session.findings.iter() {
+                    extra.insert(kind);
+                }
+                if let Some(history) = &history {
+                    // The reserve round trip is part of the overhead sample (spec § 9). Its region
+                    // ends before the timer of `decide_now` starts, so nothing counts twice.
+                    let started = Instant::now();
+                    let found = history.reserve(&ctx, session, &calls, &ids).await;
+                    if let Some(s) = ctx.policy.as_deref() {
+                        s.add_decide_elapsed(started.elapsed());
+                    }
+                    for kind in found.iter() {
+                        extra.insert(kind);
+                    }
+                }
+            }
+            Ok(decide_now(&ctx, &turn, &calls, &extra, ids, &recorder))
+        })
     }
 }
 
@@ -164,6 +219,21 @@ mod tests {
 
     async fn decide(ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<Decision> {
         decide_full(ctx, turn, call_names).await.into_iter().map(|d| d.decision).collect()
+    }
+
+    #[tokio::test]
+    async fn the_decider_gives_every_call_its_own_decision_id() {
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        let decided = decide_full(ctx.with_policy(out.snapshot), turn, &["x", "y", "rm", "z"]).await;
+        let ids: Vec<_> = decided.iter().map(|d| d.decision_id.expect("an id for every call")).collect();
+        assert!(ids.iter().all(|id| id.get_version_num() == 7));
+        let distinct: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), 4, "four distinct ids: {ids:?}");
     }
 
     #[tokio::test]
@@ -233,10 +303,23 @@ mod tests {
     #[test]
     fn an_unknown_finding_kind_is_other() {
         assert_eq!(finding_label("zz"), "other");
-        for k in ["name_collision", "unparsed_arguments"] {
+        for k in ["name_collision", "unparsed_arguments", "mixed_sessions", "forged_history", "history_truncated"] {
             assert_eq!(finding_label(k), k);
         }
-        assert_eq!(FINDING_KINDS, ["name_collision", "unparsed_arguments", "other"]);
+        assert_eq!(
+            FINDING_KINDS,
+            ["name_collision", "unparsed_arguments", "mixed_sessions", "forged_history", "history_truncated", "other"]
+        );
+    }
+
+    #[test]
+    fn each_history_finding_has_its_own_label() {
+        assert_eq!(finding_label(MIXED_SESSIONS), "mixed_sessions");
+        assert_eq!(finding_label(FORGED_HISTORY), "forged_history");
+        assert_eq!(finding_label(HISTORY_TRUNCATED), "history_truncated");
+        assert_eq!(finding_label("something_new"), "other");
+        assert_eq!(FINDING_KINDS.len(), 6);
+        assert_eq!(FINDING_KINDS[5], "other");
     }
 
     #[tokio::test]
@@ -365,5 +448,157 @@ mod tests {
         );
         assert!(snap.decide_elapsed() > Duration::ZERO, "the decide time is in the snapshot");
         assert!(snap.overhead() >= Duration::from_secs(5), "the overhead holds the request-side time");
+    }
+
+    // ---- the reserve (SMA-753) -------------------------------------------------------------------
+
+    use paigasus_gateway_core::{SessionContext, StoreBudget};
+
+    use crate::adapters::history::memory::MemorySessionStore;
+    use crate::application::tool_history::ToolHistory;
+    use crate::domain::decision_log::OsEntropy;
+    use crate::domain::limits::{SystemClock, UnavailableKind};
+    use crate::domain::tool_history::{
+        AppendReply, AppendRequest, EventKind, EventVerdict, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, Scope, SessionStore, SettleRequest, WriteRequest,
+    };
+
+    /// A store whose every call fails.
+    struct Down;
+
+    fn down() -> HistoryStoreError {
+        HistoryStoreError::Unavailable {
+            kind: UnavailableKind::Io,
+            detail: "down".into(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for Down {
+        async fn lookup(&self, _: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            Err(down())
+        }
+        async fn write(&self, _: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            Err(down())
+        }
+        async fn reserve(&self, _: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            Err(down())
+        }
+        async fn settle(&self, _: &SettleRequest) -> Result<(), HistoryStoreError> {
+            Err(down())
+        }
+        async fn append(&self, _: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            Err(down())
+        }
+    }
+
+    fn history_over(store: Arc<dyn SessionStore>) -> Arc<ToolHistory> {
+        Arc::new(ToolHistory::new(store, Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(1)))
+    }
+
+    fn session(findings: Findings) -> Arc<SessionContext> {
+        Arc::new(SessionContext::new(
+            ORG_A,
+            uuid::Uuid::from_u128(0x0190a1f0_0000_7000_8000_000000000005),
+            1,
+            findings,
+            StoreBudget::new(Duration::from_secs(1)),
+        ))
+    }
+
+    /// The context of a request under `tenant`, in enforce mode.
+    async fn ctx_under(tenant: &str) -> (DecisionContext, ToolTurn) {
+        let source = FakeSource::new(testing::FLOOR, tenant);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        (ctx.with_policy(out.snapshot), turn)
+    }
+
+    async fn decide_by(decider: &CedarDecider, ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<DecidedCall> {
+        decider.decide(Arc::new(ctx), Arc::new(turn), calls(call_names)).await.expect("decide")
+    }
+
+    #[tokio::test]
+    async fn the_reserve_runs_before_the_decision_and_uses_the_decision_ids() {
+        let store = Arc::new(MemorySessionStore::new());
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(store.clone()));
+        let s = session(Findings::new());
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let decided = decide_by(&decider, ctx.with_session(Arc::clone(&s)), turn, &["ok", "rm"]).await;
+        assert_eq!(decided.iter().map(|d| d.decision).collect::<Vec<_>>(), [Decision::Allow, BLOCK_POLICY]);
+        for (tool, d) in ["ok", "rm"].into_iter().zip(&decided) {
+            let events = store.events(ORG_A, Scope::Session, &s.session_id.to_string(), tool);
+            assert_eq!(events.len(), 1, "one pending event for {tool}: {events:?}");
+            assert_eq!((events[0].kind, events[0].verdict), (EventKind::Call, EventVerdict::Pending), "{tool}");
+            assert_eq!(Some(events[0].id), d.decision_id, "the event id is the decision id of {tool}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_finding_reaches_the_cedar_context() {
+        const TENANT: &str = r#"
+            @id("p") permit(principal, action, resource);
+            @id("mixed") forbid(principal, action, resource) when { context.findings.contains("mixed_sessions") };
+        "#;
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
+        let mut mixed = Findings::new();
+        mixed.insert(MIXED_SESSIONS);
+        let (ctx, turn) = ctx_under(TENANT).await;
+        let blocked = decide_by(&decider, ctx.clone().with_session(session(mixed)), turn.clone(), &["ok"]).await;
+        assert_eq!(blocked[0].decision, BLOCK_POLICY);
+        let allowed = decide_by(&decider, ctx.with_session(session(Findings::new())), turn, &["ok"]).await;
+        assert_eq!(allowed[0].decision, Decision::Allow, "the control: no finding, no block");
+    }
+
+    #[tokio::test]
+    async fn a_reserve_error_still_decides() {
+        let failing = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(Arc::new(Down)));
+        let plain = CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
+        let names = ["ok", "rm", "x"];
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let s = session(Findings::new());
+        let with_error = decide_by(&failing, ctx.clone().with_session(Arc::clone(&s)), turn.clone(), &names).await;
+        let without = decide_by(&plain, ctx, turn, &names).await;
+        let effects = |d: &[DecidedCall]| d.iter().map(|c| c.decision).collect::<Vec<_>>();
+        assert_eq!(effects(&with_error), effects(&without));
+        assert!(with_error.iter().all(|d| d.decision_id.is_some()), "every call keeps its id");
+        assert!(s.budget.is_failed(), "the reserve did run and fail");
+    }
+
+    /// The memory store, with a reserve that first waits `.1`.
+    struct SlowReserve(MemorySessionStore, Duration);
+
+    #[async_trait::async_trait]
+    impl SessionStore for SlowReserve {
+        async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            self.0.lookup(req).await
+        }
+        async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.write(req).await
+        }
+        async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            tokio::time::sleep(self.1).await;
+            self.0.reserve(req).await
+        }
+        async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+            self.0.settle(req).await
+        }
+        async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.append(req).await
+        }
+    }
+
+    /// Spec § 9: the overhead sample holds the reserve round trip.
+    #[tokio::test]
+    async fn the_reserve_time_is_in_the_overhead_sample() {
+        const WAIT: Duration = Duration::from_millis(80);
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(Arc::new(SlowReserve(MemorySessionStore::new(), WAIT))));
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let snap = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
+        let decided = decide_by(&decider, ctx.with_session(session(Findings::new())), turn, &["ok"]).await;
+        assert_eq!(decided[0].decision, Decision::Allow);
+        assert!(snap.decide_elapsed() >= WAIT, "the reserve wait is in the decide time: {:?}", snap.decide_elapsed());
     }
 }
