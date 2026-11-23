@@ -12,8 +12,8 @@ use serde_json::{Map, Value, json};
 
 use crate::json::{MAX_ANTHROPIC_INDEX, Malformed, opt_str};
 use crate::protocol::MAX_IDENTIFIER_BYTES;
-use crate::report::{ReportDecision, ReportEntry, notice_line};
-use crate::types::{BlockCode, ToolCall, ToolCallKind};
+use crate::report::{Blocked, ReportDecision, ReportEntry, notice_line};
+use crate::types::{ToolCall, ToolCallKind};
 
 pub(crate) fn calls(v: &Value) -> Result<(Vec<ToolCall>, Vec<ReportEntry>), Malformed> {
     let Some(Value::Array(content)) = v.get("content") else { return Err(Malformed("content")) };
@@ -85,16 +85,47 @@ fn server(o: &Map<String, Value>, ty: &str, position: u32) -> ReportEntry {
     }
 }
 
-pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<BlockCode>]) {
+pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<Blocked>]) {
     let remaining = codes.iter().filter(|k| k.is_none()).count();
     if let Some(Value::Array(content)) = v.get_mut("content") {
         for (c, code) in calls.iter().zip(codes) {
             if let (Some(code), Some(slot)) = (code, content.get_mut(c.position as usize)) {
-                *slot = json!({"type": "text", "text": notice_line(&c.display_name(), *code)});
+                *slot = json!({"type": "text", "text": notice_line(&c.display_name(), code.code, code.reference)});
             }
         }
     }
     if remaining == 0 && v.get("stop_reason").and_then(Value::as_str) == Some("tool_use") {
         v["stop_reason"] = "end_turn".into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::BlockCode;
+    use serde_json::json;
+
+    const ID: &str = "0193f6c2-8a4e-7b10-9c2d-5e8f1a2b3c4d";
+
+    #[test]
+    fn anthropic_body_notice_has_the_ref() {
+        let body = json!({"content": [
+            {"type": "tool_use", "id": "t0", "name": "read", "input": {}},
+            {"type": "tool_use", "id": "t1", "name": "rm", "input": {}}
+        ], "stop_reason": "tool_use"});
+        let (got, _) = calls(&body).unwrap();
+        let id = uuid::Uuid::try_parse(ID).unwrap();
+        let mut out = body.clone();
+        let with_ref = Blocked {
+            code: BlockCode::Policy,
+            reference: Some(id),
+        };
+        let without = Blocked {
+            code: BlockCode::Policy,
+            reference: None,
+        };
+        rewrite(&mut out, &got, &[Some(with_ref), Some(without)]);
+        assert_eq!(out["content"][0]["text"], format!("[paigasus] tool call \"read\" was blocked (policy). ref={ID}"));
+        assert_eq!(out["content"][1]["text"], "[paigasus] tool call \"rm\" was blocked (policy).");
     }
 }

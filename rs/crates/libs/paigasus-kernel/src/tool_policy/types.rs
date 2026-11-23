@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::CedarUid;
 use crate::detect::{HostSet, Severity};
 
-pub use crate::detect::{Declared, NAME_COLLISION, ToolInput, UNPARSED_ARGUMENTS};
+pub use crate::detect::{Declared, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, NAME_COLLISION, ToolInput, UNPARSED_ARGUMENTS};
 
 /// One tool call to decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,8 @@ impl RequestInfo {
     }
 }
 
-/// The session facts. The gateway has no session yet, so it passes the placeholder (D14).
+/// The session facts. With the session history of SMA-753, the gateway passes the linked session.
+/// Without a history, it passes the placeholder (D14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SessionInfo {

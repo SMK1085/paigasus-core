@@ -104,6 +104,8 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     let mut request_entries: Vec<RequestEntry> = Vec::new();
     // Preflight F14: one overhead sample per request, recorded when this drops.
     let mut overhead: Option<OverheadSample> = None;
+    // SMA-753 D4: the history write waits for the limits admission, so a refused request writes nothing.
+    let mut pending_history = None;
     let prepared = if state.tool_interception.is_some() || state.tool_policy.is_some() {
         let turn = paigasus_gateway_core::parse_request(endpoint.format, &body);
         let request_id = paigasus_observability::current_ids().map(|ids| ids.request_id.to_string());
@@ -120,6 +122,10 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                     overhead = Some(OverheadSample::new(Arc::clone(&outcome.snapshot)));
                     // D30: the decider uses this snapshot; without it, every call fails closed.
                     ctx = ctx.with_policy(outcome.snapshot);
+                    if let Some(session) = outcome.session {
+                        ctx = ctx.with_session(session);
+                    }
+                    pending_history = outcome.history;
                 }
                 Err(refused) => {
                     // The refusal metric is the operator's signal; this line stays at debug.
@@ -155,6 +161,12 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             }
         },
     };
+    // SMA-753 D4: the request is admitted (or has no `[limits]`), so the history write runs now.
+    // Its time goes into this request's overhead sample: `apply` always sets the sample when it
+    // returns a pending write.
+    if let (Some(tp), Some(pending), Some(sample)) = (&state.tool_policy, pending_history.take(), overhead.as_ref()) {
+        tp.commit_history(pending, sample.snapshot()).await;
+    }
     if let Some(guard) = guard.as_mut() {
         guard.set_request_estimate(request_estimate);
         // The ids exist here; inside the stream `current_ids()` is `None` (SMA-504 § 4.3).

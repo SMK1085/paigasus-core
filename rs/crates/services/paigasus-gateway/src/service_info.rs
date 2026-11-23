@@ -116,6 +116,7 @@ mod tests {
                 responses: crate::config::ResponsesConfig::default(),
                 tool_policy: crate::config::ToolPolicyConfig::default(),
                 decision_log: crate::config::DecisionLogConfig::default(),
+                tool_history: None,
             }
         }
 

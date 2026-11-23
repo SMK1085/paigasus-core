@@ -189,7 +189,7 @@ fn decode(payload: &[u8]) -> DecisionRecord {
 
 /// The router over the tool policy and interception that `cfg` builds on the shared `recorder`.
 fn app(base_url: &str, cfg: &GatewayConfig, recorder: &Arc<paigasus_gateway::application::decision_log::DecisionRecorder>) -> Router {
-    let rt = runtime::build_tool_policy(cfg, Arc::clone(recorder)).expect("the tool policy builds");
+    let rt = runtime::build_tool_policy(cfg, Arc::clone(recorder), None).expect("the tool policy builds");
     let ti = runtime::tool_interception(cfg, &rt);
     let tp = rt.policy.map(|(_, tp)| tp);
     router(AppState {

@@ -377,6 +377,10 @@ mod tests {
             "context == {}",
             r#"context["input"] == {}"#,
             "context.unknown_slot == 1",
+            // SMA-753 D6, D16: a history slot is a Bool at the top of the context. The gateway
+            // never fills it in PR 1, so a forbid that reads it must never be optimistic.
+            "context.h0",
+            r#"context.request.model == "m" && context.h0"#,
             r#"context.request.model == "m" && context.input.x == 1"#,
             "!(context.input.x < 5)",
             "if true then context.session.turn == 0 else false",

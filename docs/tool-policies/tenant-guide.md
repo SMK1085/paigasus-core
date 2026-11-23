@@ -232,6 +232,12 @@ Your policies read the findings in three context attributes:
 | `secret_in_args` | `secret_in_args` | high | The arguments hold a credential, for example a cloud access key. |
 | `injection_markers` | `injection_markers` | high or medium | A tool result holds a marker of a prompt injection. Only hidden Unicode tag text is `high`. |
 | `detector_error` | the detector that failed, `built_in` or `kernel` | high | A detector failed, or a scan limit stopped it. |
+| `forged_history` | `kernel` | high | The request has a tool result for a call that the gateway did not forward. This kind needs the session history. |
+| `mixed_sessions` | `kernel` | medium | The calls and the tool results of the request belong to more than one session. This kind needs the session history. |
+| `history_truncated` | `kernel` | low | The history store removed events of the session at a limit. This kind needs the session history. |
+
+The three history kinds apply to each call of the request. Your policies read them only for a
+call. The decision of a tool result does not use them.
 
 `unparsed_arguments` is `info` for every `custom` and `apply_patch` call. So for these calls,
 `context.findings.isEmpty()` is always false, and `context.max_severity >= 0` is always true. Do
@@ -255,7 +261,7 @@ and it replaces tool results.
 
 What the policy blocks:
 
-- `secret_in_args` and `name_collision`.
+- `secret_in_args`, `name_collision` and `forged_history`.
 - `injection_markers` only for hidden Unicode tag text (rule `unicode_tags`). The other markers
   are `medium`: chat template tokens, turn markers, close tags and phrases such as "ignore the
   previous instructions". These markers occur in normal source code, tests and documentation, and

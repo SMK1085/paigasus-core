@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::json::Malformed;
-use crate::report::{ReportDecision, ReportEntry, notice_line};
+use crate::report::{Blocked, ReportDecision, ReportEntry, notice_line};
 use crate::responses::assembly::{RESERVED_ID_PREFIX, arguments_complete, is_completed, item_shape, tool_call};
 use crate::responses::classify::{ItemClass, item_class};
 use crate::responses::rewrite::completed_message;
@@ -89,13 +89,13 @@ pub(crate) fn forced(v: &Value, calls: &[ToolCall]) -> Vec<Option<BlockCode>> {
 /// Replace each blocked item with the completed message of § 6.5. Only `output[i]` changes: the
 /// `status`, `usage`, `incomplete_details` and `error` of the body stay as they were.
 /// `codes[i]` is the decision for `calls[i]`; a forced `Truncated` wins over it.
-pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<BlockCode>]) {
+pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<Blocked>]) {
     let forced = forced(v, calls);
     let Some(Value::Array(output)) = v.get_mut("output") else { return };
     for ((c, code), forced) in calls.iter().zip(codes).zip(forced) {
-        let Some(code) = forced.or(*code) else { continue };
+        let Some(code) = forced.map(|code| Blocked { code, reference: None }).or(*code) else { continue };
         if let Some(slot) = output.get_mut(c.position as usize) {
-            *slot = completed_message(c.position, &notice_line(&c.display_name(), code));
+            *slot = completed_message(c.position, &notice_line(&c.display_name(), code.code, code.reference));
         }
     }
 }
@@ -156,12 +156,48 @@ mod tests {
         );
     }
 
+    const ID: &str = "0193f6c2-8a4e-7b10-9c2d-5e8f1a2b3c4d";
+
+    #[test]
+    fn responses_body_notice_has_the_ref() {
+        let v = body(vec![fc("fc_0", "c0", "{}", "completed"), fc("fc_1", "c1", "{}", "completed")]);
+        let (c, _) = calls(&v).unwrap();
+        let id = uuid::Uuid::try_parse(ID).unwrap();
+        let mut out = v.clone();
+        rewrite(
+            &mut out,
+            &c,
+            &[
+                Some(Blocked {
+                    code: BlockCode::Policy,
+                    reference: Some(id),
+                }),
+                Some(Blocked {
+                    code: BlockCode::Policy,
+                    reference: None,
+                }),
+            ],
+        );
+        assert_eq!(out["output"][0]["content"][0]["text"], format!("[paigasus] tool call \"read\" was blocked (policy). ref={ID}"));
+        assert_eq!(out["output"][1]["content"][0]["text"], "[paigasus] tool call \"read\" was blocked (policy).");
+    }
+
     #[test]
     fn a_blocked_item_becomes_the_completed_message() {
         let v = body(vec![fc("fc_0", "c0", "{}", "completed"), fc("fc_1", "c1", "{\"p\":\"SECRET\"}", "completed")]);
         let (c, _) = calls(&v).unwrap();
         let mut out = v.clone();
-        rewrite(&mut out, &c, &[None, Some(BlockCode::Policy)]);
+        rewrite(
+            &mut out,
+            &c,
+            &[
+                None,
+                Some(Blocked {
+                    code: BlockCode::Policy,
+                    reference: None,
+                }),
+            ],
+        );
         assert_eq!(out["output"][0], v["output"][0]);
         assert_eq!(out["output"][1]["id"], "msg_paigasus_1");
         assert_eq!(out["output"][1]["content"][0]["text"], "[paigasus] tool call \"read\" was blocked (policy).");

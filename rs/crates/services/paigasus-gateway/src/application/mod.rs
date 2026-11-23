@@ -9,4 +9,5 @@ pub mod decision_export;
 pub mod decision_log;
 pub mod detectors;
 pub mod limits;
+pub mod tool_history;
 pub mod tool_policy;

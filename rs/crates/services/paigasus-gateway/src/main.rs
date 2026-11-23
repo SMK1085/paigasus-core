@@ -104,6 +104,13 @@ async fn serve() -> anyhow::Result<()> {
     // breaker's constructor reach the installed recorder. Eager: with `backend = "redis"`, a Redis
     // that is down fails the boot here (Q14).
     let limits = build_limits(config.limits.as_ref()).await?;
+    // SMA-753: the tool history, also after `init` (the metrics) and eager for Redis (spec D10, D11).
+    let history = paigasus_gateway::adapters::history::build_tool_history(
+        paigasus_gateway::adapters::history::history_config_in_use(config.tool_policy.enabled, config.tool_history.as_ref()),
+        Arc::new(SystemClock),
+        Arc::new(OsEntropy),
+    )
+    .await?;
 
     // Outbound clients. IAM connects lazily (a dead IAM does not block startup); the OpenAI client
     // is built with the three split timeout budgets. Neither construction logs the key.
@@ -119,7 +126,7 @@ async fn serve() -> anyhow::Result<()> {
     // SMA-755: one recorder for the decider, the request side and the report site (P-8). The decision log
     // never waits for Redis or NATS, so a broker that is down does not block the boot (spec § 5.6).
     let decision_log = runtime::build_decision_log(&config, Arc::new(SystemClock), Arc::new(OsEntropy)).await?;
-    let tool_policy_runtime = runtime::build_tool_policy(&config, decision_log.recorder)?;
+    let tool_policy_runtime = runtime::build_tool_policy(&config, decision_log.recorder, history.history)?;
     let tool_interception = runtime::tool_interception(&config, &tool_policy_runtime);
     let tool_policy = tool_policy_runtime.policy;
 
@@ -236,10 +243,10 @@ async fn serve() -> anyhow::Result<()> {
 
     // Supervise: stop on the first of a shutdown signal or any task ending, broadcast graceful
     // shutdown to the rest, and surface the first error (SMA-463).
-    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, decision_log.tasks).await
+    runtime::supervise(servers, shutdown_signal(), tx, limits.charge_tasks, history.tasks, decision_log.tasks).await
 }
 
-/// Registers `# HELP`/`# TYPE` exposition text for the 35 metric families listed below (SMA-755 counted
+/// Registers `# HELP`/`# TYPE` exposition text for the 38 metric families listed below (SMA-755 counted
 /// them; the number is a plain count, not a gate). `paigasus-gateway` emits them (spec §4.1 and later), via the `names::` consts so this can't drift from `names::ALL`. Mirrors
 /// the meanings documented in `docs/ops/RUNBOOK-observability.md` §2.3.
 fn describe_gateway_metrics() {
@@ -323,6 +330,18 @@ fn describe_gateway_metrics() {
     describe_histogram!(
         names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS,
         "Seconds one detector stage takes, labeled by side (request, response) and stage (built_in, webhook, judge)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
+        "Tool-history store calls that failed or ran past the request budget, labeled by op (lookup, write, reserve, settle, append) and kind (io, server, decode, deadline)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL,
+        "Ids that a request sent past the cap of 128 in one list, labeled by list (calls, results, refs)."
+    );
+    describe_counter!(
+        names::GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL,
+        "Tool-history events that a write removed, labeled by reason (retention, cap)."
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_NATS_INVALIDATIONS_TOTAL,

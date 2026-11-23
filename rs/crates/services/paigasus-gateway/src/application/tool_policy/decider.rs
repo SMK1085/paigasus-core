@@ -8,6 +8,10 @@
 //! absolute deadline from the hold start (D35), and then decides. The pipeline runs inside this one
 //! future, which the relay polls: still nothing is spawned (D30).
 //!
+//! SMA-753: the decider mints the decision ids first. With a history and a session, the future then
+//! reserves one pending event per call under those ids (spec D8), before the pipeline run. The
+//! decision reads the session findings and the reserve findings. A dropped future drops the reserve.
+//!
 //! The decider writes no log line. It counts the decision metrics and computes the keyed argument digest for
 //! the decision log. The recorder writes the per-decision line (SMA-755). Metrics never hold the arguments
 //! (ADR-0027 (i)).
@@ -18,13 +22,17 @@ use std::time::{Duration, Instant};
 use metrics::counter;
 use paigasus_gateway_core::decision_log::{DecisionDetail, FindingRecord, RecordBasis};
 use paigasus_gateway_core::{
-    CallScan, DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, call_schema, decide_calls, invocation,
+    CallScan, DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, call_schema, decide_calls_with,
+    invocation,
 };
 use paigasus_kernel::detect::Severity;
+use paigasus_kernel::tool_policy::Findings;
 use paigasus_observability::names;
+use uuid::Uuid;
 
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
+use crate::application::tool_history::ToolHistory;
 use crate::config::DetectorSettings;
 use crate::domain::detectors::{DetectBatch, PipelineOutput, Side, Stage, Subject};
 
@@ -33,6 +41,8 @@ use crate::domain::detectors::{DetectBatch, PipelineOutput, Side, Stage, Subject
 pub struct CedarDecider {
     recorder: Arc<DecisionRecorder>,
     detectors: Option<Detectors>,
+    /// The tool history (SMA-753). `None`: the decider reserves nothing.
+    history: Option<Arc<ToolHistory>>,
 }
 
 /// The detector pipeline of the decider and what its deadline needs (D35).
@@ -56,7 +66,11 @@ impl Detectors {
 impl CedarDecider {
     #[must_use]
     pub fn new(recorder: Arc<DecisionRecorder>) -> Self {
-        Self { recorder, detectors: None }
+        Self {
+            recorder,
+            detectors: None,
+            history: None,
+        }
     }
 
     /// Run `pipeline` on the calls of each hold before the decision (SMA-855 § 6.9).
@@ -75,6 +89,19 @@ impl CedarDecider {
         self.detectors.as_ref().map(|d| &d.pipeline)
     }
 
+    /// Reserve the calls of each hold in `history` before the decision (SMA-753, spec D8).
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<ToolHistory>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// The tool history of this holder (SMA-753). A runtime test reads it to check the wiring.
+    #[must_use]
+    pub fn history(&self) -> Option<&Arc<ToolHistory>> {
+        self.history.as_ref()
+    }
+
     /// The recorder of this decider. A runtime test reads it to check that the decider, the request side and
     /// the report site share one recorder (P-8).
     #[must_use]
@@ -83,10 +110,14 @@ impl CedarDecider {
     }
 }
 
-/// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9, SMA-855 § 6.11.3).
-pub const FINDING_KINDS: [&str; 9] = [
+/// The finding kinds that `gateway_tool_policy_findings_total` labels (SMA-755 § 5.9, SMA-753,
+/// SMA-855 § 6.11.3).
+pub const FINDING_KINDS: [&str; 12] = [
     "name_collision",
     "unparsed_arguments",
+    "mixed_sessions",
+    "forged_history",
+    "history_truncated",
     "undeclared_tool",
     "invalid_args",
     "unseen_host",
@@ -111,11 +142,15 @@ pub const DETECTOR_LABELS: [&str; 10] = [
 ];
 
 /// The valid `(kind, detector, severity)` triples (SMA-855 P-9). It is the one source of the label
-/// mapping and of the prime. A finding outside the table counts as `other`.
-pub const FINDING_TRIPLES: [(&str, &str, &str); 13] = [
+/// mapping and of the prime. A finding outside the table counts as `other`. The three history
+/// kinds of SMA-753 come from the gateway with the detector `kernel`.
+pub const FINDING_TRIPLES: [(&str, &str, &str); 16] = [
     ("name_collision", "kernel", "high"),
     ("unparsed_arguments", "kernel", "info"),
     ("unparsed_arguments", "kernel", "medium"),
+    ("mixed_sessions", "kernel", "medium"),
+    ("forged_history", "kernel", "high"),
+    ("history_truncated", "kernel", "low"),
     ("undeclared_tool", "undeclared_tool", "medium"),
     ("invalid_args", "invalid_args", "low"),
     ("unseen_host", "unseen_host", "medium"),
@@ -166,7 +201,7 @@ pub(crate) fn count_finding(side: &'static str, f: &FindingRecord, stage: Option
 }
 
 /// Prime `gateway_tool_policy_findings_total` at zero for every valid triple and the four `other`
-/// triples, on each side: 2 x 17 = 34 series.
+/// triples, on each side: 2 x 20 = 40 series.
 pub fn prime_tool_policy_metrics() {
     for side in ["request", "response"] {
         let others = SEVERITY_LABELS.map(|s| ("other", "other", s));
@@ -247,13 +282,40 @@ fn available(ctx: &DecisionContext) -> Option<&PolicySnapshot> {
     ctx.policy.as_deref().filter(|s| matches!(s.set, PolicySet::Available { .. }))
 }
 
+/// What one hold carries into the decision (SMA-753): the request-level findings that every call
+/// carries, and one decision id per call, minted before the reserve.
+struct HoldFacts {
+    extra: Findings,
+    ids: Vec<Uuid>,
+}
+
+/// Add every kind of `from` to `into`, each with its severity.
+fn merge_findings(into: &mut Findings, from: &Findings) {
+    for kind in from.iter() {
+        if let Some(severity) = from.severity(kind) {
+            into.add(kind, severity);
+        }
+    }
+}
+
 /// Decide the calls from the snapshot of `ctx`. `None` is an unavailable set under `closed`: the
 /// tool policy is on, but the request side did not run, so every call is blocked (fail closed).
 ///
-/// `found` is the pipeline output, `None` when no pipeline ran. `started` is the start of the
-/// overhead timer: the caller starts it before the pipeline run, so the overhead holds the
-/// pipeline time (§ 6.9). It is a tokio instant, so a test with paused time measures it.
-fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall], found: Option<PipelineOutput>, started: tokio::time::Instant) -> Vec<DecidedCall> {
+/// `found` is the pipeline output, `None` when no pipeline ran. `hold` holds the request-level
+/// findings that every call carries and one decision id per call (SMA-753). `started` is the
+/// start of the overhead timer: the caller starts it after the reserve and before the pipeline
+/// run, so the overhead holds the pipeline time (§ 6.9) and counts the reserve time once. It is a
+/// tokio instant, so a test with paused time measures it.
+fn decide_now(
+    recorder: &DecisionRecorder,
+    ctx: &DecisionContext,
+    turn: &ToolTurn,
+    calls: &[ToolCall],
+    found: Option<PipelineOutput>,
+    hold: HoldFacts,
+    started: tokio::time::Instant,
+) -> Vec<DecidedCall> {
+    let HoldFacts { extra, ids } = hold;
     let fallback;
     let snapshot = match ctx.policy.as_deref() {
         Some(s) => s,
@@ -264,7 +326,7 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
     };
     // No scan when no pipeline ran: the kernel then reads the hosts of each call itself.
     let (scans, mut late) = found.map(scans_of).unwrap_or_default();
-    let outcomes = decide_calls(snapshot, turn, calls, &scans, &Instant::now);
+    let outcomes = decide_calls_with(snapshot, turn, calls, &scans, &extra, &Instant::now);
     let mode = snapshot.mode.as_str();
     // The digest is computed inside the timed region, so it is part of the overhead sample (§ 5.3).
     let digests: Vec<_> = calls.iter().map(|c| recorder.digest(&c.arguments)).collect();
@@ -288,7 +350,8 @@ fn decide_now(recorder: &DecisionRecorder, ctx: &DecisionContext, turn: &ToolTur
     outcomes
         .into_iter()
         .zip(digests)
-        .map(|(o, digest)| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, digest)))))
+        .zip(ids)
+        .map(|((o, digest), id)| DecidedCall::new(o.decision, Some(Arc::new(DecisionDetail::new(RecordBasis::from(o.basis), o.cedar, digest)))).with_decision_id(id))
         .collect()
 }
 
@@ -298,22 +361,37 @@ impl ToolCallDecider for CedarDecider {
     }
 
     fn decide_by(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>, hold_start: Instant) -> DecideFuture {
-        // D27: the pipeline runs only with the detectors on and an available policy set.
-        let Some(detectors) = self.detectors.clone().filter(|_| available(&ctx).is_some()) else {
-            let started = tokio::time::Instant::now();
-            return Box::pin(std::future::ready(Ok(decide_now(&self.recorder, &ctx, &turn, &calls, None, started))));
-        };
+        // The ids come first (SMA-753 spec D1): the reserve writes its events under them.
+        let ids: Vec<Uuid> = calls.iter().map(|_| self.recorder.mint_decision_id()).collect();
         let recorder = Arc::clone(&self.recorder);
-        // One future that the relay polls: the pipeline runs inside it, and nothing is spawned (D30).
+        let history = self.history.clone();
+        // D27: the pipeline runs only with the detectors on and an available policy set.
+        let detectors = self.detectors.clone().filter(|_| available(&ctx).is_some());
+        // One future that the relay polls: the reserve and the pipeline run inside it, and nothing
+        // is spawned (SMA-749 D25, D30). A store error is counted inside `reserve` and changes no
+        // decision (SMA-753 PR 1).
         Box::pin(async move {
+            let mut extra = Findings::new();
+            if let Some(session) = ctx.session.as_deref() {
+                merge_findings(&mut extra, &session.findings);
+                if let Some(history) = &history {
+                    // The reserve round trip is part of the overhead sample (SMA-753 spec § 9). Its
+                    // region ends before the timer of `decide_now` starts, so nothing counts twice.
+                    let started = Instant::now();
+                    let found = history.reserve(&ctx, session, &calls, &ids).await;
+                    if let Some(s) = ctx.policy.as_deref() {
+                        s.add_decide_elapsed(started.elapsed());
+                    }
+                    merge_findings(&mut extra, &found);
+                }
+            }
             // The overhead timer starts before the pipeline run (§ 6.9).
             let started = tokio::time::Instant::now();
-            let deadline = detectors.deadline(hold_start);
-            let found = match available(&ctx) {
-                Some(snapshot) => Some(detectors.pipeline.run(call_batch(snapshot, &ctx, &turn, &calls), deadline).await),
-                None => None,
+            let found = match (&detectors, available(&ctx)) {
+                (Some(detectors), Some(snapshot)) => Some(detectors.pipeline.run(call_batch(snapshot, &ctx, &turn, &calls), detectors.deadline(hold_start)).await),
+                _ => None,
             };
-            Ok(decide_now(&recorder, &ctx, &turn, &calls, found, started))
+            Ok(decide_now(&recorder, &ctx, &turn, &calls, found, HoldFacts { extra, ids }, started))
         })
     }
 }
@@ -367,6 +445,21 @@ mod tests {
 
     async fn decide(ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<Decision> {
         decide_full(ctx, turn, call_names).await.into_iter().map(|d| d.decision).collect()
+    }
+
+    #[tokio::test]
+    async fn the_decider_gives_every_call_its_own_decision_id() {
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        let decided = decide_full(ctx.with_policy(out.snapshot), turn, &["x", "y", "rm", "z"]).await;
+        let ids: Vec<_> = decided.iter().map(|d| d.decision_id.expect("an id for every call")).collect();
+        assert!(ids.iter().all(|id| id.get_version_num() == 7));
+        let distinct: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(distinct.len(), 4, "four distinct ids: {ids:?}");
     }
 
     #[tokio::test]
@@ -690,7 +783,7 @@ mod tests {
         for t in FINDING_TRIPLES {
             assert!(FINDING_KINDS.contains(&t.0) && DETECTOR_LABELS.contains(&t.1), "{t:?}");
         }
-        assert_eq!(FINDING_TRIPLES.len(), 13);
+        assert_eq!(FINDING_TRIPLES.len(), 16);
     }
 
     #[test]
@@ -699,8 +792,22 @@ mod tests {
         for k in FINDING_KINDS {
             assert_eq!(finding_label(k), k);
         }
-        assert_eq!(FINDING_KINDS.len(), 9);
+        assert_eq!(FINDING_KINDS.len(), 12);
         assert_eq!(DETECTOR_LABELS.len(), 10);
+    }
+
+    #[test]
+    fn each_history_finding_has_its_own_label_and_triple() {
+        use paigasus_kernel::detect::{FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS};
+        assert_eq!(finding_label(MIXED_SESSIONS), "mixed_sessions");
+        assert_eq!(finding_label(FORGED_HISTORY), "forged_history");
+        assert_eq!(finding_label(HISTORY_TRUNCATED), "history_truncated");
+        assert_eq!(finding_label("something_new"), "other");
+        assert_eq!(FINDING_KINDS[FINDING_KINDS.len() - 1], "other");
+        let rec = |k: &str, s| FindingRecord::new(k, Some(s), "kernel", "");
+        assert_eq!(finding_labels(&rec(FORGED_HISTORY, Severity::High), None), ("forged_history", "kernel", "high"));
+        assert_eq!(finding_labels(&rec(MIXED_SESSIONS, Severity::Medium), None), ("mixed_sessions", "kernel", "medium"));
+        assert_eq!(finding_labels(&rec(HISTORY_TRUNCATED, Severity::Low), None), ("history_truncated", "kernel", "low"));
     }
 
     #[tokio::test]
@@ -829,5 +936,157 @@ mod tests {
         );
         assert!(snap.decide_elapsed() > Duration::ZERO, "the decide time is in the snapshot");
         assert!(snap.overhead() >= Duration::from_secs(5), "the overhead holds the request-side time");
+    }
+
+    // ---- the reserve (SMA-753) -------------------------------------------------------------------
+
+    use paigasus_gateway_core::{SessionContext, StoreBudget};
+
+    use crate::adapters::history::memory::MemorySessionStore;
+    use crate::application::tool_history::ToolHistory;
+    use crate::domain::decision_log::OsEntropy;
+    use crate::domain::limits::{SystemClock, UnavailableKind};
+    use crate::domain::tool_history::{
+        AppendReply, AppendRequest, EventKind, EventVerdict, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, Scope, SessionStore, SettleRequest, WriteRequest,
+    };
+
+    /// A store whose every call fails.
+    struct Down;
+
+    fn down() -> HistoryStoreError {
+        HistoryStoreError::Unavailable {
+            kind: UnavailableKind::Io,
+            detail: "down".into(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for Down {
+        async fn lookup(&self, _: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            Err(down())
+        }
+        async fn write(&self, _: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            Err(down())
+        }
+        async fn reserve(&self, _: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            Err(down())
+        }
+        async fn settle(&self, _: &SettleRequest) -> Result<(), HistoryStoreError> {
+            Err(down())
+        }
+        async fn append(&self, _: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            Err(down())
+        }
+    }
+
+    fn history_over(store: Arc<dyn SessionStore>) -> Arc<ToolHistory> {
+        Arc::new(ToolHistory::new(store, Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(1)))
+    }
+
+    fn session(findings: Findings) -> Arc<SessionContext> {
+        Arc::new(SessionContext::new(
+            ORG_A,
+            uuid::Uuid::from_u128(0x0190a1f0_0000_7000_8000_000000000005),
+            1,
+            findings,
+            StoreBudget::new(Duration::from_secs(1)),
+        ))
+    }
+
+    /// The context of a request under `tenant`, in enforce mode.
+    async fn ctx_under(tenant: &str) -> (DecisionContext, ToolTurn) {
+        let source = FakeSource::new(testing::FLOOR, tenant);
+        let policy = testing::policy(&source, settings(TenantMode::Enforce));
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        (ctx.with_policy(out.snapshot), turn)
+    }
+
+    async fn decide_by(decider: &CedarDecider, ctx: DecisionContext, turn: ToolTurn, call_names: &[&str]) -> Vec<DecidedCall> {
+        decider.decide(Arc::new(ctx), Arc::new(turn), calls(call_names)).await.expect("decide")
+    }
+
+    #[tokio::test]
+    async fn the_reserve_runs_before_the_decision_and_uses_the_decision_ids() {
+        let store = Arc::new(MemorySessionStore::new());
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(store.clone()));
+        let s = session(Findings::new());
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let decided = decide_by(&decider, ctx.with_session(Arc::clone(&s)), turn, &["ok", "rm"]).await;
+        assert_eq!(decided.iter().map(|d| d.decision).collect::<Vec<_>>(), [Decision::Allow, BLOCK_POLICY]);
+        for (tool, d) in ["ok", "rm"].into_iter().zip(&decided) {
+            let events = store.events(ORG_A, Scope::Session, &s.session_id.to_string(), tool);
+            assert_eq!(events.len(), 1, "one pending event for {tool}: {events:?}");
+            assert_eq!((events[0].kind, events[0].verdict), (EventKind::Call, EventVerdict::Pending), "{tool}");
+            assert_eq!(Some(events[0].id), d.decision_id, "the event id is the decision id of {tool}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_finding_reaches_the_cedar_context() {
+        const TENANT: &str = r#"
+            @id("p") permit(principal, action, resource);
+            @id("mixed") forbid(principal, action, resource) when { context.findings.contains("mixed_sessions") };
+        "#;
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
+        let mut mixed = Findings::new();
+        mixed.add(paigasus_kernel::detect::MIXED_SESSIONS, Severity::Medium);
+        let (ctx, turn) = ctx_under(TENANT).await;
+        let blocked = decide_by(&decider, ctx.clone().with_session(session(mixed)), turn.clone(), &["ok"]).await;
+        assert_eq!(blocked[0].decision, BLOCK_POLICY);
+        let allowed = decide_by(&decider, ctx.with_session(session(Findings::new())), turn, &["ok"]).await;
+        assert_eq!(allowed[0].decision, Decision::Allow, "the control: no finding, no block");
+    }
+
+    #[tokio::test]
+    async fn a_reserve_error_still_decides() {
+        let failing = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(Arc::new(Down)));
+        let plain = CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
+        let names = ["ok", "rm", "x"];
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let s = session(Findings::new());
+        let with_error = decide_by(&failing, ctx.clone().with_session(Arc::clone(&s)), turn.clone(), &names).await;
+        let without = decide_by(&plain, ctx, turn, &names).await;
+        let effects = |d: &[DecidedCall]| d.iter().map(|c| c.decision).collect::<Vec<_>>();
+        assert_eq!(effects(&with_error), effects(&without));
+        assert!(with_error.iter().all(|d| d.decision_id.is_some()), "every call keeps its id");
+        assert!(s.budget.is_failed(), "the reserve did run and fail");
+    }
+
+    /// The memory store, with a reserve that first waits `.1`.
+    struct SlowReserve(MemorySessionStore, Duration);
+
+    #[async_trait::async_trait]
+    impl SessionStore for SlowReserve {
+        async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            self.0.lookup(req).await
+        }
+        async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.write(req).await
+        }
+        async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            tokio::time::sleep(self.1).await;
+            self.0.reserve(req).await
+        }
+        async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+            self.0.settle(req).await
+        }
+        async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.append(req).await
+        }
+    }
+
+    /// Spec § 9: the overhead sample holds the reserve round trip.
+    #[tokio::test]
+    async fn the_reserve_time_is_in_the_overhead_sample() {
+        const WAIT: Duration = Duration::from_millis(80);
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(Arc::new(SlowReserve(MemorySessionStore::new(), WAIT))));
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let snap = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
+        let decided = decide_by(&decider, ctx.with_session(session(Findings::new())), turn, &["ok"]).await;
+        assert_eq!(decided[0].decision, Decision::Allow);
+        assert!(snap.decide_elapsed() >= WAIT, "the reserve wait is in the decide time: {:?}", snap.decide_elapsed());
     }
 }

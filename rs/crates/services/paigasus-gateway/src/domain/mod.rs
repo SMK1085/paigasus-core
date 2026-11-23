@@ -7,6 +7,7 @@
 pub mod decision_log;
 pub mod detectors;
 pub mod limits;
+pub mod tool_history;
 pub mod tool_policy;
 
 /// Which credential authenticated the request. `Oidc`, not `User`: an OIDC bearer can belong to a

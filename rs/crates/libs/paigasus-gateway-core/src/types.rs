@@ -99,6 +99,18 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    /// The item `id` of a Responses `local_shell_call`, which a later `local_shell_call_output`
+    /// can name its call by. `arguments` holds the whole item for this kind. `None` for every
+    /// other kind, and for a missing or non-string `id`.
+    #[must_use]
+    pub fn item_id(&self) -> Option<String> {
+        if self.kind != ToolCallKind::LocalShell {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(&self.arguments).ok()?;
+        v.get("id")?.as_str().map(str::to_owned)
+    }
+
     /// `"<namespace>.<name>"`, or `name` when the call has no namespace.
     #[must_use]
     pub fn display_name(&self) -> String {

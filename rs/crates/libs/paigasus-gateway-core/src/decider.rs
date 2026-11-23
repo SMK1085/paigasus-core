@@ -9,9 +9,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
+use uuid::Uuid;
+
 use crate::decision_log::DecisionDetail;
 use crate::interceptor::DeciderError;
 use crate::policy::PolicySnapshot;
+use crate::session::SessionContext;
 use crate::turn::ToolTurn;
 use crate::types::{Decision, ToolCall};
 
@@ -34,6 +37,8 @@ pub struct DecisionContext {
     pub ingress: String,
     /// The model of the request (SMA-755). Empty by default.
     pub model: String,
+    /// The session of the request (SMA-753). `None` when the gateway keeps no session.
+    pub session: Option<Arc<SessionContext>>,
 }
 
 impl DecisionContext {
@@ -47,6 +52,7 @@ impl DecisionContext {
             api_key_id: None,
             ingress: String::new(),
             model: String::new(),
+            session: None,
         }
     }
 
@@ -65,6 +71,13 @@ impl DecisionContext {
         self.policy = Some(snapshot);
         self
     }
+
+    /// Attach the session of the request (SMA-753).
+    #[must_use]
+    pub fn with_session(mut self, s: Arc<SessionContext>) -> Self {
+        self.session = Some(s);
+        self
+    }
 }
 
 /// The decision of one call, with what the decider knows about it for the decision log (SMA-755).
@@ -74,18 +87,28 @@ pub struct DecidedCall {
     pub decision: Decision,
     /// The detail for the record. `None` when the decider has nothing to add.
     pub detail: Option<Arc<DecisionDetail>>,
+    /// The id of the decision record of this call. A block notice carries it. `None` when the
+    /// decider has no record id.
+    pub decision_id: Option<Uuid>,
 }
 
 impl DecidedCall {
     #[must_use]
     pub fn new(decision: Decision, detail: Option<Arc<DecisionDetail>>) -> Self {
-        Self { decision, detail }
+        Self { decision, detail, decision_id: None }
+    }
+
+    /// Set the decision id of the call.
+    #[must_use]
+    pub fn with_decision_id(mut self, id: Uuid) -> Self {
+        self.decision_id = Some(id);
+        self
     }
 }
 
 impl From<Decision> for DecidedCall {
     fn from(decision: Decision) -> Self {
-        Self { decision, detail: None }
+        Self::new(decision, None)
     }
 }
 
@@ -150,7 +173,7 @@ mod tests {
     #[test]
     fn a_decision_converts_to_a_call_without_detail() {
         let d = DecidedCall::from(Decision::Allow);
-        assert_eq!((d.decision, d.detail), (Decision::Allow, None));
+        assert_eq!((d.decision, d.detail, d.decision_id), (Decision::Allow, None, None));
         assert_eq!(DecidedCall::new(Decision::Allow, None), DecidedCall::from(Decision::Allow));
     }
 

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use paigasus_kernel::CedarUid;
 use paigasus_kernel::detect::{Finding, Severity};
-use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, NAME_COLLISION, PolicyRef, SessionInfo, UNPARSED_ARGUMENTS, Verdict};
+use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, NAME_COLLISION, PolicyRef, SessionInfo, UNPARSED_ARGUMENTS, Verdict};
 use uuid::Uuid;
 
 use crate::policy::{PolicyBasis, TenantMode};
@@ -161,11 +161,15 @@ pub fn records_of(given: &[Finding], v: &Verdict) -> Vec<FindingRecord> {
 }
 
 /// The fixed severity of a kind, for a finding of unknown severity (SMA-855 § 6.11.2, P-8). Only
-/// `name_collision` and `unparsed_arguments` existed before SMA-855. Any other kind is `High`.
+/// `name_collision`, `unparsed_arguments` and the three history kinds of SMA-753 existed before
+/// SMA-855. Each has the severity that the gateway gives it now. Any other kind is `High`.
 pub(crate) fn inferred_severity(kind: &str) -> Severity {
     match kind {
         NAME_COLLISION => Severity::High,
         UNPARSED_ARGUMENTS => Severity::Info,
+        FORGED_HISTORY => Severity::High,
+        MIXED_SESSIONS => Severity::Medium,
+        HISTORY_TRUNCATED => Severity::Low,
         _ => Severity::High,
     }
 }
@@ -270,6 +274,8 @@ pub struct CallFacts {
     pub id: Option<String>,
     pub namespace: Option<String>,
     pub name: String,
+    /// The item `id` of a Responses `local_shell_call`. `None` for every other call.
+    pub item_id: Option<String>,
 }
 
 impl CallFacts {
@@ -280,6 +286,7 @@ impl CallFacts {
             id: call.id.clone(),
             namespace: call.namespace.clone(),
             name: call.name.clone(),
+            item_id: call.item_id(),
         }
     }
 }
@@ -292,12 +299,27 @@ pub struct ReportedCall {
     pub entry: ReportEntry,
     pub call: Option<CallFacts>,
     pub detail: Option<Arc<DecisionDetail>>,
+    /// The id that the decider gave the decision of this call. `None` when the decision vector
+    /// is not aligned with the calls, or when the decider gave no id.
+    pub decision_id: Option<Uuid>,
 }
 
 impl ReportedCall {
     #[must_use]
     pub fn new(entry: ReportEntry, call: Option<CallFacts>, detail: Option<Arc<DecisionDetail>>) -> Self {
-        Self { entry, call, detail }
+        Self {
+            entry,
+            call,
+            detail,
+            decision_id: None,
+        }
+    }
+
+    /// Set the decision id of the call.
+    #[must_use]
+    pub fn with_decision_id(mut self, id: Option<Uuid>) -> Self {
+        self.decision_id = id;
+        self
     }
 }
 
@@ -419,6 +441,11 @@ mod tests {
         assert_eq!(
             [inferred_severity("name_collision"), inferred_severity("unparsed_arguments"), inferred_severity("zzz")],
             [Severity::High, Severity::Info, Severity::High]
+        );
+        // The three history kinds of SMA-753 (a gateway before SMA-855 wrote them with no severity).
+        assert_eq!(
+            [inferred_severity("forged_history"), inferred_severity("mixed_sessions"), inferred_severity("history_truncated")],
+            [Severity::High, Severity::Medium, Severity::Low]
         );
     }
 

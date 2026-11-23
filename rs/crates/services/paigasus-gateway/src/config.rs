@@ -62,6 +62,10 @@ pub struct GatewayConfig {
     /// SMA-755: the tool decision log. Off by default (§ 5.12).
     #[serde(default)]
     pub decision_log: DecisionLogConfig,
+    /// SMA-753: the tool-call history store. `None` (no `[tool_history]` table, the default)
+    /// means no history and no Redis connection (D12). The `Defaults` layer has no entry on purpose.
+    #[serde(default)]
+    pub tool_history: Option<ToolHistoryConfig>,
 }
 
 /// The IAM gRPC client endpoint G4 dials (`Introspect`/authorization calls). `tls` governs
@@ -226,6 +230,89 @@ pub enum LimitsBackend {
     #[default]
     Memory,
     Redis,
+}
+
+/// D10: which store backs `[tool_history]`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HistoryBackend {
+    #[default]
+    Memory,
+    Redis,
+}
+
+/// `[tool_history]` (SMA-753 § D10). A misspelt key fails extraction (`deny_unknown_fields`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolHistoryConfig {
+    /// `memory` (one replica, the default) or `redis` (shared across replicas).
+    pub backend: HistoryBackend,
+    /// Required for `backend = "redis"`, rejected for `memory`. It can carry a password, so it is
+    /// skipped on `Serialize` (the `limits.redis_url` pattern). Set it through `GATEWAY_TOOL_HISTORY__REDIS_URL`.
+    #[serde(skip_serializing)]
+    pub redis_url: Option<SecretString>,
+    /// The time limit of one store call: `"<n>ms"` or `"<n>s"`. It must be shorter than
+    /// `tool_interception.decide_timeout_secs`.
+    pub deadline: String,
+}
+
+impl Default for ToolHistoryConfig {
+    fn default() -> Self {
+        ToolHistoryConfig {
+            backend: HistoryBackend::default(),
+            redis_url: None,
+            deadline: "1s".to_string(),
+        }
+    }
+}
+
+/// Parse `"<n>ms"` or `"<n>s"`, where n is a positive integer.
+///
+/// # Errors
+/// A message that states the accepted form.
+pub fn parse_deadline(s: &str) -> Result<Duration, String> {
+    let bad = || format!("{s:?} is not a duration: use \"<n>ms\" or \"<n>s\" with n a positive integer");
+    let (digits, to_duration): (&str, fn(u64) -> Duration) = if let Some(d) = s.strip_suffix("ms") {
+        (d, Duration::from_millis)
+    } else if let Some(d) = s.strip_suffix('s') {
+        (d, Duration::from_secs)
+    } else {
+        return Err(bad());
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    match digits.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(to_duration(n)),
+        _ => Err(bad()),
+    }
+}
+
+impl ToolHistoryConfig {
+    /// # Errors
+    /// A message that names the key of the first invalid value.
+    pub fn validate(&self, ti: &ToolInterceptionConfig) -> Result<(), String> {
+        let deadline = parse_deadline(&self.deadline).map_err(|e| format!("tool_history.deadline: {e}"))?;
+        if deadline >= Duration::from_secs(ti.decide_timeout_secs) {
+            return Err(format!(
+                "tool_history.deadline ({}) must be less than tool_interception.decide_timeout_secs ({})",
+                self.deadline, ti.decide_timeout_secs
+            ));
+        }
+        match self.backend {
+            HistoryBackend::Redis if is_blank(&self.redis_url) => Err("tool_history.backend = \"redis\" requires tool_history.redis_url (set GATEWAY_TOOL_HISTORY__REDIS_URL)".to_string()),
+            HistoryBackend::Memory if self.redis_url.is_some() => {
+                Err("tool_history.redis_url is set but tool_history.backend is \"memory\": the history would not be shared; set tool_history.backend = \"redis\" or unset the URL".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Only after `validate`. An invalid value reads as the default of one second.
+    #[must_use]
+    pub fn deadline(&self) -> Duration {
+        parse_deadline(&self.deadline).unwrap_or(Duration::from_secs(1))
+    }
 }
 
 /// `[dpop]` (SMA-700 § 4.10). With `enabled`, the gateway accepts `Authorization: DPoP <token>`
@@ -632,6 +719,9 @@ impl GatewayConfig {
         self.tool_interception.validate()?;
         self.responses.validate()?;
         self.tool_policy.validate(&self.tool_interception)?;
+        if let Some(tool_history) = &self.tool_history {
+            tool_history.validate(&self.tool_interception)?;
+        }
         self.decision_log.validate(&self.tool_policy)?;
         // SMA-775: the cross-table rule that `ToolPolicyConfig::validate` cannot see (it has no `iam`).
         // A blank or padded path is refused at all times (as a blank `tool_policy.nats.creds_file` is).
@@ -1590,6 +1680,109 @@ mod tests {
             assert_eq!(limits.budget_period, BudgetPeriod::Daily);
             Ok(())
         });
+    }
+
+    fn th_toml(body: &str) -> String {
+        format!("{}\n[tool_history]\n{body}\n", valid_toml())
+    }
+
+    #[test]
+    fn parse_deadline_accepts_ms_and_s() {
+        assert_eq!(parse_deadline("1s"), Ok(Duration::from_millis(1000)));
+        assert_eq!(parse_deadline("250ms"), Ok(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn parse_deadline_refuses_other_forms() {
+        for s in ["", "0s", "0ms", "1.5s", "1m", " 1s", "-1s", "s", "ms", "1 s", "+1s"] {
+            assert!(parse_deadline(s).is_err(), "{s:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn no_tool_history_table_is_none() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.tool_history.is_none(), "D12: no table means no history");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_default_deadline_is_one_second() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &th_toml(""))?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            let th = cfg.tool_history.as_ref().expect("an empty table is Some");
+            assert_eq!(th.backend, HistoryBackend::Memory);
+            assert_eq!(th.deadline, "1s");
+            assert_eq!(th.deadline(), Duration::from_secs(1));
+            assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn validate_rejects_each_bad_tool_history_value_and_names_the_key() {
+        let cases = [
+            ("deadline = \"\"", "tool_history.deadline"),
+            ("deadline = \"0s\"", "tool_history.deadline"),
+            ("deadline = \"1.5s\"", "tool_history.deadline"),
+            ("deadline = \"1m\"", "tool_history.deadline"),
+            (
+                "deadline = \"5s\"\n[tool_interception]\ndecide_timeout_secs = 5",
+                "tool_history.deadline (5s) must be less than tool_interception.decide_timeout_secs (5)",
+            ),
+            ("backend = \"redis\"", "tool_history.backend = \"redis\" requires tool_history.redis_url"),
+            ("backend = \"redis\"\nredis_url = \"  \"", "tool_history.backend = \"redis\" requires tool_history.redis_url"),
+            ("redis_url = \"redis://127.0.0.1:6379\"", "tool_history.redis_url is set but tool_history.backend is \"memory\""),
+        ];
+        for (body, want) in cases {
+            figment::Jail::expect_with(|jail| {
+                // A `[tool_interception]` table inside `body` must follow the `[tool_history]` keys.
+                jail.create_file("gateway.toml", &th_toml(body))?;
+                let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+                let err = cfg.validate().expect_err(body);
+                assert!(err.contains(want), "{body}: got {err}");
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn a_misspelt_tool_history_key_fails_extraction() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", &th_toml("deadlin = \"1s\""))?;
+            assert!(GatewayConfig::figment().extract::<GatewayConfig>().is_err());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_redis_url_comes_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            jail.set_env("GATEWAY_TOOL_HISTORY__BACKEND", "redis");
+            jail.set_env("GATEWAY_TOOL_HISTORY__REDIS_URL", "redis://:hunter2@127.0.0.1:6379/3");
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+            let th = cfg.tool_history.as_ref().expect("the env vars create the table");
+            assert_eq!(th.backend, HistoryBackend::Redis);
+            assert_eq!(th.redis_url.as_ref().map(|u| u.expose_secret().to_owned()), Some("redis://:hunter2@127.0.0.1:6379/3".to_owned()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_redis_url_is_not_serialized() {
+        let th = ToolHistoryConfig {
+            backend: HistoryBackend::Redis,
+            redis_url: Some(SecretString::from("redis://:hunter2@h:6379".to_owned())),
+            ..ToolHistoryConfig::default()
+        };
+        let json = serde_json::to_string(&th).expect("serializes");
+        assert!(!json.contains("hunter2") && !json.contains("redis_url"), "{json}");
     }
 
     fn ti_toml(body: &str) -> String {

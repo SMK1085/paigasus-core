@@ -31,6 +31,7 @@ use crate::adapters::policy_source::file::FilePolicySource;
 use crate::adapters::policy_source::iam::IamPolicySource;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
+use crate::application::tool_history::ToolHistory;
 use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
 use crate::config::{GatewayConfig, PolicySourceConfig};
 use crate::domain::decision_log::{Entropy, TracingDecisionLog};
@@ -57,6 +58,9 @@ pub const DECISION_LOG_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 ///   first `changed().await` correctly waits.
 /// - `charges`: the Redis limit store's spawned charges (SMA-677 D16). After the servers drain,
 ///   they get at most [`CHARGE_DRAIN_BUDGET`]; the rest are counted as dropped.
+/// - `history`: the settle and append tasks of the tool history (SMA-753). They drain together with the charges, for at
+///   most [`CHARGE_DRAIN_BUDGET`] in all. A settle that still runs is lost and logged. It leaves its events `pending`,
+///   and `pending` events still count.
 /// - `decision_log`: the writer and the relay run outside `servers`, on a shutdown watch of their own (P-18).
 ///   They drain last, after the servers and after the charges, because a server that stops can still
 ///   record a decision. They get at most [`DECISION_LOG_DRAIN_BUDGET`]. They never end the gateway.
@@ -68,6 +72,7 @@ pub async fn supervise(
     shutdown: impl Future<Output = ()>,
     tx: watch::Sender<()>,
     charges: Option<TaskTracker>,
+    history: Option<TaskTracker>,
     decision_log: Option<DecisionLogTasks>,
 ) -> anyhow::Result<()> {
     // Stop on the first of: shutdown signal, or a server task ending.
@@ -108,9 +113,19 @@ pub async fn supervise(
             Err(_) => {}
         }
     }
-    if let Some(charges) = charges {
-        drain_charges(&charges, CHARGE_DRAIN_BUDGET).await;
-    }
+    // The charge drain and the history drain run together, so the worst case is one budget, not two.
+    tokio::join!(
+        async {
+            if let Some(charges) = &charges {
+                drain_charges(charges, CHARGE_DRAIN_BUDGET).await;
+            }
+        },
+        async {
+            if let Some(history) = &history {
+                drain_history(history, CHARGE_DRAIN_BUDGET).await;
+            }
+        }
+    );
     if let Some(tasks) = decision_log {
         tasks.drain(DECISION_LOG_DRAIN_BUDGET).await;
     }
@@ -233,6 +248,20 @@ pub async fn drain_charges(charges: &TaskTracker, budget: Duration) -> usize {
     lost
 }
 
+/// Close the history tracker and wait at most `budget`. Returns the number of tasks that were lost.
+async fn drain_history(history: &TaskTracker, budget: Duration) -> usize {
+    history.close();
+    if tokio::time::timeout(budget, history.wait()).await.is_ok() {
+        return 0;
+    }
+    let lost = history.len();
+    tracing::warn!(
+        lost,
+        "shutdown: tool history tasks still running after the drain budget were lost (a lost settle leaves its events pending)"
+    );
+    lost
+}
+
 /// SMA-752 D19: what the composition root wires for the tool policy.
 pub struct ToolPolicyRuntime {
     /// The cache (for its refresh task) and the request side. `None` with `[tool_policy] enabled = false`.
@@ -249,6 +278,8 @@ pub struct ToolPolicyRuntime {
     /// The one detector pipeline (SMA-855 § 6.6.4). `None` with the tool policy off or with
     /// `[tool_policy.detectors] enabled = false`.
     pub detectors: Option<Arc<DetectorPipeline>>,
+    /// The tool history (SMA-753). `None` with the tool policy off or without `[tool_history]`.
+    pub history: Option<Arc<ToolHistory>>,
 }
 
 /// The tool interception of the composition root, only with `[tool_interception] enabled = true`.
@@ -263,6 +294,7 @@ pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Opti
             limits: config.tool_interception.limits(),
             decider: Arc::clone(&rt.decider),
             recorder: rt.recorder.clone(),
+            history: rt.history.clone(),
         })
     })
 }
@@ -274,14 +306,18 @@ pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Opti
 /// # Errors
 ///
 /// `enabled = true` with no `[tool_policy.source]` (a config that skipped `validate`).
-pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>) -> anyhow::Result<ToolPolicyRuntime> {
+pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>, history: Option<Arc<ToolHistory>>) -> anyhow::Result<ToolPolicyRuntime> {
     if !config.tool_policy.enabled {
+        if history.is_some() {
+            tracing::info!("[tool_history] is set, but the tool policy is off: the history is not used");
+        }
         return Ok(ToolPolicyRuntime {
             policy: None,
             decider: Arc::new(AllowAll),
             cedar: None,
             recorder: None,
             detectors: None,
+            history: None,
         });
     }
     let settings = config.tool_policy.settings();
@@ -318,16 +354,19 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
     if let Some(pipeline) = &detectors {
         cedar = cedar.with_detectors(Arc::clone(pipeline), config.tool_interception.limits().decide_timeout, config.tool_policy.detector_settings());
     }
+    let mut request_side = RequestToolPolicy::new(Arc::clone(&cache), settings, Arc::clone(&recorder)).with_detectors(detectors.clone(), config.tool_policy.detector_settings());
+    if let Some(h) = &history {
+        cedar = cedar.with_history(Arc::clone(h));
+        request_side = request_side.with_history(Arc::clone(h));
+    }
     let cedar = Arc::new(cedar);
     Ok(ToolPolicyRuntime {
-        policy: Some((
-            Arc::clone(&cache),
-            Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder)).with_detectors(detectors.clone(), config.tool_policy.detector_settings())),
-        )),
+        policy: Some((cache, Arc::new(request_side))),
         decider: Arc::clone(&cedar) as Arc<dyn ToolCallDecider>,
         cedar: Some(cedar),
         recorder: Some(recorder),
         detectors,
+        history,
     })
 }
 
@@ -413,7 +452,7 @@ mod tool_policy_tests {
     #[tokio::test]
     async fn the_tool_policy_off_builds_nothing_and_allows_every_call() {
         let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
-        let rt = build_tool_policy(&cfg, rec()).expect("builds");
+        let rt = build_tool_policy(&cfg, rec(), None).expect("builds");
         assert!(rt.policy.is_none());
         assert_eq!(decide_one(&rt.decider).await, Decision::Allow);
     }
@@ -429,7 +468,7 @@ mod tool_policy_tests {
             ),
             true,
         );
-        let rt = build_tool_policy(&cfg, rec()).expect("builds");
+        let rt = build_tool_policy(&cfg, rec(), None).expect("builds");
         assert!(rt.policy.is_some());
         assert_eq!(decide_one(&rt.decider).await, Decision::Block { code: BlockCode::PolicyUnavailable });
     }
@@ -438,7 +477,7 @@ mod tool_policy_tests {
     #[test]
     fn the_tool_policy_on_without_a_source_is_an_error() {
         let cfg = config(&format!("{BASE}[tool_policy]\nenabled = true\non_policy_unavailable = \"open\"\n"), false);
-        let err = build_tool_policy(&cfg, rec()).err().expect("an error");
+        let err = build_tool_policy(&cfg, rec(), None).err().expect("an error");
         assert!(err.to_string().contains("tool_policy.source"), "{err}");
     }
 
@@ -465,7 +504,7 @@ mod tool_policy_tests {
         let key = DigestKey::new("k1".into(), "k".repeat(32).into()).expect("key");
         let recorder = Arc::new(DecisionRecorder::new(Arc::new(MemoryDecisionLog::new(true)), Arc::new(SystemClock), Arc::new(OsEntropy), Some(key)));
         let cfg = enabled_config();
-        let rt = build_tool_policy(&cfg, Arc::clone(&recorder)).expect("builds");
+        let rt = build_tool_policy(&cfg, Arc::clone(&recorder), None).expect("builds");
         let (_, request_side) = rt.policy.as_ref().expect("on");
         assert!(Arc::ptr_eq(request_side.recorder(), &recorder), "the request side");
         assert!(Arc::ptr_eq(rt.recorder.as_ref().expect("a recorder"), &recorder), "the runtime");
@@ -482,7 +521,7 @@ mod tool_policy_tests {
     /// holds that same pipeline.
     #[test]
     fn detectors_on_build_one_pipeline_for_the_decider() {
-        let rt = build_tool_policy(&enabled_config(), rec()).expect("builds");
+        let rt = build_tool_policy(&enabled_config(), rec(), None).expect("builds");
         let pipeline = rt.detectors.as_ref().expect("the detectors are on by default");
         let held = rt.cedar.as_ref().and_then(|c| c.pipeline()).expect("the decider holds the pipeline");
         assert!(Arc::ptr_eq(pipeline, held));
@@ -498,14 +537,14 @@ mod tool_policy_tests {
             true,
         );
         let (logs, _guard) = paigasus_logging::test_support::capture_logs();
-        let rt = build_tool_policy(&cfg, rec()).expect("builds");
+        let rt = build_tool_policy(&cfg, rec(), None).expect("builds");
         assert!(rt.detectors.is_none());
         assert!(rt.cedar.as_ref().expect("the Cedar decider").pipeline().is_none());
         let text = logs.text();
         assert_eq!(text.matches("tool-policy detectors are off: findings come only from the kernel").count(), 1, "{text}");
         // With the detectors on, the line does not appear.
         let (logs, _guard) = paigasus_logging::test_support::capture_logs();
-        build_tool_policy(&enabled_config(), rec()).expect("builds");
+        build_tool_policy(&enabled_config(), rec(), None).expect("builds");
         assert!(!logs.text().contains("tool-policy detectors are off"));
     }
 
@@ -513,7 +552,7 @@ mod tool_policy_tests {
     #[test]
     fn the_tool_policy_off_keeps_no_recorder() {
         let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
-        let rt = build_tool_policy(&cfg, rec()).expect("builds");
+        let rt = build_tool_policy(&cfg, rec(), None).expect("builds");
         assert!(rt.recorder.is_none());
         assert!(tool_interception(&cfg, &rt).expect("on").recorder.is_none());
     }
@@ -524,7 +563,7 @@ mod tool_policy_tests {
         let debugging = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = debugging.snapshotter();
         let _local = metrics::set_default_local_recorder(&debugging);
-        build_tool_policy(&enabled_config(), rec()).expect("builds");
+        build_tool_policy(&enabled_config(), rec(), None).expect("builds");
         let others = ["info", "low", "medium", "high"].map(|s| ("other", "other", s));
         let mut n = 0;
         for side in ["request", "response"] {
@@ -535,14 +574,14 @@ mod tool_policy_tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 34);
+        assert_eq!(n, 40);
         let series = snapshotter
             .snapshot()
             .into_vec()
             .into_iter()
             .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL)
             .count();
-        assert_eq!(series, 34);
+        assert_eq!(series, 40);
     }
 
     /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.
@@ -566,7 +605,7 @@ mod tool_policy_tests {
     #[tokio::test]
     async fn the_nats_subscription_is_built_only_with_the_policy_on_and_a_nats_table() {
         let url = format!("nats://127.0.0.1:{}", closed_port());
-        let cache = build_tool_policy(&tp_config(true, None), rec()).expect("builds").policy.expect("on").0;
+        let cache = build_tool_policy(&tp_config(true, None), rec(), None).expect("builds").policy.expect("on").0;
 
         assert!(build_policy_events(&tp_config(true, None), &cache).await.expect("no error").is_none(), "no nats table: refresh only");
         assert!(build_policy_events(&tp_config(false, Some(&url)), &cache).await.expect("no error").is_none(), "the tool policy is off");
@@ -621,7 +660,7 @@ mod tool_policy_tests {
         assert!(dl.recorder.log().wants_digest(), "the Redis log wants the digest");
         let tasks = dl.tasks.expect("the three tasks");
         let recorder = dl.recorder;
-        let rt = build_tool_policy(&cfg, Arc::clone(&recorder)).expect("builds");
+        let rt = build_tool_policy(&cfg, Arc::clone(&recorder), None).expect("builds");
         let (_, request_side) = rt.policy.as_ref().expect("on");
         assert!(Arc::ptr_eq(request_side.recorder(), &recorder), "the request side");
         assert!(Arc::ptr_eq(rt.cedar.as_ref().expect("cedar").recorder(), &recorder), "the decider");
@@ -635,11 +674,52 @@ mod tool_policy_tests {
     async fn a_missing_creds_file_is_a_boot_error_without_the_url() {
         let mut cfg = tp_config(true, Some("nats://user:hunter2@127.0.0.1:1"));
         cfg.tool_policy.nats.as_mut().expect("nats").creds_file = Some("/nonexistent/gw.creds".to_string());
-        let cache = build_tool_policy(&cfg, rec()).expect("builds").policy.expect("on").0;
+        let cache = build_tool_policy(&cfg, rec(), None).expect("builds").policy.expect("on").0;
         let err = build_policy_events(&cfg, &cache).await.err().expect("an error");
         let text = format!("{err:#}");
         assert!(text.contains("/nonexistent/gw.creds"), "{text}");
         assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    /// SMA-753: one `ToolHistory` reaches the request side, the decider and the report site.
+    #[tokio::test]
+    async fn the_history_reaches_the_request_side_the_decider_and_the_report_site() {
+        use crate::adapters::history::MemorySessionStore;
+        use crate::domain::decision_log::OsEntropy;
+        use crate::domain::limits::SystemClock;
+
+        let history = Arc::new(ToolHistory::new(
+            Arc::new(MemorySessionStore::new()),
+            Arc::new(SystemClock),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+        ));
+        let cfg = enabled_config();
+        let rt = build_tool_policy(&cfg, rec(), Some(Arc::clone(&history))).expect("builds");
+        let (_, request_side) = rt.policy.as_ref().expect("on");
+        assert!(Arc::ptr_eq(request_side.history().expect("request side history"), &history), "the request side");
+        assert!(Arc::ptr_eq(rt.cedar.as_ref().expect("cedar").history().expect("decider history"), &history), "the decider");
+        let ti = tool_interception(&cfg, &rt).expect("interception is on");
+        assert!(Arc::ptr_eq(ti.history.as_ref().expect("report site history"), &history), "the report site");
+    }
+
+    /// With the tool policy off the history is not used.
+    #[tokio::test]
+    async fn the_tool_policy_off_does_not_use_the_history() {
+        use crate::adapters::history::MemorySessionStore;
+        use crate::domain::decision_log::OsEntropy;
+        use crate::domain::limits::SystemClock;
+
+        let history = Arc::new(ToolHistory::new(
+            Arc::new(MemorySessionStore::new()),
+            Arc::new(SystemClock),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+        ));
+        let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
+        let rt = build_tool_policy(&cfg, rec(), Some(history)).expect("builds");
+        assert!(rt.history.is_none());
+        assert!(tool_interception(&cfg, &rt).expect("on").history.is_none());
     }
 }
 
@@ -681,7 +761,7 @@ mod tests {
         servers.spawn(async { Err(anyhow::anyhow!("boom")) });
 
         // `shutdown` never fires; the only way out is the failing task.
-        let result = supervise(servers, pending(), tx, None, None).await;
+        let result = supervise(servers, pending(), tx, None, None, None).await;
 
         let err = result.expect_err("a failing task must surface as Err");
         assert_eq!(err.to_string(), "boom");
@@ -695,7 +775,7 @@ mod tests {
         spawn_until_shutdown(&mut servers, rx.clone());
 
         // `shutdown` is ready immediately → supervise broadcasts, both tasks drain Ok.
-        let result = supervise(servers, ready(()), tx, None, None).await;
+        let result = supervise(servers, ready(()), tx, None, None, None).await;
 
         assert!(result.is_ok(), "clean shutdown must drain all tasks to Ok, got {result:?}");
     }
@@ -708,7 +788,7 @@ mod tests {
         // A task that returns Ok before any shutdown — the warn branch, not an error.
         servers.spawn(async { Ok(()) });
 
-        let result = supervise(servers, pending(), tx, None, None).await;
+        let result = supervise(servers, pending(), tx, None, None, None).await;
 
         assert!(result.is_ok(), "a clean early return is not an error, got {result:?}");
     }
@@ -722,7 +802,7 @@ mod tests {
         servers.spawn(async { Err(anyhow::anyhow!("late boom")) });
 
         // Whichever `select!` arm wins, the drain must still surface the error.
-        let result = supervise(servers, ready(()), tx, None, None).await;
+        let result = supervise(servers, ready(()), tx, None, None, None).await;
 
         let err = result.expect_err("the error must survive even when shutdown wins the select");
         assert_eq!(err.to_string(), "late boom");
@@ -805,7 +885,7 @@ mod tests {
             server_log.record(build_response(header, &ctx, &ReportedCall::new(entry, None, None)));
             Ok(())
         });
-        let result = supervise(servers, ready(()), tx, None, Some(tasks)).await;
+        let result = supervise(servers, ready(()), tx, None, None, Some(tasks)).await;
         assert!(result.is_ok());
         assert_eq!(seen.load(Ordering::SeqCst), 1, "the writer saw the decision that a server recorded while it stopped");
     }
@@ -822,8 +902,34 @@ mod tests {
             tokio::task::yield_now().await;
             flag.store(true, Ordering::SeqCst);
         });
-        let result = supervise(servers, ready(()), tx, Some(charges), None).await;
+        let result = supervise(servers, ready(()), tx, Some(charges), None, None).await;
         assert!(result.is_ok());
         assert!(landed.load(Ordering::SeqCst), "supervise waits for an in-flight charge");
+    }
+
+    #[tokio::test]
+    async fn supervise_drains_the_history_tasks() {
+        let (tx, rx) = watch::channel(());
+        let mut servers = JoinSet::new();
+        spawn_until_shutdown(&mut servers, rx.clone());
+        let history = TaskTracker::new();
+        let landed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&landed);
+        history.spawn(async move {
+            tokio::task::yield_now().await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        let result = supervise(servers, ready(()), tx, None, Some(history), None).await;
+        assert!(result.is_ok());
+        assert!(landed.load(Ordering::SeqCst), "supervise waits for an in-flight history task");
+    }
+
+    #[tokio::test]
+    async fn a_history_task_past_the_budget_is_lost_and_logged() {
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+        let history = TaskTracker::new();
+        history.spawn(std::future::pending::<()>());
+        assert_eq!(drain_history(&history, Duration::from_millis(50)).await, 1);
+        assert!(logs.text().contains("tool history tasks still running"), "{}", logs.text());
     }
 }

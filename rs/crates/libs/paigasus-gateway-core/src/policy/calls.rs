@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, Finding, HostSet, Severity};
+use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Finding, HostSet, Severity};
 use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
@@ -171,12 +171,20 @@ fn scans_for(calls: usize, scans: &[CallScan]) -> ScansFor<'_> {
 /// difference is the `decide_duration` of the call. The core reads no clock of its own.
 #[must_use]
 pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
-    debug_assert!(scans.is_empty() || scans.len() == calls.len(), "one scan per call, or none");
-    decide_with(snapshot, turn, calls, scans_for(calls.len(), scans), now)
+    decide_calls_with(snapshot, turn, calls, scans, &Findings::new(), now)
 }
 
-/// `decide_calls` after the count check. It is also the release path of a wrong count.
-fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: ScansFor<'_>, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+/// `decide_calls` with request-level findings (`extra`) that every call of the hold carries, in
+/// addition to its own findings (SMA-753). Each one has the detector `kernel` and the severity
+/// that `extra` holds for it.
+#[must_use]
+pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+    debug_assert!(scans.is_empty() || scans.len() == calls.len(), "one scan per call, or none");
+    decide_with(snapshot, turn, calls, scans_for(calls.len(), scans), extra, now)
+}
+
+/// `decide_calls_with` after the count check. It is also the release path of a wrong count.
+fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: ScansFor<'_>, extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
     let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
         // P-6: `closed` blocks in every tenant mode, `off` included.
         return calls
@@ -208,6 +216,11 @@ fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], s
                     given.extend(s[i].findings.iter().cloned());
                 }
                 ScansFor::Mismatch => given.push(Finding::new(DETECTOR_BUILT_IN, DETECTOR_ERROR, Severity::High, "")),
+            }
+            for kind in extra.iter() {
+                // `iter` yields only kinds that the set holds, so the fallback never applies.
+                let severity = extra.severity(kind).unwrap_or(Severity::High);
+                given.push(Finding::new(DETECTOR_KERNEL, kind, severity, ""));
             }
             let started = now();
             let v = decide(&inv, facts, &kernel_findings(&given), policies);
@@ -391,6 +404,34 @@ mod tests {
             decide_calls(&unavailable, &ToolTurn::Unavailable("test"), &[call("a"), call("b"), call("c")], &[], &Instant::now).len(),
             3
         );
+    }
+
+    #[test]
+    fn extra_findings_reach_every_call_of_the_hold() {
+        const TENANT_FORGED: &str = r#"
+            @id("all") permit(principal, action, resource);
+            @id("forged") forbid(principal, action, resource) when { context.findings.contains("forged_history") };
+        "#;
+        let floor = Arc::new(ToolPolicies::compile_floor(FLOOR).expect("floor"));
+        let set = PolicySet::Available {
+            policies: Arc::new(ToolPolicies::compile(floor, TENANT_FORGED, &[]).expect("compile")),
+            tenant: TenantPart::Evaluated,
+            facts: facts(),
+        };
+        let snap = PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed);
+        let turn = ToolTurn::Unavailable("test");
+        let calls = [call("a"), call("b")];
+        let mut extra = Findings::new();
+        extra.add(paigasus_kernel::detect::FORGED_HISTORY, Severity::High);
+        let blocked = decide_calls_with(&snap, &turn, &calls, &[], &extra, &Instant::now);
+        assert_eq!(blocked.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY]);
+        // Each call records the extra finding with the detector `kernel` and its severity.
+        for o in &blocked {
+            let records = &o.cedar.as_ref().expect("cedar").findings;
+            assert_eq!(records, &[crate::decision_log::FindingRecord::new("forged_history", Some(Severity::High), DETECTOR_KERNEL, "")]);
+        }
+        let allowed = decide_calls(&snap, &turn, &calls, &[], &Instant::now);
+        assert_eq!(allowed.iter().map(|o| o.decision).collect::<Vec<_>>(), [Decision::Allow, Decision::Allow]);
     }
 
     #[test]
@@ -614,7 +655,7 @@ mod tests {
         // The release path: `decide_calls` checks the count with a `debug_assert!` first.
         let snap = tenant_snapshot(FORBID_HIGH);
         let turn = ToolTurn::Unavailable("test");
-        let out = decide_with(&snap, &turn, &[call("a"), call("b")], scans_for(2, &one), &Instant::now);
+        let out = decide_with(&snap, &turn, &[call("a"), call("b")], scans_for(2, &one), &Findings::new(), &Instant::now);
         assert_eq!(out.len(), 2);
         for o in &out {
             assert_eq!(o.decision, BLOCK_POLICY);

@@ -24,6 +24,13 @@ pub const UNSEEN_HOST: &str = "unseen_host";
 pub const SECRET_IN_ARGS: &str = "secret_in_args";
 /// The finding that the arguments hold a prompt injection marker.
 pub const INJECTION_MARKERS: &str = "injection_markers";
+/// The finding that the calls of one history belong to more than one session (SMA-753).
+pub const MIXED_SESSIONS: &str = "mixed_sessions";
+/// The finding that the history of a request contains a call that the gateway did not see (SMA-753).
+pub const FORGED_HISTORY: &str = "forged_history";
+/// The finding that the history store cut the events of a history at a cap or at the retention
+/// limit (SMA-753).
+pub const HISTORY_TRUNCATED: &str = "history_truncated";
 /// The finding that a detector failed.
 pub const DETECTOR_ERROR: &str = "detector_error";
 /// The detector name for a finding that the kernel itself makes.
