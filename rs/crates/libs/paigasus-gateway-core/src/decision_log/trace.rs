@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The Dogwood trace encoder (SMA-755 § 5.11). Pure: no I/O and no clock. One response-side
-//! record gives one trace line. A record that Dogwood cannot replay exactly is skipped.
+//! record gives one trace line. A record that Dogwood cannot replay exactly is skipped. One
+//! exception: the call hosts are not encoded. Every line writes `hosts: []` (SMA-855 D29), so a
+//! policy that reads `context.call.hosts` can replay with another verdict than the live one. The
+//! export CLI warns about this.
 
 use std::fmt;
 use std::time::SystemTime;
