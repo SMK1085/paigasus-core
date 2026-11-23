@@ -37,11 +37,19 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `nats.stream` | `AGENT_HOST_NATS__STREAM` | none | Must be `IAM_EVENTS`. |
 | `nats.durable` | `AGENT_HOST_NATS__DURABLE` | none | Must be `agent-host-inbox`. |
 | `nats.channels` | none (TOML only) | none | List of `[[nats.channels]]` tables. At least one is required. See the NATS section. |
-| `memory.backend` | `AGENT_HOST_MEMORY__BACKEND` | `postgres` | Memory store backend. Only `postgres` exists now. A backend switch does not move data. |
+| `memory.backend` | `AGENT_HOST_MEMORY__BACKEND` | `postgres` | Memory store backend: `postgres` or `s3`. A backend switch does not move data. `s3` needs the `memory.s3` section. |
 | `memory.caps.max_file_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_FILE_BYTES` | `65536` | Largest memory file, in bytes. Greater than 0. |
 | `memory.caps.max_store_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_STORE_BYTES` | `1048576` | Largest memory total of a scope, in bytes. Greater than 0. |
 | `memory.caps.max_store_files` | `AGENT_HOST_MEMORY__CAPS__MAX_STORE_FILES` | `512` | Largest number of memory files in a scope. Greater than 0. |
 | `memory.caps.max_loaded_file_bytes` | `AGENT_HOST_MEMORY__CAPS__MAX_LOADED_FILE_BYTES` | `8192` | The cut of each file that the run start loads into the context. A longer file is cut with a truncation note. `view` does not use it (it cuts at 16,000 characters). Greater than 0, at most `max_file_bytes`. |
+| `memory.s3.bucket` | `AGENT_HOST_MEMORY__S3__BUCKET` | none (required) | The bucket. 3 to 63 characters of `a-z`, `0-9`, `.` and `-`. It starts and ends with a letter or digit. It has no `..`. |
+| `memory.s3.prefix` | `AGENT_HOST_MEMORY__S3__PREFIX` | none (required) | The key prefix of the store. At most 128 bytes and 8 segments. No empty segment, no leading or trailing `/`. Each segment has 1 to 64 bytes from `A-Z a-z 0-9 . _ -` and does not start with `.`. |
+| `memory.s3.region` | `AGENT_HOST_MEMORY__S3__REGION` | `us-east-1` | The region. An `AWS_REGION` variable does not change it. |
+| `memory.s3.endpoint` | `AGENT_HOST_MEMORY__S3__ENDPOINT` | not set (AWS) | The URL of an S3-compatible store. Scheme `http` or `https`. No user name, password, query or fragment. An `http` URL needs `allow_http`. |
+| `memory.s3.path_style` | `AGENT_HOST_MEMORY__S3__PATH_STYLE` | `true` with an `endpoint` or a bucket name with a `.`, else `false` | Path-style addressing. A bucket name with a `.` does not match the AWS wildcard certificate in virtual-hosted style. With `false` and an `endpoint`, the endpoint must already hold the bucket. |
+| `memory.s3.allow_http` | `AGENT_HOST_MEMORY__S3__ALLOW_HTTP` | `false` | Allow an `http` endpoint. Use it for local tests and development only. |
+| `memory.s3.extra_ca_bundle_path` | `AGENT_HOST_MEMORY__S3__EXTRA_CA_BUNDLE_PATH` | not set | A PEM file of extra trust anchors. It ADDs to the platform roots. The bundle must hold roots only. The host reads it once at boot. An empty or padded path is refused. |
+| `memory.s3.apply_deadline_secs` | `AGENT_HOST_MEMORY__S3__APPLY_DEADLINE_SECS` | `10` | The time limit of one change set. At least 1 and less than `lease.ttl_secs`. |
 | `timers.enabled` | `AGENT_HOST_TIMERS__ENABLED` | `true` | Run the scheduler loop. `false` stops only the loop. The tools still work. No range. |
 | `timers.poll_interval_secs` | `AGENT_HOST_TIMERS__POLL_INTERVAL_SECS` | `5` | Seconds between two passes. Range: 1 to 300. |
 | `timers.pass_limit` | `AGENT_HOST_TIMERS__PASS_LIMIT` | `100` | Most rows that one pass processes. Range: 1 to 1000. |
@@ -52,6 +60,51 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `timers.max_fire_attempts` | `AGENT_HOST_TIMERS__MAX_FIRE_ATTEMPTS` | `10` | Failed fire attempts before a timer goes to `failed`. Range: 1 to 1000. |
 | `timers.min_follow_up_delay_secs` | `AGENT_HOST_TIMERS__MIN_FOLLOW_UP_DELAY_SECS` | `60` | Shortest follow-up, from the time of the tool call. Range: 1 to 86400. |
 | `timers.max_agent_timers_created_per_day` | `AGENT_HOST_TIMERS__MAX_AGENT_TIMERS_CREATED_PER_DAY` | `100` | Most `agent` timers that one inbox can create in a rolling 24 hours, in any status. Range: 1 to 10000. |
+
+### S3 memory backend
+
+Set `memory.backend = "s3"` and the `memory.s3` section to keep the agent memory in an S3 bucket.
+The store works with AWS S3 and with S3-compatible stores.
+
+- A backend switch does not move data. The old backend keeps its files. The destination shows the data that it already holds. Only a fresh destination starts empty. A switch back shows the old data again.
+- The bucket must not keep object versions. The boot probe refuses a bucket that keeps versions.
+- When the probe refuses a versioned bucket, its first `PUT` already made an object version. The cleanup delete adds only a delete marker. Each boot uses a new probe key. So after such a refusal, remove the probe versions and delete markers under `<prefix>/_probe/` with an S3 tool.
+- The store must give strong read-after-write consistency for `GET`, `HEAD` and `LIST`. AWS S3 does.
+- Each object starts with a 51-byte header line. So the objects are not plain Markdown. Do not read them as plain files.
+- Do not write objects under the prefix. If a foreign object is there, the store handles it as follows.
+- An object that the adapter did not write has no header. A `get` of that path fails with a fixed `Store` error. The store counts it as `reason=header`. It does not make the whole scope fail.
+- A key that is a valid object path but not a valid memory path: `list` skips it and counts `reason=key`. `delete_scope` deletes it.
+- A key that is not a valid object path (for example `a//b`) makes the whole scope unreadable. The store counts it as `reason=unparsable`. Remove it with an S3 tool.
+- A folder marker is a key that ends in `/`. A marker under the prefix cannot be deleted by `delete_scope`, because `object_store` removes the trailing `/`. Then `delete_scope` fails with the "keys remain" error. Delete the marker with an S3 tool. This is the same repair step as for an `unparsable` key.
+- The prefixes of two deployments on one bucket must not nest. For example, do not use `mem` and `mem/a`.
+- If `memory.s3.path_style` is `false` and an `endpoint` is set, the endpoint must already hold the bucket name.
+
+**Credentials.** No config key holds a credential. The host reads only these ten environment variables:
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
+`AWS_ROLE_ARN`, `AWS_ROLE_SESSION_NAME`, `AWS_ENDPOINT_URL_STS`,
+`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_CONTAINER_CREDENTIALS_FULL_URI` and
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`. An empty variable counts as not set. Any other `AWS_*`
+variable changes no setting. `AWS_ENDPOINT_URL_STS` sends the web-identity token to the host that it
+names. With none of these variables set, the client asks the instance metadata
+endpoint for credentials. Off AWS, the boot probe then fails with `unauthenticated` or `timeout`.
+
+**Other variables that change the client.** These variables are not on the credential list. The host does not turn them off.
+
+- The HTTP client reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, and their lower-case forms. This is the default of `reqwest`. Set `NO_PROXY` for the store endpoint if the host must not use a proxy for it.
+- The credential client reads the same variables. With an HTTP proxy, add the local AWS credential hosts to `NO_PROXY`. Then the credential request does not go through the proxy. An EKS Pod Identity request holds a token in its `Authorization` header. The hosts are `169.254.169.254` (EC2 instance metadata), `169.254.170.2` (ECS, from `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`) and the host of `AWS_CONTAINER_CREDENTIALS_FULL_URI`. For EKS Pod Identity, that host is `169.254.170.23`.
+- When `REQUEST_METHOD` is set, the client uses no proxy (a guard for CGI).
+- On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` change the system trust roots. The client reads them through `rustls-native-certs`.
+
+**Races.** The store is correct for one writer at a time. When two writers write one scope at the
+same moment, five races remain.
+
+1. A writer can add a file under a guarded directory between the check and the writes. The file stays.
+2. Two writers can both pass the store cap check. The store can then go over a cap. A later change that makes the store larger is refused. A change that makes the store smaller still passes.
+3. A delete is a `HEAD` and a `DELETE`. A change between the two is lost. In a `rename`, the new path then holds the old content.
+4. A conflict between the check and the writes gives a partial result.
+5. A write that lands after the last listing of `delete_scope` stays.
+
+A `Put` has no race: the store checks its condition, so a stale `Put` never overwrites.
 
 The `[iam]`, `[nats]` and `[timers]` sections are optional. A nested value that has no default, for example
 `iam.tls`, is easiest to set in the TOML file. `agent-host.toml.example` shows every key.
