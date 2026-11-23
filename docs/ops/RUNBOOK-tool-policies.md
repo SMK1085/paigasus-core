@@ -393,16 +393,19 @@ in one release. The new schema adds two attributes: `context.max_severity` and
 - The job compares the old and the new output with an additive rule. The policy text and the
   conditions must be the same, and the new schema may only add attributes to Record types. So one
   boot run re-compiles every live set that still compiles to an identical live version at
-  generation 3 and revision 2. For these sets it writes no held row, and no admin action is
-  necessary. A set that holds a history rule does not compile (section 5): the job holds it as
+  generation 3 and revision 2, when the write of that version succeeds. For these sets it writes
+  no held row, and no admin action is necessary. An `error` or `conflict` result writes nothing
+  for its set, so the set stays stale. If `iam_tool_policy_recompile_results_total` shows an
+  `error` or a `conflict`, start the job again with `POST /v1/tool-policy-recompile` (after the
+  compiler is healthy, see "The results"). A set that holds a history rule does not compile (section 5): the job holds it as
   `held_failed`, and its catalog writes stay refused with `tool-policy-recompile-pending`. A
   non-zero `held_failed` in the metric `iam_tool_policy_recompile_results_total` shows that this
   occurred, but the metric does not name the set. A later run returns `ALREADY_PROPOSED` for a set
   that is already held. So find the held sets with `GET /v1/held-tool-policy-versions` and read
   their reports (see "Held versions"). For each set that a history rule stops, do the steps of
   section 5.
-- Each set that compiles gets a new live version. So every gateway reloads every such
-  organization at about the same time.
+- Each set that compiles and is written gets a new live version. So every gateway reloads every
+  such organization at about the same time.
 - Until the job reaches a set, a catalog write on that set is refused with
   `tool-policy-recompile-pending`, as on every bump.
 - After the rollout, start the job one more time with `POST /v1/tool-policy-recompile`, as
