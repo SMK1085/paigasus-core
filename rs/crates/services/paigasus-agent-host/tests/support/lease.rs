@@ -2,9 +2,43 @@
 
 //! Shared SQL of the lease tests. The statements live here, never in the adapter.
 
+use std::time::Duration;
+
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use uuid::Uuid;
+
+/// The backend pid of the session of `conn` (for example the transaction that holds a row lock).
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn backend_pid<C: ConnectionTrait>(conn: &C) -> i64 {
+    conn.query_one_raw(Statement::from_string(DatabaseBackend::Postgres, "SELECT pg_backend_pid()::bigint AS n".to_owned()))
+        .await
+        .expect("query the backend pid")
+        .expect("row")
+        .try_get::<i64>("", "n")
+        .expect("bigint column named n")
+}
+
+/// Waits until a session of the database waits on a lock that the session `holder` holds. It
+/// panics after `within`. A lock-wait test calls it before it releases the lock, so a call that
+/// starts only after the release cannot pass the test without a wait.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub async fn wait_until_blocked_by(db: &DatabaseConnection, holder: i64, within: Duration) {
+    let sql = format!("SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE {holder} = ANY(pg_blocking_pids(pid))");
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let row = db
+            .query_one_raw(Statement::from_string(DatabaseBackend::Postgres, sql.clone()))
+            .await
+            .expect("query pg_stat_activity")
+            .expect("row");
+        if row.try_get::<i64>("", "n").expect("bigint column named n") > 0 {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no session waited on the row lock within {within:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
 
 /// Expires the lease of an inbox one second in the past. The row stays.
 #[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]

@@ -7,9 +7,12 @@ use std::time::Duration;
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::{Figment, error::Error as FigmentError};
+use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::claim::ClaimConfig;
+use paigasus_agent_host_core::ids::AgentId;
 use paigasus_agent_host_core::memory::MemoryCaps;
 use paigasus_agent_host_core::mid_run::MidRunPolicy;
+use paigasus_agent_host_core::retry::RetryPolicy;
 use paigasus_agent_host_core::timer::{TimerCaps, WALK_BOUND};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -80,7 +83,17 @@ pub struct Config {
     pub nats: Option<NatsConfig>,
     pub memory: MemoryConfig,
     pub timers: TimersConfig,
+    /// The run limits of the worker (spec §6.12).
+    pub run: RunSettings,
+    /// The retry delay of a failed run (spec §6.9, §6.12).
+    pub retry: RetrySettings,
+    /// The agents that this host can run (spec §6.2). The list can be empty.
+    #[serde(default)]
+    pub agents: Vec<AgentConfig>,
 }
+
+/// The tool names that an `[[agents]]` entry can list.
+pub const KNOWN_TOOLS: &[&str] = &["memory"];
 
 /// The timers (spec §9.1, §9.2). Every number has a range that [`Config::validate`] checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -348,11 +361,58 @@ impl MigrationConfig {
     }
 }
 
-/// The worker switch. The value is read and checked. It has no effect yet: the worker arrives in
-/// a later task.
+/// The worker (spec §6.1, §6.12). Every number has a range that [`Config::validate`] checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct WorkerConfig {
     pub enabled: bool,
+    /// The number of runs that execute at the same time. Range 1 to 64.
+    pub concurrency: u32,
+    /// The time between two polls of the inbox claim. Range 100 to 60000.
+    pub poll_interval_ms: u64,
+    /// The most runs that one lease serves. Range 1 to 1000.
+    pub max_runs_per_lease: u32,
+}
+
+/// The limits of one run. Every number has a range that [`Config::validate`] checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RunSettings {
+    /// The most model turns of one run. Range 1 to 256.
+    pub max_turns: u32,
+    /// The time limit of one run. Range 1 to 3600.
+    pub timeout_secs: u64,
+}
+
+/// The retry delay of a failed run. Every number has a range that [`Config::validate`] checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RetrySettings {
+    /// The delay before the first retry. Range 1 to 3600.
+    pub base_delay_secs: u64,
+    /// The cap of the delay. Range 1 to 86400, and at least the base.
+    pub max_delay_secs: u64,
+}
+
+impl RetrySettings {
+    /// The policy for the retry delay.
+    #[must_use]
+    pub fn to_policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            base: Duration::from_secs(self.base_delay_secs),
+            max: Duration::from_secs(self.max_delay_secs),
+        }
+    }
+}
+
+/// One `[[agents]]` entry (spec §6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentConfig {
+    /// The agent PRN: `prn:pgs:agents::<org>:agent/<uuid>`.
+    pub id: String,
+    pub name: String,
+    /// The model name. Task 14 checks it against the model registry.
+    pub model: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 /// The inbox lease (spec §8.6, §8.7).
@@ -539,8 +599,24 @@ pub enum ConfigError {
     MemoryS3CaPathBlank,
     #[error("memory.s3.apply_deadline_secs must be at least 1 and less than lease.ttl_secs (got {deadline}, lease.ttl_secs is {ttl})")]
     MemoryS3DeadlineOutOfRange { deadline: u64, ttl: u64 },
+    /// The worker pool starts and the S3 memory store is selected. The run commit of the worker
+    /// supports only the Postgres store until its S3 commit semantics are decided.
+    #[error(
+        "memory.backend is \"s3\", and the worker pool starts (worker.enabled is true and an [[agents]] entry exists): the worker supports only the Postgres memory store for now. Set memory.backend = \"postgres\", or set worker.enabled = false"
+    )]
+    WorkerNeedsPostgresMemory,
     #[error("timers.{key} must be between {min} and {max} (got {value})")]
     TimerValueOutOfRange { key: &'static str, value: u64, min: u64, max: u64 },
+    #[error("{key} must be between {min} and {max} (got {value})")]
+    ValueOutOfRange { key: &'static str, value: u64, min: u64, max: u64 },
+    #[error("retry.max_delay_secs ({max}) must be at least retry.base_delay_secs ({base})")]
+    RetryMaxBelowBase { base: u64, max: u64 },
+    #[error("agents: the id \"{0}\" is not an agent PRN (prn:pgs:agents::<org>:agent/<uuid>)")]
+    AgentIdInvalid(String),
+    #[error("agents: the id \"{0}\" is used by two entries")]
+    AgentDuplicate(String),
+    #[error("agents: the agent \"{agent}\" lists the unknown tool \"{tool}\"")]
+    AgentUnknownTool { agent: String, tool: String },
 }
 
 /// The defaults. `database_url` has none: it is required. `iam` has none: no `[iam]` section
@@ -558,6 +634,8 @@ struct Defaults {
     mid_run: MidRunConfig,
     memory: MemoryDefaults,
     timers: TimersConfig,
+    run: RunSettings,
+    retry: RetrySettings,
 }
 
 #[derive(Serialize)]
@@ -721,7 +799,12 @@ impl Config {
             log_level: "info",
             metrics: MetricsDefaults { enabled: true },
             migration: MigrationConfigDefaults { lock_wait_secs: 120 },
-            worker: WorkerConfig { enabled: true },
+            worker: WorkerConfig {
+                enabled: true,
+                concurrency: 4,
+                poll_interval_ms: 1000,
+                max_runs_per_lease: 8,
+            },
             lease: LeaseConfig {
                 ttl_secs: 30,
                 heartbeat_interval_secs: 10,
@@ -753,6 +836,11 @@ impl Config {
                 max_fire_attempts: 10,
                 min_follow_up_delay_secs: 60,
                 max_agent_timers_created_per_day: 100,
+            },
+            run: RunSettings { max_turns: 16, timeout_secs: 300 },
+            retry: RetrySettings {
+                base_delay_secs: 30,
+                max_delay_secs: 1800,
             },
         }))
         .merge(Toml::file("agent-host.toml"))
@@ -865,7 +953,61 @@ impl Config {
                 return Err(ConfigError::TimerValueOutOfRange { key, value, min, max });
             }
         }
+        let (w, r, retry) = (&self.worker, &self.run, &self.retry);
+        for (key, value, min, max) in [
+            ("worker.concurrency", u64::from(w.concurrency), 1, 64),
+            ("worker.poll_interval_ms", w.poll_interval_ms, 100, 60_000),
+            ("worker.max_runs_per_lease", u64::from(w.max_runs_per_lease), 1, 1000),
+            ("run.max_turns", u64::from(r.max_turns), 1, 256),
+            ("run.timeout_secs", r.timeout_secs, 1, 3600),
+            ("retry.base_delay_secs", retry.base_delay_secs, 1, 3600),
+            ("retry.max_delay_secs", retry.max_delay_secs, 1, 86_400),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(ConfigError::ValueOutOfRange { key, value, min, max });
+            }
+        }
+        if retry.max_delay_secs < retry.base_delay_secs {
+            return Err(ConfigError::RetryMaxBelowBase {
+                base: retry.base_delay_secs,
+                max: retry.max_delay_secs,
+            });
+        }
+        self.agent_definitions()?;
+        // The worker pool starts only with `worker.enabled` and an agent (see `serve`). Its run
+        // commit cannot commit an external memory store yet, so that pair stops the boot. The S3
+        // store stays usable when the pool does not start.
+        if matches!(self.memory.backend, MemoryBackend::S3) && self.worker.enabled && !self.agents.is_empty() {
+            return Err(ConfigError::WorkerNeedsPostgresMemory);
+        }
         Ok(())
+    }
+
+    /// The agent definitions of the `[[agents]]` list. An id that is not an agent PRN, an id that
+    /// appears twice and a tool that is not in [`KNOWN_TOOLS`] each give an error.
+    pub fn agent_definitions(&self) -> Result<Vec<AgentDefinition>, ConfigError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut definitions = Vec::with_capacity(self.agents.len());
+        for agent in &self.agents {
+            let id = AgentId::parse(&agent.id).map_err(|_| ConfigError::AgentIdInvalid(agent.id.clone()))?;
+            if !seen.insert(id.clone()) {
+                return Err(ConfigError::AgentDuplicate(agent.id.clone()));
+            }
+            if let Some(tool) = agent.tools.iter().find(|t| !KNOWN_TOOLS.contains(&t.as_str())) {
+                return Err(ConfigError::AgentUnknownTool {
+                    agent: agent.id.clone(),
+                    tool: tool.clone(),
+                });
+            }
+            definitions.push(AgentDefinition {
+                id,
+                name: agent.name.clone(),
+                model_id: agent.model.clone(),
+                instructions: agent.instructions.clone(),
+                tool_names: agent.tools.clone(),
+            });
+        }
+        Ok(definitions)
     }
 }
 
@@ -1230,6 +1372,96 @@ mod tests {
                 max: 10_000,
                 err: |v| timer_err("max_agent_timers_created_per_day", v, 1, 10_000),
             },
+            RangeRow {
+                key: "worker.concurrency",
+                set: |c, v| c.worker.concurrency = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 64,
+                err: |v| ConfigError::ValueOutOfRange {
+                    key: "worker.concurrency",
+                    value: v,
+                    min: 1,
+                    max: 64,
+                },
+            },
+            RangeRow {
+                key: "worker.poll_interval_ms",
+                set: |c, v| c.worker.poll_interval_ms = v,
+                min: 100,
+                max: 60000,
+                err: |v| ConfigError::ValueOutOfRange {
+                    key: "worker.poll_interval_ms",
+                    value: v,
+                    min: 100,
+                    max: 60000,
+                },
+            },
+            RangeRow {
+                key: "worker.max_runs_per_lease",
+                set: |c, v| c.worker.max_runs_per_lease = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 1000,
+                err: |v| ConfigError::ValueOutOfRange {
+                    key: "worker.max_runs_per_lease",
+                    value: v,
+                    min: 1,
+                    max: 1000,
+                },
+            },
+            RangeRow {
+                key: "run.max_turns",
+                set: |c, v| c.run.max_turns = u32::try_from(v).unwrap(),
+                min: 1,
+                max: 256,
+                err: |v| ConfigError::ValueOutOfRange {
+                    key: "run.max_turns",
+                    value: v,
+                    min: 1,
+                    max: 256,
+                },
+            },
+            RangeRow {
+                key: "run.timeout_secs",
+                set: |c, v| c.run.timeout_secs = v,
+                min: 1,
+                max: 3600,
+                err: |v| ConfigError::ValueOutOfRange {
+                    key: "run.timeout_secs",
+                    value: v,
+                    min: 1,
+                    max: 3600,
+                },
+            },
+            RangeRow {
+                key: "retry.base_delay_secs",
+                set: |c, v| {
+                    c.retry.max_delay_secs = 86_400;
+                    c.retry.base_delay_secs = v;
+                },
+                min: 1,
+                max: 3600,
+                err: |v| ConfigError::ValueOutOfRange {
+                    key: "retry.base_delay_secs",
+                    value: v,
+                    min: 1,
+                    max: 3600,
+                },
+            },
+            RangeRow {
+                key: "retry.max_delay_secs",
+                set: |c, v| {
+                    c.retry.base_delay_secs = 1;
+                    c.retry.max_delay_secs = v;
+                },
+                min: 1,
+                max: 86400,
+                err: |v| ConfigError::ValueOutOfRange {
+                    key: "retry.max_delay_secs",
+                    value: v,
+                    min: 1,
+                    max: 86400,
+                },
+            },
         ];
         figment::Jail::expect_with(|jail| {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
@@ -1349,6 +1581,25 @@ mod tests {
 
     fn s3_with(extra: &str) -> Config {
         s3_cfg(&format!("{S3_BASE}{extra}"), None)
+    }
+
+    #[test]
+    fn the_worker_refuses_the_s3_memory_store() {
+        let agent = agent_toml(&agent_prn(7), "[]");
+        // The pool starts (default `worker.enabled = true`, one agent): the boot is refused.
+        let refused = s3_cfg(&format!("{S3_BASE}{agent}"), None).validate();
+        assert_eq!(refused, Err(ConfigError::WorkerNeedsPostgresMemory));
+        let text = refused.unwrap_err().to_string();
+        assert!(
+            text.contains("memory.backend") && text.contains("worker.enabled") && text.contains("only the Postgres memory store"),
+            "{text}"
+        );
+        // No agent: the pool does not start, so the S3 store is allowed.
+        assert_eq!(s3_with("").validate(), Ok(()));
+        // An agent with `worker.enabled = false`: the pool does not start either.
+        assert_eq!(s3_cfg(&format!("[worker]\nenabled = false\n{S3_BASE}{agent}"), None).validate(), Ok(()));
+        // Positive control: the Postgres store with an agent is valid.
+        assert_eq!(s3_cfg(&agent, None).validate(), Ok(()));
     }
 
     #[test]
@@ -1809,6 +2060,113 @@ mod tests {
             // The boundary is accepted.
             cfg.memory.caps.max_loaded_file_bytes = 100;
             assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    fn agent_toml(id: &str, tools: &str) -> String {
+        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\ntools = {tools}\n")
+    }
+
+    fn agent_prn(n: u128) -> String {
+        paigasus_agent_host_core::ids::AgentId::new(Uuid::from_u128(1), Uuid::from_u128(n)).as_prn().canonical()
+    }
+
+    #[test]
+    fn the_worker_run_and_retry_defaults_match_the_spec() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let cfg = with_url();
+            assert_eq!(cfg.worker.concurrency, 4);
+            assert_eq!(cfg.worker.poll_interval_ms, 1000);
+            assert_eq!(cfg.worker.max_runs_per_lease, 8);
+            assert_eq!(cfg.run.max_turns, 16);
+            assert_eq!(cfg.run.timeout_secs, 300);
+            assert_eq!(cfg.retry.base_delay_secs, 30);
+            assert_eq!(cfg.retry.max_delay_secs, 1800);
+            assert!(cfg.agents.is_empty());
+            assert_eq!(cfg.validate(), Ok(()));
+            let policy = cfg.retry.to_policy();
+            assert_eq!(policy.base, Duration::from_secs(30));
+            assert_eq!(policy.max, Duration::from_secs(1800));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_retry_max_must_be_at_least_the_base() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.retry.base_delay_secs = 60;
+            cfg.retry.max_delay_secs = 59;
+            assert_eq!(cfg.validate(), Err(ConfigError::RetryMaxBelowBase { base: 60, max: 59 }));
+            cfg.retry.max_delay_secs = 60;
+            assert_eq!(cfg.validate(), Ok(()));
+            Ok(())
+        });
+    }
+
+    fn agent_cfg(id: &str, tools: &[&str]) -> AgentConfig {
+        AgentConfig {
+            id: id.to_owned(),
+            name: "triage".to_owned(),
+            model: "scripted".to_owned(),
+            instructions: "Sort the request.".to_owned(),
+            tools: tools.iter().map(|t| (*t).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn an_agent_id_that_does_not_parse_fails() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            cfg.agents = vec![agent_cfg("triage", &[])];
+            assert_eq!(cfg.validate(), Err(ConfigError::AgentIdInvalid("triage".to_owned())));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_duplicate_agent_id_fails() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            let id = agent_prn(2);
+            cfg.agents = vec![agent_cfg(&id, &[]), agent_cfg(&id, &[])];
+            assert_eq!(cfg.validate(), Err(ConfigError::AgentDuplicate(id)));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_unknown_tool_fails() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let mut cfg = with_url();
+            let id = agent_prn(2);
+            cfg.agents = vec![agent_cfg(&id, &["shell"])];
+            assert_eq!(cfg.validate(), Err(ConfigError::AgentUnknownTool { agent: id, tool: "shell".to_owned() }));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn agents_are_read_from_toml() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let id = agent_prn(2);
+            jail.create_file("agent-host.toml", &agent_toml(&id, "[\"memory\"]"))?;
+            let cfg = Config::load()?;
+            assert_eq!(cfg.validate(), Ok(()));
+            let defs = cfg.agent_definitions().unwrap();
+            assert_eq!(defs.len(), 1);
+            assert_eq!(defs[0].id.as_prn().canonical(), id);
+            assert_eq!(defs[0].name, "triage");
+            assert_eq!(defs[0].model_id, "scripted");
+            assert_eq!(defs[0].instructions, "Sort the request.");
+            assert_eq!(defs[0].tool_names, ["memory"]);
             Ok(())
         });
     }

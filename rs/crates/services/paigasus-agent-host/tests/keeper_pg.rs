@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `LeaseKeeper` on a real `PgLeaseStore` (spec §8.2, §8.6): the heartbeat keeps the lease
-//! alive in real time, and it sends the rotated token.
+//! The `LeaseKeeper` on a real `PgLeaseStore` and `PgRunCommitter` (spec §8.2, §8.6, SMA-790
+//! §6.8): the heartbeat keeps the lease alive in real time, and it sends the rotated token.
 
 mod support;
 
@@ -14,6 +14,7 @@ use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::ids::InboxId;
 use paigasus_agent_host_core::ports::LeaseRepository;
 use paigasus_agent_host_core::run::LeaseToken;
+use support::commit::{committer, completed_record, inbox_scope};
 use support::inbox::{insert_inbox, migrated_postgres};
 use support::lease::insert_pending_event;
 use uuid::Uuid;
@@ -41,13 +42,14 @@ async fn a_keeper_survives_a_rotation() {
     let store = Arc::new(PgLeaseStore::new(db.clone(), Duration::from_millis(500)));
     let handle = store.acquire(&InboxId::new(u(1), u(INBOX)), "w1", timing.lease_ttl).await.expect("acquire").expect("some");
     assert_eq!(handle.token(), LeaseToken(1));
-    let keeper = LeaseKeeper::start(handle, store.clone(), store.clone(), timing);
+    let scope = inbox_scope(&db, handle.inbox()).await;
+    let keeper = LeaseKeeper::start(handle, store.clone(), store.clone(), committer(&db), timing);
     let cancel = keeper.cancellation();
 
     insert_pending_event(&db, u(INBOX), u(10), 10).await;
     let first = keeper.claim(&cfg()).await.expect("claim 1").expect("some");
     assert_eq!(first.lease_token, LeaseToken(1), "the first claim after a take reuses the take token");
-    keeper.complete(first).await.expect("complete 1");
+    keeper.commit(completed_record(&first, scope.clone())).await.expect("commit 1");
 
     // Longer than the ttl: only the heartbeats keep the lease.
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -56,7 +58,7 @@ async fn a_keeper_survives_a_rotation() {
     insert_pending_event(&db, u(INBOX), u(11), 1).await;
     let second = keeper.claim(&cfg()).await.expect("claim 2").expect("some");
     assert_eq!(second.lease_token, LeaseToken(2), "the second claim rotates the token");
-    keeper.complete(second).await.expect("complete 2");
+    keeper.commit(completed_record(&second, scope)).await.expect("commit 2");
 
     // Longer than the ttl again: the heartbeats now send token 2.
     tokio::time::sleep(Duration::from_secs(4)).await;

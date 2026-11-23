@@ -6,20 +6,20 @@
 mod support;
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::lease_store::{CANDIDATE_LIMIT, CANDIDATES_SQL, PgLeaseStore};
-use paigasus_agent_host_core::ids::{EventId, InboxId, RunId};
+use paigasus_agent_host_core::ids::{AgentId, EventId, InboxId, RunId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
 use paigasus_agent_host_core::lease::HeartbeatError;
 use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, LeaseRepository};
 use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use support::inbox::{insert_inbox, migrated_postgres};
-use support::lease::{expire, expires_us, insert_pending_event, insert_run};
+use support::lease::{backend_pid, expire, expires_us, insert_pending_event, insert_run, wait_until_blocked_by};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(30);
@@ -121,6 +121,49 @@ async fn heartbeat_after_expiry_is_lease_lost() {
     assert_eq!(lost_counter(&recorder, "heartbeat"), 1);
 }
 
+/// ADR-0028 (c): a heartbeat after `expires_at` does not revive the lease. Another transaction
+/// holds the lease row with `FOR UPDATE` past the expiry and does not change the row. The
+/// heartbeat waits for the lock (its statement timeout is longer than the wait), then it must give
+/// `LeaseLost`, and `expires_at` must not move.
+#[tokio::test]
+async fn a_heartbeat_that_waits_past_the_expiry_is_lease_lost() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let ttl = Duration::from_secs(2);
+    let store = PgLeaseStore::new(db.clone(), HB_TIMEOUT);
+    let handle = store.acquire(&inbox_id(2), "w1", ttl).await.expect("acquire").expect("some");
+    let txn = db.begin().await.expect("begin");
+    txn.execute_unprepared(&format!("SELECT token FROM inbox_lease WHERE inbox_id = '{}' FOR UPDATE", u(2)))
+        .await
+        .expect("lock the lease row");
+    let locked_at = tokio::time::Instant::now();
+    let holder_pid = backend_pid(&txn).await;
+    let before = expires_us(&db, u(2)).await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let beat = async {
+        let result = store.heartbeat(&handle, Duration::from_secs(60)).await;
+        (result, Instant::now())
+    };
+    let holder = async {
+        // Guard: the heartbeat waits on the row lock before the release. A heartbeat that starts
+        // after the release ends after it too, so the end time alone cannot prove a wait.
+        wait_until_blocked_by(&db, holder_pid, Duration::from_secs(2)).await;
+        tokio::time::sleep_until(locked_at + ttl + Duration::from_secs(1)).await;
+        // The time before the commit is sent: the server can release the lock before the
+        // client sees the commit reply, so a time taken after it can be later than the end of a
+        // call that waited.
+        let release = Instant::now();
+        txn.commit().await.expect("commit the lock");
+        release
+    };
+    let ((result, beat_done), released) = tokio::time::timeout(Duration::from_secs(15), async { tokio::join!(beat, holder) }).await.expect("the heartbeat ends");
+    assert!(beat_done >= released, "the heartbeat did not wait for the row lock, so this test proves nothing");
+    assert_eq!(result, Err(HeartbeatError::LeaseLost), "a heartbeat after the expiry revived the lease");
+    assert_eq!(expires_us(&db, u(2)).await, before, "the heartbeat moved expires_at");
+    assert_eq!(lost_counter(&recorder, "heartbeat"), 1);
+}
+
 #[tokio::test]
 async fn heartbeat_with_a_stale_token_is_lease_lost() {
     let Some((_node, _url, db)) = migrated_postgres().await else { return };
@@ -178,7 +221,7 @@ async fn acquire_next_takes_the_inbox_with_the_oldest_pending_event() {
     ))
     .await
     .expect("set the event times");
-    let store = PgLeaseStore::new(db, HB_TIMEOUT);
+    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving(vec![AgentId::new(u(1), u(3)), AgentId::new(u(1), u(30))]);
     let first = store.acquire_next("w", TTL).await.expect("acquire_next").expect("some");
     assert_eq!(first.inbox(), &inbox_id(20));
     let second = store.acquire_next("w", TTL).await.expect("acquire_next").expect("some");
@@ -191,7 +234,7 @@ async fn acquire_next_skips_an_inbox_with_a_live_lease() {
     let Some((_node, _url, db)) = migrated_postgres().await else { return };
     insert_inbox(&db, u(1), u(10), u(3), u(4)).await;
     insert_pending_event(&db, u(10), u(101), 5).await;
-    let store = PgLeaseStore::new(db, HB_TIMEOUT);
+    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving(vec![AgentId::new(u(1), u(3))]);
     let _held = store.acquire(&inbox_id(10), "w1", TTL).await.expect("acquire").expect("some");
     assert!(store.acquire_next("w2", TTL).await.expect("acquire_next").is_none());
 }
@@ -202,7 +245,7 @@ async fn acquire_next_skips_an_inbox_whose_events_wait_on_not_before() {
     insert_inbox(&db, u(1), u(10), u(3), u(4)).await;
     insert_pending_event(&db, u(10), u(101), 5).await;
     db.execute_unprepared("UPDATE inbox_event SET not_before = now() + interval '1 hour'").await.expect("update");
-    let store = PgLeaseStore::new(db, HB_TIMEOUT);
+    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving(vec![AgentId::new(u(1), u(3))]);
     assert!(store.acquire_next("w", TTL).await.expect("acquire_next").is_none());
 }
 
@@ -218,7 +261,7 @@ async fn acquire_next_on_many_inboxes_gives_one_holder_each() {
         let url = url.clone();
         tasks.push(tokio::spawn(async move {
             let conn = support::connect_pinned(&url).await;
-            let store = PgLeaseStore::new(conn, HB_TIMEOUT);
+            let store = PgLeaseStore::new(conn, HB_TIMEOUT).serving((0..20u128).map(|n| AgentId::new(u(1), u(500 + n))).collect());
             let mut taken = Vec::new();
             while let Some(handle) = store.acquire_next(&format!("w{w}"), Duration::from_secs(60)).await.expect("acquire_next") {
                 taken.push(handle.inbox().uuid());
@@ -244,7 +287,11 @@ async fn an_open_acquirer_does_not_block_an_insert() {
     conn1.execute_unprepared("BEGIN").await.expect("begin");
     let limit = i64::try_from(CANDIDATE_LIMIT).expect("limit");
     let rows = conn1
-        .query_all_raw(Statement::from_sql_and_values(DatabaseBackend::Postgres, CANDIDATES_SQL, [limit.into()]))
+        .query_all_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            CANDIDATES_SQL,
+            [limit.into(), vec![u(1)].into(), vec![u(3)].into()],
+        ))
         .await
         .expect("candidates");
     assert_eq!(rows.len(), 1, "the inbox is a candidate, and its row is now locked");

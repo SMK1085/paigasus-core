@@ -14,12 +14,14 @@ use jiff::Timestamp;
 use uuid::Uuid;
 
 use crate::claim::{Claim, ClaimConfig};
+pub use crate::fault::FaultPoint;
 use crate::ids::{EventId, InboxId, OutboxMessageId, TimerId};
 use crate::inbox::{Inbox, NewInboxEvent};
-use crate::lease::{ClaimError, CompleteError, HeartbeatError, LeaseHandle};
+use crate::lease::{ClaimError, HeartbeatError, LeaseHandle};
 use crate::memory::{CapError, MemoryCaps, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use crate::outbox::OutboxMessage;
-use crate::run::{CommitError, Committed, RunHandle, RunOutcome};
+use crate::run::{BackOff, CommitError, Committed, RunRecord, ScreenOut, ScreenResult};
+pub use crate::screen::EventScreen;
 use crate::timer::{TimerOrigin, TimerView};
 
 /// The error of a repository port.
@@ -81,15 +83,12 @@ pub trait LeaseRepository: Send + Sync {
 }
 
 /// The store of claims. Owner: SMA-787.
-/// `complete` is replaced by `RunCommitter` in SMA-790.
+/// A claim ends through `RunCommitter` (SMA-790 §6.8), which replaced `complete`.
 /// Provisional: the owner may change the methods, not the responsibility.
 #[async_trait]
 pub trait ClaimRepository: Send + Sync {
     /// Claim a batch of events. Returns `None` when there is nothing to claim.
     async fn claim(&self, handle: &mut LeaseHandle, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError>;
-    /// Complete a claim. Returns the IDs of the events that it finished.
-    /// A poisoned handle gives `LeaseLost` with no SQL.
-    async fn complete(&self, handle: &mut LeaseHandle, claim: Claim) -> Result<Vec<EventId>, CompleteError>;
 }
 
 /// The read side of the timer store. Owner: SMA-788.
@@ -236,13 +235,23 @@ pub trait AgentResolver: Send + Sync {
 /// Used inside a run: this is the only writer.
 /// Provisional: the owner may change the methods, not the responsibility.
 ///
+/// The port has four methods. `commit` writes a run outcome. `screen_out` closes the events that
+/// the screen flagged. `back_off` returns the events to the inbox with a delay.
+/// `release_after_shutdown` gives up the lease when the worker stops.
+///
 /// There is no `Transient` outcome. A transient failure rolls back and does not commit.
-/// A database error is `Store`, never `LeaseLost`. SMA-790 adds an "outcome unknown" case. The
-/// shape of the buffered changes is the design of SMA-790 (spec sections 6.2 and 7).
+/// A database error is `Store`, never `LeaseLost`. Only `CommitError::LeaseLost` counts as a lost
+/// lease. `OutcomeUnknown` means that the store may have committed.
 #[async_trait]
 pub trait RunCommitter: Send + Sync {
     /// Commit the outcome of a run in one transaction.
-    async fn commit(&self, handle: RunHandle, outcome: RunOutcome) -> Result<Committed, CommitError>;
+    async fn commit(&self, h: &mut LeaseHandle, r: RunRecord) -> Result<Committed, CommitError>;
+    /// Close the events that the screen flagged.
+    async fn screen_out(&self, h: &mut LeaseHandle, s: ScreenOut) -> Result<ScreenResult, CommitError>;
+    /// Return the events of a failed run to the inbox with a delay.
+    async fn back_off(&self, h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError>;
+    /// Release the lease after a shutdown.
+    async fn release_after_shutdown(&self, h: LeaseHandle) -> Result<(), CommitError>;
 }
 
 /// The time zone name is not in the time zone database.

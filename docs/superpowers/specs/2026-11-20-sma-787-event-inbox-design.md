@@ -398,6 +398,14 @@ UPDATE inbox_lease SET expires_at = clock_timestamp() + $ttl
 WHERE inbox_id = $inbox AND token = $t AND expires_at > clock_timestamp();
 ```
 
+Corrected 2026-11-22 (SMA-790): the single-statement heartbeat above is not safe. When the
+statement waits for a row lock, Postgres evaluates its `WHERE` before the wait. It evaluates the
+`WHERE` again only if the other transaction changed the row. So a heartbeat that waits past the
+expiry can extend a lease that is lost. The heartbeat must first lock the lease row by inbox and
+token (`SELECT ... FOR UPDATE`, no expiry term). Then it checks the expiry in a new statement in
+the same transaction. Then it runs the `UPDATE`. SMA-790 added `lock_live_lease` for this. The
+take is safe, because `ON CONFLICT DO UPDATE` locks the row before it evaluates its `WHERE`.
+
 The take uses `clock_timestamp()`, not `now()`: its conflict branch can wait for a row lock, and
 `now()` (the transaction start) could then give a new lease that is already expired (PR 518
 review).
@@ -413,6 +421,10 @@ poisoned error) and touches no row. Then one short transaction:
    after a take uses the token of the take.
 2. **Lock the lease row and check it** (`FOR UPDATE`; token and `expires_at > clock_timestamp()`).
    Fail: roll back, `LeaseLost`.
+
+   Corrected 2026-11-22 (SMA-790): do not put the expiry term in the locking statement. Lock the
+   row by inbox and token first. Then check the expiry in a new statement in the same
+   transaction (`lock_live_lease`). See the correction in §8.3.
 3. **Move exhausted events to `dead`** (§8.4.1).
 4. **Select the claimable events.** An event is claimable when all are true:
    - `status = 'pending'` and `not_before <= now()`;

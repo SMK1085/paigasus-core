@@ -22,23 +22,12 @@ pub enum ClaimError {
     /// The lease is lost.
     #[error("lease lost")]
     LeaseLost,
-    /// The handle has an open claim. Complete it before the next claim.
+    /// The handle has an open claim. Commit it before the next claim.
     #[error("a claim is open")]
     ClaimOpen,
-    /// The handle is poisoned. A failed claim or completion left its state unknown.
+    /// The handle is poisoned. A failed claim or commit left its state unknown.
     #[error("the lease handle is poisoned")]
     Poisoned,
-    /// The store failed. The text is the cause.
-    #[error("store error: {0}")]
-    Store(String),
-}
-
-/// The completion of a claim failed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum CompleteError {
-    /// The lease is lost. Another holder owns it, or the handle is poisoned.
-    #[error("lease lost")]
-    LeaseLost,
     /// The store failed. The text is the cause.
     #[error("store error: {0}")]
     Store(String),
@@ -126,12 +115,12 @@ impl LeaseHandle {
         self.open_claim = run;
     }
 
-    /// Record the completion of the open claim.
+    /// Record that a commit finished the open claim.
     pub fn record_complete(&mut self) {
         self.open_claim = None;
     }
 
-    /// Poison the handle. Every later claim, heartbeat and completion fails.
+    /// Poison the handle. Every later claim, heartbeat and commit fails.
     pub fn poison(&mut self) {
         self.poisoned = true;
     }
