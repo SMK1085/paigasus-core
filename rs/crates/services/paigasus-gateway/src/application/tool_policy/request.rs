@@ -106,7 +106,10 @@ impl Screened {
     /// of `medium` or higher and that `plan` does not replace with `enforced = true`.
     fn seen_hosts(&self, plan: &RequestPlan, turn: &TurnFacts) -> SeenHosts {
         let seen = match &self.screen {
-            Some(screen) => seen_hosts(screen, &self.findings, &|i| plan.replaced_enforced(turn, i)),
+            Some(screen) => {
+                let enforced = plan.enforced_results(turn);
+                seen_hosts(screen, &self.findings, &|i| enforced.get(i).copied().unwrap_or(false))
+            }
             None => HostSet::new(),
         };
         SeenHosts(Arc::new(seen))

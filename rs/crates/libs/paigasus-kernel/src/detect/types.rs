@@ -248,13 +248,23 @@ pub fn detector_error(detector: impl Into<String>) -> Finding {
 }
 
 /// The arguments of a tool call, as the model sent them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ToolInput {
     /// The raw JSON text. The kernel parses it and reads each number from its original text.
     Json(String),
     /// Free text, for the tool kinds `custom`, `apply_patch` and `other`.
     Text(String),
+}
+
+/// The variant and the length only: the arguments can hold a secret (A2).
+impl fmt::Debug for ToolInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ToolInput::Json(s) => write!(f, "Json {{ len: {} }}", s.len()),
+            ToolInput::Text(s) => write!(f, "Text {{ len: {} }}", s.len()),
+        }
+    }
 }
 
 /// Whether the name of a call is among the tool definitions of the request.
@@ -394,5 +404,9 @@ mod tests {
             assert!(!s.contains(CANARY), "{s}");
         }
         assert!(format!("{f:?}").contains("unseen_host") && format!("{f:?}").contains("evidence: 2"));
+        for input in [ToolInput::Json(format!(r#"{{"k":"{CANARY}"}}"#)), ToolInput::Text(CANARY.to_owned())] {
+            let s = format!("{input:?}");
+            assert!(!s.contains(CANARY) && s.contains("len: "), "{s}");
+        }
     }
 }

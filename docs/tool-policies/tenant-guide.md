@@ -287,8 +287,10 @@ What the policy blocks:
   the decision log only when your set is live and your mode is `log_only` or `enforce`.
 - The platform operator can stop all detectors with `[tool_policy.detectors] enabled = false`.
   Then `context.max_severity` is -1 and `context.call.hosts` is `[]`, also when a finding of the
-  kernel such as `name_collision` exists. `context.findings` still holds the kernel kinds. So a
-  policy on `max_severity` or on `context.call.hosts` has no effect while the detectors are off.
+  kernel such as `name_collision` exists. `context.findings` still holds the kernel kinds. Cedar
+  still evaluates your policies with these values. So the starter rule
+  `context.max_severity >= 3` and a forbid on a host in `context.call.hosts` never match while
+  the detectors are off. A rule such as `context.max_severity < 3` matches every call.
 
 ### How a tool result is decided
 
@@ -299,7 +301,8 @@ findings does not replace the result. In `log_only` mode, the gateway records th
 but it does not replace the result.
 
 - A tool result whose earlier call is not in the request is decided with the tool name of the
-  result, or with the empty tool name. So a policy that names a tool does not apply to it.
+  result, or with the empty tool name. A policy that names the tool of the result applies to
+  it. When the result has no tool name, a policy that names a tool does not apply to it.
 - The gateway never replaces a tool result with no call id and no tool name. The gateway records
   it in the decision log with its findings.
 

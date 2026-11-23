@@ -1205,14 +1205,14 @@ fn detect_call_on_64_kib_and_injection_markers_on_1_and_4_mib() { /* print the t
 - [ ] **Step 1: Run the full graph** as CI does. This list is copied from the `ci-targets` block of the root `CLAUDE.md`:
 
 ```bash
-moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking
-  :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free
-  :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site
-  :http-extractor-envelope :input-liveness :promtool :observability-drift
-  :nats-permissions :release-parity :release-parity-py :release-parity-ts
-  :publish-metadata :version-lockstep :workflow-credentials :pyo3-stub-drift :ruff-ci
-  :next-public-free :helm-render :moon-diagnosis-exec :wasm-lockstep :test-e2e
-  --base origin/main
+moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking \
+  :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free \
+  :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site \
+  :http-extractor-envelope :input-liveness :promtool :observability-drift \
+  :nats-permissions :release-parity :release-parity-py :release-parity-ts \
+  :publish-metadata :version-lockstep :workflow-credentials :pyo3-stub-drift :ruff-ci \
+  :next-public-free :helm-render :moon-diagnosis-exec :wasm-lockstep :test-e2e \
+  --base origin/main \
   --include-relations
 ```
 

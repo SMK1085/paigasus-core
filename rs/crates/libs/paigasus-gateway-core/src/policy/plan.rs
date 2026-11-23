@@ -121,12 +121,32 @@ impl RequestPlan {
     /// replaces with `enforced = true` (D14: its hosts are then not seen).
     #[must_use]
     pub fn replaced_enforced(&self, turn: &TurnFacts, index: usize) -> bool {
-        let Some(r) = turn.tool_results.get(index) else { return false };
-        self.replaced.iter().filter(|i| i.enforced).any(|i| match &i.target {
-            ResultTarget::CallId(id) => r.call_id.as_deref() == Some(id.as_str()),
-            ResultTarget::Name(n) => r.call_id.is_none() && r.name.as_deref() == Some(n.as_str()),
-            ResultTarget::LocalShellId(id) => r.item_id.as_deref() == Some(id.as_str()),
-        })
+        self.enforced_results(turn).get(index).copied().unwrap_or(false)
+    }
+
+    /// For each entry of `turn.tool_results`, whether it is in a target that the plan replaces
+    /// with `enforced = true` (D14). The enforced targets are indexed once, so the cost is
+    /// `O((results + targets) log targets)`, not one scan of the targets per result.
+    #[must_use]
+    pub fn enforced_results(&self, turn: &TurnFacts) -> Vec<bool> {
+        let (mut ids, mut names, mut shells) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        for item in self.replaced.iter().filter(|i| i.enforced) {
+            match &item.target {
+                ResultTarget::CallId(id) => ids.insert(id.as_str()),
+                ResultTarget::Name(n) => names.insert(n.as_str()),
+                ResultTarget::LocalShellId(id) => shells.insert(id.as_str()),
+            };
+        }
+        turn.tool_results
+            .iter()
+            .map(|r| {
+                let by_call = match r.call_id.as_deref() {
+                    Some(id) => ids.contains(id),
+                    None => r.name.as_deref().is_some_and(|n| names.contains(n)),
+                };
+                by_call || r.item_id.as_deref().is_some_and(|id| shells.contains(id))
+            })
+            .collect()
     }
 
     /// The first enforced cause in map order, or `None`.
