@@ -9,6 +9,23 @@ detectors), SMA-751 (the IAM tool policy sets and their Cedar schema).
 Status: revision 3, after the builder check, the first challenge and the second challenge
 (APPROVE WITH CHANGES). Sven answered QA and QB on 2026-11-22.
 
+## Revision 4 (build) amendments
+
+These items changed during the build. Each line gives the change, the reason and the task.
+
+- A1. § 6.3.2: raw-mode argument text also decodes `\uXXXX` (surrogate pairs; a lone surrogate gives U+FFFD) and `\\`, not only `\/`. Reason: an escaped host failed open on a deny list. Task 3.
+- A2. § 6.3: a URL candidate with an authority longer than 1024 bytes marks the host set as overflowed, as the 256-host cap does. The hosts-cap `detector_error` reports it. Reason: bounded, linear parsing that fails closed. Task 3.
+- A3. § 6.3.4: `unicode_tags` counts every tag character (U+E0020 to U+E007E) outside an exempt emoji tag sequence in the whole text. A total of 4 or more is a match. The tag characters are joined and every rule scans the joined text. Reason: a payload split into runs of 3 or fewer evaded every rule. Task 6.
+- A4. § 6.3.4: only the RGI subdivision flags `gbeng`, `gbsct` and `gbwls` are exempt. Every other flag-form sequence counts. Reason: a payload hid in fake flags. Task 6.
+- A5. § 6.2.1: `Evidence::argument` and `Evidence::host` cut every pointer before the first token that matches the secret set. The walk computes the cut once per key. Reason: no evidence copy holds a secret, and SMA-856 sends evidence to webhooks. Task 7.
+- A6. § 6.11.1 and § 6.11.2: proto `CedarDetail` gets `bool detection_disabled = 9`. The spec said there was no proto field. Reason: a detection-off decision otherwise replays with a derived `max_severity`, not the -1 the kernel used. Task 11.
+- A7. § 6.3.5: an OpenAPI `nullable: true` skip is added. An `enum` of non-integer numbers, or of integers spelled with an exponent or `.0`, gives no signal. Reason: anti-goal A7 holds without the serde_json `float_roundtrip` feature. Task 5.
+- A8. § 6.8.2: F(v) in the differential predicate holds only FORBID policies: `v.determining_forbids` and `v.errored_forbids`. The kernel has a new field `Verdict.determining_forbids`. Reason: the kernel keeps satisfied permits in `determining` when an errored forbid denies, which gave a false replacement. Task 15.
+- A9. § 6.8.2: an optimistic-only replacement takes the detail of the call that the optimistic path denied. The spec said the detail of the first earlier call. Reason: the record keeps the enforcing floor policy. Task 15.
+- A10. § 6.3: a wrong scans count gives every call a `detector_error` (detector `built_in`) and no scan hosts. Reason: A3 fails closed. Task 13.
+- A11. § 6.13.3: an IAM rollback does not make held rows "different". The code returns `older_replica` and writes nothing. The runbook follows the code. Task 17.
+- A12. § 6.10: Anthropic `search_result` blocks and text or content `document` blocks are scanned. `tool_reference` is a part with no text. Base64, URL and file documents, Responses `input_file`, object content and unknown part types are "not scanned" and give a `detector_error`. Reason: fail closed without false replacements on normal RAG traffic. Task 22.
+
 ## Revision 3 changelog
 
 - S1. § 6.8.0, D27: the request-side gate is mode-based. Mode `log_only` or `enforce` with the
