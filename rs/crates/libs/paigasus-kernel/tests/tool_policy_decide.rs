@@ -241,9 +241,6 @@ fn a_catalog_name_is_in_the_catalog_group_and_another_is_unregistered() {
     let p = policies("", "", &["Read_File"]);
     assert_eq!(decide(&call(" read_file", "{}"), &facts(), &Findings::new(), &p).action_group, ActionGroup::Catalog);
     assert_eq!(decide(&call("rm", "{}"), &facts(), &Findings::new(), &p).action_group, ActionGroup::Unregistered);
-    // The accessor gives the same group with no decision.
-    assert_eq!(p.action_group(" read_file"), ActionGroup::Catalog);
-    assert_eq!(p.action_group("rm"), ActionGroup::Unregistered);
 }
 
 #[test]

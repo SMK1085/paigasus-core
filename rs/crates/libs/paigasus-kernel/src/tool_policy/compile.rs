@@ -267,17 +267,6 @@ impl ToolPolicies {
         self.reads_screen_dependent
     }
 
-    /// The action group of a tool name (the raw name: it is normalised here), with no Cedar
-    /// decision. `decide` gives the same group in `Verdict.action_group`.
-    #[must_use]
-    pub fn action_group(&self, name: &str) -> ActionGroup {
-        self.group_of(&normalise(name))
-    }
-
-    fn group_of(&self, normalised: &str) -> ActionGroup {
-        if self.catalog.contains(normalised) { ActionGroup::Catalog } else { ActionGroup::Unregistered }
-    }
-
     /// The optimistic set of § 6.1.6.
     pub(crate) fn optimistic_set(&self) -> &PolicySet {
         &self.optimistic
@@ -314,7 +303,7 @@ impl ActionGroup {
 /// The action of a call, with parent `InvokeTool` (a catalog name) or `Unregistered` (D22).
 pub(crate) fn action_entity(policies: &ToolPolicies, normalised: &str) -> (EntityUid, Entities, ActionGroup) {
     let uid = action_uid(normalised);
-    if policies.group_of(normalised) == ActionGroup::Catalog {
+    if policies.catalog.contains(normalised) {
         return (uid, policies.entities.clone(), ActionGroup::Catalog);
     }
     let entity = Entity::new_no_attrs(uid.clone(), HashSet::from([action_uid(GROUP_UNREGISTERED)]));

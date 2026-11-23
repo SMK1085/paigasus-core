@@ -13,7 +13,7 @@ use paigasus_kernel::tool_policy::{
 };
 use sha2::{Digest, Sha256};
 
-use super::calls::{cedar_detail, kernel_findings, unevaluated_detail};
+use super::calls::{cedar_detail, kernel_findings};
 use super::mapping::{definition_call_name, input_for, name_collisions};
 use super::snapshot::{PolicySet, PolicySnapshot, TenantMode, TenantPart};
 use crate::decision_log::CedarDetail;
@@ -204,10 +204,19 @@ fn findings_per_result(results: usize, given: &[Vec<Finding>]) -> Cow<'_, [Vec<F
 /// The most distinct differential pairs (§ 6.8.2) that one request decides. Each pair is two
 /// Cedar decisions, and the client controls how many targets and earlier calls a request has.
 /// Equal pairs are decided once (the pair cache), so only distinct pairs count. Past the budget,
-/// every target with findings that is not yet decided is not evaluated: it gets one
-/// `detector_error` (detector `built_in`, high) and is replaced, fail closed, as a `scan_limit`
-/// is (spec A13).
+/// every target with findings that is not yet decided is decided by one pseudo pair for its tool
+/// name: the D32 pseudo call (input `{}`), with one `detector_error` (detector `built_in`, high)
+/// added to A. The D12 predicate and the normal accounting decide it, so a finding never
+/// replaces a result without a policy that reads it (A1). Spec A13.
 pub(crate) const PAIR_BUDGET: usize = 64;
+
+/// A target's findings with the `detector_error` (detector `built_in`, high) that says that the
+/// request went past `PAIR_BUDGET`.
+fn with_budget_error(given: &[Finding]) -> Vec<Finding> {
+    let mut given = given.to_vec();
+    given.push(Finding::new(DETECTOR_BUILT_IN, DETECTOR_ERROR, Severity::High, ""));
+    given
+}
 
 /// A SHA-256 digest. A pair cache key holds digests, never the call content (A2).
 type Digest32 = [u8; 32];
@@ -348,7 +357,8 @@ struct ResultJudge<'j, 'p, 'k> {
     cache: HashMap<(Digest32, Digest32), PairOutcome>,
     /// The pairs decided so far (each one two Cedar decisions). At most `PAIR_BUDGET`.
     decided: usize,
-    /// A pair past `PAIR_BUDGET` was needed: no target with findings is evaluated after this.
+    /// A pair past `PAIR_BUDGET` was needed: every later target with findings goes to
+    /// `past_budget`.
     exhausted: bool,
 }
 
@@ -396,12 +406,18 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     /// `hit` into one item (`enforced` is the OR), with A's detail. Not replaced: a screen record.
     fn screened(&mut self, calls: &[EarlierCall<'k>], given: &[Finding], hit: Option<(&'k str, bool)>) -> Option<(&'k str, bool, Option<CedarDetail>)> {
         let first = calls.first()?;
-        let Some(pairs) = self.pairs(calls, given) else {
-            // Past the pair budget: not evaluated, replaced (fail closed, spec A13).
-            let (name, detail) = self.unevaluated(first.name, given);
-            let enforced = self.judge.floor_only || self.judge.mode == TenantMode::Enforce;
-            return Some((hit.map_or(name, |(n, _)| n), enforced || hit.is_some_and(|(_, e)| e), Some(detail)));
+        let (pairs, calls, given): (Pairs, Cow<'_, [EarlierCall<'k>]>, Cow<'_, [Finding]>) = match self.pairs(calls, given) {
+            Some(pairs) => (pairs, Cow::Borrowed(calls), Cow::Borrowed(given)),
+            None => {
+                // Past the pair budget (spec A13): one pseudo pair for the target's tool name, with
+                // a `detector_error` added to A. The policies decide, as for any other pair.
+                let pseudo = EarlierCall::pseudo(first.name);
+                let given = with_budget_error(given);
+                let pairs = self.past_budget(&pseudo, &given);
+                (pairs, Cow::Owned(vec![pseudo]), Cow::Owned(given))
+            }
         };
+        let (first, given) = (calls.first()?, &*given);
         match (pairs.hit, hit) {
             // Replaced by the findings: the cited call (first enforced difference, else first
             // difference) names the entry and gives the detail.
@@ -426,12 +442,16 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     }
 
     /// A result that names no call (P-6): the pair of the pseudo call, and a screen record only.
-    /// Past the pair budget, the record holds the unevaluated detail; it is still not replaced.
+    /// Past the pair budget, A also gets the `detector_error`; the result is still not replaced.
     fn orphan(&mut self, given: &[Finding]) {
         let pseudo = EarlierCall::pseudo("");
         let cedar = match self.pairs(&[pseudo], given) {
             Some(pairs) => self.detail(&pseudo, &pairs, given),
-            None => Some(self.unevaluated(pseudo.name, given).1),
+            None => {
+                let given = with_budget_error(given);
+                let pairs = self.past_budget(&pseudo, &given);
+                self.detail(&pseudo, &pairs, &given)
+            }
         };
         if let Some(cedar) = cedar {
             self.plan.screen_records.push(ScreenRecord { tool: pseudo.name.to_owned(), cedar });
@@ -444,17 +464,36 @@ impl<'k> ResultJudge<'_, '_, 'k> {
         Some(cedar_detail(&outcome.a, given, Declared::Unknown, self.judge.facts, outcome.duration))
     }
 
-    /// The name and detail of a target past the pair budget: its findings and one `detector_error`.
-    fn unevaluated(&self, name: &'k str, given: &[Finding]) -> (&'k str, CedarDetail) {
-        let mut given = given.to_vec();
-        given.push(Finding::new(DETECTOR_BUILT_IN, DETECTOR_ERROR, Severity::High, ""));
-        (name, unevaluated_detail(&given, name, self.judge.policies, self.judge.facts))
+    /// The pair of a target past `PAIR_BUDGET` (spec A13): the D32 pseudo call of its tool name,
+    /// with `given` (the target's findings and the budget `detector_error`). It is in the same
+    /// cache, keyed by the pseudo call (so by the tool name) and the finding set, and it does not
+    /// count against the budget. Past the budget, a request therefore decides at most one pair per
+    /// distinct (tool name, finding set). That is at most one pair per target, never one per
+    /// (target, earlier call). A finding never decides alone (A1): the policies decide the pair.
+    fn past_budget(&mut self, pseudo: &EarlierCall<'k>, given: &[Finding]) -> Pairs {
+        let with = kernel_findings(given);
+        let findings = findings_digest(&with);
+        let key = (pseudo.digest, findings);
+        let counts = match self.cache.get(&key) {
+            Some(outcome) => outcome.counts,
+            None => {
+                let outcome = self.decide_pair(pseudo, &with);
+                let counts = outcome.counts;
+                self.cache.insert(key, outcome);
+                counts
+            }
+        };
+        Pairs {
+            findings,
+            hit: counts.map(|enforced| (0, enforced)),
+        }
     }
 
     /// The differential pairs of a target (§ 6.8.2), from the pair cache. `None` when a pair that
-    /// is not in the cache would go past `PAIR_BUDGET`: the target is then not evaluated, and no
-    /// later target is either. The cost of one request is at most `2 * PAIR_BUDGET` Cedar
-    /// decisions, plus one cache look-up for each (target, earlier call).
+    /// is not in the cache would go past `PAIR_BUDGET`: the target, and every later target with
+    /// findings, is then decided by `past_budget`. Before the budget, a request decides at most
+    /// `PAIR_BUDGET` pairs (`2 * PAIR_BUDGET` Cedar decisions), plus one cache look-up for each
+    /// (target, earlier call).
     fn pairs(&mut self, calls: &[EarlierCall<'k>], given: &[Finding]) -> Option<Pairs> {
         if self.exhausted {
             return None;
@@ -1894,48 +1933,83 @@ mod tests {
         t
     }
 
+    /// The finding records of a detail as (kind, severity, detector).
+    fn records(d: &CedarDetail) -> Vec<(&str, Option<Severity>, &str)> {
+        d.findings.iter().map(|f| (f.kind.as_str(), f.severity, f.detector.as_str())).collect()
+    }
+
+    const BUDGET_RECORDS: [(&str, Option<Severity>, &str); 2] = [(DETECTOR_ERROR, Some(Severity::High), DETECTOR_BUILT_IN), (INJECTION_MARKERS, Some(Severity::High), INJECTION_MARKERS)];
+
     #[test]
-    fn targets_past_the_pair_budget_get_a_detector_error_and_are_replaced() {
+    fn past_the_pair_budget_an_allow_all_tenant_replaces_nothing() {
+        // A1: a tenant with no detector policy ("signals only") keeps every result.
         let n = PAIR_BUDGET + 6;
-        for (mode, enforced) in [(TenantMode::Enforce, true), (TenantMode::LogOnly, false)] {
+        for mode in [TenantMode::Enforce, TenantMode::LogOnly] {
             let (p, reads) = counted(&tenant(PERMIT_ALL, mode), &distinct(n), &vec![vec![high()]; n]);
-            assert_eq!(reads, 2 * PAIR_BUDGET, "{mode:?}: no pair past the budget");
-            // The first PAIR_BUDGET targets are evaluated: `permit all` allows, so screen records.
-            assert_eq!(p.screen_records.len(), PAIR_BUDGET, "{mode:?}");
+            // 64 budget pairs, then one pseudo pair for the one tool name `fetch`.
+            assert_eq!(reads, 2 * (PAIR_BUDGET + 1), "{mode:?}");
+            assert!(p.replaced.is_empty() && p.entries.is_empty(), "{mode:?}");
+            assert_eq!(p.screen_records.len(), n, "{mode:?}");
             assert!(p.screen_records.iter().all(|r| r.cedar.effect == Effect::Allow));
-            // The others are not evaluated: replaced, fail closed, with the error in the record.
-            let past: Vec<ResultTarget> = (PAIR_BUDGET..n).map(|i| ResultTarget::CallId(format!("c{i}"))).collect();
-            assert_eq!(p.replaced.iter().map(|i| i.target.clone()).collect::<Vec<_>>(), past, "{mode:?}");
-            assert!(p.replaced.iter().all(|i| i.enforced == enforced), "{mode:?}");
-            for d in p.entry_details.iter().map(|d| d.as_ref().expect("detail")) {
-                assert_eq!((d.effect, d.determining.len(), d.max_severity), (Effect::Deny, 0, Some(Severity::High)));
-                let records: Vec<(&str, Option<Severity>, &str)> = d.findings.iter().map(|f| (f.kind.as_str(), f.severity, f.detector.as_str())).collect();
-                assert_eq!(
-                    records,
-                    [(DETECTOR_ERROR, Some(Severity::High), DETECTOR_BUILT_IN), (INJECTION_MARKERS, Some(Severity::High), INJECTION_MARKERS)]
-                );
+            // The records past the budget hold the error; the ones before do not.
+            for (i, r) in p.screen_records.iter().enumerate() {
+                let past = i >= PAIR_BUDGET;
+                assert_eq!(r.cedar.findings.iter().any(|f| f.kind == DETECTOR_ERROR), past, "{mode:?} {i}");
+                if past {
+                    assert_eq!(records(&r.cedar), BUDGET_RECORDS);
+                }
             }
         }
-        // At the budget exactly, every target is evaluated.
+        // At the budget exactly, no pseudo pair runs.
         let (p, reads) = counted(&tenant(PERMIT_ALL, TenantMode::Enforce), &distinct(PAIR_BUDGET), &vec![vec![high()]; PAIR_BUDGET]);
         assert_eq!((reads, p.screen_records.len(), p.replaced.len()), (2 * PAIR_BUDGET, PAIR_BUDGET, 0));
+        assert!(p.screen_records.iter().all(|r| r.cedar.findings.iter().all(|f| f.kind != DETECTOR_ERROR)));
     }
 
     #[test]
-    fn an_orphan_past_the_pair_budget_gets_an_unevaluated_screen_record() {
+    fn past_the_pair_budget_the_starter_policy_replaces() {
+        let n = PAIR_BUDGET + 6;
+        for (mode, enforced) in [(TenantMode::Enforce, true), (TenantMode::LogOnly, false)] {
+            let (p, _) = counted(&tenant(PERMIT_ALL_STARTER, mode), &distinct(n), &vec![vec![high()]; n]);
+            // Every target is replaced by the policy: before the budget by its own pair, past it by
+            // the pseudo pair. `log_only` gives Observe (an unenforced item).
+            assert_eq!(p.replaced.len(), n, "{mode:?}");
+            assert!(p.replaced.iter().all(|i| i.enforced == enforced), "{mode:?}");
+            for d in &p.entry_details[PAIR_BUDGET..] {
+                let d = d.as_ref().expect("detail");
+                assert_eq!((d.effect, ids(&d.determining)), (Effect::Deny, vec!["detectors-block-high"]));
+                assert_eq!(records(d), BUDGET_RECORDS);
+            }
+        }
+    }
+
+    #[test]
+    fn past_the_pair_budget_one_tool_name_costs_one_pair() {
+        let n = PAIR_BUDGET + 2000;
+        let (p, reads) = counted(&tenant(PERMIT_ALL_STARTER, TenantMode::Enforce), &distinct(n), &vec![vec![high()]; n]);
+        assert_eq!(reads, 2 * (PAIR_BUDGET + 1), "2000 targets past the budget, one tool name: one pseudo pair");
+        assert_eq!(p.replaced.len(), n);
+    }
+
+    #[test]
+    fn an_orphan_past_the_pair_budget_gets_a_screen_record_only() {
         let mut t = distinct(PAIR_BUDGET);
-        // A result with no id is decided by the pseudo pair, which is the 65th distinct pair.
+        // A result with no id is decided by the pseudo pair, which is past the budget.
         t.tool_results.push(ToolResultRef {
             call_id: None,
             name: None,
             item_id: None,
             shape: ResultShape::Text,
         });
-        let (p, _) = counted(&tenant(PERMIT_ALL, TenantMode::Enforce), &t, &vec![vec![high()]; PAIR_BUDGET + 1]);
-        assert!(p.replaced.is_empty(), "P-6: never replaced");
-        let last = p.screen_records.last().expect("record");
-        assert_eq!((last.tool.as_str(), last.cedar.effect), ("", Effect::Deny));
-        assert!(last.cedar.findings.iter().any(|f| f.kind == DETECTOR_ERROR && f.detector == DETECTOR_BUILT_IN));
+        for (text, effect) in [(PERMIT_ALL, Effect::Allow), (PERMIT_ALL_STARTER, Effect::Deny)] {
+            let (p, _) = counted(&tenant(text, TenantMode::Enforce), &t, &vec![vec![high()]; PAIR_BUDGET + 1]);
+            // P-6: never replaced, even when the policy denies. Only the 64 call targets can be.
+            let calls_replaced = if effect == Effect::Deny { PAIR_BUDGET } else { 0 };
+            assert_eq!((p.replaced.len(), p.screen_records.len()), (calls_replaced, PAIR_BUDGET + 1 - calls_replaced));
+            let last = p.screen_records.last().expect("record");
+            assert_eq!((last.tool.as_str(), last.cedar.effect), ("", effect));
+            assert_eq!(records(&last.cedar), BUDGET_RECORDS);
+        }
     }
 
     #[test]
