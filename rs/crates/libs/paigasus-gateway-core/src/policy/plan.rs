@@ -289,8 +289,9 @@ struct PairOutcome {
 struct Pairs {
     /// The `findings_digest` of the target's finding set.
     findings: Digest32,
-    /// The first call whose pair differs in a way that counts, and whether the item is enforced
-    /// (the OR over every such call).
+    /// The call that the record cites, and whether the item is enforced (the OR over every call
+    /// whose pair differs in a way that counts). The cited call is the first one whose difference
+    /// is enforced; when no difference is enforced, it is the first one that differs (spec A14).
     hit: Option<(usize, bool)>,
 }
 
@@ -402,7 +403,8 @@ impl<'k> ResultJudge<'_, '_, 'k> {
             return Some((hit.map_or(name, |(n, _)| n), enforced || hit.is_some_and(|(_, e)| e), Some(detail)));
         };
         match (pairs.hit, hit) {
-            // Replaced by the findings: the first call whose pair differed names the entry.
+            // Replaced by the findings: the cited call (first enforced difference, else first
+            // difference) names the entry and gives the detail.
             (Some((index, enforced)), optimistic) => {
                 let c = calls.get(index)?;
                 Some((c.name, enforced || optimistic.is_some_and(|(_, e)| e), self.detail(c, &pairs, given)))
@@ -479,7 +481,12 @@ impl<'k> ResultJudge<'_, '_, 'k> {
                 }
             };
             if let Some(enforced) = counts {
-                pairs.hit = Some(pairs.hit.map_or((index, enforced), |(first, e)| (first, e || enforced)));
+                // The cited call: the first enforced differing pair, else the first differing pair
+                // (spec A14). The verdict (`enforced`, the OR) does not depend on the choice.
+                pairs.hit = Some(match pairs.hit {
+                    None => (index, enforced),
+                    Some((cited, e)) => (if enforced && !e { index } else { cited }, e || enforced),
+                });
             }
         }
         Some(pairs)
@@ -1943,5 +1950,38 @@ mod tests {
         let mut medium = Findings::new();
         medium.add(INJECTION_MARKERS, Severity::Medium);
         assert_ne!(findings_digest(&medium), findings_digest(&kernel_findings(&[high()])), "the severity is in the key");
+    }
+
+    /// Spec A14: one target, two earlier calls `a` then `rm`, both differ by the finding.
+    fn two_differing_calls(s: &PolicySnapshot) -> RequestPlan {
+        let mut t = turn(vec![]);
+        t.prior_calls = vec![prior("c0", "a"), prior("c0", "rm")];
+        t.tool_results = vec![by_id("c0")];
+        plan_request(s, Format::OpenAiChat, &t, &[vec![high()]], &Instant::now)
+    }
+
+    const TENANT_A: &str = r#"@id("all") permit(principal, action, resource);
+        @id("ta") forbid(principal, action == Pgs::Gateway::Action::"a", resource) when { context.max_severity >= 3 };"#;
+
+    #[test]
+    fn the_record_cites_the_first_enforced_differing_pair() {
+        // `a` differs only by a log-only tenant forbid; `rm` differs by a floor forbid.
+        let floor = r#"@id("fr") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when { context.findings.contains("injection_markers") };"#;
+        let p = two_differing_calls(&snap(floor, TENANT_A, TenantPart::Evaluated, TenantMode::LogOnly));
+        assert_eq!(p.replaced, [c0(true)]);
+        assert_eq!(p.entries[0].tool, "rm");
+        let d = detail(&p, 0);
+        assert!(d.floor_denied);
+        assert_eq!(ids(&d.determining), ["fr"]);
+    }
+
+    #[test]
+    fn with_no_enforced_pair_the_record_cites_the_first_differing_pair() {
+        // The control: both differences are log-only tenant forbids.
+        let tenant = format!(r#"{TENANT_A} @id("tr") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when {{ context.findings.contains("injection_markers") }};"#);
+        let p = two_differing_calls(&snap(NO_FLOOR, &tenant, TenantPart::Evaluated, TenantMode::LogOnly));
+        assert_eq!(p.replaced, [c0(false)]);
+        assert_eq!(p.entries[0].tool, "a");
+        assert_eq!(ids(&detail(&p, 0).determining), ["ta"]);
     }
 }

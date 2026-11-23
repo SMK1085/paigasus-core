@@ -26,6 +26,7 @@ These items changed during the build. Each line gives the change, the reason and
 - A11. § 6.13.3: an IAM rollback does not make held rows "different". The code returns `older_replica` and writes nothing. The runbook follows the code. Task 17.
 - A12. § 6.10: Anthropic `search_result` blocks and text or content `document` blocks are scanned. `tool_reference` is a part with no text. Base64, URL and file documents, Responses `input_file`, object content and unknown part types are "not scanned" and give a `detector_error`. Reason: fail closed without false replacements on normal RAG traffic. Task 22.
 - A13. § 6.8.2: one request decides each distinct differential pair once (a cache keyed by digests of the call and of the finding set), and at most `PAIR_BUDGET` = 64 pairs. Past the budget, each target with findings that is not yet decided gets one `detector_error` (detector `built_in`, high), is not evaluated, and is replaced (enforced in `enforce` mode or with a floor-only set; an orphan only gets the screen record). Reason: the client controlled about 2 × N × N Cedar decisions. Task 15 (PR 534 review).
+- A14. § 6.8.2: the record cites the first enforced differing pair, else the first differing pair (Sven, 2026-11-23).
 
 ## Revision 3 changelog
 
