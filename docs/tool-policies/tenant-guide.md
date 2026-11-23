@@ -217,8 +217,10 @@ Your policies read the findings in three context attributes:
   is 1, `medium` is 2 and `high` is 3. It is -1 when there are no findings. So every comparison
   with a real level is false for a call with no findings.
 - `context.call.hosts` is the set of the hosts in the call arguments, with no duplicates and in
-  sorted order. It holds each host, also a host that the history holds. It is empty for a call
-  with no host.
+  sorted order. It holds every host of the arguments, also a host that is in the history. It is
+  empty for a call with no host. A comma does not end a URL in text. So
+  `https://a.example,https://b.example` gives the host `a.example,https`, and a deny list can miss
+  `b.example`.
 
 ### The finding kinds
 
@@ -268,10 +270,14 @@ What the policy blocks:
   a coding agent reads such files as tool results. So they are signals only. The meaning of a text
   is the job of a judge (SMA-857).
 - `detector_error`. It is `high`, so a detector error blocks under this policy. That is fail
-  closed. A detector error occurs when a detector fails, when a scan limit stops a scan, when the
-  scan of the request fails, when a URL has an authority that is too long, or when a call has more
-  than 256 hosts. At the default
-  limits, the gateway scans a request in full. A larger request limit or a smaller
+  closed. These are the causes of a detector error:
+  - A detector fails.
+  - A scan limit stops a scan.
+  - The scan of the request fails.
+  - A URL has an authority that is too long.
+  - A call has more than 256 hosts.
+
+  At the default limits, the gateway scans a request in full. A larger request limit or a smaller
   `max_scan_bytes` of the operator can give a scan limit on old tool results.
 
 ### When the detectors run
@@ -288,14 +294,14 @@ What the policy blocks:
 
 A tool result with findings is decided with the call that the result answers. The gateway
 evaluates your set two times: one time with the findings and one time without them. The gateway
-replaces the result when the findings cause the deny. A forbid that applies also without the
+replaces the result when the findings make the policy deny the call. A forbid that applies also without the
 findings does not replace the result. In `log_only` mode, the gateway records the replacement,
 but it does not replace the result.
 
 - A tool result whose earlier call is not in the request is decided with the tool name of the
   result, or with the empty tool name. So a policy that names a tool does not apply to it.
-- A tool result with no call id and no tool name is never replaced. The gateway records it in the
-  decision log with its findings.
+- The gateway never replaces a tool result with no call id and no tool name. The gateway records
+  it in the decision log with its findings.
 
 ### What one aggregated `max_severity` cannot express
 
