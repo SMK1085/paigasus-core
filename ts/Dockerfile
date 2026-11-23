@@ -72,7 +72,7 @@ RUN printf "// SPDX-License-Identifier: Apache-2.0\nawait import('./apps/%s/serv
 # connection and never answers. assert_console_pins holds the signal below the --timeout.
 RUN printf '// SPDX-License-Identifier: Apache-2.0\nconst r = await fetch(`http://127.0.0.1:${process.env.PORT ?? 3000}%s/healthz`, { signal: AbortSignal.timeout(2500) });\nprocess.exit(r.ok ? 0 : 1);\n' "$BASE_PATH" > /app/healthcheck.mjs
 
-FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f92717143215d248fd55771ee1936ef4b3302e531
+FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:ffa8a7545403036c94ec76674b5dbac2d425af2d679147cdf3e30180071487b7
 COPY --from=builder /app /app
 ENV PORT=3000 HOSTNAME=0.0.0.0 NODE_ENV=production
 EXPOSE 3000
