@@ -328,6 +328,9 @@ impl<'k> ResultJudge<'_, '_, 'k> {
             // Replaced by the findings: the first call whose pair differed names the entry. `pairs`
             // pushes one detail for every call that it sets `hit` for, so `index` is in range.
             (Some((index, enforced)), optimistic) => {
+                // The invariant: a debug build panics on a defect. A release build keeps the
+                // result (the `?` below), as before.
+                debug_assert!(index < pairs.details.len(), "the differing pair has a detail");
                 let (name, detail) = pairs.take(index)?;
                 Some((name, enforced || optimistic.is_some_and(|(_, e)| e), Some(detail)))
             }
