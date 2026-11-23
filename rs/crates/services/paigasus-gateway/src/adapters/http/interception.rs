@@ -956,8 +956,8 @@ mod tests {
     ///
     /// Both holds complete at t = 0. The first run ends at 600 ms, inside its deadline of 750 ms.
     /// The second run starts at 600 ms and ends at the absolute deadline `hold start +
-    /// decide_timeout - margin` = 750 ms: the decider gives `detector_error` (basis `decider`),
-    /// not `on_failure`. With a relative deadline (`now + timeout_ms` = 1350 ms) the relay would
+    /// decide_timeout - margin` = 750 ms: the decider gives `detector_error` (record basis
+    /// `RecordBasis::Policy`), not `RecordBasis::OnFailure`. With a relative deadline (`now + timeout_ms` = 1350 ms) the relay would
     /// rule `on_failure` at 1000 ms. Keep-alive comments go out while the holds wait.
     #[tokio::test(start_paused = true)]
     async fn two_holds_with_a_slow_detector_use_the_absolute_deadline() {

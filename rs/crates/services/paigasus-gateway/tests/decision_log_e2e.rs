@@ -152,6 +152,20 @@ where
     }
 }
 
+/// Wait until the writer of the decision log holds a Redis connection. `boot` spawns the connect loop
+/// and returns at once, and the writer DROPS a batch while it has no connection
+/// (`gateway_decision_log_dropped_total{reason="redis_unavailable"}`): it does not buffer. So a test
+/// that records before the first connect succeeds loses those events, and no wait on `XLEN` brings
+/// them back (Task 23 review). The connect loop sets the slot, then logs this line. `logs` must be
+/// captured before `boot`. The capture is thread-local, so this works on the current-thread runtime of
+/// `#[tokio::test]`, where the spawned connect loop runs on the test thread.
+async fn wait_for_redis_writer(logs: &paigasus_logging::test_support::LogBuffer) {
+    wait_for("the decision log writer is connected to Redis", || async {
+        logs.text().contains("the decision log connected to Redis")
+    })
+    .await;
+}
+
 /// The payloads of the stream, with their subjects. An empty list while the stream does not exist yet.
 async fn published(js: &jetstream::Context) -> Vec<(String, Vec<u8>)> {
     let Ok(mut stream) = js.get_stream(dl_js::STREAM).await else {
@@ -318,6 +332,8 @@ async fn the_canary_never_leaves_the_gateway() {
     let unavailable = gateway_config(&no_floor, "enforce", &stack.redis_url, &stack.nats_url);
     let dl = boot(&enforce).await;
     let recorder = dl.recorder.clone();
+    // The pre-existing flake of this test (Task 0 baseline) is the same race as Task 23's (review I1).
+    wait_for_redis_writer(&logs).await;
 
     // allowed + blocked, with a floor-denied definition that the request side removes
     chat_exchange(&enforce, &recorder, &["read_file", "floor_rm"], &[("read_file", CANARY_ARGS), ("floor_rm", CANARY_ARGS)]).await;
@@ -469,6 +485,7 @@ async fn the_redis_stream_holds_no_canary() {
         return;
     };
     let metrics = paigasus_observability::init("paigasus-gateway");
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs();
     // A port that nothing listens on: the relay cannot publish, so the events stay in the stream.
     let nats_port = {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe port");
@@ -482,6 +499,7 @@ async fn the_redis_stream_holds_no_canary() {
     assert!(allow_cfg.tool_policy.detector_settings().enabled, "the detectors are on by default");
     let starter_cfg = gateway_config(&starter_dir, "enforce", &redis_url, &nats_url);
     let dl = boot(&allow_cfg).await;
+    wait_for_redis_writer(&logs).await;
     let args = det_secret_args();
     for cfg in [&allow_cfg, &starter_cfg] {
         let mock = MockOpenAi::spawn_json(StatusCode::OK, chat_answer(&[("fetch", args.as_str())])).await;
@@ -490,11 +508,10 @@ async fn the_redis_stream_holds_no_canary() {
     }
     // Per request: one response record for the call and one request record for the result
     // (a screen record under allow-all, a replace record under the starter policy). On a timeout
-    // the message names the stream length and the decision-log counters, for the diagnosis.
-    // The wait is 90 s, not the 40 s of `wait_for`: one try timed out at 40 s once (Task 23 report).
-    // The writer's connect loop backs off 1, 2, 4, 8, 16, 30 s, so it tries at 0, 1, 3, 7, 15, 31 and
-    // 61 s; 90 s covers the try at 61 s. A passing run takes under one second.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    // the message names the stream length and the non-zero decision-log counters, for the diagnosis
+    // (a `dropped_total{reason="redis_unavailable"}` names the connect race that
+    // `wait_for_redis_writer` closes).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
     while xlen(&redis).await < 4 {
         if tokio::time::Instant::now() >= deadline {
             let rendered = metrics.render();

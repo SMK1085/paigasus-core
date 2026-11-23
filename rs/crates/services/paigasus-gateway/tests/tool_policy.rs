@@ -1808,11 +1808,16 @@ mod detectors {
     // --- § 7.4 scan limit ------------------------------------------------------------------------
 
     /// § 6.10, F10: with `max_scan_bytes` 65536 and three 30 KiB results, the two newest fit and are
-    /// scanned, and the oldest gets `detector_error` (`scan_limit`). Under the starter policy that
-    /// replaces the oldest result only.
+    /// scanned, and the oldest gets `detector_error` (`scan_limit`). The newest result holds an
+    /// injection with a tag run, so its `injection_markers` finding proves that it was scanned (review
+    /// Minor 2). Under the starter policy the oldest and the newest results are replaced, and the
+    /// middle one is not.
     #[tokio::test]
     async fn a_request_past_max_scan_bytes_gets_scan_limit_on_old_results() {
-        let text: Vec<String> = (0..3).map(|i| format!("{i}").repeat(30 * 1024)).collect();
+        let mut text: Vec<String> = (0..3).map(|i| format!("{i}").repeat(30 * 1024)).collect();
+        // At least 4 tag characters (Task 22): `injection_markers`, high. The two newest still fit.
+        text[2].push_str(&format!(" {}", tags("hidden-order")));
+        assert!(text[1].len() + text[2].len() <= 65_536, "the two newest fit in the budget");
         let results = [("res_0", text[0].as_str()), ("res_1", text[1].as_str()), ("res_2", text[2].as_str())];
         let allow_dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
         let starter_dir = policy_dir(SHIPPED_FLOOR, &starter());
@@ -1826,16 +1831,26 @@ mod detectors {
             let ex = s.run(ep, &body, &[]).await;
             assert_eq!(ex.upstream.as_deref(), Some(body.as_bytes()), "{ep:?}");
             let screened = screen_records(&s.log.records());
-            let got: Vec<(&str, Vec<(String, String)>)> = screened.iter().map(|r| (r.tool.name.as_str(), findings(r))).collect();
-            assert_eq!(got, [("res_0", vec![("detector_error".to_owned(), "built_in".to_owned())])], "{ep:?}");
+            let mut got: Vec<(&str, Vec<(String, String)>)> = screened.iter().map(|r| (r.tool.name.as_str(), findings(r))).collect();
+            got.sort();
+            assert_eq!(
+                got,
+                [
+                    ("res_0", vec![("detector_error".to_owned(), "built_in".to_owned())]),
+                    ("res_2", vec![("injection_markers".to_owned(), "injection_markers".to_owned())]),
+                ],
+                "the oldest is not scanned, the newest is ({ep:?})"
+            );
 
             let s = stack(&starter_dir, TenantMode::Enforce, det());
             let ex = s.run(ep, &body, &[]).await;
             let up = ex.upstream_json();
-            assert!(is_notice(&result_slot(ep, &up, 0)), "the oldest result is replaced ({ep:?})");
+            assert!(is_notice(&result_slot(ep, &up, 0)), "the oldest result is replaced: scan_limit ({ep:?})");
             assert_eq!(result_slot(ep, &up, 1), text[1].as_str(), "{ep:?}");
-            assert_eq!(result_slot(ep, &up, 2), text[2].as_str(), "{ep:?}");
-            assert_eq!(request_entries(&ex.entries), [req("res_0", "replace-result", true)], "{ep:?}");
+            assert!(is_notice(&result_slot(ep, &up, 2)), "the newest result is replaced: its injection ({ep:?})");
+            let mut entries = request_entries(&ex.entries);
+            entries.sort();
+            assert_eq!(entries, [req("res_0", "replace-result", true), req("res_2", "replace-result", true)], "{ep:?}");
         }
     }
 
