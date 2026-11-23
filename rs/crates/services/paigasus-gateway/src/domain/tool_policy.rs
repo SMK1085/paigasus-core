@@ -39,9 +39,12 @@ pub struct TenantPolicies {
     pub version: String,
     /// The tenant settings. `None` from a source with no settings.
     pub settings: Option<TenantSettings>,
-    /// The source refused the set (R5: a history condition, until SMA-753). The settings still
-    /// apply. The cache keeps them, but it never compiles the set, so the tenant set is
-    /// unavailable and the tenant fail mode decides.
+    /// The source refused the set. The cache then keeps the settings of the answer, but it never
+    /// compiles the set. So the tenant set is unavailable, and the tenant fail mode decides.
+    ///
+    /// No source sets this field now. The SMA-775 R5 refusal refused a set with a history
+    /// condition. SMA-753 D16 replaced that rule: such a set loads, and its slots stay empty. The
+    /// port keeps the field for a later refusal rule.
     pub refused: bool,
 }
 

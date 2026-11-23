@@ -5,9 +5,10 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::json::Malformed;
-use crate::report::ReportEntry;
+use crate::report::{Blocked, ReportEntry};
 use crate::sse::Record;
 use crate::types::{BlockCode, Decision, HoldKey, ToolCall};
 
@@ -25,8 +26,8 @@ pub(crate) const MAX_IDENTIFIER_BYTES: usize = 1024;
 pub(crate) enum Verdict {
     /// Every call allowed: frames are released unchanged.
     AllowAll,
-    /// One decision per call, in the hold's call order.
-    PerCall(Vec<Decision>),
+    /// One decision per call, in the hold's call order, each with the decision id of the decider.
+    PerCall(Vec<(Decision, Option<Uuid>)>),
     /// Every call of the hold blocked, including calls not assembled yet.
     BlockAll(BlockCode),
     /// Observe mode: released unchanged and not enforced (§ 5.3).
@@ -38,21 +39,31 @@ impl Verdict {
         match self {
             Verdict::AllowAll | Verdict::PassThrough => false,
             Verdict::BlockAll(_) => true,
-            Verdict::PerCall(d) => d.iter().any(|d| !d.is_allow()),
+            Verdict::PerCall(d) => d.iter().any(|(d, _)| !d.is_allow()),
         }
     }
 
-    /// The block code of the call in `slot` (its index within the hold), or `None` when allowed.
-    pub(crate) fn block_code(&self, slot: usize) -> Option<BlockCode> {
+    /// The block of the call in `slot` (its index within the hold), or `None` when allowed. Only
+    /// a block that the decider made carries a reference (spec D1).
+    pub(crate) fn blocked(&self, slot: usize) -> Option<Blocked> {
         match self {
             Verdict::AllowAll | Verdict::PassThrough => None,
-            Verdict::BlockAll(c) => Some(*c),
+            Verdict::BlockAll(c) => Some(Blocked { code: *c, reference: None }),
             Verdict::PerCall(d) => match d.get(slot) {
-                Some(Decision::Block { code }) => Some(*code),
+                Some((Decision::Block { code }, reference)) => Some(Blocked { code: *code, reference: *reference }),
                 Some(_) => None,
-                None => Some(BlockCode::DeciderError), // D18: a missing decision is a block
+                // D18: a missing decision is a block
+                None => Some(Blocked {
+                    code: BlockCode::DeciderError,
+                    reference: None,
+                }),
             },
         }
+    }
+
+    /// The block code of the call in `slot`, or `None` when allowed.
+    pub(crate) fn block_code(&self, slot: usize) -> Option<BlockCode> {
+        self.blocked(slot).map(|b| b.code)
     }
 }
 
@@ -142,4 +153,10 @@ pub(crate) fn raw_len(raw: &Value) -> usize {
 #[cfg(test)]
 pub(crate) fn raws_len(raws: &[Value]) -> usize {
     raws.iter().map(raw_len).sum()
+}
+
+/// A `PerCall` verdict whose decisions carry no decision id. Tests only.
+#[cfg(test)]
+pub(crate) fn per_call(d: Vec<Decision>) -> Verdict {
+    Verdict::PerCall(d.into_iter().map(|d| (d, None)).collect())
 }

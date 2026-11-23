@@ -11,6 +11,7 @@
 // dead-code lint rather than sprinkle `#[allow]` on each item.
 #![allow(dead_code)]
 
+pub mod history_contract;
 pub mod limits;
 pub mod limits_contract;
 

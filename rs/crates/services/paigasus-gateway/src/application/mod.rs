@@ -8,4 +8,5 @@ pub mod charge_guard;
 pub mod decision_export;
 pub mod decision_log;
 pub mod limits;
+pub mod tool_history;
 pub mod tool_policy;

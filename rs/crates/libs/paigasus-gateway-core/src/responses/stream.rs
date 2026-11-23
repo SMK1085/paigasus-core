@@ -21,12 +21,12 @@ use bytes::Bytes;
 use serde_json::Value;
 
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
-use crate::report::notice_line;
+use crate::report::{Blocked, notice_line};
 use crate::responses::assembly::Assembly;
 use crate::responses::classify::{Event, Scope, classify, scope_of};
 use crate::responses::rewrite::{added_events, completed_message, done_event};
 use crate::sse::{self, Record};
-use crate::types::{BlockCode, HoldKey};
+use crate::types::HoldKey;
 
 /// The longest `event:` name written, in bytes (Review Focus 1).
 const MAX_EVENT_BYTES: usize = 64;
@@ -61,10 +61,10 @@ impl ResponsesStream {
     }
 
     /// The notice of the call in `slot`, by its qualified name (§ 6.6).
-    fn notice(&self, slot: usize, code: BlockCode) -> String {
+    fn notice(&self, slot: usize, blocked: Blocked) -> String {
         let known = self.asm.known();
         let name = known.get(slot).map_or("unknown", |(_, n)| n.as_str());
-        notice_line(name, code)
+        notice_line(name, blocked.code, blocked.reference)
     }
 
     /// The synthesized `output_item.done` of the owed item, if any (§ 6.5).
@@ -75,11 +75,11 @@ impl ResponsesStream {
     }
 
     /// One frame of the client-run item at `index`, which the verdict blocks with `code`.
-    fn rewrite_item(&mut self, value: &Value, index: u32, slot: usize, code: BlockCode) -> Vec<Bytes> {
+    fn rewrite_item(&mut self, value: &Value, index: u32, slot: usize, blocked: Blocked) -> Vec<Bytes> {
         let seq = value.get("sequence_number");
         match value.get("type").and_then(Value::as_str) {
             Some("response.output_item.added") => {
-                let notice = self.notice(slot, code);
+                let notice = self.notice(slot, blocked);
                 let out = added_events(index, &notice, seq).iter().map(event_frame).collect();
                 self.owed = Some(Owed { index, notice, seq: seq.cloned() });
                 out
@@ -89,7 +89,7 @@ impl ResponsesStream {
                     self.owed = None;
                 }
                 self.closed.insert(index);
-                vec![event_frame(&done_event(index, &self.notice(slot, code), seq))]
+                vec![event_frame(&done_event(index, &self.notice(slot, blocked), seq))]
             }
             _ => Vec::new(),
         }
@@ -102,9 +102,9 @@ impl ResponsesStream {
         let output = v.get_mut("response").and_then(|r| r.get_mut("output")).and_then(Value::as_array_mut)?;
         let mut changed = false;
         for (slot, (index, name)) in self.asm.known().iter().enumerate() {
-            let Some(code) = verdict.block_code(slot) else { continue };
+            let Some(blocked) = verdict.blocked(slot) else { continue };
             if let Some(item) = output.get_mut(*index as usize) {
-                *item = completed_message(*index, &notice_line(name, code));
+                *item = completed_message(*index, &notice_line(name, blocked.code, blocked.reference));
                 changed = true;
             }
         }
@@ -215,8 +215,8 @@ impl Protocol for ResponsesStream {
         let Some((i, slot)) = index.and_then(|i| self.asm.slot_of(i).map(|s| (i, s))) else {
             return self.owed_done();
         };
-        match verdict.block_code(slot) {
-            Some(code) => self.rewrite_item(&value, i, slot, code),
+        match verdict.blocked(slot) {
+            Some(blocked) => self.rewrite_item(&value, i, slot, blocked),
             None => vec![original()],
         }
     }
@@ -258,7 +258,8 @@ mod tests {
     use crate::decider::DecidedCall;
     use crate::interceptor::{Action, Interceptor, Metric};
     use crate::limits::Limits;
-    use crate::types::{Decision, Format, ToolCall};
+    use crate::protocol::per_call;
+    use crate::types::{BlockCode, Decision, Format, ToolCall};
 
     fn plain(d: Vec<Decision>) -> Vec<DecidedCall> {
         d.into_iter().map(DecidedCall::from).collect()
@@ -438,7 +439,7 @@ mod tests {
         let evs = two_items();
         let mut recs = records(&evs);
         recs.push(done_rec());
-        let (out, calls, _) = run(&recs, |c| Verdict::PerCall(vec![Decision::Allow; c.len()]), BlockCode::Truncated);
+        let (out, calls, _) = run(&recs, |c| per_call(vec![Decision::Allow; c.len()]), BlockCode::Truncated);
         let want: String = evs.iter().map(framed).collect::<String>() + "data: [DONE]\n\n";
         assert_eq!(out, want);
         assert_eq!(calls.iter().map(|c| (c.position, c.name.as_str())).collect::<Vec<_>>(), [(1, "rm")]);
@@ -446,10 +447,26 @@ mod tests {
         assert_eq!(out, want);
     }
 
+    const ID: &str = "0193f6c2-8a4e-7b10-9c2d-5e8f1a2b3c4d";
+
+    #[test]
+    fn responses_stream_notice_has_the_ref() {
+        let id = uuid::Uuid::try_parse(ID).unwrap();
+        let evs = two_items();
+        let (out, _, _) = run(
+            &records(&evs),
+            |_| Verdict::PerCall(vec![(Decision::Block { code: BlockCode::Policy }, Some(id))]),
+            BlockCode::Truncated,
+        );
+        assert!(out.contains(&format!(r#"[paigasus] tool call \"rm\" was blocked (policy). ref={ID}"#)), "{out}");
+        let (out, _, _) = run(&records(&evs), |_| per_call(vec![Decision::Block { code: BlockCode::Policy }]), BlockCode::Truncated);
+        assert!(out.contains(r#"[paigasus] tool call \"rm\" was blocked (policy)."#) && !out.contains("ref="), "{out}");
+    }
+
     #[test]
     fn a_blocked_function_call_becomes_a_message_at_its_index() {
         let evs = two_items();
-        let (out, _, _) = run(&records(&evs), |_| Verdict::PerCall(vec![Decision::Block { code: BlockCode::Policy }]), BlockCode::Truncated);
+        let (out, _, _) = run(&records(&evs), |_| per_call(vec![Decision::Block { code: BlockCode::Policy }]), BlockCode::Truncated);
         assert!(!out.contains("CANARY") && !out.contains("\\\"p\\\""), "the blocked arguments leaked: {out}");
         let notice = r#"[paigasus] tool call "rm" was blocked (policy)."#;
         let got = payloads(&out);

@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 use crate::json::{MAX_OPENAI_INDEX, Malformed, index_of};
 use crate::openai::assembly::{ChoiceAssembly, check_tool_choice};
 use crate::openai::classify::{BODY_OBJECT, Fragment, NameArgs, check_object, fragment_at, legacy_call};
-use crate::report::notice_line;
-use crate::types::{BlockCode, ToolCall};
+use crate::report::{Blocked, notice_line};
+use crate::types::ToolCall;
 
 /// Tool calls per choice are bounded as in the stream, where a fragment `index` is at most 127.
 const MAX_CALLS: usize = MAX_OPENAI_INDEX as usize + 1;
@@ -82,15 +82,19 @@ pub(crate) fn calls(v: &Value) -> Result<Vec<ToolCall>, Malformed> {
     Ok(out)
 }
 
-pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<BlockCode>]) {
+pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<Blocked>]) {
     let Some(Value::Array(choices)) = v.get_mut("choices") else { return };
     for ch in choices {
         let idx = ch.get("index").and_then(Value::as_u64).and_then(|i| u32::try_from(i).ok()).unwrap_or(0);
-        let mine: Vec<(&ToolCall, Option<BlockCode>)> = calls.iter().zip(codes).filter(|(c, _)| c.choice == idx).map(|(c, k)| (c, *k)).collect();
+        let mine: Vec<(&ToolCall, Option<Blocked>)> = calls.iter().zip(codes).filter(|(c, _)| c.choice == idx).map(|(c, k)| (c, *k)).collect();
         if mine.iter().all(|(_, k)| k.is_none()) {
             continue;
         }
-        let notice: String = mine.iter().filter_map(|(c, k)| k.map(|k| notice_line(&c.display_name(), k))).collect::<Vec<_>>().join("\n");
+        let notice: String = mine
+            .iter()
+            .filter_map(|(c, k)| k.map(|k| notice_line(&c.display_name(), k.code, k.reference)))
+            .collect::<Vec<_>>()
+            .join("\n");
         let remaining = mine.iter().filter(|(_, k)| k.is_none()).count();
         let blocked: Vec<u32> = mine.iter().filter(|(_, k)| k.is_some()).map(|(c, _)| c.position).collect();
         if let Value::Object(o) = ch {
@@ -132,7 +136,41 @@ pub(crate) fn rewrite(v: &mut Value, calls: &[ToolCall], codes: &[Option<BlockCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::BlockCode;
     use serde_json::json;
+
+    const ID: &str = "0193f6c2-8a4e-7b10-9c2d-5e8f1a2b3c4d";
+
+    #[test]
+    fn openai_body_notice_has_the_ref() {
+        let tool_calls = json!([
+            {"id": "c0", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+            {"id": "c1", "type": "function", "function": {"name": "rm", "arguments": "{}"}}
+        ]);
+        let body = json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"tool_calls": tool_calls}, "finish_reason": "tool_calls"}]});
+        let got = calls(&body).unwrap();
+        let id = uuid::Uuid::try_parse(ID).unwrap();
+        let mut out = body.clone();
+        rewrite(
+            &mut out,
+            &got,
+            &[
+                Some(Blocked {
+                    code: BlockCode::Policy,
+                    reference: Some(id),
+                }),
+                Some(Blocked {
+                    code: BlockCode::Policy,
+                    reference: None,
+                }),
+            ],
+        );
+        let text = out["choices"][0]["message"]["content"].as_str().unwrap();
+        assert_eq!(
+            text,
+            format!("[paigasus] tool call \"read\" was blocked (policy). ref={ID}\n[paigasus] tool call \"rm\" was blocked (policy).")
+        );
+    }
 
     #[test]
     fn a_bodyless_call_type_over_1024_bytes_is_malformed() {
