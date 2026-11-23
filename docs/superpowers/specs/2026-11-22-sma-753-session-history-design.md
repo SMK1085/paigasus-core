@@ -389,7 +389,7 @@ when the retention is shorter than `max_window_ms`. IAM writes `max_window_ms` i
 into a set with no condition (`sets.rs:83`). Proposed rule: the check applies only to a set with at
 least one condition, and only per condition (`window_ms <= retention`). When it fails, only the
 slots of those conditions are missing. The other policies of the set still work. This affects fewer
-calls than a failed set, and it makes a rollback safe (§ 10). The `iam.proto` comment changes to
+calls than a failed set, and it makes a rollback safe (§ 8). The `iam.proto` comment changes to
 say this.
 
 **Store errors.** The rule depends on what the request needs:
