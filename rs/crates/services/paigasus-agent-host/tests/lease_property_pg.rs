@@ -13,20 +13,25 @@
 mod support;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
+use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
 use paigasus_agent_host_core::claim::{Claim, ClaimConfig};
 use paigasus_agent_host_core::ids::{EventId, InboxId, ThreadId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
-use paigasus_agent_host_core::lease::{ClaimError, CompleteError, HeartbeatError, LeaseHandle};
-use paigasus_agent_host_core::ports::{ClaimRepository, InboxRepository, InsertOutcome, LeaseRepository};
+use paigasus_agent_host_core::lease::{ClaimError, HeartbeatError, LeaseHandle};
+use paigasus_agent_host_core::memory::MemoryScope;
+use paigasus_agent_host_core::ports::{ClaimRepository, InboxRepository, InsertOutcome, LeaseRepository, RunCommitter};
+use paigasus_agent_host_core::run::CommitError;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use support::commit::{committer, completed_record, inbox_scope};
 use support::inbox::{insert_inbox, migrated_postgres};
 use support::lease::{expire, insert_thread, lease_state, newest_run_thread, snapshot, terminal_event_ids};
 use uuid::Uuid;
@@ -36,7 +41,7 @@ const HB_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_WORKERS: usize = 4;
 const CASES: u32 = 64;
 const ORG: Uuid = Uuid::from_u128(1);
-/// The upper bound of drain rounds. Each round completes one claim, so a drain that needs more
+/// The upper bound of drain rounds. Each round commits one claim, so a drain that needs more
 /// rounds does not make progress.
 const DRAIN_ROUNDS: usize = 500;
 
@@ -69,9 +74,9 @@ enum Op {
     Acquire(usize),
     Heartbeat(usize),
     Claim(usize),
-    /// `old`: complete an older claim (of a replaced or released handle, or already completed)
+    /// `old`: commit an older claim (of a replaced or released handle, or already committed)
     /// with the current handle of the worker.
-    Complete {
+    Commit {
         worker: usize,
         old: bool,
     },
@@ -83,7 +88,7 @@ enum Op {
 }
 
 fn op(workers: usize) -> impl Strategy<Value = Op> {
-    // Half of the operations go to worker 0. A rotation needs one worker to claim, complete and
+    // Half of the operations go to worker 0. A rotation needs one worker to claim, commit and
     // claim again, so a uniform choice of the worker makes rotations rare.
     let w = prop_oneof![1 => Just(0usize), 1 => 0..workers];
     let thread = prop_oneof![Just(ThreadChoice::None), Just(ThreadChoice::ExistingOfRun), Just(ThreadChoice::Foreign)];
@@ -91,8 +96,8 @@ fn op(workers: usize) -> impl Strategy<Value = Op> {
         3 => w.clone().prop_map(Op::Acquire),
         1 => w.clone().prop_map(Op::Heartbeat),
         4 => w.clone().prop_map(Op::Claim),
-        4 => w.clone().prop_map(|worker| Op::Complete { worker, old: false }),
-        1 => w.clone().prop_map(|worker| Op::Complete { worker, old: true }),
+        4 => w.clone().prop_map(|worker| Op::Commit { worker, old: false }),
+        1 => w.clone().prop_map(|worker| Op::Commit { worker, old: true }),
         1 => w.prop_map(Op::Release),
         3 => thread.prop_map(|thread| Op::Insert { thread }),
         2 => Just(Op::Expire),
@@ -102,17 +107,18 @@ fn op(workers: usize) -> impl Strategy<Value = Op> {
 /// The coverage counters over all cases.
 #[derive(Default)]
 struct Coverage {
-    stale_complete: AtomicUsize,
+    stale_commit: AtomicUsize,
     take_after_expire: AtomicUsize,
     rotation: AtomicUsize,
-    old_claim_complete: AtomicUsize,
+    old_claim_commit: AtomicUsize,
 }
 
 /// What every case shares: the database, one store per worker (each on one pinned connection),
-/// the drain store, the repository and the thread of the foreign inbox.
+/// the drain store, the run committer, the repository and the thread of the foreign inbox.
 struct Ctx {
     db: DatabaseConnection,
     stores: Vec<PgLeaseStore>,
+    committer: Arc<PgRunCommitter>,
     drain: PgLeaseStore,
     repo: PgInboxRepository,
     foreign_thread: Uuid,
@@ -134,12 +140,14 @@ struct Worker {
 struct Case<'a> {
     ctx: &'a Ctx,
     inbox: InboxId,
+    /// The memory scope of the inbox row. A commit with another scope is refused.
+    scope: MemoryScope,
     workers: Vec<Worker>,
     /// Claims that are no longer the open claim of a held handle.
     old_claims: Vec<Claim>,
     /// The ids of every inserted event.
     inserted: Vec<Uuid>,
-    /// The `done` ids of every successful complete.
+    /// The `done` ids of every successful commit.
     done: HashSet<Uuid>,
     /// The largest token that an acquire or a claim returned.
     max_token: i64,
@@ -162,8 +170,8 @@ impl Case<'_> {
             Op::Acquire(w) => self.acquire(*w).await,
             Op::Heartbeat(w) => self.heartbeat(*w).await,
             Op::Claim(w) => self.claim(*w).await,
-            Op::Complete { worker, old: false } => self.complete(*worker).await,
-            Op::Complete { worker, old: true } => self.complete_old(*worker).await,
+            Op::Commit { worker, old: false } => self.commit(*worker).await,
+            Op::Commit { worker, old: true } => self.commit_old(*worker).await,
             Op::Release(w) => self.release(*w).await,
             Op::Insert { thread } => self.insert(thread).await,
             Op::Expire => {
@@ -252,7 +260,7 @@ impl Case<'_> {
         Ok(())
     }
 
-    async fn complete(&mut self, w: usize) -> Result<(), TestCaseError> {
+    async fn commit(&mut self, w: usize) -> Result<(), TestCaseError> {
         let (token, live) = self.lease().await;
         let worker = &mut self.workers[w];
         let (Some(handle), Some(claim)) = (worker.handle.as_mut(), worker.claim.as_ref()) else {
@@ -260,33 +268,35 @@ impl Case<'_> {
         };
         let valid = live && token == claim.lease_token.0;
         let before = snapshot(&self.ctx.db, self.inbox.uuid()).await;
-        match self.ctx.stores[w].complete(handle, claim.clone()).await {
-            Ok(done) => {
-                prop_assert!(valid, "a complete succeeded with a stale token");
-                for id in done {
+        match self.ctx.committer.commit(handle, completed_record(claim, self.scope.clone())).await {
+            Ok(c) => {
+                prop_assert!(valid, "a commit succeeded with a stale token");
+                // A raw handle has no keeper, so the test finishes the claim on it.
+                handle.record_complete();
+                for id in c.done {
                     prop_assert!(self.done.insert(id.uuid()), "event {} is done twice", id.uuid());
                 }
                 let claim = worker.claim.take().expect("claim");
                 self.old_claims.push(claim);
             }
-            Err(CompleteError::LeaseLost) => {
-                prop_assert!(!valid, "a complete lost a valid lease");
-                prop_assert_eq!(&before, &snapshot(&self.ctx.db, self.inbox.uuid()).await, "a stale complete changed a row");
-                self.ctx.coverage.stale_complete.fetch_add(1, Ordering::Relaxed);
+            Err(CommitError::LeaseLost) => {
+                prop_assert!(!valid, "a commit lost a valid lease");
+                prop_assert_eq!(&before, &snapshot(&self.ctx.db, self.inbox.uuid()).await, "a stale commit changed a row");
+                self.ctx.coverage.stale_commit.fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) => panic!("complete: {e}"),
+            Err(e) => panic!("commit: {e}"),
         }
         Ok(())
     }
 
-    async fn complete_old(&mut self, w: usize) -> Result<(), TestCaseError> {
+    async fn commit_old(&mut self, w: usize) -> Result<(), TestCaseError> {
         let Some(claim) = self.old_claims.last().cloned() else { return Ok(()) };
         let Some(handle) = self.workers[w].handle.as_mut() else { return Ok(()) };
         let before = snapshot(&self.ctx.db, self.inbox.uuid()).await;
-        let result = self.ctx.stores[w].complete(handle, claim).await;
-        prop_assert_eq!(result, Err(CompleteError::LeaseLost), "a complete with an old claim");
-        prop_assert_eq!(&before, &snapshot(&self.ctx.db, self.inbox.uuid()).await, "a complete with an old claim changed a row");
-        self.ctx.coverage.old_claim_complete.fetch_add(1, Ordering::Relaxed);
+        let result = self.ctx.committer.commit(handle, completed_record(&claim, self.scope.clone())).await;
+        prop_assert_eq!(result, Err(CommitError::LeaseLost), "a commit with an old claim");
+        prop_assert_eq!(&before, &snapshot(&self.ctx.db, self.inbox.uuid()).await, "a commit with an old claim changed a row");
+        self.ctx.coverage.old_claim_commit.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -357,7 +367,7 @@ impl Case<'_> {
         Ok(())
     }
 
-    /// One fresh worker claims and completes until no event is claimable. Then every inserted
+    /// One fresh worker claims and commits until no event is claimable. Then every inserted
     /// event is `done` or `dead` (AG2).
     async fn drain(&mut self) -> Result<(), TestCaseError> {
         let store = &self.ctx.drain;
@@ -374,7 +384,9 @@ impl Case<'_> {
                 drained = true;
                 break;
             };
-            for id in store.complete(&mut handle, claim).await.expect("drain complete") {
+            let c = self.ctx.committer.commit(&mut handle, completed_record(&claim, self.scope.clone())).await.expect("drain commit");
+            handle.record_complete();
+            for id in c.done {
                 prop_assert!(self.done.insert(id.uuid()), "event {} is done twice", id.uuid());
             }
             self.check().await?;
@@ -407,9 +419,11 @@ async fn count(db: &DatabaseConnection, sql: &str) -> i64 {
 async fn run_case(ctx: &Ctx, workers: usize, ops: &[Op]) -> Result<(), TestCaseError> {
     let inbox = fresh();
     insert_inbox(&ctx.db, ORG, inbox, fresh(), fresh()).await;
+    let inbox = InboxId::new(ORG, inbox);
     let mut case = Case {
         ctx,
-        inbox: InboxId::new(ORG, inbox),
+        scope: inbox_scope(&ctx.db, &inbox).await,
+        inbox,
         workers: (0..workers).map(|_| Worker::default()).collect(),
         old_claims: Vec::new(),
         inserted: Vec::new(),
@@ -442,6 +456,7 @@ fn lease_and_claim_keep_their_invariants() {
         insert_thread(&db, foreign_inbox, foreign_thread).await;
         Ctx {
             repo: PgInboxRepository::new(db.clone()),
+            committer: committer(&db),
             db,
             stores,
             drain,
@@ -478,28 +493,28 @@ fn lease_and_claim_keep_their_invariants() {
         eprintln!("coverage: {name} = {n}");
     }
     // Not required by the spec, and not asserted: the old-claim case stops at the in-memory
-    // pre-check of `complete`.
-    eprintln!("coverage: complete with an old claim = {}", c.old_claim_complete.load(Ordering::Relaxed));
+    // pre-check of `commit`.
+    eprintln!("coverage: commit with an old claim = {}", c.old_claim_commit.load(Ordering::Relaxed));
 }
 
 /// The coverage counters that spec §10.1 requires.
 fn required_coverage(c: &Coverage) -> [(&'static str, &AtomicUsize); 3] {
-    [("stale complete", &c.stale_complete), ("take after expire", &c.take_after_expire), ("rotation", &c.rotation)]
+    [("stale commit", &c.stale_commit), ("take after expire", &c.take_after_expire), ("rotation", &c.rotation)]
 }
 
-/// Worker 0 takes, claims, completes and claims again (a rotation). The lease expires, worker 1
-/// takes it (a take after expire), and worker 0 completes its open claim with the stale token (a
-/// stale complete).
+/// Worker 0 takes, claims, commits and claims again (a rotation). The lease expires, worker 1
+/// takes it (a take after expire), and worker 0 commits its open claim with the stale token (a
+/// stale commit).
 fn fixed_case() -> Vec<Op> {
     vec![
         Op::Acquire(0),
         Op::Insert { thread: ThreadChoice::None },
         Op::Claim(0),
-        Op::Complete { worker: 0, old: false },
+        Op::Commit { worker: 0, old: false },
         Op::Insert { thread: ThreadChoice::ExistingOfRun },
         Op::Claim(0),
         Op::Expire,
         Op::Acquire(1),
-        Op::Complete { worker: 0, old: false },
+        Op::Commit { worker: 0, old: false },
     ]
 }

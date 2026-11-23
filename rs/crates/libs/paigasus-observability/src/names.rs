@@ -156,6 +156,26 @@ pub const AGENT_HOST_SCHEDULER_LAG_SECONDS: &str = "agent_host_scheduler_lag_sec
 pub const AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS: &str = "agent_host_scheduler_last_pass_timestamp_seconds";
 /// Calls of the timer tools. Labels: `tool`, `outcome` (`ok` or `refused`).
 pub const AGENT_HOST_TIMER_TOOL_CALLS_TOTAL: &str = "agent_host_timer_tool_calls_total";
+// Agent host worker run loop (SMA-790 spec §6.14). The names are provisional; SMA-798 owns them.
+/// Runs that ended. Label: `class` (`completed`, `stopped`, `deterministic`, `transient`, `screened`, `discarded` or `shutdown`).
+pub const AGENT_HOST_RUNS_TOTAL: &str = "agent_host_runs_total";
+/// The duration of one run, from the claim to the end of the commit, in seconds. No label.
+pub const AGENT_HOST_RUN_DURATION_SECONDS: &str = "agent_host_run_duration_seconds";
+/// Inbox events that the screen flagged. No label.
+pub const AGENT_HOST_EVENTS_SCREENED_TOTAL: &str = "agent_host_events_screened_total";
+/// Run commits that the memory store refused with a version conflict. No label.
+pub const AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL: &str = "agent_host_commit_memory_conflicts_total";
+/// Run commits whose COMMIT statement failed, so the outcome is unknown. No label.
+pub const AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL: &str = "agent_host_commit_outcome_unknown_total";
+/// Restarts of a worker of the pool. No label.
+pub const AGENT_HOST_WORKER_RESTARTS_TOTAL: &str = "agent_host_worker_restarts_total";
+/// The age in seconds of the oldest due pending event (`status = 'pending'`, `not_before <= now()`)
+/// of every inbox of an agent that this host serves, on the database clock, or 0 when there is
+/// none. An event in a leased or locked inbox counts too. Read in each poll of `acquire_next`.
+/// No label.
+pub const AGENT_HOST_INBOX_LAG_SECONDS: &str = "agent_host_inbox_lag_seconds";
+/// A histogram of the `attempts` of an event when it goes to `done` or `dead`. No label.
+pub const AGENT_HOST_EVENT_ATTEMPTS: &str = "agent_host_event_attempts";
 // Agent host S3 memory store (SMA-829 spec §6.11). No label holds a path or a key.
 /// Objects under a memory scope that a read skipped or refused. Label: `reason` (`key`, `size`,
 /// `header` or `unparsable`). It counts events at each read, not distinct objects.
@@ -422,6 +442,14 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_SCHEDULER_LAG_SECONDS,
     AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
     AGENT_HOST_TIMER_TOOL_CALLS_TOTAL,
+    AGENT_HOST_RUNS_TOTAL,
+    AGENT_HOST_RUN_DURATION_SECONDS,
+    AGENT_HOST_EVENTS_SCREENED_TOTAL,
+    AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL,
+    AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
+    AGENT_HOST_WORKER_RESTARTS_TOTAL,
+    AGENT_HOST_INBOX_LAG_SECONDS,
+    AGENT_HOST_EVENT_ATTEMPTS,
     AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
     AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL,
     GATEWAY_HTTP_REQUESTS_TOTAL,
@@ -527,6 +555,22 @@ mod tests {
             AGENT_HOST_SCHEDULER_LAG_SECONDS,
             AGENT_HOST_SCHEDULER_LAST_PASS_TIMESTAMP_SECONDS,
             AGENT_HOST_TIMER_TOOL_CALLS_TOTAL,
+        ] {
+            assert!(ALL.contains(&name), "{name} is missing from ALL");
+        }
+    }
+
+    #[test]
+    fn the_agent_host_worker_families_are_registered() {
+        for name in [
+            AGENT_HOST_RUNS_TOTAL,
+            AGENT_HOST_RUN_DURATION_SECONDS,
+            AGENT_HOST_EVENTS_SCREENED_TOTAL,
+            AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL,
+            AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
+            AGENT_HOST_WORKER_RESTARTS_TOTAL,
+            AGENT_HOST_INBOX_LAG_SECONDS,
+            AGENT_HOST_EVENT_ATTEMPTS,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

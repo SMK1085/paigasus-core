@@ -3,9 +3,11 @@
 //! The `LeaseKeeper` (spec §8.2, §8.6).
 //!
 //! The keeper owns one `LeaseHandle` behind one mutex. It is the only writer of the lease row of
-//! that handle: the heartbeat, the claim with its token rotation, the completion and the release
-//! each hold the mutex for the whole repository call. So a heartbeat never runs during a claim,
-//! and it always sends the current token.
+//! that handle: the heartbeat, the claim with its token rotation, every run commit of the
+//! `RunCommitter` (SMA-790 §6.8) and the release each hold the mutex for the whole call. So a
+//! heartbeat never runs during a claim or a commit, and it always sends the current token. The
+//! keeper, not the committer, clears the open claim of the handle after a commit that finished
+//! the claim.
 //!
 //! The heartbeat runs in a task on absolute monotonic instants. The keeper cancels its token when
 //! the lease is lost, or when its local deadline passes with no successful heartbeat. The local
@@ -15,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use paigasus_agent_host_core::claim::{Claim, ClaimConfig};
-use paigasus_agent_host_core::ids::EventId;
-use paigasus_agent_host_core::lease::{ClaimError, CompleteError, HeartbeatError, LeaseHandle};
-use paigasus_agent_host_core::ports::{ClaimRepository, LeaseRepository, StoreError};
+use paigasus_agent_host_core::lease::{ClaimError, HeartbeatError, LeaseHandle};
+use paigasus_agent_host_core::ports::{ClaimRepository, LeaseRepository, RunCommitter, StoreError};
+use paigasus_agent_host_core::run::{BackOff, CommitError, Committed, RunRecord, ScreenOut, ScreenResult};
 use paigasus_observability::names;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -74,7 +76,8 @@ impl KeeperTiming {
     }
 }
 
-/// The handle, shared between the keeper and its heartbeat task. `release` takes it out.
+/// The handle, shared between the keeper and its heartbeat task. `release` and
+/// `release_after_shutdown` take it out.
 type SharedHandle = Arc<Mutex<Option<LeaseHandle>>>;
 
 /// The owner of one lease handle and its heartbeat. It is the guard of spec §8.6: dropping it
@@ -83,6 +86,7 @@ pub struct LeaseKeeper {
     handle: SharedHandle,
     leases: Arc<dyn LeaseRepository>,
     claims: Arc<dyn ClaimRepository>,
+    committer: Arc<dyn RunCommitter>,
     cancel: CancellationToken,
     heartbeat: JoinHandle<()>,
 }
@@ -90,7 +94,7 @@ pub struct LeaseKeeper {
 impl LeaseKeeper {
     /// Take ownership of a handle and start its heartbeat. The first local deadline counts from
     /// now. It needs a Tokio runtime.
-    pub fn start(handle: LeaseHandle, leases: Arc<dyn LeaseRepository>, claims: Arc<dyn ClaimRepository>, timing: KeeperTiming) -> LeaseKeeper {
+    pub fn start(handle: LeaseHandle, leases: Arc<dyn LeaseRepository>, claims: Arc<dyn ClaimRepository>, committer: Arc<dyn RunCommitter>, timing: KeeperTiming) -> LeaseKeeper {
         let started = Instant::now();
         let shared: SharedHandle = Arc::new(Mutex::new(Some(handle)));
         let cancel = CancellationToken::new();
@@ -99,6 +103,7 @@ impl LeaseKeeper {
             handle: shared,
             leases,
             claims,
+            committer,
             cancel,
             heartbeat,
         }
@@ -112,15 +117,19 @@ impl LeaseKeeper {
         self.cancel.child_token()
     }
 
+    /// True after the keeper found the lease lost: a lost lease, a poisoned handle, a passed local
+    /// deadline or a panic of the heartbeat task.
+    #[must_use]
+    pub fn is_lost(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
     /// Claim a batch of events under the mutex. After the lease is lost, it gives `LeaseLost`
     /// with no store call. A claim that loses the lease or poisons the handle (a failed COMMIT,
     /// spec §8.4) cancels the run at once. The original error is returned. A caller that drops
     /// this future while the store poisons the handle also cancels the run (`LoseIfPoisoned`).
     pub async fn claim(&self, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError> {
-        let mut guard = LoseIfPoisoned {
-            slot: self.handle.lock().await,
-            keeper: self,
-        };
+        let mut guard = self.lock_handle().await;
         let Some(handle) = guard.slot.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
             return Err(ClaimError::LeaseLost);
         };
@@ -131,22 +140,42 @@ impl LeaseKeeper {
         result
     }
 
-    /// Complete a claim under the mutex. After the lease is lost, it gives `LeaseLost` with no
-    /// store call. A completion that loses the lease or poisons the handle (a failed COMMIT,
-    /// spec §8.5) cancels the run at once. The original error is returned. A caller that drops
-    /// this future while the store poisons the handle also cancels the run (`LoseIfPoisoned`).
-    pub async fn complete(&self, claim: Claim) -> Result<Vec<EventId>, CompleteError> {
-        let mut guard = LoseIfPoisoned {
-            slot: self.handle.lock().await,
-            keeper: self,
-        };
+    /// Commit the end of the run of the open claim under the mutex (spec §6.8). After the lease is
+    /// lost, it gives `LeaseLost` with no store call. A commit that loses the lease or poisons the
+    /// handle (`OutcomeUnknown`) cancels the run at once, also when the caller drops this future
+    /// during the COMMIT (`LoseIfPoisoned`). After `Ok`, the claim is finished.
+    pub async fn commit(&self, record: RunRecord) -> Result<Committed, CommitError> {
+        let mut guard = self.lock_handle().await;
         let Some(handle) = guard.slot.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
-            return Err(CompleteError::LeaseLost);
+            return Err(CommitError::LeaseLost);
         };
-        let result = self.claims.complete(handle, claim).await;
-        if matches!(result, Err(CompleteError::LeaseLost)) {
-            self.lose();
-        }
+        let result = self.committer.commit(handle, record).await;
+        self.settle(handle, &result, result.is_ok());
+        result
+    }
+
+    /// Close the events that the screen flagged, under the mutex (spec §6.3, §6.9). The rules of
+    /// `commit` apply. Only `AllScreened` finishes the claim: after `Continue` the run goes on
+    /// with the other events.
+    pub async fn screen_out(&self, s: ScreenOut) -> Result<ScreenResult, CommitError> {
+        let mut guard = self.lock_handle().await;
+        let Some(handle) = guard.slot.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
+            return Err(CommitError::LeaseLost);
+        };
+        let result = self.committer.screen_out(handle, s).await;
+        self.settle(handle, &result, result == Ok(ScreenResult::AllScreened));
+        result
+    }
+
+    /// Fail the run and delay its events, under the mutex (spec §6.9). The rules of `commit`
+    /// apply. After `Ok`, the claim is finished.
+    pub async fn back_off(&self, b: BackOff) -> Result<(), CommitError> {
+        let mut guard = self.lock_handle().await;
+        let Some(handle) = guard.slot.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
+            return Err(CommitError::LeaseLost);
+        };
+        let result = self.committer.back_off(handle, b).await;
+        self.settle(handle, &result, result.is_ok());
         result
     }
 
@@ -160,6 +189,36 @@ impl LeaseKeeper {
         }
     }
 
+    /// Stop the heartbeat, then release the lease after a shutdown under the mutex (spec §6.9): the
+    /// open run is discarded and its attempts are refunded.
+    pub async fn release_after_shutdown(self) -> Result<(), CommitError> {
+        self.heartbeat.abort();
+        let mut guard = self.handle.lock().await;
+        match guard.take() {
+            Some(handle) => self.committer.release_after_shutdown(handle).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Take the mutex of the handle for one claim or commit.
+    async fn lock_handle(&self) -> LoseIfPoisoned<'_> {
+        LoseIfPoisoned {
+            slot: self.handle.lock().await,
+            keeper: self,
+        }
+    }
+
+    /// After a committer call: a `LeaseLost` cancels the run, and a call that finished the claim
+    /// clears the open claim of the handle.
+    fn settle<T>(&self, handle: &mut LeaseHandle, result: &Result<T, CommitError>, finished: bool) {
+        if matches!(result, Err(CommitError::LeaseLost)) {
+            self.lose();
+        }
+        if finished {
+            handle.record_complete();
+        }
+    }
+
     /// The lease is lost: cancel the run and stop the heartbeat. The caller holds the mutex, so
     /// a heartbeat that waits for it sees the cancellation first.
     fn lose(&self) {
@@ -168,9 +227,9 @@ impl LeaseKeeper {
     }
 }
 
-/// Holds the mutex of the handle for one claim or completion. When it drops with a poisoned
+/// Holds the mutex of the handle for one claim or run commit. When it drops with a poisoned
 /// handle, it cancels the run. It drops on every exit: a return, and also a caller that drops the
-/// claim or completion future during the COMMIT (spec §8.4, §8.5). In that case the store's
+/// claim or commit future during the COMMIT (spec §8.4, SMA-790 §6.8). In that case the store's
 /// `commit_or_poison` guard poisons the handle first, because the store future drops before this
 /// guard. A handle that is not poisoned (a retryable store error, or a drop before the COMMIT)
 /// does not cancel. `Drop::drop` runs before the fields drop, so the mutex is still held.
@@ -252,7 +311,7 @@ async fn heartbeat_loop(handle: SharedHandle, leases: Arc<dyn LeaseRepository>, 
 /// One heartbeat. It holds the mutex for the whole call.
 async fn beat(handle: &SharedHandle, leases: &dyn LeaseRepository, timing: &KeeperTiming, cancel: &CancellationToken) -> Beat {
     let guard = handle.lock().await;
-    // A claim or a completion that lost the lease cancels while it holds this mutex.
+    // A claim or a commit that lost the lease cancels while it holds this mutex.
     if cancel.is_cancelled() {
         return Beat::Stopped;
     }
@@ -290,9 +349,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-    use paigasus_agent_host_core::ids::{InboxId, RunId, ThreadId};
+    use paigasus_agent_host_core::ids::{AgentId, InboxId, PrincipalId, RunId, ThreadId};
     use paigasus_agent_host_core::lease::HeartbeatError;
-    use paigasus_agent_host_core::run::LeaseToken;
+    use paigasus_agent_host_core::memory::{MemoryChangeSet, MemoryCommitSet, MemoryScope};
+    use paigasus_agent_host_core::run::{LeaseToken, RunClass, RunUsage};
     use paigasus_observability::names;
     use uuid::Uuid;
 
@@ -306,6 +366,8 @@ mod tests {
         Hold(Duration),
         /// Rotate the token from 1 to 2.
         Rotate,
+        /// Check the handle as the store does, then open the run of `a_claim`.
+        Open,
         /// Poison the handle and return a store error.
         Poison,
         /// Return `LeaseLost`.
@@ -326,16 +388,20 @@ mod tests {
         }
     }
 
-    /// A fake of both ports. It records each heartbeat.
+    /// A fake of the three ports. It records each heartbeat, and the open claim of the handle at
+    /// the start of each committer call.
     struct Fake {
         heartbeat_error: Option<HeartbeatError>,
         heartbeat_sleep: Duration,
         claim_mode: ClaimMode,
-        complete_lost: bool,
-        complete_poisons: bool,
-        /// The completion waits forever and poisons the handle when the call drops.
-        complete_hangs: bool,
+        commit_lost: bool,
+        /// The commit fails at its COMMIT: it poisons the handle and gives `OutcomeUnknown`.
+        commit_poisons: bool,
+        /// The commit waits forever and poisons the handle when the call drops.
+        commit_hangs: bool,
         heartbeat_panics: bool,
+        open_claims: StdMutex<Vec<Option<RunId>>>,
+        shutdowns: AtomicUsize,
         heartbeats: AtomicUsize,
         claims: AtomicUsize,
         tokens: StdMutex<Vec<i64>>,
@@ -349,10 +415,12 @@ mod tests {
                 heartbeat_error: None,
                 heartbeat_sleep: Duration::ZERO,
                 claim_mode: ClaimMode::Rotate,
-                complete_lost: false,
-                complete_poisons: false,
-                complete_hangs: false,
+                commit_lost: false,
+                commit_poisons: false,
+                commit_hangs: false,
                 heartbeat_panics: false,
+                open_claims: StdMutex::new(Vec::new()),
+                shutdowns: AtomicUsize::new(0),
                 heartbeats: AtomicUsize::new(0),
                 claims: AtomicUsize::new(0),
                 tokens: StdMutex::new(Vec::new()),
@@ -363,6 +431,10 @@ mod tests {
 
         fn heartbeats(&self) -> usize {
             self.heartbeats.load(Ordering::SeqCst)
+        }
+
+        fn see(&self, handle: &LeaseHandle) {
+            self.open_claims.lock().expect("open claims").push(handle.open_claim());
         }
     }
 
@@ -412,6 +484,12 @@ mod tests {
                     handle.record_claim(LeaseToken(2), None);
                     Ok(None)
                 }
+                ClaimMode::Open => {
+                    handle.check_claim()?;
+                    let claim = a_claim();
+                    handle.record_claim(claim.lease_token, Some(claim.run.clone()));
+                    Ok(Some(claim))
+                }
                 ClaimMode::Poison => {
                     handle.poison();
                     Err(ClaimError::Store("commit failed".into()))
@@ -424,17 +502,40 @@ mod tests {
                 }
             }
         }
+    }
 
-        async fn complete(&self, handle: &mut LeaseHandle, _claim: Claim) -> Result<Vec<EventId>, CompleteError> {
-            if self.complete_hangs {
+    #[async_trait]
+    impl RunCommitter for Fake {
+        async fn commit(&self, handle: &mut LeaseHandle, r: RunRecord) -> Result<Committed, CommitError> {
+            self.see(handle);
+            if self.commit_hangs {
                 let _guard = PoisonOnDrop(handle);
                 return std::future::pending().await;
             }
-            if self.complete_poisons {
+            if self.commit_poisons {
                 handle.poison();
-                return Err(CompleteError::Store("commit failed".into()));
+                return Err(CommitError::OutcomeUnknown);
             }
-            if self.complete_lost { Err(CompleteError::LeaseLost) } else { Ok(Vec::new()) }
+            if self.commit_lost {
+                return Err(CommitError::LeaseLost);
+            }
+            Ok(Committed { run: r.run, done: Vec::new() })
+        }
+
+        async fn screen_out(&self, handle: &mut LeaseHandle, s: ScreenOut) -> Result<ScreenResult, CommitError> {
+            self.see(handle);
+            Ok(if s.all { ScreenResult::AllScreened } else { ScreenResult::Continue })
+        }
+
+        async fn back_off(&self, handle: &mut LeaseHandle, _b: BackOff) -> Result<(), CommitError> {
+            self.see(handle);
+            Ok(())
+        }
+
+        async fn release_after_shutdown(&self, handle: LeaseHandle) -> Result<(), CommitError> {
+            self.see(&handle);
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -464,9 +565,44 @@ mod tests {
         }
     }
 
+    fn a_record() -> RunRecord {
+        let claim = a_claim();
+        RunRecord {
+            run: claim.run,
+            token: claim.lease_token,
+            passed: Vec::new(),
+            class: RunClass::Completed {
+                output: None,
+                usage: RunUsage::default(),
+            },
+            session: Vec::new(),
+            nonce: "n".into(),
+            close_thread: false,
+            memory: MemoryCommitSet::new(MemoryScope::new(AgentId::new(u(1), u(5)), PrincipalId::from_uuid(u(6))), MemoryChangeSet::new()),
+        }
+    }
+
+    fn a_screen_out(all: bool) -> ScreenOut {
+        ScreenOut {
+            run: a_claim().run,
+            token: LeaseToken(1),
+            flagged: Vec::new(),
+            all,
+        }
+    }
+
+    fn a_back_off() -> BackOff {
+        BackOff {
+            run: a_claim().run,
+            token: LeaseToken(1),
+            error: "model unavailable".into(),
+            retry: Vec::new(),
+        }
+    }
+
     fn start(fake: &Arc<Fake>) -> LeaseKeeper {
         let timing = KeeperTiming::new(TTL, INTERVAL).expect("timing");
-        LeaseKeeper::start(handle(), fake.clone(), fake.clone(), timing)
+        LeaseKeeper::start(handle(), fake.clone(), fake.clone(), fake.clone(), timing)
     }
 
     async fn sleep_ms(ms: u64) {
@@ -648,15 +784,12 @@ mod tests {
         assert!(keeper.cancellation().is_cancelled());
     }
 
-    /// The same for a completion whose COMMIT fails.
+    /// The same for a run commit whose COMMIT fails.
     #[tokio::test(start_paused = true)]
-    async fn a_poisoning_complete_cancels_the_keeper_at_once() {
-        let fake = Arc::new(Fake {
-            complete_poisons: true,
-            ..Fake::new()
-        });
+    async fn a_poisoning_commit_cancels_the_keeper_at_once() {
+        let fake = Arc::new(Fake { commit_poisons: true, ..Fake::new() });
         let keeper = start(&fake);
-        assert!(matches!(keeper.complete(a_claim()).await, Err(CompleteError::Store(_))));
+        assert_eq!(keeper.commit(a_record()).await, Err(CommitError::OutcomeUnknown));
         assert!(keeper.cancellation().is_cancelled());
         assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
     }
@@ -678,13 +811,13 @@ mod tests {
         assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
     }
 
-    /// The same for a completion that the caller drops during its COMMIT.
+    /// The same for a run commit that the caller drops during its COMMIT.
     #[tokio::test(start_paused = true)]
-    async fn a_complete_dropped_while_it_poisons_cancels_the_keeper_at_once() {
-        let fake = Arc::new(Fake { complete_hangs: true, ..Fake::new() });
+    async fn a_commit_dropped_while_it_poisons_cancels_the_keeper_at_once() {
+        let fake = Arc::new(Fake { commit_hangs: true, ..Fake::new() });
         let keeper = start(&fake);
-        let dropped = timeout(Duration::from_millis(100), keeper.complete(a_claim())).await;
-        assert!(dropped.is_err(), "the fake completion never ends, so the timeout drops it");
+        let dropped = timeout(Duration::from_millis(100), keeper.commit(a_record())).await;
+        assert!(dropped.is_err(), "the fake commit never ends, so the timeout drops it");
         assert!(keeper.cancellation().is_cancelled());
         assert_eq!(fake.heartbeats(), 0, "no heartbeat ran, so the keeper cancelled the run itself");
     }
@@ -723,16 +856,17 @@ mod tests {
         assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
         assert!(keeper.cancellation().is_cancelled());
         // The keeper serves the dead handle no more: no heartbeat and no store call.
-        assert_eq!(keeper.complete(a_claim()).await, Err(CompleteError::LeaseLost));
+        assert_eq!(keeper.commit(a_record()).await, Err(CommitError::LeaseLost));
+        assert!(fake.open_claims.lock().expect("open claims").is_empty(), "a lost keeper called the committer");
         sleep_ms(100_000).await;
         assert_eq!(fake.heartbeats(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_lease_lost_complete_cancels_the_keeper_at_once() {
-        let fake = Arc::new(Fake { complete_lost: true, ..Fake::new() });
+    async fn a_lease_lost_commit_cancels_the_keeper_at_once() {
+        let fake = Arc::new(Fake { commit_lost: true, ..Fake::new() });
         let keeper = start(&fake);
-        assert_eq!(keeper.complete(a_claim()).await, Err(CompleteError::LeaseLost));
+        assert_eq!(keeper.commit(a_record()).await, Err(CommitError::LeaseLost));
         assert!(keeper.cancellation().is_cancelled());
         assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
         sleep_ms(100_000).await;
@@ -745,6 +879,51 @@ mod tests {
         let keeper = start(&fake);
         sleep_ms(10_100).await;
         keeper.release().await.expect("release");
+        sleep_ms(100_000).await;
+        assert_eq!(fake.heartbeats(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn is_lost_is_false_until_the_lease_is_lost() {
+        let fake = Arc::new(Fake { commit_lost: true, ..Fake::new() });
+        let keeper = start(&fake);
+        assert!(!keeper.is_lost());
+        assert_eq!(keeper.commit(a_record()).await, Err(CommitError::LeaseLost));
+        assert!(keeper.is_lost());
+    }
+
+    /// A `Continue` screen-out keeps the open claim. A back-off, a screen-out of every event and a
+    /// commit each clear it, so the next claim passes the check of the handle and opens a run.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_finished_claim_clears_the_open_claim() {
+        let fake = Arc::new(Fake {
+            claim_mode: ClaimMode::Open,
+            ..Fake::new()
+        });
+        let keeper = start(&fake);
+        let run = a_claim().run;
+        assert_eq!(keeper.claim(&cfg()).await, Ok(Some(a_claim())));
+        assert_eq!(keeper.screen_out(a_screen_out(false)).await, Ok(ScreenResult::Continue));
+        assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::ClaimOpen), "a Continue screen-out cleared the open claim");
+        assert_eq!(keeper.back_off(a_back_off()).await, Ok(()));
+        assert_eq!(keeper.claim(&cfg()).await, Ok(Some(a_claim())), "a back-off did not clear the open claim");
+        assert_eq!(keeper.screen_out(a_screen_out(true)).await, Ok(ScreenResult::AllScreened));
+        assert_eq!(keeper.claim(&cfg()).await, Ok(Some(a_claim())), "a screen-out of every event did not clear the open claim");
+        assert!(keeper.commit(a_record()).await.is_ok());
+        assert_eq!(keeper.claim(&cfg()).await, Ok(Some(a_claim())), "a commit did not clear the open claim");
+        // Each committer call saw the open run.
+        assert_eq!(*fake.open_claims.lock().expect("open claims"), vec![Some(run.clone()), Some(run.clone()), Some(run.clone()), Some(run)]);
+        assert_eq!(fake.claims.load(Ordering::SeqCst), 5);
+        assert!(!keeper.is_lost());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn release_after_shutdown_stops_the_heartbeats() {
+        let fake = Arc::new(Fake::new());
+        let keeper = start(&fake);
+        sleep_ms(10_100).await;
+        keeper.release_after_shutdown().await.expect("release after shutdown");
+        assert_eq!(fake.shutdowns.load(Ordering::SeqCst), 1);
         sleep_ms(100_000).await;
         assert_eq!(fake.heartbeats(), 1);
     }

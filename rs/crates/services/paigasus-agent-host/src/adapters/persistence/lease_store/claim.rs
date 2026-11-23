@@ -6,16 +6,18 @@
 
 use std::collections::{HashMap, HashSet};
 
+use async_trait::async_trait;
 use paigasus_agent_host_core::claim::{Claim, ClaimConfig};
 use paigasus_agent_host_core::ids::{InboxId, RunId, ThreadId};
 use paigasus_agent_host_core::lease::{ClaimError, LeaseHandle};
+use paigasus_agent_host_core::ports::ClaimRepository;
 use paigasus_agent_host_core::run::LeaseToken;
 use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseTransaction, Statement, TransactionTrait, Value};
 use uuid::Uuid;
 
 use super::take::ttl_micros;
-use super::{PgLeaseStore, commit_or_poison, lost};
+use super::{PgLeaseStore, commit_or_poison, lock_live_lease, lost};
 use crate::adapters::id::mint_uuid;
 use crate::adapters::persistence::inbox_repository::{event_columns, row_to_event};
 
@@ -40,12 +42,13 @@ macro_rules! free {
     };
 }
 
-/// `$1` = inbox, `$2` = token, `$3` = max attempts, `$4` = `DEAD_REASON` (§8.4.1).
+/// `$1` = inbox, `$2` = token, `$3` = max attempts, `$4` = `DEAD_REASON` (§8.4.1). The error of
+/// the last failure stays; `DEAD_REASON` fills only an empty `last_error` (SMA-790 §6.9).
 const DEAD_SQL: &str = concat!(
-    "UPDATE inbox_event e SET status = 'dead', last_error = $4 \
+    "UPDATE inbox_event e SET status = 'dead', last_error = COALESCE(e.last_error, $4) \
      WHERE e.inbox_id = $1 AND e.status = 'pending' AND e.not_before <= now() AND e.attempts >= $3 AND ",
     free!(),
-    " RETURNING e.id"
+    " RETURNING e.id, e.attempts"
 );
 
 /// `$1` = inbox, `$2` = token, `$3` = max attempts. The claimable events, the oldest first.
@@ -100,8 +103,8 @@ fn stmt(sql: &str, values: impl IntoIterator<Item = Value>) -> Statement {
 enum Step {
     /// The lease is lost. Roll back.
     Lost,
-    /// Commit. `token` is the current token, `dead` the number of dead moves.
-    Commit { token: LeaseToken, dead: u64, claim: Option<Claim> },
+    /// Commit. `token` is the current token, `dead` the attempts of each event moved to `dead`.
+    Commit { token: LeaseToken, dead: Vec<i32>, claim: Option<Claim> },
 }
 
 impl PgLeaseStore {
@@ -120,11 +123,14 @@ impl PgLeaseStore {
             Step::Commit { token, dead, claim } => {
                 // The database may have rotated the token and opened the run. If the commit fails
                 // or the caller drops this future during it, the handle keeps the old token and no
-                // open claim, so it is poisoned (as in `complete`).
+                // open claim, so it is poisoned (as in the run commit).
                 commit_or_poison(handle, txn.commit()).await.map_err(store)?;
                 handle.record_claim(token, claim.as_ref().map(|c| c.run.clone()));
-                if dead > 0 {
-                    metrics::counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL).increment(dead);
+                if !dead.is_empty() {
+                    metrics::counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL).increment(u64::try_from(dead.len()).unwrap_or(u64::MAX));
+                }
+                for attempts in dead {
+                    metrics::histogram!(names::AGENT_HOST_EVENT_ATTEMPTS).record(f64::from(attempts));
                 }
                 if claim.is_some() {
                     metrics::counter!(names::AGENT_HOST_CLAIMS_TOTAL).increment(1);
@@ -135,12 +141,23 @@ impl PgLeaseStore {
     }
 }
 
+#[async_trait]
+impl ClaimRepository for PgLeaseStore {
+    async fn claim(&self, handle: &mut LeaseHandle, cfg: &ClaimConfig) -> Result<Option<Claim>, ClaimError> {
+        self.claim_events(handle, cfg).await
+    }
+}
+
 /// Steps 1 to 8 of §8.4 in the open transaction.
 async fn claim_in(txn: &DatabaseTransaction, handle: &LeaseHandle, cfg: &ClaimConfig) -> Result<Step, ClaimError> {
     let inbox = handle.inbox().uuid();
 
-    // Step 1: rotate the token, except on the first claim after a take.
+    // Step 1: lock the lease row of the handle's token and check the expiry after the lock is held
+    // (ADR-0028 (b)). Then rotate the token, except on the first claim after a take.
     let mut token = handle.token();
+    if !lock_live_lease(txn, inbox, token).await.map_err(store)? {
+        return Ok(Step::Lost);
+    }
     if handle.needs_rotation() {
         let Some(row) = txn.query_one_raw(stmt(ROTATE_SQL, [inbox.into(), token.0.into()])).await.map_err(store)? else {
             return Ok(Step::Lost);
@@ -148,7 +165,8 @@ async fn claim_in(txn: &DatabaseTransaction, handle: &LeaseHandle, cfg: &ClaimCo
         token = LeaseToken(row.try_get("", "token").map_err(store)?);
     }
 
-    // Step 2: lock the lease row and check it.
+    // Step 2: check the lease row with the current token. Step 1 holds the row lock, so this does
+    // not wait.
     if txn.query_one_raw(stmt(LOCK_SQL, [inbox.into(), token.0.into()])).await.map_err(store)?.is_none() {
         return Ok(Step::Lost);
     }
@@ -159,8 +177,9 @@ async fn claim_in(txn: &DatabaseTransaction, handle: &LeaseHandle, cfg: &ClaimCo
         .query_all_raw(stmt(DEAD_SQL, [inbox.into(), token.0.into(), max_attempts.into(), DEAD_REASON.into()]))
         .await
         .map_err(store)?
-        .len();
-    let dead = u64::try_from(dead).unwrap_or(u64::MAX);
+        .iter()
+        .map(|row| row.try_get::<i32>("", "attempts").map_err(store))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Step 4: the claimable events, the oldest first.
     let rows = txn.query_all_raw(stmt(CLAIMABLE_SQL, [inbox.into(), token.0.into(), max_attempts.into()])).await.map_err(store)?;
@@ -258,4 +277,32 @@ async fn run_thread(txn: &DatabaseTransaction, inbox: Uuid, resolved: Option<Uui
     let new = mint_uuid();
     txn.execute_raw(stmt(INSERT_THREAD_SQL, [new.into(), inbox.into(), resolved.into()])).await.map_err(store)?;
     Ok((new, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn handle() -> LeaseHandle {
+        LeaseHandle::new(InboxId::new(Uuid::nil(), Uuid::nil()), LeaseToken(1), "h".to_owned())
+    }
+
+    #[tokio::test]
+    async fn a_commit_that_the_caller_drops_poisons_the_handle() {
+        let mut h = handle();
+        let pending = std::future::pending::<Result<(), String>>();
+        let outcome = tokio::time::timeout(Duration::from_millis(20), commit_or_poison(&mut h, pending)).await;
+        assert!(outcome.is_err(), "the commit never returns");
+        assert!(h.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_poisons_and_a_good_commit_does_not() {
+        let mut h = handle();
+        assert_eq!(commit_or_poison(&mut h, async { Ok::<(), String>(()) }).await, Ok(()));
+        assert!(!h.is_poisoned());
+        assert!(commit_or_poison(&mut h, async { Err::<(), String>("x".into()) }).await.is_err());
+        assert!(h.is_poisoned());
+    }
 }

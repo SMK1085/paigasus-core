@@ -3314,6 +3314,7 @@ dependencies = [
  "paigasus-agent-host-core",
  "paigasus-cloudevents",
  "paigasus-helikon",
+ "paigasus-helikon-sessions-testkit",
  "paigasus-kernel",
  "paigasus-logging",
  "paigasus-nats-creds",
@@ -3484,6 +3485,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "paigasus-helikon-sessions-testkit"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca5141ee898f49dd79807ce6d6d5d58c3a507549c1c0524315ac7bb5df670603"
+dependencies = [
+ "jiff",
+ "paigasus-helikon-core",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

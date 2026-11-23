@@ -3,3 +3,4 @@
 pub mod ingest;
 pub mod lease_keeper;
 pub mod scheduler_loop;
+pub mod worker;

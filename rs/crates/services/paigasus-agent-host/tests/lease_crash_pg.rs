@@ -3,8 +3,8 @@
 //! The crash test of the lease (spec §10.3). Worker A takes the lease with a real `LeaseKeeper`
 //! and a short real ttl, and claims. Then the task of A is aborted (one case) or panics (one
 //! case). The heartbeat stops, and the lease expires on the database clock. Worker B takes the
-//! lease after the ttl, claims the same events again and completes them. A late complete with the
-//! claim of A is `LeaseLost` and changes no row.
+//! lease after the ttl, claims the same events again and commits them with a `Completed` record.
+//! A late commit with the claim of A is `LeaseLost` and changes no row.
 
 mod support;
 
@@ -15,8 +15,10 @@ use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host::application::lease_keeper::{KeeperTiming, LeaseKeeper};
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::ids::InboxId;
-use paigasus_agent_host_core::lease::{CompleteError, LeaseHandle};
-use paigasus_agent_host_core::ports::{ClaimRepository, LeaseRepository};
+use paigasus_agent_host_core::lease::LeaseHandle;
+use paigasus_agent_host_core::ports::{ClaimRepository, LeaseRepository, RunCommitter};
+use paigasus_agent_host_core::run::CommitError;
+use support::commit::{committer, completed_record, inbox_scope};
 use support::inbox::{insert_inbox, migrated_postgres};
 use support::lease::{expires_us, insert_pending_event, snapshot};
 use tokio::sync::oneshot;
@@ -64,7 +66,9 @@ async fn a_crashed_worker_is_taken_over(crash: Crash) {
     // Worker A: take, start the keeper, claim in a task.
     let handle = store_a.acquire(&inbox, "a", ttl).await.expect("A acquire").expect("A takes the lease");
     let a_token = handle.token();
-    let keeper = LeaseKeeper::start(handle, store_a.clone(), store_a.clone(), timing());
+    let committer = committer(&db);
+    let scope = inbox_scope(&db, &inbox).await;
+    let keeper = LeaseKeeper::start(handle, store_a.clone(), store_a.clone(), committer.clone(), timing());
     let (claim_tx, claim_rx) = oneshot::channel();
     let (crash_tx, crash_rx) = oneshot::channel::<()>();
     let task = tokio::spawn(async move {
@@ -144,17 +148,18 @@ async fn a_crashed_worker_is_taken_over(crash: Crash) {
     assert!(b_claim.events.iter().all(|e| e.attempts == 2), "{:?}", b_claim.events.iter().map(|e| e.attempts).collect::<Vec<_>>());
     assert_eq!(b_claim.thread, a_claim.thread);
     assert!(b_claim.fresh_thread);
-    let done = store_b.complete(&mut b, b_claim).await.expect("B complete");
-    assert_eq!(done.len(), 2);
+    let committed = committer.commit(&mut b, completed_record(&b_claim, scope.clone())).await.expect("B commit");
+    b.record_complete();
+    assert_eq!(committed.done.len(), 2);
     let done_count = support::scalar_i64(&db, &format!("SELECT count(*) AS n FROM inbox_event WHERE inbox_id = '{INBOX}' AND status = 'done'")).await;
     assert_eq!(done_count, 2, "every event is done");
 
-    // A late complete with the claim of A is `LeaseLost` and changes no row.
+    // A late commit with the claim of A, through a raw handle, is `LeaseLost` and changes no row.
     let mut late = LeaseHandle::new(inbox.clone(), a_token, "a".to_string());
     late.record_claim(a_token, Some(a_claim.run.clone()));
     let before = snapshot(&db, INBOX).await;
-    assert_eq!(store_a.complete(&mut late, a_claim).await, Err(CompleteError::LeaseLost));
-    assert_eq!(before, snapshot(&db, INBOX).await, "the late complete of A changed a row");
+    assert_eq!(committer.commit(&mut late, completed_record(&a_claim, scope)).await, Err(CommitError::LeaseLost));
+    assert_eq!(before, snapshot(&db, INBOX).await, "the late commit of A changed a row");
     store_b.release(b).await.expect("B release");
 }
 

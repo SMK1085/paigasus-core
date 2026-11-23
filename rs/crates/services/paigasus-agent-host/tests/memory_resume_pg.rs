@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use paigasus_agent_host::adapters::helikon::memory_tool::{MemoryTool, run_nonce};
+use paigasus_agent_host::adapters::helikon::scripted::ScriptedModel;
 use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
 use paigasus_agent_host_core::memory::conformance::fresh_scope;
@@ -20,7 +21,6 @@ use paigasus_agent_host_core::memory::{MemoryCaps, MemoryScope, MemoryWorkspace,
 use paigasus_helikon::core::{AgentEvent, AgentInput, ContentPart, Item, LlmAgent, RunConfig, RunContext, Runner};
 use paigasus_helikon::runtime_tokio::TokioRunner;
 use serde_json::json;
-use support::ScriptedModel;
 use tokio::sync::Mutex;
 
 /// The texts of every tool result of a run, in order.

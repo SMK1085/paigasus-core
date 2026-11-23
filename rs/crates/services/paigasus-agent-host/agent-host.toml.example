@@ -12,7 +12,31 @@
 # lock_wait_secs = 120      # 1 to 3600
 
 # [worker]
-# enabled = true            # read and checked; no effect until SMA-790
+# enabled = true
+# concurrency = 4           # runs at the same time. Range 1 to 64
+#                           # One replica opens 2 x concurrency + 8 main connections and
+#                           # concurrency + 1 lease connections (201 at the maximum of 64).
+#                           # The sum over all replicas must stay below the Postgres
+#                           # max_connections (default 100).
+# poll_interval_ms = 1000   # the time between two claim polls. Range 100 to 60000
+# max_runs_per_lease = 8    # the most runs that one lease serves. Range 1 to 1000
+
+# [run]
+# max_turns = 16            # the most model turns of one run. Range 1 to 256
+# timeout_secs = 300        # the time limit of one run. Range 1 to 3600
+
+# [retry]
+# base_delay_secs = 30      # the delay before the first retry. Range 1 to 3600
+# max_delay_secs = 1800     # the cap of the delay. Range 1 to 86400, and at least base_delay_secs
+
+# One table per agent. The id is an agent PRN: prn:pgs:agents::<org-uuid>:agent/<agent-uuid>.
+# The ids must be unique. The only known tool is "memory".
+# [[agents]]
+# id = "prn:pgs:agents::00000000-0000-0000-0000-000000000001:agent/00000000-0000-0000-0000-000000000002"
+# name = "triage"
+# model = "scripted"        # a model name; boot checks it against the model registry
+# instructions = "Sort the request and answer it."
+# tools = ["memory"]        # optional
 
 # [lease]
 # ttl_secs = 30             # 3 to 600, and at least 3 x heartbeat_interval_secs
@@ -58,6 +82,7 @@
 
 # [memory]
 # backend = "postgres"      # "postgres" or "s3". A backend switch does not move data. "s3" needs [memory.s3]
+#                           # "s3" with worker.enabled = true and an [[agents]] entry stops the boot: the worker supports only "postgres" for now
 # [memory.caps]
 # max_file_bytes = 65536          # greater than 0
 # max_store_bytes = 1048576       # greater than 0

@@ -8,6 +8,7 @@ pub mod agent;
 pub mod claim;
 pub mod deferral;
 pub mod error;
+pub mod fault;
 pub mod ids;
 pub mod inbox;
 pub mod lease;
@@ -16,7 +17,9 @@ pub mod mid_run;
 pub mod outbox;
 pub mod ports;
 pub mod render;
+pub mod retry;
 pub mod run;
+pub mod screen;
 pub mod timer;
 
 #[cfg(test)]
@@ -41,6 +44,8 @@ mod port_tests {
         assert_port::<dyn Outbox>();
         assert_port::<dyn AgentResolver>();
         assert_port::<dyn RunCommitter>();
+        assert_port::<dyn EventScreen>();
+        assert_port::<dyn FaultPoint>();
     }
 }
 

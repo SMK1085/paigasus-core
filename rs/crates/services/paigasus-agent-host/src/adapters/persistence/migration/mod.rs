@@ -6,6 +6,7 @@ mod m0001_create_inbox;
 mod m0002_create_memory;
 mod m0003_create_inbox_event_tables;
 mod m0004_create_timer;
+mod m0005_create_session_event;
 
 /// The migration bookkeeping table. It differs from the default so that the agent host does not
 /// share state with another service on the same server.
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0002_create_memory::Migration),
             Box::new(m0003_create_inbox_event_tables::Migration),
             Box::new(m0004_create_timer::Migration),
+            Box::new(m0005_create_session_event::Migration),
         ]
     }
 
