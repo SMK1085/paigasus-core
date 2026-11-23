@@ -306,6 +306,11 @@ mod tests {
         );
     }
     #[test]
+    fn a_number_outside_the_f64_range_does_not_hide_a_bare_host() {
+        assert_eq!(hosts(r#"{"host":"docs.example","threshold":1e400}"#), ["docs.example"]);
+    }
+
+    #[test]
     fn a_bare_host_under_an_upper_case_key_counts() {
         assert_eq!(hosts(r#"{"URL":"up.example","Base_Url":"b.example"}"#), ["b.example", "up.example"]);
     }

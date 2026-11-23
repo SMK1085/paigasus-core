@@ -282,9 +282,12 @@ What the policy blocks:
 
 ### When the detectors run
 
-- The detectors that read tool results run only when your mode is `log_only` or `enforce`. In
-  mode `off`, the gateway does not scan the tool results. So the findings of a tool result are in
-  the decision log only when your set is live and your mode is `log_only` or `enforce`.
+- The detectors that read tool results run when your mode is `log_only` or `enforce`. In mode
+  `off`, the gateway does not scan the tool results, with one exception: a platform floor policy
+  that reads a detector result, for example `context.max_severity`. Then the gateway scans the
+  tool results also in mode `off`, and only the floor can replace a result. The shipped floor
+  does not read a detector result. So with the shipped floor, the findings of a tool result are
+  in the decision log only when your set is live and your mode is `log_only` or `enforce`.
 - The platform operator can stop all detectors with `[tool_policy.detectors] enabled = false`.
   Then `context.max_severity` is -1 and `context.call.hosts` is `[]`, also when a finding of the
   kernel such as `name_collision` exists. `context.findings` still holds the kernel kinds. Cedar

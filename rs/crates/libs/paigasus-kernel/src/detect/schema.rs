@@ -19,7 +19,7 @@ use std::fmt;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 
-use super::input::{NumberClass, classify_number};
+use super::input::{NumberClass, classify_number, number_spans, zero_numbers};
 use super::walk::{InputMode, escape_into, input_mode};
 use super::{CallSubject, Evidence, Finding, INVALID_ARGS, Severity, ToolInput};
 
@@ -74,33 +74,7 @@ enum Inst {
 
 /// The text of every number in a valid JSON text, in document order.
 fn number_texts(text: &str) -> Vec<&str> {
-    let b = text.as_bytes();
-    let (mut out, mut i, mut in_string, mut escaped) = (Vec::new(), 0, false, false);
-    while i < b.len() {
-        let c = b[i];
-        if in_string {
-            match (escaped, c) {
-                (true, _) => escaped = false,
-                (false, b'\\') => escaped = true,
-                (false, b'"') => in_string = false,
-                _ => {}
-            }
-            i += 1;
-        } else if c == b'"' {
-            in_string = true;
-            i += 1;
-        } else if c == b'-' || c.is_ascii_digit() {
-            let start = i;
-            while i < b.len() && matches!(b[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
-                i += 1;
-            }
-            // The bytes are ASCII, so `start..i` is on character boundaries.
-            out.push(text.get(start..i).unwrap_or(""));
-        } else {
-            i += 1;
-        }
-    }
-    out
+    number_spans(text).into_iter().map(|span| text.get(span).unwrap_or("")).collect()
 }
 
 /// The parse of the arguments. Each number takes the next text of `numbers`, because the parser
@@ -174,13 +148,19 @@ impl<'de, 't> Visitor<'de> for Seed<'_, 't> {
 }
 
 /// The arguments as a tree, or `None`. The caller has checked the mode, so the text is valid JSON
-/// with unique keys and at most 128 levels.
+/// with unique keys and at most 128 levels. Each number is read from its original text, so a
+/// number outside the `f64` range (`1e400`) is parsed from a copy with every number as `0`
+/// ([`zero_numbers`]): the copy has the same numbers in the same order.
 fn parse(text: &str) -> Option<Inst> {
     let numbers = number_texts(text);
+    tree(text, &numbers).or_else(|| tree(&zero_numbers(text)?, &numbers))
+}
+
+fn tree(text: &str, numbers: &[&str]) -> Option<Inst> {
     let next = Cell::new(0);
     let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
-    let inst = Seed { numbers: &numbers, next: &next }.deserialize(&mut de).ok()?;
+    let inst = Seed { numbers, next: &next }.deserialize(&mut de).ok()?;
     de.end().ok()?;
     (next.get() == numbers.len()).then_some(inst)
 }
@@ -501,6 +481,19 @@ mod tests {
         assert!(!bad_text(r#"{"type":"number"}"#, "5.5"));
         // A number that the reader cannot classify by value: no signal.
         assert!(!bad_text(r#"{"type":"integer"}"#, "12345678901234567890.5"));
+    }
+
+    #[test]
+    fn a_number_outside_the_f64_range_does_not_stop_the_check() {
+        // `1e400` is valid JSON. It is a number, so `string` gives a finding and `number` none.
+        assert!(bad_text(r#"{"type":"string"}"#, "1e400"));
+        assert!(!bad_text(r#"{"type":"number"}"#, "-1E+999"));
+        // The value is not known exactly: no signal for `integer`.
+        assert!(!bad_text(r#"{"type":"integer"}"#, "1e400"));
+        // A sibling member still gets its check.
+        let input = ToolInput::Json(r#"{"v":1,"n":1e400}"#.to_owned());
+        let f = validate_args(&input, &json!({ "properties": { "v": { "type": "string" } } })).expect("v is not a string");
+        assert_eq!(pointers(&f), [("type", "/v".to_owned())]);
     }
 
     #[test]

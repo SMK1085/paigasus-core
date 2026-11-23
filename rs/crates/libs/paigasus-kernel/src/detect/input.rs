@@ -162,6 +162,56 @@ pub(crate) fn elements(text: &str) -> Result<Vec<&RawValue>, Unparsed> {
     serde_json::from_str::<Vec<&RawValue>>(text).map_err(|_| Unparsed)
 }
 
+/// The byte range of every number token outside a string, in document order. Each range is on
+/// ASCII bytes, so it is on character boundaries. A reader uses it only on a valid JSON text.
+pub(crate) fn number_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let b = text.as_bytes();
+    let (mut out, mut i, mut in_string, mut escaped) = (Vec::new(), 0, false, false);
+    while i < b.len() {
+        let c = b[i];
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_string = true;
+            i += 1;
+        } else if c == b'-' || c.is_ascii_digit() {
+            let start = i;
+            while i < b.len() && matches!(b[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
+                i += 1;
+            }
+            out.push(start..i);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A copy of `text` with each number token as `0`, or `None` when `text` is not valid JSON.
+///
+/// `serde_json` with no `arbitrary_precision` rejects a number outside the `f64` range, such as
+/// `1e400`, but the text is valid JSON and the Cedar mapping reads it (`RawValue` does not check
+/// the range). A reader that does not use the value of a number parses this copy, so that such a
+/// number cannot make the detectors read the arguments as raw text.
+pub(crate) fn zero_numbers(text: &str) -> Option<String> {
+    serde_json::from_str::<&serde_json::value::RawValue>(text).ok()?;
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for span in number_spans(text) {
+        out.push_str(text.get(last..span.start)?);
+        out.push('0');
+        last = span.end;
+    }
+    out.push_str(text.get(last..)?);
+    Some(out)
+}
+
 /// Whether the brackets of one valid JSON text nest at most `MAX_NESTING` levels. Iterative, so a
 /// deep text cannot overflow the stack. A bracket inside a string does not count.
 pub(crate) fn nesting_ok(text: &str) -> bool {

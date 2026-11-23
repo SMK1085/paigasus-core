@@ -8,7 +8,7 @@
 use std::fmt;
 
 use super::hosts::HostSet;
-use super::secrets::safe_pointer;
+use super::secrets::{is_secret_token, safe_pointer};
 
 /// The finding that two tool names have the same normal form in one request.
 pub const NAME_COLLISION: &str = "name_collision";
@@ -136,14 +136,17 @@ impl Evidence {
         }
     }
 
-    /// A match of a host. `pointer` is `None` when the host is in free text.
+    /// A match of a host. `pointer` is `None` when the host is in free text. A host that holds a
+    /// known token form is not stored (`host` is `None`), because no evidence copy holds a secret
+    /// (§ 6.2.1). The finding and the location stay.
     #[must_use]
     pub fn host(rule: &'static str, pointer: Option<&str>, host: String) -> Self {
         let location = match pointer {
             Some(pointer) => Location::Argument { pointer: stored_pointer(pointer) },
             None => Location::TextInput,
         };
-        Self { rule, location, host: Some(host) }
+        let host = (!is_secret_token(&host)).then_some(host);
+        Self { rule, location, host }
     }
 
     /// A match in the free text of a call.
@@ -183,9 +186,14 @@ pub(super) fn prefix_on_boundary(s: &str, max: usize) -> &str {
 }
 
 /// The pointer that an evidence entry stores. The secret cut runs first, on the whole pointer, so
-/// that the length cut cannot split a secret key and leave a part of it.
+/// that the length cut cannot split a secret key and leave a part of it. A length cut that ends
+/// inside an escape (`~0` or `~1`) drops the lone `~`, so the stored pointer stays valid RFC 6901
+/// syntax: every `~` of a pointer starts an escape.
 fn stored_pointer(pointer: &str) -> String {
-    prefix_on_boundary(safe_pointer(pointer), MAX_POINTER).to_owned()
+    let safe = safe_pointer(pointer);
+    let cut = prefix_on_boundary(safe, MAX_POINTER);
+    let cut = if cut.len() < safe.len() { cut.strip_suffix('~').unwrap_or(cut) } else { cut };
+    cut.to_owned()
 }
 
 /// One finding of one detector. A finding never blocks a call by itself.
@@ -377,6 +385,28 @@ mod tests {
         let h = Evidence::host("r", Some(&format!("/{}", "é".repeat(200))), "h".into());
         let Location::Argument { pointer } = &h.location else { panic!("not an argument") };
         assert!(pointer.len() <= 256);
+    }
+
+    #[test]
+    fn a_cut_inside_an_escape_drops_the_lone_tilde() {
+        // 254 bytes of key, then `~1`: the 256-byte cut ends after the `~`.
+        let long = format!("/{}~1", "k".repeat(254));
+        let Location::Argument { pointer } = Evidence::argument("r", &long).location else {
+            panic!("not an argument")
+        };
+        assert_eq!(pointer, format!("/{}", "k".repeat(254)));
+        // A pointer that fits keeps its escapes.
+        let Location::Argument { pointer } = Evidence::argument("r", "/a~1b/c~0").location else {
+            panic!("not an argument")
+        };
+        assert_eq!(pointer, "/a~1b/c~0");
+    }
+
+    #[test]
+    fn a_host_that_holds_a_secret_is_not_stored() {
+        let token = ["xoxb-", "123456789012-abcdefghij"].concat();
+        let e = Evidence::host("url", Some("/u"), format!("{token}.evil.example"));
+        assert_eq!((e.host, e.location), (None, Location::Argument { pointer: "/u".into() }));
     }
 
     #[test]

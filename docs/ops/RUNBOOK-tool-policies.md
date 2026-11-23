@@ -369,6 +369,24 @@ This release changes the compiler generation from 2 to 3 and the tool schema rev
 in one release. The new schema adds two attributes: `context.max_severity` and
 `context.call.hosts`. It removes or changes no attribute.
 
+- Before you deploy the gateway, find the live sets that compare the whole `context.call` record
+  with a value:
+
+  ```sql
+  SELECT kind, org_id, version
+  FROM tool_policy_set_version
+  WHERE status = 'live'
+    AND (source ~ 'context\.call\s*[!=]='
+      OR source ~ '[!=]=\s*context\.call([^.[:alnum:]_]|$)');
+  ```
+
+  The new gateway adds `hosts` to `context.call`. So a comparison such as
+  `context.call == {"declared": "yes"}` is false for every call after the gateway deploy. If that
+  comparison is the only permit that matches a call, the call is denied in mode `enforce`. IAM
+  cannot prevent this, because the gateway fills the record. The organization must change each
+  such comparison to `context.call.declared == "yes"` before you deploy the gateway. The query
+  does not find every form (for example `context["call"]`), so also read the sets of the
+  organizations that use mode `enforce`.
 - Deploy the gateway first, then IAM. A gateway of an older release does not fill the two
   attributes. A tenant `forbid` that reads them then errors and denies the call. That is fail
   closed, but it blocks calls.

@@ -67,7 +67,7 @@ fn text_of(size: usize) -> String {
     while out.len() < size {
         out.push_str("lorem ipsum dolor sit amet 日本語のテキスト 🙂🚀 e\u{301}a\u{308} consectetur adipiscing elit sed do eiusmod tempor ");
         if i.is_multiple_of(4) {
-            out.push_str(&format!("see https://h{}.docs.example.com/page/{i}?q=1 for more ", i % 8));
+            out.push_str(&format!("see https://h{}.docs.example.com/page/{i}?q=1 for more ", (i / 4) % 8));
         }
         i += 1;
     }
@@ -103,6 +103,7 @@ fn call_passes(label: &str, size: usize, runs: usize) {
     let found = detect_call(&subject);
     let kinds: Vec<&str> = found.findings.iter().map(|f| f.kind.as_str()).collect();
     assert_eq!(kinds, ["unseen_host"], "the near-miss token gives no secret_in_args, and the schema holds");
+    assert_eq!(found.findings[0].evidence.len(), 6, "h2 to h7 are the six unseen body hosts");
 
     println!("--- {label}: {bytes} bytes of arguments ---");
     print("detect_call (all four built-ins)", runs, time(runs, || drop(black_box(detect_call(black_box(&subject))))));

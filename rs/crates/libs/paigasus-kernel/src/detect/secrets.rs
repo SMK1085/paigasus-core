@@ -64,17 +64,18 @@ pub(super) fn is_secret_token(token: &str) -> bool {
 /// of every value below it. The cut pointer is the pointer of the object that holds that key.
 /// `Evidence` calls it for every argument pointer it stores, at most 16 per finding, so the cost
 /// stays linear.
+///
+/// A pointer that does not start with `/` is not RFC 6901, but `Evidence` is public: its first
+/// part counts as a token too, and no input makes this function panic.
 pub(super) fn safe_pointer(pointer: &str) -> &str {
     let Some(set) = SET.as_ref() else { return pointer };
-    let mut start = 0;
-    while start < pointer.len() {
-        let rest = &pointer[start + 1..];
-        let end = rest.find('/').map_or(pointer.len(), |i| start + 1 + i);
-        let token = pointer[start + 1..end].replace("~1", "/").replace("~0", "~");
-        if set.is_match(&token) {
-            return &pointer[..start];
+    // `start` is the byte offset of the token; the `/` before it is at `start - 1`.
+    let mut start: usize = 0;
+    for token in pointer.split('/') {
+        if set.is_match(&token.replace("~1", "/").replace("~0", "~")) {
+            return &pointer[..start.saturating_sub(1)];
         }
-        start = end;
+        start += token.len() + 1;
     }
     pointer
 }
@@ -136,6 +137,20 @@ mod tests {
         "pem_private_key",
         "jwt",
     ];
+
+    #[test]
+    fn safe_pointer_cuts_before_a_secret_token_and_never_panics() {
+        let key = ["AKIA", "ABCDEFGHIJKLMNOP"].concat();
+        assert_eq!(safe_pointer(&format!("/a/{key}/b")), "/a");
+        assert_eq!(safe_pointer(&format!("/{key}")), "");
+        assert_eq!(safe_pointer("/a~1b/c~0d"), "/a~1b/c~0d");
+        assert_eq!(safe_pointer(""), "");
+        // Not RFC 6901, but `Evidence` is public: a multi-byte first character, and a secret in
+        // the first part.
+        assert_eq!(safe_pointer("é/x"), "é/x");
+        assert_eq!(safe_pointer("日本"), "日本");
+        assert_eq!(safe_pointer(&format!("{key}/x")), "");
+    }
 
     fn n(c: char, count: usize) -> String {
         c.to_string().repeat(count)

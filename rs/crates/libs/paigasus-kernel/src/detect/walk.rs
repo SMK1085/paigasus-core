@@ -11,7 +11,7 @@ use std::fmt;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 use super::ToolInput;
-use super::input::nesting_ok;
+use super::input::{nesting_ok, zero_numbers};
 use super::secrets::is_secret_token;
 
 /// One string of the arguments.
@@ -109,11 +109,16 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
 /// The parsed tree and whether an object repeats a key. `None` is invalid JSON, or JSON that
 /// nests deeper than 128 levels. The strict reader allows exactly 128 levels (`nesting_ok`), so
 /// the walk checks that first and then lifts the 127 level limit of `serde_json`. The check
-/// bounds the recursion.
+/// bounds the recursion. A number outside the `f64` range (`1e400`) is valid JSON: the walk then
+/// reads a copy with every number as `0`, because it reads no number ([`zero_numbers`]).
 fn parse(text: &str) -> Option<(Node, bool)> {
     if !nesting_ok(text) {
         return None;
     }
+    tree(text).or_else(|| tree(&zero_numbers(text)?))
+}
+
+fn tree(text: &str) -> Option<(Node, bool)> {
     let duplicate = Cell::new(false);
     let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
@@ -284,6 +289,13 @@ mod tests {
         assert_eq!(mode(r#"["a"]"#), InputMode::NotObject);
         assert_eq!(mode(r#"{"a":"#), InputMode::Raw);
         assert_eq!(mode(r#"{"a":1} x"#), InputMode::Raw);
+        // A number outside the f64 range is valid JSON, as for the Cedar mapping.
+        assert_eq!(mode(r#"{"host":"docs.example","n":1e400}"#), InputMode::Strict);
+        assert_eq!(mode(r#"{"a":1e400,"a":-1E+999}"#), InputMode::DuplicateKeys);
+        assert_eq!(mode("[1e400]"), InputMode::NotObject);
+        // An invalid number stays invalid: the copy with zeros is not read.
+        assert_eq!(mode(r#"{"a":1.2.3}"#), InputMode::Raw);
+        assert_eq!(mode(r#"{"a":01}"#), InputMode::Raw);
         assert_eq!(input_mode(&ToolInput::Text("x".into())), InputMode::Text);
         let deep = format!("{}1{}", "[".repeat(129), "]".repeat(129));
         assert_eq!(mode(&deep), InputMode::Raw);

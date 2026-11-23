@@ -6,6 +6,7 @@
 //! The snapshot goes into `DecisionContext` (D30), so the decider uses the same policies as the
 //! request side. Logs and metrics hold no arguments, results or prompts (ADR-0027 (i)).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -150,14 +151,23 @@ fn place_findings_unchecked(indexes: &[usize], out: &PipelineOutput, findings: &
     }
 }
 
+/// The tool name of each earlier call id of the turn. The first call with an id wins. The map is
+/// built once per turn, so a turn with many results costs linear time, not results times calls.
+fn call_names(turn: &TurnFacts) -> HashMap<&str, &str> {
+    let mut names = HashMap::new();
+    for c in &turn.prior_calls {
+        if let Some(id) = c.id.as_deref() {
+            names.entry(id).or_insert(c.name.as_str());
+        }
+    }
+    names
+}
+
 /// The tool name of the result at `index`: its own name, else the name of the earlier call with its
-/// call id.
-fn result_tool(turn: &TurnFacts, index: usize) -> Option<String> {
+/// call id (`names`, from [`call_names`]).
+fn result_tool(turn: &TurnFacts, names: &HashMap<&str, &str>, index: usize) -> Option<String> {
     let r = turn.tool_results.get(index)?;
-    r.name.clone().or_else(|| {
-        let id = r.call_id.as_deref()?;
-        turn.prior_calls.iter().find(|c| c.id.as_deref() == Some(id)).map(|c| c.name.clone())
-    })
+    r.name.clone().or_else(|| names.get(r.call_id.as_deref()?).map(|name| (*name).to_owned()))
 }
 
 /// The request-side tool-policy service (D19).
@@ -411,6 +421,7 @@ impl RequestToolPolicy {
         };
         let mut findings: Vec<Vec<Finding>> = vec![Vec::new(); n];
         let mut stages: Vec<Vec<Stage>> = vec![Vec::new(); n];
+        let names = call_names(turn);
         // The budget is already applied: a result that did not fit has no text, and is in `limited`.
         let (indexes, subjects): (Vec<usize>, Vec<Subject>) = screen
             .result_texts
@@ -422,7 +433,7 @@ impl RequestToolPolicy {
                     index,
                     Subject::Result {
                         index,
-                        tool: result_tool(turn, index),
+                        tool: result_tool(turn, &names, index),
                         text,
                     },
                 ))
@@ -1334,6 +1345,28 @@ mod tests {
             messages.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
         }
         Bytes::from(json!({"model": "m", "tools": [{"type": "function", "function": {"name": tool, "parameters": {}}}], "messages": messages}).to_string())
+    }
+
+    #[test]
+    fn a_result_takes_the_name_of_the_first_call_with_its_id() {
+        // Two calls share the id `c1`: the first one names the result, as a scan from the start did.
+        let messages = json!([
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "first", "arguments": "{}"}},
+                {"id": "c1", "type": "function", "function": {"name": "second", "arguments": "{}"}},
+                {"id": "c2", "type": "function", "function": {"name": "other", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "a"},
+            {"role": "tool", "tool_call_id": "c2", "content": "b"},
+            {"role": "tool", "tool_call_id": "none", "content": "c"}
+        ]);
+        let body = json!({"model": "m", "messages": messages}).to_string();
+        let ToolTurn::Parsed(turn) = parse_request(Format::OpenAiChat, body.as_bytes()) else {
+            panic!("the turn parses")
+        };
+        let names = call_names(&turn);
+        let tools: Vec<Option<String>> = (0..4).map(|i| result_tool(&turn, &names, i)).collect();
+        assert_eq!(tools, [Some("first".to_owned()), Some("other".to_owned()), None, None]);
     }
 
     fn of_action(log: &MemoryDecisionLog, action: RecordedAction) -> Vec<DecisionRecord> {
