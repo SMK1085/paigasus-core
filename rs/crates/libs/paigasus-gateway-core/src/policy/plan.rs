@@ -230,6 +230,8 @@ fn finish(h: Sha256) -> Digest32 {
 /// The digest of a call as the pair decides it: the raw name, whether the input is JSON or text,
 /// and the arguments. The hosts come from the input, and `declared` is always `Unknown`.
 fn call_digest(name: &str, kind: ToolCallKind, arguments: &str) -> Digest32 {
+    #[cfg(test)]
+    tests::CALL_DIGESTS.with(|n| n.set(n.get() + 1));
     let mut h = Sha256::new();
     h.update([u8::from(matches!(input_for(kind, ""), ToolInput::Text(_)))]);
     h.update((name.len() as u64).to_le_bytes());
@@ -260,28 +262,39 @@ struct EarlierCall<'k> {
     name: &'k str,
     kind: ToolCallKind,
     arguments: &'k str,
-    /// The `call_digest`, computed once per call.
-    digest: Digest32,
+    /// The index of the call in `TurnFacts.prior_calls`, so that its `call_digest` is computed
+    /// at most once, and only when a pair needs it. `None` for the pseudo call.
+    slot: Option<usize>,
 }
 
 impl<'k> EarlierCall<'k> {
-    fn of(c: &'k PriorCall) -> Self {
-        Self::new(&c.name, c.kind, &c.arguments)
+    fn of(slot: usize, c: &'k PriorCall) -> Self {
+        Self {
+            name: &c.name,
+            kind: c.kind,
+            arguments: &c.arguments,
+            slot: Some(slot),
+        }
     }
 
     /// D32: a result with no earlier call is decided with its own name (or the empty name).
     fn pseudo(name: &'k str) -> Self {
-        Self::new(name, ToolCallKind::Function, "{}")
-    }
-
-    fn new(name: &'k str, kind: ToolCallKind, arguments: &'k str) -> Self {
         Self {
             name,
-            kind,
-            arguments,
-            digest: call_digest(name, kind, arguments),
+            kind: ToolCallKind::Function,
+            arguments: "{}",
+            slot: None,
         }
     }
+}
+
+/// The pair that a record cites: a call and the finding set of its A.
+#[derive(Clone, Copy)]
+struct Cite<'k> {
+    call: EarlierCall<'k>,
+    findings: Digest32,
+    /// A had the budget `detector_error` added (the past-budget pseudo pair).
+    past_budget: bool,
 }
 
 /// The decided pair of one distinct (call, finding set).
@@ -302,6 +315,9 @@ struct Pairs {
     /// whose pair differs in a way that counts). The cited call is the first one whose difference
     /// is enforced; when no difference is enforced, it is the first one that differs (spec A14).
     hit: Option<(usize, bool)>,
+    /// Every call of the target has its pair. `false` when the budget stopped the loop: `hit`
+    /// then holds what the pairs before the stop found, and it is kept.
+    complete: bool,
 }
 
 /// Whether the plan may remove a definition of this kind and name (P-15).
@@ -355,6 +371,9 @@ struct ResultJudge<'j, 'p, 'k> {
     /// The pair cache of this request, keyed by (`call_digest`, `findings_digest`). The policies
     /// are the snapshot's for the whole `plan_request` call, so they need no part in the key.
     cache: HashMap<(Digest32, Digest32), PairOutcome>,
+    /// The `call_digest` of each earlier call (by `EarlierCall.slot`), computed on first use. A
+    /// request with no findings hashes no arguments.
+    digests: Vec<Option<Digest32>>,
     /// The pairs decided so far (each one two Cedar decisions). At most `PAIR_BUDGET`.
     decided: usize,
     /// A pair past `PAIR_BUDGET` was needed: every later target with findings goes to
@@ -405,36 +424,62 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     /// The outcome of a target with findings: the differential pairs merged with the optimistic
     /// `hit` into one item (`enforced` is the OR), with A's detail. Not replaced: a screen record.
     fn screened(&mut self, calls: &[EarlierCall<'k>], given: &[Finding], hit: Option<(&'k str, bool)>) -> Option<(&'k str, bool, Option<CedarDetail>)> {
-        let first = calls.first()?;
-        let (pairs, calls, given): (Pairs, Cow<'_, [EarlierCall<'k>]>, Cow<'_, [Finding]>) = match self.pairs(calls, given) {
-            Some(pairs) => (pairs, Cow::Borrowed(calls), Cow::Borrowed(given)),
-            None => {
-                // Past the pair budget (spec A13): one pseudo pair for the target's tool name, with
-                // a `detector_error` added to A. The policies decide, as for any other pair.
-                let pseudo = EarlierCall::pseudo(first.name);
-                let given = with_budget_error(given);
-                let pairs = self.past_budget(&pseudo, &given);
-                (pairs, Cow::Owned(vec![pseudo]), Cow::Owned(given))
-            }
+        let first = *calls.first()?;
+        let own = self.pairs(calls, given);
+        let cite = |index: usize| -> Option<Cite<'k>> {
+            Some(Cite {
+                call: *calls.get(index)?,
+                findings: own.findings,
+                past_budget: false,
+            })
         };
-        let (first, given) = (calls.first()?, &*given);
-        match (pairs.hit, hit) {
-            // Replaced by the findings: the cited call (first enforced difference, else first
-            // difference) names the entry and gives the detail.
-            (Some((index, enforced)), optimistic) => {
-                let c = calls.get(index)?;
-                Some((c.name, enforced || optimistic.is_some_and(|(_, e)| e), self.detail(c, &pairs, given)))
-            }
+        // The pair that a record cites when no pair differs.
+        let mut base = Cite {
+            call: first,
+            findings: own.findings,
+            past_budget: false,
+        };
+        let mut differs = own.hit.and_then(|(index, enforced)| Some((cite(index)?, enforced)));
+        let with_error = if own.complete { Vec::new() } else { with_budget_error(given) };
+        if !own.complete {
+            // Past the pair budget (spec A13): one pseudo pair for the target's tool name, with a
+            // `detector_error` added to A. The policies decide, as for any other pair. It only
+            // adds to what the target's own pairs found before the stop: a hit already found is
+            // kept, its `enforced` is ORed, and the cited pair moves only to an enforced
+            // difference that the kept hit lacks (spec A14).
+            let pseudo = EarlierCall::pseudo(first.name);
+            let past = self.past_budget(&pseudo, &with_error);
+            base = Cite {
+                call: pseudo,
+                findings: past.findings,
+                past_budget: true,
+            };
+            differs = match (differs, past.hit) {
+                (Some((kept, e)), Some((_, pe))) => Some((if pe && !e { base } else { kept }, e || pe)),
+                (Some(kept), None) => Some(kept),
+                (None, Some((_, pe))) => Some((base, pe)),
+                (None, None) => None,
+            };
+        }
+        let detail = |judge: &Self, c: &Cite<'k>| judge.detail(c, if c.past_budget { &with_error } else { given });
+        match (differs, hit) {
+            // Replaced by the findings: the cited pair names the entry and gives the detail.
+            (Some((c, enforced)), optimistic) => Some((c.call.name, enforced || optimistic.is_some_and(|(_, e)| e), detail(self, &c))),
             // Replaced by the optimistic path only: A's detail of the call that it denied, so that
-            // a floor deny shows its floor policy (§ 6.8.2).
+            // a floor deny shows its floor policy (§ 6.8.2). A call with no pair (past the budget)
+            // gives the base detail.
             (None, Some((name, enforced))) => {
                 let n = normalise(name);
-                let c = calls.iter().find(|c| normalise(c.name) == n).unwrap_or(first);
-                Some((name, enforced, self.detail(c, &pairs, given)))
+                let denied = calls.iter().position(|c| normalise(c.name) == n).and_then(cite);
+                let cedar = denied.and_then(|c| detail(self, &c)).or_else(|| detail(self, &base));
+                Some((name, enforced, cedar))
             }
             (None, None) => {
-                if let Some(cedar) = self.detail(first, &pairs, given) {
-                    self.plan.screen_records.push(ScreenRecord { tool: first.name.to_owned(), cedar });
+                if let Some(cedar) = detail(self, &base) {
+                    self.plan.screen_records.push(ScreenRecord {
+                        tool: base.call.name.to_owned(),
+                        cedar,
+                    });
                 }
                 None
             }
@@ -445,23 +490,58 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     /// Past the pair budget, A also gets the `detector_error`; the result is still not replaced.
     fn orphan(&mut self, given: &[Finding]) {
         let pseudo = EarlierCall::pseudo("");
-        let cedar = match self.pairs(&[pseudo], given) {
-            Some(pairs) => self.detail(&pseudo, &pairs, given),
-            None => {
-                let given = with_budget_error(given);
-                let pairs = self.past_budget(&pseudo, &given);
-                self.detail(&pseudo, &pairs, &given)
-            }
+        let own = self.pairs(&[pseudo], given);
+        let cedar = if own.complete {
+            let c = Cite {
+                call: pseudo,
+                findings: own.findings,
+                past_budget: false,
+            };
+            self.detail(&c, given)
+        } else {
+            let given = with_budget_error(given);
+            let past = self.past_budget(&pseudo, &given);
+            let c = Cite {
+                call: pseudo,
+                findings: past.findings,
+                past_budget: true,
+            };
+            self.detail(&c, &given)
         };
         if let Some(cedar) = cedar {
             self.plan.screen_records.push(ScreenRecord { tool: pseudo.name.to_owned(), cedar });
         }
     }
 
-    /// A's Cedar detail of call `c` of a decided target.
-    fn detail(&self, c: &EarlierCall<'k>, pairs: &Pairs, given: &[Finding]) -> Option<CedarDetail> {
-        let outcome = self.cache.get(&(c.digest, pairs.findings))?;
+    /// A's Cedar detail of a cited pair, with the findings that A had.
+    fn detail(&self, c: &Cite<'k>, given: &[Finding]) -> Option<CedarDetail> {
+        let outcome = self.cache.get(&(self.known_digest(&c.call)?, c.findings))?;
         Some(cedar_detail(&outcome.a, given, Declared::Unknown, self.judge.facts, outcome.duration))
+    }
+
+    /// The `call_digest` of a call: from the memo for an earlier call (computed on first use),
+    /// computed here for the pseudo call.
+    fn digest(&mut self, c: &EarlierCall<'k>) -> Digest32 {
+        let Some(slot) = c.slot else {
+            return call_digest(c.name, c.kind, c.arguments);
+        };
+        if let Some(Some(d)) = self.digests.get(slot) {
+            return *d;
+        }
+        let d = call_digest(c.name, c.kind, c.arguments);
+        if let Some(entry) = self.digests.get_mut(slot) {
+            *entry = Some(d);
+        }
+        d
+    }
+
+    /// The digest of a call whose pair is decided: the memo of an earlier call (`None` when it
+    /// was never needed), or the pseudo call's digest.
+    fn known_digest(&self, c: &EarlierCall<'k>) -> Option<Digest32> {
+        match c.slot {
+            Some(slot) => self.digests.get(slot).copied().flatten(),
+            None => Some(call_digest(c.name, c.kind, c.arguments)),
+        }
     }
 
     /// The pair of a target past `PAIR_BUDGET` (spec A13): the D32 pseudo call of its tool name,
@@ -473,7 +553,7 @@ impl<'k> ResultJudge<'_, '_, 'k> {
     fn past_budget(&mut self, pseudo: &EarlierCall<'k>, given: &[Finding]) -> Pairs {
         let with = kernel_findings(given);
         let findings = findings_digest(&with);
-        let key = (pseudo.digest, findings);
+        let key = (self.digest(pseudo), findings);
         let counts = match self.cache.get(&key) {
             Some(outcome) => outcome.counts,
             None => {
@@ -486,31 +566,35 @@ impl<'k> ResultJudge<'_, '_, 'k> {
         Pairs {
             findings,
             hit: counts.map(|enforced| (0, enforced)),
+            complete: true,
         }
     }
 
-    /// The differential pairs of a target (§ 6.8.2), from the pair cache. `None` when a pair that
-    /// is not in the cache would go past `PAIR_BUDGET`: the target, and every later target with
-    /// findings, is then decided by `past_budget`. Before the budget, a request decides at most
+    /// The differential pairs of a target (§ 6.8.2), from the pair cache. When a pair that is not
+    /// in the cache would go past `PAIR_BUDGET`, the loop stops: the result has `complete` false
+    /// and keeps the `hit` of the pairs before the stop. The target, and every later target with
+    /// findings, then also gets `past_budget`. Before the budget, a request decides at most
     /// `PAIR_BUDGET` pairs (`2 * PAIR_BUDGET` Cedar decisions), plus one cache look-up for each
     /// (target, earlier call).
-    fn pairs(&mut self, calls: &[EarlierCall<'k>], given: &[Finding]) -> Option<Pairs> {
-        if self.exhausted {
-            return None;
-        }
+    fn pairs(&mut self, calls: &[EarlierCall<'k>], given: &[Finding]) -> Pairs {
         let with = kernel_findings(given);
         let mut pairs = Pairs {
             findings: findings_digest(&with),
             hit: None,
+            complete: !self.exhausted,
         };
+        if self.exhausted {
+            return pairs;
+        }
         for (index, c) in calls.iter().enumerate() {
-            let key = (c.digest, pairs.findings);
+            let key = (self.digest(c), pairs.findings);
             let counts = match self.cache.get(&key) {
                 Some(outcome) => outcome.counts,
                 None => {
                     if self.decided >= PAIR_BUDGET {
                         self.exhausted = true;
-                        return None;
+                        pairs.complete = false;
+                        return pairs;
                     }
                     self.decided += 1;
                     let outcome = self.decide_pair(c, &with);
@@ -528,7 +612,7 @@ impl<'k> ResultJudge<'_, '_, 'k> {
                 });
             }
         }
-        Some(pairs)
+        pairs
     }
 
     /// One differential pair (§ 6.8.2): A with the target's findings only, B with no findings,
@@ -642,7 +726,7 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts,
     // it is replaced if any of them is denied. A legacy result carries its own name.
     // A result with findings is also decided by the differential pair (§ 6.8.2).
     // One index of the prior calls by id, built once. A duplicate id keeps every call in order.
-    // Each earlier call is held with its `call_digest`, computed once here.
+    // Each earlier call is held with its slot; its `call_digest` is computed only when a pair needs it.
     let mut by_id: BTreeMap<&str, Vec<EarlierCall>> = BTreeMap::new();
     // A `local_shell_call_output` can name its call by `id` alone. The provider schema does not say
     // if that is the `call_id` or the item `id` of the call, so it is matched against both ids of
@@ -650,8 +734,8 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts,
     let mut shell_ids: BTreeMap<&str, Vec<EarlierCall>> = BTreeMap::new();
     // The legacy chat `function_call`s (no id) by normalised name, for the pair of a `Name` target.
     let mut legacy: BTreeMap<String, Vec<EarlierCall>> = BTreeMap::new();
-    for c in &turn.prior_calls {
-        let earlier = EarlierCall::of(c);
+    for (slot, c) in turn.prior_calls.iter().enumerate() {
+        let earlier = EarlierCall::of(slot, c);
         if let Some(id) = c.id.as_deref() {
             by_id.entry(id).or_default().push(earlier);
         } else if c.kind == ToolCallKind::LegacyFunctionCall {
@@ -698,6 +782,7 @@ pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts,
         unions,
         now,
         cache: HashMap::new(),
+        digests: vec![None; turn.prior_calls.len()],
         decided: 0,
         exhausted: false,
     };
@@ -775,6 +860,27 @@ mod tests {
     use crate::policy::SHIPPED_FLOOR;
     use crate::policy::snapshot::OnUnavailable;
     use crate::turn::{ToolResultRef, ToolTurn, parse_request};
+
+    thread_local! {
+        /// The number of `call_digest` calls on this thread (nextest runs each test in its own
+        /// process).
+        pub(super) static CALL_DIGESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn a_request_with_no_findings_hashes_no_arguments() {
+        let s = tenant(PERMIT_ALL_STARTER, TenantMode::Enforce);
+        let t = distinct(10);
+        CALL_DIGESTS.with(|n| n.set(0));
+        let _ = plan_request(&s, Format::OpenAiChat, &t, &[], &Instant::now);
+        let _ = plan_request(&s, Format::OpenAiChat, &t, &vec![vec![]; 10], &Instant::now);
+        assert_eq!(CALL_DIGESTS.with(std::cell::Cell::get), 0, "no result has findings");
+        // The control: one result with findings hashes its own call only.
+        let mut findings = vec![vec![]; 10];
+        findings[3] = vec![high()];
+        let _ = plan_request(&s, Format::OpenAiChat, &t, &findings, &Instant::now);
+        assert_eq!(CALL_DIGESTS.with(std::cell::Cell::get), 1);
+    }
 
     const NO_FLOOR: &str = "";
     const RM_FLOOR: &str = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
@@ -1989,6 +2095,30 @@ mod tests {
         let (p, reads) = counted(&tenant(PERMIT_ALL_STARTER, TenantMode::Enforce), &distinct(n), &vec![vec![high()]; n]);
         assert_eq!(reads, 2 * (PAIR_BUDGET + 1), "2000 targets past the budget, one tool name: one pseudo pair");
         assert_eq!(p.replaced.len(), n);
+    }
+
+    #[test]
+    fn an_enforced_hit_is_kept_when_a_later_pair_of_the_target_is_past_the_budget() {
+        // 63 targets use 63 pairs. Target `cx` has two calls: `rm` uses pair 64 and finds a floor
+        // difference (enforced in log_only); `b` needs pair 65, past the budget. The pseudo pair
+        // (`rm`, input `{}`) does not differ, because the floor forbid reads `input.p`.
+        let floor = r#"@id("fp") forbid(principal, action == Pgs::Gateway::Action::"rm", resource)
+            when { context.findings.contains("injection_markers") && context.input has p };"#;
+        let s = snap(floor, PERMIT_ALL, TenantPart::Evaluated, TenantMode::LogOnly);
+        let mut t = distinct(PAIR_BUDGET - 1);
+        let mut rm = prior("cx", "rm");
+        rm.arguments = r#"{"p":1}"#.to_owned();
+        let mut b = prior("cx", "b");
+        b.arguments = r#"{"z":1}"#.to_owned();
+        t.prior_calls.extend([rm, b]);
+        t.tool_results.push(by_id("cx"));
+        let (p, reads) = counted(&s, &t, &vec![vec![high()]; PAIR_BUDGET]);
+        assert_eq!(reads, 2 * (PAIR_BUDGET + 1), "64 budget pairs and one pseudo pair");
+        assert_eq!(p.replaced, [item(ResultTarget::CallId("cx".to_owned()), true)]);
+        assert_eq!(p.entries[0].tool, "rm");
+        let d = detail(&p, 0);
+        assert!(d.floor_denied);
+        assert_eq!(ids(&d.determining), ["fp"]);
     }
 
     #[test]
