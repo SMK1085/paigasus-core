@@ -2,6 +2,8 @@
 //! The request side of a turn (spec D19): what tools the caller declared, what it called before,
 //! and which results it sent back. Never the content of a tool result. No request rewrite.
 
+use std::sync::Arc;
+
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -139,7 +141,8 @@ pub struct ToolDefinition {
     /// The tool namespace of a Responses API definition. `None` for every other format.
     pub namespace: Option<String>,
     pub kind: ToolCallKind,
-    pub schema: Option<Value>,
+    /// Shared, so a detector can hold the schema without a copy.
+    pub schema: Option<Arc<Value>>,
 }
 
 impl ToolDefinition {
@@ -164,6 +167,8 @@ pub struct PriorCall {
     /// The request plan decides a result by this name, so it must match the call's name.
     pub name: String,
     pub arguments: String,
+    /// How the call arrived. It decides whether `arguments` is JSON or text.
+    pub kind: ToolCallKind,
     /// `true` for a Responses `local_shell_call`. Its result may name it by `id` alone.
     pub local_shell: bool,
     /// The item `id` of a Responses `local_shell_call`. `None` for every other call.
@@ -207,14 +212,209 @@ pub(crate) fn responses_result_shape(ty: &str) -> Option<ResultShape> {
 
 #[must_use]
 pub fn parse_request(format: Format, body: &[u8]) -> ToolTurn {
-    let parsed = match format {
-        Format::OpenAiResponses => parse_strict_responses(body, ResponsesDoc::Request).and_then(|v| responses(&v)),
-        Format::OpenAiChat => parse_strict(body).and_then(|v| openai(&v)),
-        Format::AnthropicMessages => parse_strict(body).and_then(|v| anthropic(&v)),
-    };
-    match parsed {
+    match parse_value(format, body).and_then(|v| walk(format, &v, None)) {
         Ok(f) => ToolTurn::Parsed(f),
         Err(_) => ToolTurn::Unavailable("malformed"),
+    }
+}
+
+/// The strict parse of a request body. `parse_request` and the request screen use the same one.
+pub(crate) fn parse_value(format: Format, body: &[u8]) -> Result<Value, Malformed> {
+    match format {
+        Format::OpenAiResponses => parse_strict_responses(body, ResponsesDoc::Request),
+        Format::OpenAiChat | Format::AnthropicMessages => parse_strict(body),
+    }
+}
+
+/// The one format walker (§ 6.8.1, S13). With a sink, it also gives the text of each tool result
+/// and of each seen message source (§ 6.3.3). The sink never changes the facts or the errors.
+pub(crate) fn walk<'a>(format: Format, v: &'a Value, sink: Option<&mut (dyn TextSink<'a> + '_)>) -> Result<TurnFacts, Malformed> {
+    match format {
+        Format::OpenAiResponses => responses(v, sink),
+        Format::OpenAiChat => openai(v, sink),
+        Format::AnthropicMessages => anthropic(v, sink),
+    }
+}
+
+/// Receives the texts that the request screen reads. The texts borrow from the parsed request.
+pub(crate) trait TextSink<'a> {
+    /// The text parts of the tool result with this index in `TurnFacts.tool_results`. A result
+    /// with no text (a screenshot, an approval) gives no parts. `complete` is `false` when the
+    /// result holds content that the walker cannot read as text (an object `content`, a
+    /// `document` block): the parts then miss some of the result, and the screen reports it.
+    fn result(&mut self, index: usize, parts: &[&'a str], complete: bool);
+    /// One text of a seen message source (§ 6.3.3).
+    fn message(&mut self, text: &'a str);
+}
+
+/// The `text` of each part of `parts` whose `type` is `ty`. Other parts are skipped.
+fn typed_texts<'a>(parts: &'a [Value], ty: &str, out: &mut Vec<&'a str>) {
+    for p in parts {
+        if p.get("type").and_then(Value::as_str) == Some(ty)
+            && let Some(t) = p.get("text").and_then(Value::as_str)
+        {
+            out.push(t);
+        }
+    }
+}
+
+/// The texts of a content value: the string itself, or the `text` of each part of type `ty`.
+fn content_texts<'a>(content: Option<&'a Value>, ty: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    match content {
+        Some(Value::String(s)) => out.push(s.as_str()),
+        Some(Value::Array(parts)) => typed_texts(parts, ty, &mut out),
+        _ => {}
+    }
+    out
+}
+
+/// The part types of a tool result that hold no text: an image. Any other part type that is not
+/// the text type of the format holds content the screen cannot read, except the Anthropic blocks
+/// of [`anthropic_part_texts`].
+const NO_TEXT_PARTS: [&str; 3] = ["image", "image_url", "input_image"];
+
+/// The texts of the content of a tool result, and whether they are all of it: `false` for a
+/// content that is not a string, an array or null, and for an array part that the screen cannot
+/// read (see [`part_texts`]). `anthropic` turns on the Anthropic result blocks.
+fn result_texts<'a>(content: Option<&'a Value>, ty: &str, anthropic: bool) -> (Vec<&'a str>, bool) {
+    let mut out = Vec::new();
+    let complete = content_parts(content, ty, anthropic, &mut out);
+    (out, complete)
+}
+
+/// Push the texts of a content value: a string, or an array of parts. Return whether all of it was
+/// read. An absent or null content holds nothing, so it is read in full.
+fn content_parts<'a>(content: Option<&'a Value>, ty: &str, anthropic: bool, out: &mut Vec<&'a str>) -> bool {
+    match content {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => {
+            out.push(s);
+            true
+        }
+        Some(Value::Array(parts)) => {
+            // No early stop: a part that cannot be read does not hide the texts of later parts.
+            let mut complete = true;
+            for p in parts {
+                complete &= part_texts(p, ty, anthropic, out);
+            }
+            complete
+        }
+        Some(_) => false,
+    }
+}
+
+/// Push the texts of one part of a tool result. Return whether all of it was read: `true` for a
+/// text part of type `ty` with a string `text` and for an image part, `false` for any other part,
+/// except the Anthropic blocks when `anthropic` is set.
+fn part_texts<'a>(p: &'a Value, ty: &str, anthropic: bool, out: &mut Vec<&'a str>) -> bool {
+    let Some(part_ty) = p.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    if part_ty == ty {
+        return match p.get("text") {
+            Some(Value::String(t)) => {
+                out.push(t);
+                true
+            }
+            _ => false,
+        };
+    }
+    if NO_TEXT_PARTS.contains(&part_ty) {
+        return true;
+    }
+    anthropic && anthropic_part_texts(p, part_ty, out)
+}
+
+/// The Anthropic result blocks that hold readable text (controller ruling, Task 22 review):
+/// - `search_result`: its `title`, its `source` and the text blocks of its `content`;
+/// - `document` with a `source` of type `text` (`data`) or `content` (text blocks): that text, and
+///   its `title` and `context`. A document with a base64, URL or file source is not read (fail
+///   closed);
+/// - `tool_reference`: a tool name and no free text, so there is nothing to read.
+fn anthropic_part_texts<'a>(p: &'a Value, part_ty: &str, out: &mut Vec<&'a str>) -> bool {
+    match part_ty {
+        "tool_reference" => true,
+        "search_result" => {
+            let strings = strings_of(p, &["title", "source"], out);
+            content_parts(p.get("content"), "text", false, out) && strings
+        }
+        "document" => {
+            let strings = strings_of(p, &["title", "context"], out);
+            let source = p.get("source");
+            let read = match source.and_then(|s| s.get("type")).and_then(Value::as_str) {
+                Some("text") => match source.and_then(|s| s.get("data")) {
+                    Some(Value::String(d)) => {
+                        out.push(d);
+                        true
+                    }
+                    _ => false,
+                },
+                Some("content") => content_parts(source.and_then(|s| s.get("content")), "text", false, out),
+                _ => false,
+            };
+            read && strings
+        }
+        _ => false,
+    }
+}
+
+/// Push the string values of these keys of `p`. Return `false` when one of them holds another
+/// value (it cannot be read); an absent or null key holds nothing.
+fn strings_of<'a>(p: &'a Value, keys: &[&str], out: &mut Vec<&'a str>) -> bool {
+    keys.iter().fold(true, |complete, k| match p.get(*k) {
+        None | Some(Value::Null) => complete,
+        Some(Value::String(s)) => {
+            out.push(s);
+            complete
+        }
+        Some(_) => false,
+    })
+}
+
+/// Give each text of a seen message source to the sink.
+fn sink_messages<'a>(sink: &mut Option<&mut (dyn TextSink<'a> + '_)>, content: Option<&'a Value>, ty: &str) {
+    if let Some(s) = sink.as_deref_mut() {
+        for t in content_texts(content, ty) {
+            s.message(t);
+        }
+    }
+}
+
+/// Whether a message role is a seen source (§ 6.3.3).
+fn seen_role(role: Option<&str>) -> bool {
+    matches!(role, Some("system" | "developer" | "user"))
+}
+
+/// The text parts of a Responses result item of this shape, and whether they are all of it (see
+/// [`result_texts`]).
+fn responses_result_texts(item: &Map<String, Value>, shape: ResultShape) -> (Vec<&str>, bool) {
+    match shape {
+        ResultShape::Text => result_texts(item.get("output"), "input_text", false),
+        ResultShape::ShellChunks => {
+            let mut out = Vec::new();
+            let mut complete = true;
+            match item.get("output") {
+                None | Some(Value::Null) => {}
+                Some(Value::Array(chunks)) => {
+                    for c in chunks {
+                        if !c.is_object() {
+                            complete = false;
+                        }
+                        for k in ["stdout", "stderr"] {
+                            match c.get(k) {
+                                None | Some(Value::Null) => {}
+                                Some(Value::String(t)) => out.push(t.as_str()),
+                                Some(_) => complete = false,
+                            }
+                        }
+                    }
+                }
+                Some(_) => complete = false,
+            }
+            (out, complete)
+        }
+        ResultShape::Screenshot | ResultShape::Approval => (Vec::new(), true),
     }
 }
 
@@ -234,7 +434,7 @@ fn req_str(o: &Map<String, Value>, k: &'static str) -> Result<String, Malformed>
     opt_str(o.get(k), k)?.ok_or(Malformed(k))
 }
 
-fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
+fn openai<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
     let mut f = TurnFacts {
         tool_choice: chat_choice(top),
@@ -249,7 +449,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                     name: req_str(func, "name")?,
                     namespace: None,
                     kind: ToolCallKind::Function,
-                    schema: func.get("parameters").cloned(),
+                    schema: func.get("parameters").cloned().map(Arc::new),
                 });
             }
             Some("custom") => {
@@ -270,7 +470,7 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
             name: req_str(d, "name")?,
             namespace: None,
             kind: ToolCallKind::LegacyFunctionCall,
-            schema: d.get("parameters").cloned(),
+            schema: d.get("parameters").cloned().map(Arc::new),
         });
     }
     for m in arr(top, "messages")? {
@@ -279,11 +479,12 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
             Some("assistant") => {
                 for c in arr(m, "tool_calls")? {
                     let c = obj(c)?;
-                    let (name, arguments) = prior_body(c)?;
+                    let (name, arguments, kind) = prior_body(c)?;
                     f.prior_calls.push(PriorCall {
                         id: opt_str(c.get("id"), "id")?,
                         name,
                         arguments,
+                        kind,
                         local_shell: false,
                         item_id: None,
                     });
@@ -293,24 +494,34 @@ fn openai(v: &Value) -> Result<TurnFacts, Malformed> {
                         id: None,
                         name: req_str(fc, "name")?,
                         arguments: opt_str(fc.get("arguments"), "arguments")?.unwrap_or_default(),
+                        kind: ToolCallKind::LegacyFunctionCall,
                         local_shell: false,
                         item_id: None,
                     });
                 }
             }
-            Some("tool") => f.tool_results.push(ToolResultRef {
-                call_id: opt_str(m.get("tool_call_id"), "tool_call_id")?,
-                name: None,
-                item_id: None,
-                shape: ResultShape::Text,
-            }),
-            Some("function") => f.tool_results.push(ToolResultRef {
-                call_id: None,
-                name: opt_str(m.get("name"), "name")?,
-                item_id: None,
-                shape: ResultShape::Text,
-            }),
-            _ => {}
+            Some(role @ ("tool" | "function")) => {
+                let (call_id, name) = if role == "tool" {
+                    (opt_str(m.get("tool_call_id"), "tool_call_id")?, None)
+                } else {
+                    (None, opt_str(m.get("name"), "name")?)
+                };
+                if let Some(s) = sink.as_deref_mut() {
+                    let (parts, complete) = result_texts(m.get("content"), "text", false);
+                    s.result(f.tool_results.len(), &parts, complete);
+                }
+                f.tool_results.push(ToolResultRef {
+                    call_id,
+                    name,
+                    item_id: None,
+                    shape: ResultShape::Text,
+                });
+            }
+            role => {
+                if seen_role(role) {
+                    sink_messages(&mut sink, m.get("content"), "text");
+                }
+            }
         }
     }
     f.latest = chat_latest(arr(top, "messages")?);
@@ -342,14 +553,14 @@ fn chat_latest(messages: &[Value]) -> LatestTurn {
 /// The (name, arguments) of a prior OpenAI tool call: a `function` body's name and arguments, or a
 /// `custom` body's name and input. An entry with neither body, both, or a body that disagrees with
 /// its `type` is malformed: an empty name would read as a call to no tool at all.
-fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
+fn prior_body(c: &Map<String, Value>) -> Result<(String, String, ToolCallKind), Malformed> {
     let ty = opt_str(c.get("type"), "type")?;
-    let (body, input) = match (opt_obj(c.get("function"), "function")?, opt_obj(c.get("custom"), "custom")?, ty.as_deref()) {
-        (Some(x), None, None | Some("function")) => (x, "arguments"),
-        (None, Some(x), None | Some("custom")) => (x, "input"),
+    let (body, input, kind) = match (opt_obj(c.get("function"), "function")?, opt_obj(c.get("custom"), "custom")?, ty.as_deref()) {
+        (Some(x), None, None | Some("function")) => (x, "arguments", ToolCallKind::Function),
+        (None, Some(x), None | Some("custom")) => (x, "input", ToolCallKind::Custom),
         _ => return Err(Malformed("tool_call")),
     };
-    Ok((req_str(body, "name")?, opt_str(body.get(input), input)?.unwrap_or_default()))
+    Ok((req_str(body, "name")?, opt_str(body.get(input), input)?.unwrap_or_default(), kind))
 }
 
 /// The request side of a Responses turn (spec § 7.2), read by `parse_request`.
@@ -361,7 +572,7 @@ fn prior_body(c: &Map<String, Value>) -> Result<(String, String), Malformed> {
 /// prior calls (read as a response reads them, `assembly::tool_call`), and each output item is a
 /// tool result (`responses_result_shape` is the one list of the result types). An `mcp_approval_response` refers to its request by `approval_request_id`, and the
 /// id of an `mcp_approval_request` call is its item `id`. A string `input` has no items.
-fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
+fn responses<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
     let mut f = TurnFacts {
         tool_choice: responses_choice(top.get("tool_choice")),
@@ -396,6 +607,14 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
             }
         }
     }
+    if let Some(s) = sink.as_deref_mut() {
+        if let Some(Value::String(t)) = top.get("instructions") {
+            s.message(t);
+        }
+        if let Some(Value::String(t)) = top.get("input") {
+            s.message(t);
+        }
+    }
     // A string `input` is one user message. Only an array has items.
     let items: &[Value] = match top.get("input") {
         Some(Value::Array(a)) => a,
@@ -404,19 +623,23 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
     };
     for (i, item) in items.iter().enumerate() {
         let item = obj(item)?;
-        // A message in the short form has no `type`.
-        let Some(ty) = opt_str(item.get("type"), "type")? else { continue };
+        // A message in the short form has no `type`. It is still a seen source (§ 6.3.3).
+        let ty = opt_str(item.get("type"), "type")?;
+        if matches!(ty.as_deref(), None | Some("message")) && seen_role(item.get("role").and_then(Value::as_str)) {
+            sink_messages(&mut sink, item.get("content"), "input_text");
+        }
+        let Some(ty) = ty else { continue };
         if let Some(shape) = responses_result_shape(&ty) {
             let key = if shape == ResultShape::Approval { "approval_request_id" } else { "call_id" };
             // Only a `local_shell_call_output` refers to its call by `id`. For the other output
             // types, `id` is the id of the output item itself.
             let item_id = if ty == "local_shell_call_output" { opt_str(item.get("id"), "id")? } else { None };
-            f.tool_results.push(ToolResultRef {
-                call_id: opt_str(item.get(key), key)?,
-                name: None,
-                item_id,
-                shape,
-            });
+            let call_id = opt_str(item.get(key), key)?;
+            if let Some(s) = sink.as_deref_mut() {
+                let (parts, complete) = responses_result_texts(item, shape);
+                s.result(f.tool_results.len(), &parts, complete);
+            }
+            f.tool_results.push(ToolResultRef { call_id, name: None, item_id, shape });
             continue;
         }
         match ty.as_str() {
@@ -436,6 +659,7 @@ fn responses(v: &Value) -> Result<TurnFacts, Malformed> {
                         name: c.display_name(), // PRIOR-DISPLAY-NAME
                         id: c.id,
                         arguments: c.arguments,
+                        kind,
                         local_shell,
                         item_id: if local_shell { opt_str(item.get("id"), "id")? } else { None },
                     });
@@ -642,11 +866,11 @@ fn responses_definition(t: &Map<String, Value>, ty: &str, namespace: Option<Stri
         name: req_str(t, "name")?,
         namespace,
         kind: if function { ToolCallKind::Function } else { ToolCallKind::Custom },
-        schema: if function { t.get("parameters").cloned() } else { None },
+        schema: if function { t.get("parameters").cloned().map(Arc::new) } else { None },
     })
 }
 
-fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
+fn anthropic<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> Result<TurnFacts, Malformed> {
     let top = obj(v)?;
     let mut f = TurnFacts {
         tool_choice: anthropic_choice(top.get("tool_choice")),
@@ -659,13 +883,18 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                 name: req_str(t, "name")?,
                 namespace: None,
                 kind: ToolCallKind::AnthropicToolUse,
-                schema: t.get("input_schema").cloned(),
+                schema: t.get("input_schema").cloned().map(Arc::new),
             }),
             Some(_) => f.server_tools = true, // a server tool
         }
     }
+    sink_messages(&mut sink, top.get("system"), "text");
     for m in arr(top, "messages")? {
         let m = obj(m)?;
+        // Only `user` text is a seen source. Its `tool_result` blocks are results, not messages.
+        if m.get("role").and_then(Value::as_str) == Some("user") {
+            sink_messages(&mut sink, m.get("content"), "text");
+        }
         let Some(Value::Array(blocks)) = m.get("content") else { continue };
         for b in blocks {
             let b = obj(b)?;
@@ -674,15 +903,23 @@ fn anthropic(v: &Value) -> Result<TurnFacts, Malformed> {
                     id: opt_str(b.get("id"), "id")?,
                     name: req_str(b, "name")?,
                     arguments: b.get("input").map(Value::to_string).unwrap_or_default(),
+                    kind: ToolCallKind::AnthropicToolUse,
                     local_shell: false,
                     item_id: None,
                 }),
-                Some("tool_result") => f.tool_results.push(ToolResultRef {
-                    call_id: opt_str(b.get("tool_use_id"), "tool_use_id")?,
-                    name: None,
-                    item_id: None,
-                    shape: ResultShape::Text,
-                }),
+                Some("tool_result") => {
+                    let call_id = opt_str(b.get("tool_use_id"), "tool_use_id")?;
+                    if let Some(s) = sink.as_deref_mut() {
+                        let (parts, complete) = result_texts(b.get("content"), "text", true);
+                        s.result(f.tool_results.len(), &parts, complete);
+                    }
+                    f.tool_results.push(ToolResultRef {
+                        call_id,
+                        name: None,
+                        item_id: None,
+                        shape: ResultShape::Text,
+                    });
+                }
                 _ => {}
             }
         }
@@ -876,7 +1113,8 @@ mod tests {
 
     #[test]
     fn a_responses_request_yields_definitions_calls_and_results() {
-        let f = responses(&json!({"model":"m",
+        let f = responses(
+            &json!({"model":"m",
             "tools":[{"type":"function","name":"read","parameters":{"type":"object"}},
                      {"type":"custom","name":"sql"},
                      {"type":"namespace","name":"db","tools":[{"type":"function","name":"query","parameters":{}},{"type":"custom","name":"raw"}]},
@@ -893,7 +1131,9 @@ mod tests {
                      {"type":"apply_patch_call_output","call_id":"c6","status":"completed"},
                      {"type":"mcp_approval_request","id":"mcpr_1","name":"rm","server_label":"srv","arguments":"{}"},
                      {"type":"mcp_approval_response","approval_request_id":"mcpr_1","approve":true},
-                     {"type":"reasoning","id":"rs_1","summary":[]}]}))
+                     {"type":"reasoning","id":"rs_1","summary":[]}]}),
+            None,
+        )
         .unwrap();
         assert!(f.definitions_complete);
         assert_eq!(
@@ -923,10 +1163,13 @@ mod tests {
 
     #[test]
     fn a_local_shell_call_and_output_keep_their_item_ids() {
-        let f = responses(&json!({"input":[
+        let f = responses(
+            &json!({"input":[
             {"type":"local_shell_call","id":"ls_1","call_id":"c1","action":{"type":"exec","command":["ls"],"env":{}},"status":"completed"},
             {"type":"local_shell_call_output","id":"ls_1","output":"x"},
-            {"type":"function_call_output","id":"fco_1","call_id":"c2","output":"x"}]}))
+            {"type":"function_call_output","id":"fco_1","call_id":"c2","output":"x"}]}),
+            None,
+        )
         .unwrap();
         assert_eq!(
             f.prior_calls.iter().map(|c| (c.id.as_deref(), c.local_shell, c.item_id.as_deref())).collect::<Vec<_>>(),
@@ -941,13 +1184,13 @@ mod tests {
 
     #[test]
     fn a_namespaced_prior_call_keeps_its_display_name() {
-        let f = responses(&json!({"input":[{"type":"function_call","call_id":"c1","namespace":"db","name":"query","arguments":"{}"}]})).unwrap();
+        let f = responses(&json!({"input":[{"type":"function_call","call_id":"c1","namespace":"db","name":"query","arguments":"{}"}]}), None).unwrap();
         assert_eq!(f.prior_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["db.query"]);
     }
 
     #[test]
     fn a_string_input_has_no_calls() {
-        let f = responses(&json!({"model":"m","input":"hi"})).unwrap();
+        let f = responses(&json!({"model":"m","input":"hi"}), None).unwrap();
         assert_eq!(f, TurnFacts::default());
         assert!(f.definitions_complete);
     }
@@ -959,7 +1202,7 @@ mod tests {
             json!({"input":[{"type":"additional_tools","id":"at_1","tools":[]}]}),
             json!({"input":[{"type":"tool_search_output","id":"tso_1","tools":[]}]}),
         ] {
-            assert!(!responses(&v).unwrap().definitions_complete, "{v}");
+            assert!(!responses(&v, None).unwrap().definitions_complete, "{v}");
         }
     }
 
@@ -978,7 +1221,7 @@ mod tests {
             json!({"input":true}),
             json!({"input":[{"type":"function_call","name":"f"}]}),
         ] {
-            assert!(responses(&v).is_err(), "{v}");
+            assert!(responses(&v, None).is_err(), "{v}");
         }
     }
 
@@ -1062,6 +1305,32 @@ mod tests {
         assert_eq!(c(json!({"type":"tool"})), ToolChoice::Unknown);
         assert_eq!(c(json!({"type":"x"})), ToolChoice::Unknown);
         assert_eq!(c(json!("auto")), ToolChoice::Unknown);
+    }
+
+    #[test]
+    fn prior_calls_carry_their_kind() {
+        let kinds = |f: &TurnFacts| f.prior_calls.iter().map(|c| c.kind).collect::<Vec<_>>();
+        let chat = facts(
+            Format::OpenAiChat,
+            json!({"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":[
+                {"id":"a","type":"function","function":{"name":"read","arguments":"{}"}},
+                {"id":"b","type":"custom","custom":{"name":"sql","input":"x"}}],
+                "function_call":{"name":"old","arguments":"{}"}}]}),
+        );
+        assert_eq!(kinds(&chat), [ToolCallKind::Function, ToolCallKind::Custom, ToolCallKind::LegacyFunctionCall]);
+        let anthropic = facts(
+            Format::AnthropicMessages,
+            json!({"model":"c","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{}}]}]}),
+        );
+        assert_eq!(kinds(&anthropic), [ToolCallKind::AnthropicToolUse]);
+        let responses = facts(
+            Format::OpenAiResponses,
+            json!({"model":"m","input":[
+                {"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},
+                {"type":"custom_tool_call","call_id":"c2","name":"sql","input":"x"},
+                {"type":"local_shell_call","id":"i","call_id":"c3","action":{"type":"exec","command":["ls"]}}]}),
+        );
+        assert_eq!(kinds(&responses), [ToolCallKind::Function, ToolCallKind::Custom, ToolCallKind::LocalShell]);
     }
 
     fn notice(name: &str, id: uuid::Uuid) -> String {

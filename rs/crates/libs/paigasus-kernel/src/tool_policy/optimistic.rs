@@ -5,7 +5,8 @@
 //!
 //! - every `permit` keeps its scope and loses its conditions;
 //! - every `forbid` whose conditions read `context.input`, `context.input_text`,
-//!   `context.findings`, `context.call` or `context.session` is dropped.
+//!   `context.findings`, `context.call` (`call.hosts` included), `context.session` or
+//!   `context.max_severity` is dropped.
 //!
 //! So if the optimistic set denies, the merged set denies for every real call.
 
@@ -15,6 +16,7 @@ use serde_json::Value;
 use super::compile::{PolicyOrigin, ToolPolicies};
 use super::decide::request;
 use super::types::{Facts, Findings};
+use crate::detect::SCREEN_INDEPENDENT_KINDS;
 
 /// The result of `decide_tool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,19 +39,28 @@ pub(crate) enum ContextAttr {
     Findings,
     Call,
     Session,
+    MaxSeverity,
 }
 
 /// Every part, for a read of the context as a whole or a shape the walk does not know.
-const ALL_READS: [ContextAttr; 5] = [ContextAttr::Input, ContextAttr::InputText, ContextAttr::Findings, ContextAttr::Call, ContextAttr::Session];
+const ALL_READS: [ContextAttr; 6] = [
+    ContextAttr::Input,
+    ContextAttr::InputText,
+    ContextAttr::Findings,
+    ContextAttr::Call,
+    ContextAttr::Session,
+    ContextAttr::MaxSeverity,
+];
 
 /// A `forbid` that reads one of these parts is dropped from the optimistic set. One element per
 /// line, so that a mutation test can delete exactly one rule (preflight F1).
 pub(crate) const DROP_READS: &[ContextAttr] = &[
-    ContextAttr::Input,     // context.input
-    ContextAttr::InputText, // context.input_text
-    ContextAttr::Findings,  // context.findings
-    ContextAttr::Call,      // context.call
-    ContextAttr::Session,   // context.session
+    ContextAttr::Input,       // context.input
+    ContextAttr::InputText,   // context.input_text
+    ContextAttr::Findings,    // context.findings
+    ContextAttr::Call,        // context.call
+    ContextAttr::Session,     // context.session
+    ContextAttr::MaxSeverity, // context.max_severity
 ];
 
 /// What a walk has found: some parts, or all of them.
@@ -67,9 +78,10 @@ impl Reads {
             "findings" => self.parts.push(ContextAttr::Findings),
             "call" => self.parts.push(ContextAttr::Call),
             "session" => self.parts.push(ContextAttr::Session),
+            "max_severity" => self.parts.push(ContextAttr::MaxSeverity),
             // Fixed for one request.
             "request" => {}
-            // An attribute that the gateway does not fill: count it as a read of all.
+            // An attribute that the context does not hold: count it as a read of all.
             _ => self.all = true,
         }
     }
@@ -175,6 +187,63 @@ pub(crate) fn policy_reads(policy: &Value) -> Vec<ContextAttr> {
     ALL_READS.into_iter().filter(|a| r.all || r.parts.contains(a)).collect()
 }
 
+/// Whether `e` is `context.findings`.
+fn is_findings(e: Option<&Value>) -> bool {
+    e.and_then(|e| e.get("."))
+        .is_some_and(|d| is_context(d.get("left")) && d.get("attr").and_then(Value::as_str) == Some("findings"))
+}
+
+/// Whether an expression reads `context.findings` in a form other than
+/// `context.findings.contains(<literal>)` with a decoded value in `SCREEN_INDEPENDENT_KINDS`.
+/// Any other node is searched in full, which can only find more reads (the safe side).
+fn reads_dependent_findings(e: &Value) -> bool {
+    match e {
+        Value::Object(m) => {
+            if let Some(c) = m.get("contains").filter(|_| m.len() == 1)
+                && is_findings(c.get("left"))
+                && let Some(Value::String(kind)) = c.get("right").and_then(|r| r.get("Value"))
+            {
+                return !SCREEN_INDEPENDENT_KINDS.contains(&kind.as_str());
+            }
+            if m.len() == 1 && is_findings(Some(e)) {
+                return true;
+            }
+            if let Some(h) = m.get("has").filter(|_| m.len() == 1)
+                && is_context(h.get("left"))
+            {
+                let first = match h.get("attr") {
+                    Some(Value::String(a)) => Some(a.as_str()),
+                    Some(Value::Array(path)) => path.first().and_then(Value::as_str),
+                    _ => None,
+                };
+                // A `has` that names no attribute the walk can read counts as a findings read.
+                if first.is_none_or(|a| a == "findings") {
+                    return true;
+                }
+            }
+            m.values().any(reads_dependent_findings)
+        }
+        Value::Array(xs) => xs.iter().any(reads_dependent_findings),
+        _ => false,
+    }
+}
+
+/// Whether a policy (its `Policy::to_json` form) reads a screen-dependent part of the context
+/// (§ 6.8.0, D27): `max_severity`, `call`, the context as a whole, a shape the walk does not know,
+/// or `findings` in any form other than `contains` of a literal whose decoded value is in
+/// `SCREEN_INDEPENDENT_KINDS`. The literal comes from the JSON form, so an escape in the source
+/// text cannot hide a dependent kind.
+pub(crate) fn screen_dependent(policy: &Value) -> bool {
+    // A read of all (`context` as a whole, an unknown shape) holds both parts.
+    if policy_reads(policy).iter().any(|a| matches!(a, ContextAttr::MaxSeverity | ContextAttr::Call)) {
+        return true;
+    }
+    match policy.get("conditions").and_then(Value::as_array) {
+        Some(conditions) => conditions.iter().any(|c| c.get("body").is_none_or(reads_dependent_findings)),
+        None => true,
+    }
+}
+
 /// The permit `p` with its scope and without its conditions. If the JSON round trip fails, an
 /// unconditional permit with the same id, which allows even more.
 fn strip_conditions(p: &Policy) -> Policy {
@@ -240,6 +309,7 @@ mod tests {
 
     use super::*;
     use crate::CedarUid;
+    use crate::detect::Severity;
     use crate::tool_policy::{Declared, Effect as Outcome, NAME_COLLISION, RequestInfo, SessionInfo, ToolInput, ToolInvocation, decide};
 
     const ALLOW_ALL: &str = r#"@id("all") permit(principal, action, resource);"#;
@@ -261,7 +331,13 @@ mod tests {
 
     fn findings(kinds: &[&str]) -> Findings {
         let mut f = Findings::new();
-        kinds.iter().for_each(|k| f.insert(k));
+        kinds.iter().for_each(|k| f.add(k, if *k == "name_collision" { Severity::High } else { Severity::Medium }));
+        f
+    }
+
+    fn findings_with(kinds: &[(&str, Severity)]) -> Findings {
+        let mut f = Findings::new();
+        kinds.iter().for_each(|(k, s)| f.add(k, *s));
         f
     }
 
@@ -312,6 +388,21 @@ mod tests {
         ] {
             assert!(dropped(cond), "{cond}");
         }
+    }
+
+    #[test]
+    fn a_forbid_on_max_severity_or_hosts_is_dropped() {
+        for c in ["context.max_severity >= 3", r#"context.call.hosts.contains("a.example")"#] {
+            assert!(dropped(c), "{c}");
+        }
+        // The reads are the named part, not a read of all (ruling F20).
+        let reads = |c: &str| {
+            let p = Policy::parse(None, format!("forbid(principal, action, resource) when {{ {c} }};")).expect("parses");
+            policy_reads(&p.to_json().expect("json"))
+        };
+        assert_eq!(reads("context.max_severity >= 3"), [ContextAttr::MaxSeverity]);
+        assert_eq!(reads("context.max_severity == -1 && context.session.turn > 0"), [ContextAttr::Session, ContextAttr::MaxSeverity]);
+        assert_eq!(reads(r#"context.call.hosts.contains("a.example")"#), [ContextAttr::Call]);
     }
 
     #[test]
@@ -425,6 +516,13 @@ mod tests {
                 call_turn: 1,
                 ..counter(
                     r#"@id("all") permit(principal, action, resource); @id("f") forbid(principal, action, resource) when { context.session.turn == 0 };"#,
+                    json("{}"),
+                )
+            },
+            ContextAttr::MaxSeverity => Counter {
+                call_findings: findings_with(&[("x", Severity::Low)]),
+                ..counter(
+                    r#"@id("all") permit(principal, action, resource); @id("f") forbid(principal, action, resource) when { context.max_severity == -1 };"#,
                     json("{}"),
                 )
             },

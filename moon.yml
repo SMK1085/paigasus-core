@@ -436,7 +436,7 @@ tasks:
       - 'rs/.cargo/config.toml'
 
   wasm-getrandom-free:
-    description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448) — and that no binding crate pulls `cedar-policy` (SMA-752 D21).'
+    description: 'Assert the wasm binding pulls no `getrandom` — the kernel mints UUIDv7 from injected bytes, so wasm32-unknown-unknown stays buildable (SMA-448) — that no binding crate pulls `cedar-policy` (SMA-752 D21), and that no binding crate enables the kernel feature `detectors` (SMA-855).'
     # Resolve the FULL dependency tree first (fail LOUD if `cargo tree` itself errors — a broken
     # invocation must not silently read as "getrandom absent"), then grep it for getrandom. We WANT
     # it absent: fail the task only when the (successfully resolved) tree contains it.
@@ -461,6 +461,19 @@ tasks:
         fi
         if grep -qw cedar-policy < <(printf '%s\n' "$tree"); then
           echo "cedar-policy is in the $crate dependency graph — the kernel tool-policy feature leaked into a binding" >&2
+          exit 1
+        fi
+        # SMA-855 A5: no binding crate may enable the kernel feature `detectors`. Resolve the
+        # feature tree first (a failed `cargo tree` exits 2), then grep it, so a broken command
+        # cannot read as "feature absent". `--target all` also reads a target-specific
+        # dependency, for example one for wasm32 only.
+        if ! feat="$(cargo tree --locked -p "$crate" -e features -i paigasus-kernel --target all)"; then
+          echo "cargo tree failed for $crate (features) — cannot verify detectors absence" >&2
+          exit 2
+        fi
+        # Match the `feature "detectors"` line, not the bare word: a checkout path can hold it.
+        if grep -qF 'feature "detectors"' < <(printf '%s\n' "$feat"); then
+          echo "the kernel feature detectors reached $crate; bindings must not get the detectors (SMA-855 A5)" >&2
           exit 1
         fi
       done

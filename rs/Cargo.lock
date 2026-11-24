@@ -3583,10 +3583,12 @@ version = "0.3.0"
 dependencies = [
  "cedar-policy",
  "proptest",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",
  "unicode-normalization",
+ "url",
  "uuid",
 ]
 

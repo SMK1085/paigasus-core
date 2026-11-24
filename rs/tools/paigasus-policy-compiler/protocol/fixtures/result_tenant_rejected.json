@@ -1,7 +1,7 @@
 {
   "outcome": "rejected",
   "protocol_version": 1,
-  "compiler_generation": 2,
+  "compiler_generation": 3,
   "rejections": [
     {
       "policy_id": null,

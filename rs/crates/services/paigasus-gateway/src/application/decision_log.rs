@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
-use paigasus_gateway_core::decision_log::{ArgumentDigest, DecisionRecord, RecordHeader, ReportedCall, build_refusal, build_request, build_response, response_org};
-use paigasus_gateway_core::{DecisionContext, RequestEntry, TenantMode};
+use paigasus_gateway_core::decision_log::{ArgumentDigest, CedarDetail, DecisionRecord, RecordHeader, ReportedCall, build_refusal, build_request, build_response, build_screen, response_org};
+use paigasus_gateway_core::{DecisionContext, RequestEntry, ScreenRecord, TenantMode};
 use paigasus_kernel::mint_uuid7;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
@@ -143,8 +143,18 @@ impl DecisionRecorder {
         self.emit(response_org(ctx).or_else(|| org_of(&ctx.scope)), r.decision_id, r.detail.is_some(), |h| build_response(h, ctx, r));
     }
 
-    pub fn record_request(&self, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry) {
-        self.emit(org_of(&ctx.scope), None, false, |h| build_request(h, ctx, mode, e));
+    /// One request-side entry. `cedar` is the detail of the entry (SMA-855 § 6.11.2), `None` for an
+    /// entry that no decision with findings made. The tracing line is written exactly when the
+    /// entry has a detail: a Cedar decision with findings made it (§ 6.11.2, as R11).
+    pub fn record_request(&self, ctx: &DecisionContext, mode: Option<TenantMode>, e: &RequestEntry, cedar: Option<&CedarDetail>) {
+        self.emit(org_of(&ctx.scope), None, cedar.is_some(), |h| build_request(h, ctx, mode, e, cedar));
+    }
+
+    /// One tool result with findings that the gateway did not replace: a `SCREEN_RESULT` record
+    /// with applied `Allow` (SMA-855 § 6.11.2). It always has a detail, so it always writes the
+    /// tracing line.
+    pub fn record_screen(&self, ctx: &DecisionContext, mode: Option<TenantMode>, r: &ScreenRecord) {
+        self.emit(org_of(&ctx.scope), None, true, |h| build_screen(h, ctx, mode, r));
     }
 
     pub fn record_refusal(&self, ctx: &DecisionContext, mode: Option<TenantMode>) {
@@ -302,6 +312,116 @@ mod tests {
         for field in ["mode=", "determining=", "errored="] {
             assert!(text.contains(field), "{field} in {text}");
         }
+    }
+
+    #[test]
+    fn the_line_lists_the_finding_kinds_and_severities_and_no_evidence() {
+        use paigasus_gateway_core::decision_log::{CedarDetail, FindingRecord};
+        use paigasus_kernel::detect::{Evidence, Finding, Severity};
+        use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect};
+        const CANARY: &str = "canary-91c2.example";
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let host = Finding::new("unseen_host", "unseen_host", Severity::Medium, "v1").with_evidence(Evidence::host("r", Some("/u"), CANARY.to_owned()));
+        let cedar = CedarDetail::new(
+            Effect::Deny,
+            vec![],
+            vec![],
+            false,
+            vec![FindingRecord::from_finding(&host), FindingRecord::new("name_collision", None, "", "")],
+            Some(Severity::High),
+            Declared::Yes,
+            ActionGroup::Catalog,
+            std::time::Duration::ZERO,
+        );
+        let call = ReportedCall::new(
+            entry_of(ReportDecision::Block, Some(Basis::Decider), Some(BlockCode::Policy), Some(true)),
+            None,
+            Some(Arc::new(DecisionDetail::new(RecordBasis::Policy, Some(cedar), None))),
+        );
+        rec.record_response(&ctx(&scope(ORG_A)), &call);
+        let text = logs.text();
+        let lines = decision_lines(&text);
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(has_field(&lines[0], "findings", "name_collision:unknown,unseen_host:medium"), "{text}");
+        assert!(!text.contains(CANARY), "{text}");
+    }
+
+    /// SMA-855 D37 (carried from Task 11): a finding with a bad kind from a detector never reaches the
+    /// line or a metric label. The pipeline replaces it before any record is built.
+    #[tokio::test]
+    async fn a_bad_kind_from_a_detector_never_reaches_the_line_or_a_label() {
+        use crate::adapters::detectors::BuiltInDetector;
+        use crate::application::detectors::DetectorPipeline;
+        use crate::application::tool_policy::testing::FixedDetector;
+        use crate::application::tool_policy::{FINDING_KINDS, finding_label};
+        use crate::domain::detectors::{DetectBatch, Detector, Side, Subject};
+        use paigasus_gateway_core::decision_log::{CedarDetail, FindingRecord};
+        use paigasus_kernel::detect::{Finding, Severity, ToolInput};
+        use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, ToolInvocation};
+        const CANARY: &str = "canary-3b7e";
+        let bad = [
+            format!("a,{CANARY}"),
+            format!("a:{CANARY}"),
+            format!("a\n{CANARY}=x"),
+            format!("sk_live_{CANARY}"),
+            format!("Bad-{CANARY}"),
+        ];
+        let hook: Arc<dyn Detector> = Arc::new(FixedDetector("hook_a", bad.iter().map(|k| Finding::new("hook_a", k.as_str(), Severity::Medium, "v1")).collect()));
+        let pipeline = DetectorPipeline::new(Arc::new(BuiltInDetector::new(65536)), vec![hook], None, std::time::Duration::from_millis(500));
+        let subject = Subject::Call {
+            index: 0,
+            invocation: ToolInvocation::new("t", ToolInput::Json("{}".into()), Declared::Yes),
+            schema: None,
+        };
+        let out = pipeline
+            .run(
+                DetectBatch::new(Side::Response, None, None, vec![subject], None),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .await;
+        let found = &out.findings[0];
+        for f in found {
+            assert!(FINDING_KINDS.contains(&finding_label(&f.kind)), "{f:?}");
+            assert!(!f.kind.contains(CANARY) && !f.detector.contains(CANARY), "{f:?}");
+        }
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let cedar = CedarDetail::new(
+            Effect::Deny,
+            vec![],
+            vec![],
+            false,
+            found.iter().map(FindingRecord::from_finding).collect(),
+            Some(Severity::High),
+            Declared::Yes,
+            ActionGroup::Catalog,
+            std::time::Duration::ZERO,
+        );
+        let call = ReportedCall::new(
+            entry_of(ReportDecision::Block, Some(Basis::Decider), Some(BlockCode::Policy), Some(true)),
+            None,
+            Some(Arc::new(DecisionDetail::new(RecordBasis::Policy, Some(cedar), None))),
+        );
+        rec.record_response(&ctx(&scope(ORG_A)), &call);
+        let text = logs.text();
+        let lines = decision_lines(&text);
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(has_field(&lines[0], "findings", "detector_error:high"), "{text}");
+        assert!(!text.contains(CANARY), "{text}");
+    }
+
+    #[test]
+    fn a_line_without_findings_has_an_empty_findings_field() {
+        let (logs, _guard) = capture_logs_at(tracing::Level::INFO);
+        let log = Arc::new(MemoryDecisionLog::new(false));
+        let rec = recorder(&log, None);
+        let c = with_detail(entry_of(ReportDecision::Allow, Some(Basis::Decider), None, None), RecordBasis::Policy);
+        rec.record_response(&ctx(&scope(ORG_A)), &c);
+        let text = logs.text();
+        assert!(decision_lines(&text)[0].contains("findings="), "{text}");
     }
 
     #[test]

@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use uuid::Uuid;
 
@@ -117,6 +118,15 @@ pub type DecideFuture = Pin<Box<dyn Future<Output = Result<Vec<DecidedCall>, Dec
 /// interceptor treats any other length as a decider error (D18).
 pub trait ToolCallDecider: Send + Sync + 'static {
     fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture;
+
+    /// Decide a hold that completed at `hold_start` (SMA-855 § 6.9, D35). The hold's
+    /// `decide_timeout` counts from `hold_start`, not from this call: in a stream a hold can wait
+    /// in the queue behind an earlier one. A decider with a deadline of its own (the detector
+    /// pipeline) computes it from `hold_start`. The default ignores it and calls `decide`.
+    fn decide_by(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>, hold_start: Instant) -> DecideFuture {
+        let _ = hold_start;
+        self.decide(ctx, turn, calls)
+    }
 }
 
 /// The only decider in SMA-749.
@@ -171,6 +181,20 @@ mod tests {
     fn allow_all_allows_every_call() {
         let fut = AllowAll.decide(Arc::new(DecisionContext::new("p", "s", None)), Arc::new(ToolTurn::Unavailable("test")), vec![call(), call()]);
         assert_eq!(ready(fut), Ok(vec![Decision::Allow, Decision::Allow]));
+    }
+
+    #[test]
+    fn decide_by_defaults_to_decide() {
+        let ctx = Arc::new(DecisionContext::new("p", "s", None));
+        let turn = Arc::new(ToolTurn::Unavailable("test"));
+        let by = ready_calls(AllowAll.decide_by(Arc::clone(&ctx), Arc::clone(&turn), vec![call(), call(), call()], Instant::now()));
+        let plain = ready_calls(AllowAll.decide(ctx, turn, vec![call(), call(), call()]));
+        assert_eq!(by, plain);
+        assert_eq!(by.map(|v| v.len()), Ok(3));
+        // Through a trait object too: the default method is part of the vtable.
+        let d: Arc<dyn ToolCallDecider> = Arc::new(AllowAll);
+        let fut = d.decide_by(Arc::new(DecisionContext::new("p", "s", None)), Arc::new(ToolTurn::Unavailable("test")), vec![call()], Instant::now());
+        assert_eq!(ready(fut), Ok(vec![Decision::Allow]));
     }
 
     #[test]

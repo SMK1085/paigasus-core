@@ -294,8 +294,18 @@ impl Ex {
 }
 
 async fn exchange(ep: Ep, scope: &str, tp: Option<Arc<RequestToolPolicy>>, body: &str, calls: &[(&str, &str)]) -> Ex {
+    exchange_with(ep, scope, cedar(), tp, body, calls).await
+}
+
+/// `exchange` with the tool interception `ti`.
+async fn exchange_with(ep: Ep, scope: &str, ti: Option<Arc<ToolInterception>>, tp: Option<Arc<RequestToolPolicy>>, body: &str, calls: &[(&str, &str)]) -> Ex {
     let mock = ep.mock(calls).await;
-    let app = app_for(scope, &mock.base_url, None, cedar(), tp);
+    exchange_on(ep, mock, scope, ti, tp, body).await
+}
+
+/// One request through the gateway against `mock`.
+async fn exchange_on(ep: Ep, mock: MockOpenAi, scope: &str, ti: Option<Arc<ToolInterception>>, tp: Option<Arc<RequestToolPolicy>>, body: &str) -> Ex {
+    let app = app_for(scope, &mock.base_url, None, ti, tp);
     let sent = send_to(&app, ep.path(), body).await;
     let text = sent.text();
     let entries = if ep.stream() && sent.status.is_success() {
@@ -1445,6 +1455,888 @@ async fn a_floor_forbid_blocks_in_tenant_off_and_log_only() {
             assert!(!ex.text.contains("CANARY"), "{case}");
             assert_eq!(upstream_tools(ep, &ex.upstream_json()).expect("tools"), ["read_file"], "{case}");
             assert_eq!(request_entries(&ex.entries), [req("floor_rm", "remove-definition", true)], "{case}");
+        }
+    }
+}
+
+// --- SMA-855 Task 23: the tool-call detectors end to end (§ 7.4) -------------------------------
+
+mod detectors {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use paigasus_gateway::adapters::decision_log::proto;
+    use paigasus_gateway::adapters::detectors::BuiltInDetector;
+    use paigasus_gateway::application::decision_log::DecisionRecorder;
+    use paigasus_gateway::application::detectors::DetectorPipeline;
+    use paigasus_gateway::application::tool_policy::FINDING_TRIPLES;
+    use paigasus_gateway::config::{DETECTOR_MARGIN_MS, DetectorSettings, GatewayConfig};
+    use paigasus_gateway::domain::decision_log::{DecisionLog, OsEntropy};
+    use paigasus_gateway::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, Side as DetectSide, Subject};
+    use paigasus_gateway::domain::limits::SystemClock;
+    use paigasus_gateway::runtime;
+    use paigasus_gateway_core::decision_log::{AppliedEffect, DecisionRecord, RecordBasis, RecordedAction, Side as RecordSide};
+    use paigasus_gateway_core::{Format, SeenHosts, ToolTurn, parse_request, screen_request};
+    use paigasus_kernel::detect::{CallSubject, Declared, Finding, HostSet, ToolInput, detect_call, injection_markers};
+    use paigasus_kernel::tool_policy::ToolInvocation;
+    use prost::Message;
+
+    use super::*;
+
+    /// The tenant guide policies (Task 17): one shared fixture, one policy per paragraph.
+    const DETECTOR_POLICIES: &str = include_str!("../../../../../docs/tool-policies/detector-policies.cedar");
+    /// A tenant set that permits every IAM principal and forbids nothing.
+    const PERMIT_ALL: &str = r#"@id("p") permit(principal is Pgs::Iam::Principal, action, resource);"#;
+    /// The canary host of the call arguments (one per test, A2).
+    const CANARY_HOST: &str = "canary-host-4c1d.example";
+    /// The visible part of the canary injection phrase.
+    const CANARY_PHRASE: &str = "visible-canary-phrase-8a2e";
+    /// The hidden part, as plain ASCII. The result holds it as Unicode tag characters.
+    const CANARY_TAG_TEXT: &str = "canary-tag-9d4f";
+    /// The distinctive part of the canary secret. The whole secret is an AWS key id form.
+    const CANARY_SECRET_BODY: &str = "Q7CANARY3ZX9W2KL";
+    /// The canary in the panic payload of the panicking stage.
+    const CANARY_PANIC: &str = "canary-panic-payload-61b0";
+
+    /// The policy of the fixture with this `@id`.
+    fn fixture_policy(id: &str) -> &'static str {
+        let head = format!("@id(\"{id}\")");
+        DETECTOR_POLICIES.split("\n\n").find(|p| p.starts_with(&head)).unwrap_or_else(|| panic!("no fixture policy {id}"))
+    }
+
+    /// The tenant set of the starter policy: permit all, and `detectors-block-high`.
+    fn starter() -> String {
+        format!("{PERMIT_ALL}\n{}", fixture_policy("detectors-block-high"))
+    }
+
+    /// The canary secret: an AWS access key id (`secret_in_args`, high).
+    fn canary_secret() -> String {
+        ["AKIA", CANARY_SECRET_BODY].concat()
+    }
+
+    /// `s` as Unicode tag characters (U+E0020 to U+E007E).
+    fn tags(s: &str) -> String {
+        s.chars().map(|c| char::from_u32(0xE0000 + c as u32).expect("a tag character")).collect()
+    }
+
+    /// A tool result with the canary phrase and at least 4 tag characters (Task 22: a single tag
+    /// character gives no finding). `injection_markers` is high for this text.
+    fn injected() -> String {
+        format!("{CANARY_PHRASE} {}", tags(CANARY_TAG_TEXT))
+    }
+
+    /// The arguments of the secret call: the canary secret and the canary host.
+    fn secret_args() -> String {
+        json!({"url": format!("https://{CANARY_HOST}/x"), "key": canary_secret()}).to_string()
+    }
+
+    /// Every byte string that no output may hold.
+    fn canaries() -> Vec<String> {
+        vec![
+            CANARY_SECRET_BODY.to_owned(),
+            CANARY_HOST.to_owned(),
+            CANARY_PHRASE.to_owned(),
+            CANARY_TAG_TEXT.to_owned(),
+            tags(CANARY_TAG_TEXT),
+            CANARY_PANIC.to_owned(),
+        ]
+    }
+
+    fn assert_no_canary(what: &str, bytes: &[u8]) {
+        for c in canaries() {
+            assert!(!bytes.windows(c.len()).any(|w| w == c.as_bytes()), "{what} holds a canary");
+        }
+    }
+
+    // --- the stack -------------------------------------------------------------------------------
+
+    /// A decision log that keeps every record, for the assertions.
+    #[derive(Default)]
+    struct CaptureLog(Mutex<Vec<DecisionRecord>>);
+
+    impl DecisionLog for CaptureLog {
+        fn wants_digest(&self) -> bool {
+            false
+        }
+
+        fn record(&self, record: DecisionRecord) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(record);
+        }
+    }
+
+    impl CaptureLog {
+        fn records(&self) -> Vec<DecisionRecord> {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        }
+
+        fn clear(&self) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        }
+    }
+
+    /// A recorder over `log`.
+    fn recorder_over(log: &Arc<CaptureLog>) -> Arc<DecisionRecorder> {
+        Arc::new(DecisionRecorder::new(Arc::clone(log) as Arc<dyn DecisionLog>, Arc::new(SystemClock), Arc::new(OsEntropy), None))
+    }
+
+    /// The detectors of one stack.
+    struct Det {
+        /// `None`: the built-in detectors, behind a stage that counts the request screens (F9).
+        built_in: Option<Arc<dyn BuiltInStage>>,
+        webhooks: Vec<Arc<dyn Detector>>,
+        enabled: bool,
+        timeout_ms: u64,
+        max_scan_bytes: usize,
+    }
+
+    impl Default for Det {
+        fn default() -> Self {
+            Det {
+                built_in: None,
+                webhooks: Vec::new(),
+                enabled: true,
+                timeout_ms: 500,
+                max_scan_bytes: 16 * MIB,
+            }
+        }
+    }
+
+    /// The request side and the interception over one policy directory, with one recorder over a
+    /// [`CaptureLog`], as `runtime::build_tool_policy` wires them.
+    struct Stack {
+        ti: Option<Arc<ToolInterception>>,
+        tp: Option<Arc<RequestToolPolicy>>,
+        log: Arc<CaptureLog>,
+        /// The request screens that the counting built-in stage saw.
+        screens: Arc<AtomicUsize>,
+    }
+
+    impl Stack {
+        async fn run(&self, ep: Ep, body: &str, calls: &[(&str, &str)]) -> Ex {
+            exchange_with(ep, ORG_A_PRN, self.ti.clone(), self.tp.clone(), body, calls).await
+        }
+
+        fn screens(&self) -> usize {
+            self.screens.load(Ordering::SeqCst)
+        }
+    }
+
+    fn build(dir: &TempDir, mode: TenantMode, det: Det, limits: CoreLimits) -> Stack {
+        let log = Arc::new(CaptureLog::default());
+        let recorder = recorder_over(&log);
+        let screens = Arc::new(AtomicUsize::new(0));
+        let built_in = det.built_in.unwrap_or_else(|| {
+            Arc::new(CountingStage {
+                inner: BuiltInDetector::new(det.max_scan_bytes),
+                requests: Arc::clone(&screens),
+            })
+        });
+        let settings = DetectorSettings {
+            enabled: det.enabled,
+            timeout: Duration::from_millis(det.timeout_ms),
+            max_scan_bytes: det.max_scan_bytes,
+            margin: Duration::from_millis(DETECTOR_MARGIN_MS),
+        };
+        let pipeline = Arc::new(DetectorPipeline::new(built_in, det.webhooks, None, settings.timeout));
+        let mut cedar = CedarDecider::new(Arc::clone(&recorder));
+        // The runtime gives the decider no pipeline with the detectors off.
+        if det.enabled {
+            cedar = cedar.with_detectors(Arc::clone(&pipeline), limits.decide_timeout, settings);
+        }
+        let tp_settings = tp_settings(mode);
+        let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&tp_settings));
+        // The request side keeps the pipeline also with `enabled = false`, so a test can prove that
+        // the switch alone stops the screen.
+        let tp = RequestToolPolicy::new(cache, tp_settings, Arc::clone(&recorder)).with_detectors(Some(pipeline), settings);
+        Stack {
+            ti: Some(Arc::new(ToolInterception {
+                limits,
+                decider: Arc::new(cedar),
+                recorder: Some(recorder),
+                history: None,
+            })),
+            tp: Some(Arc::new(tp)),
+            log,
+            screens,
+        }
+    }
+
+    fn stack(dir: &TempDir, mode: TenantMode, det: Det) -> Stack {
+        build(dir, mode, det, CoreLimits::defaults())
+    }
+
+    // --- requests --------------------------------------------------------------------------------
+
+    /// A request that declares `fetch` and holds one tool result `(tool, text)` per entry, each
+    /// after its call. The result `i` is at `result_slot(ep, _, i)`.
+    fn results_body(ep: Ep, results: &[(&str, &str)]) -> String {
+        if ep.chat() {
+            let calls: Vec<Value> = results
+                .iter()
+                .enumerate()
+                .map(|(i, (n, _))| json!({"id":format!("call_r{i}"),"type":"function","function":{"name":n,"arguments":"{}"}}))
+                .collect();
+            let mut messages = vec![json!({"role":"user","content":"hi"}), json!({"role":"assistant","content":null,"tool_calls":calls})];
+            for (i, (_, text)) in results.iter().enumerate() {
+                messages.push(json!({"role":"tool","tool_call_id":format!("call_r{i}"),"content":text}));
+            }
+            ep.body(json!({"model":"gpt-4o-mini","tools":chat_tools(&["fetch"]),"messages":messages}))
+        } else {
+            let mut input = vec![json!({"role":"user","content":"hi"})];
+            for (i, (n, text)) in results.iter().enumerate() {
+                input.push(json!({"type":"function_call","id":format!("fc_r{i}"),"call_id":format!("r{i}"),"name":n,"arguments":"{}","status":"completed"}));
+                input.push(json!({"type":"function_call_output","call_id":format!("r{i}"),"output":text}));
+            }
+            ep.body(json!({"model":"gpt-6","tools":responses_tools(&["fetch"]),"input":input}))
+        }
+    }
+
+    /// The upstream copy of result `i` of a [`results_body`] request.
+    fn result_slot(ep: Ep, up: &Value, i: usize) -> Value {
+        if ep.chat() {
+            up["messages"][2 + i]["content"].clone()
+        } else {
+            up["input"][2 + 2 * i]["output"].clone()
+        }
+    }
+
+    /// The request of most tests: one injected result of `read_page`.
+    fn injected_body(ep: Ep) -> String {
+        results_body(ep, &[("read_page", &injected())])
+    }
+
+    // --- record readers --------------------------------------------------------------------------
+
+    /// `(kind, detector)` of each finding of a record.
+    fn findings(r: &DecisionRecord) -> Vec<(String, String)> {
+        r.cedar.as_ref().map(|c| c.findings.iter().map(|f| (f.kind.clone(), f.detector.clone())).collect()).unwrap_or_default()
+    }
+
+    fn has(r: &DecisionRecord, kind: &str, detector: &str) -> bool {
+        findings(r).iter().any(|(k, d)| k == kind && d == detector)
+    }
+
+    /// The response-side record of the call `name`.
+    fn call_record(records: &[DecisionRecord], name: &str) -> DecisionRecord {
+        records
+            .iter()
+            .find(|r| r.side == RecordSide::Response && r.tool.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no response record for {name}: {records:#?}"))
+    }
+
+    /// The records of one request action.
+    fn action_records(records: &[DecisionRecord], action: RecordedAction) -> Vec<DecisionRecord> {
+        records.iter().filter(|r| r.request_action == Some(action)).cloned().collect()
+    }
+
+    /// The `SCREEN_RESULT` records.
+    fn screen_records(records: &[DecisionRecord]) -> Vec<DecisionRecord> {
+        action_records(records, RecordedAction::ScreenResult)
+    }
+
+    /// The report entries as text: the header of a JSON answer, the comments of a stream.
+    fn report_text(ex: &Ex) -> String {
+        serde_json::to_string(&ex.entries).expect("json")
+    }
+
+    fn keep_alives(text: &str) -> usize {
+        text.matches(": keep-alive\n\n").count()
+    }
+
+    // --- § 7.4 signals only and the starter policy ------------------------------------------------
+
+    /// A1, D2: with the shipped floor and an allow-all tenant, a call with a secret and an
+    /// injected result pass unchanged in enforce and in log-only. The screen runs (the mode counts),
+    /// the decision log holds the findings, and the report holds none.
+    #[tokio::test]
+    async fn findings_are_signals_only() {
+        let dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        let secret = secret_args();
+        let calls = [("fetch", secret.as_str())];
+        for mode in [TenantMode::Enforce, TenantMode::LogOnly] {
+            for ep in EPS {
+                let s = stack(&dir, mode, Det::default());
+                let body = injected_body(ep);
+                let ex = s.run(ep, &body, &calls).await;
+                let case = format!("{ep:?} {mode:?}");
+                assert_eq!(ex.status, StatusCode::OK, "{case}: {}", ex.text);
+                assert_eq!(ex.upstream.as_deref(), Some(body.as_bytes()), "the result goes upstream unchanged ({case})");
+                assert_eq!(call_of(&ex.entries, "fetch"), ALLOWED, "{case}");
+                assert!(ex.text.contains(CANARY_SECRET_BODY), "the call goes to the client unchanged ({case})");
+                assert!(request_entries(&ex.entries).is_empty(), "{case}");
+                assert_eq!(s.screens(), 1, "the screen runs once ({case})");
+                let records = s.log.records();
+                let call = call_record(&records, "fetch");
+                assert!(has(&call, "secret_in_args", "secret_in_args"), "{case}: {:?}", findings(&call));
+                let screened = screen_records(&records);
+                assert_eq!(screened.len(), 1, "{case}: {records:#?}");
+                assert!(has(&screened[0], "injection_markers", "injection_markers"), "{case}: {:?}", findings(&screened[0]));
+                let report = report_text(&ex);
+                for word in ["finding", "secret_in_args", "injection_markers", "severity"] {
+                    assert!(!report.contains(word), "the report holds no findings ({case}): {report}");
+                }
+            }
+        }
+    }
+
+    /// § 6.12, SMA-752 A2: the starter policy and a `high` finding. Enforce blocks the call and
+    /// replaces the result with the notice. Log-only reports `Observe` and changes no byte.
+    #[tokio::test]
+    async fn the_starter_policy_blocks_in_enforce_and_observes_in_log_only() {
+        let dir = policy_dir(SHIPPED_FLOOR, &starter());
+        let secret = secret_args();
+        let calls = [("fetch", secret.as_str())];
+        for ep in EPS {
+            let body = injected_body(ep);
+            let enforce = stack(&dir, TenantMode::Enforce, Det::default()).run(ep, &body, &calls).await;
+            assert_eq!(enforce.status, StatusCode::OK, "{ep:?}: {}", enforce.text);
+            assert_eq!(call_of(&enforce.entries, "fetch"), BLOCKED, "{ep:?}");
+            assert!(!enforce.text.contains(CANARY_SECRET_BODY), "{ep:?}");
+            assert!(is_notice(&result_slot(ep, &enforce.upstream_json(), 0)), "the result is replaced ({ep:?})");
+            assert_eq!(request_entries(&enforce.entries), [req("read_page", "replace-result", true)], "{ep:?}");
+
+            let log = stack(&dir, TenantMode::LogOnly, Det::default());
+            let log_ex = log.run(ep, &body, &calls).await;
+            let off = stack(&dir, TenantMode::Off, Det::default()).run(ep, &body, &calls).await;
+            assert_eq!(call_of(&log_ex.entries, "fetch"), OBSERVED, "{ep:?}");
+            assert_eq!(request_entries(&log_ex.entries), [req("read_page", "replace-result", false)], "{ep:?}");
+            assert_eq!(log_ex.upstream.as_deref(), Some(body.as_bytes()), "log-only sends the original ({ep:?})");
+            assert_eq!(off.upstream, log_ex.upstream, "{ep:?}");
+            assert_eq!(without_comments(&log_ex.text), without_comments(&off.text), "{ep:?}");
+            if !ep.stream() {
+                assert_eq!(log_ex.sent.body, off.sent.body, "{ep:?}");
+            }
+            let records = log.log.records();
+            assert_eq!(call_record(&records, "fetch").applied, AppliedEffect::Observe, "{ep:?}");
+            assert_eq!(action_records(&records, RecordedAction::ReplaceResult).len(), 1, "{ep:?}: {records:#?}");
+        }
+    }
+
+    // --- § 7.4 timeouts --------------------------------------------------------------------------
+
+    /// § 7.4: a webhook slower than `timeout_ms` gives a `detector_error` with its name. The starter
+    /// policy blocks the call in enforce; without it the call is allowed. A stream sends keep-alive
+    /// comments while the hold waits on the pipeline.
+    #[tokio::test]
+    async fn a_slow_detector_gives_detector_error_and_keepalives() {
+        let starter_dir = policy_dir(SHIPPED_FLOOR, &starter());
+        let allow_dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        let limits = CoreLimits {
+            keepalive: Duration::from_millis(100),
+            ..CoreLimits::defaults()
+        };
+        let mut runs = Vec::new();
+        for ep in EPS {
+            for (dir, want) in [(&starter_dir, BLOCKED), (&allow_dir, ALLOWED)] {
+                let det = Det {
+                    webhooks: vec![Arc::new(SlowDetector("hook_slow", Duration::from_secs(30)))],
+                    timeout_ms: 500,
+                    ..Det::default()
+                };
+                let s = build(dir, TenantMode::Enforce, det, limits);
+                runs.push(async move {
+                    let ex = s.run(ep, &ep.tools_body(&["fetch"]), &[("fetch", "{}")]).await;
+                    (ep, want, ex, s.log.records())
+                });
+            }
+        }
+        for (ep, want, ex, records) in futures::future::join_all(runs).await {
+            assert_eq!(ex.status, StatusCode::OK, "{ep:?}: {}", ex.text);
+            assert_eq!(call_of(&ex.entries, "fetch"), want, "{ep:?}");
+            let call = call_record(&records, "fetch");
+            assert!(has(&call, "detector_error", "hook_slow"), "{ep:?}: {:?}", findings(&call));
+            assert_eq!(call.basis, RecordBasis::Policy, "the decider decided, not on_failure ({ep:?})");
+            if ep.stream() {
+                assert!(keep_alives(&ex.text) >= 1, "keep-alives while the hold waits ({ep:?}): {}", ex.text);
+            }
+        }
+    }
+
+    // The two-hold case of § 7.4 (D35, S3) is `two_holds_with_a_slow_detector_use_the_absolute_deadline`
+    // in `src/adapters/http/interception.rs`. An OpenAI chat stream carries tool calls in choice 0
+    // only, and a Responses stream has one hold, so no route of the router has two holds. Only an
+    // Anthropic stream has, and the gateway has no Anthropic route yet (SMA-750).
+
+    // --- § 7.4 errors and panics -----------------------------------------------------------------
+
+    /// § 7.4, § 6.2.4: an erroring webhook gives a `detector_error` with its name, and a panicking
+    /// built-in stage gives `detector_error` of `built_in` on both sides. The canary of the panic
+    /// payload reaches no log line, no metric and no decision record. stderr is not checked: the
+    /// default panic hook prints the payload (the recorded residual).
+    #[tokio::test]
+    async fn an_erroring_detector_and_a_panicking_stage_leak_no_canary() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        let allow_dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        let starter_dir = policy_dir(SHIPPED_FLOOR, &starter());
+        let mut all = Vec::new();
+        for ep in EPS {
+            // The erroring webhook.
+            for (dir, want) in [(&allow_dir, ALLOWED), (&starter_dir, BLOCKED)] {
+                let det = Det {
+                    webhooks: vec![Arc::new(ErrDetector("hook_err"))],
+                    ..Det::default()
+                };
+                let s = stack(dir, TenantMode::Enforce, det);
+                let ex = s.run(ep, &ep.tools_body(&["fetch"]), &[("fetch", "{}")]).await;
+                assert_eq!(call_of(&ex.entries, "fetch"), want, "{ep:?}");
+                let call = call_record(&s.log.records(), "fetch");
+                assert!(has(&call, "detector_error", "hook_err"), "{ep:?}: {:?}", findings(&call));
+                all.extend(s.log.records());
+            }
+            // The panicking built-in stage, with an allow-all tenant: the call and the result each
+            // get `detector_error` of `built_in`.
+            let det = Det {
+                built_in: Some(Arc::new(PanicStage(CANARY_PANIC))),
+                ..Det::default()
+            };
+            let s = stack(&allow_dir, TenantMode::Enforce, det);
+            let ex = s.run(ep, &results_body(ep, &[("read_page", "plain text")]), &[("fetch", "{}")]).await;
+            assert_eq!(ex.status, StatusCode::OK, "{ep:?}");
+            let records = s.log.records();
+            assert!(has(&call_record(&records, "fetch"), "detector_error", "built_in"), "{ep:?}: {records:#?}");
+            let screened = screen_records(&records);
+            assert_eq!(screened.len(), 1, "{ep:?}: {records:#?}");
+            assert!(has(&screened[0], "detector_error", "built_in"), "{ep:?}");
+            assert_no_canary("the report", report_text(&ex).as_bytes());
+            all.extend(records);
+        }
+        let text = logs.text();
+        assert!(text.contains("a detector stage panicked") && text.contains("stage=\"built_in\""), "{text}");
+        assert_no_canary("a log line", text.as_bytes());
+        let mut keys = 0;
+        for (key, _, _, _) in snapshotter.snapshot().into_vec() {
+            keys += 1;
+            let key = key.key();
+            assert_no_canary("a metric name", key.name().as_bytes());
+            for l in key.labels() {
+                assert_no_canary("a metric label", l.value().as_bytes());
+            }
+        }
+        assert!(keys > 0, "the metric check is not vacuous");
+        for r in &all {
+            assert_no_canary("a decision record", format!("{r:?}").as_bytes());
+            assert_no_canary("a decision event", &proto::to_event(r).encode_to_vec());
+        }
+    }
+
+    // --- § 7.4 scan limit ------------------------------------------------------------------------
+
+    /// § 6.10, F10: with `max_scan_bytes` 65536 and three 30 KiB results, the two newest fit and are
+    /// scanned, and the oldest gets `detector_error` (`scan_limit`). The newest result holds an
+    /// injection with a tag run, so its `injection_markers` finding proves that it was scanned (review
+    /// Minor 2). Under the starter policy the oldest and the newest results are replaced, and the
+    /// middle one is not.
+    #[tokio::test]
+    async fn a_request_past_max_scan_bytes_gets_scan_limit_on_old_results() {
+        let mut text: Vec<String> = (0..3).map(|i| format!("{i}").repeat(30 * 1024)).collect();
+        // At least 4 tag characters (Task 22): `injection_markers`, high. The two newest still fit.
+        text[2].push_str(&format!(" {}", tags("hidden-order")));
+        assert!(text[1].len() + text[2].len() <= 65_536, "the two newest fit in the budget");
+        let results = [("res_0", text[0].as_str()), ("res_1", text[1].as_str()), ("res_2", text[2].as_str())];
+        let allow_dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        let starter_dir = policy_dir(SHIPPED_FLOOR, &starter());
+        let det = || Det {
+            max_scan_bytes: 65_536,
+            ..Det::default()
+        };
+        for ep in EPS {
+            let body = results_body(ep, &results);
+            let s = stack(&allow_dir, TenantMode::Enforce, det());
+            let ex = s.run(ep, &body, &[]).await;
+            assert_eq!(ex.upstream.as_deref(), Some(body.as_bytes()), "{ep:?}");
+            let screened = screen_records(&s.log.records());
+            let mut got: Vec<(&str, Vec<(String, String)>)> = screened.iter().map(|r| (r.tool.name.as_str(), findings(r))).collect();
+            got.sort();
+            assert_eq!(
+                got,
+                [
+                    ("res_0", vec![("detector_error".to_owned(), "built_in".to_owned())]),
+                    ("res_2", vec![("injection_markers".to_owned(), "injection_markers".to_owned())]),
+                ],
+                "the oldest is not scanned, the newest is ({ep:?})"
+            );
+
+            let s = stack(&starter_dir, TenantMode::Enforce, det());
+            let ex = s.run(ep, &body, &[]).await;
+            let up = ex.upstream_json();
+            assert!(is_notice(&result_slot(ep, &up, 0)), "the oldest result is replaced: scan_limit ({ep:?})");
+            assert_eq!(result_slot(ep, &up, 1), text[1].as_str(), "{ep:?}");
+            assert!(is_notice(&result_slot(ep, &up, 2)), "the newest result is replaced: its injection ({ep:?})");
+            let mut entries = request_entries(&ex.entries);
+            entries.sort();
+            assert_eq!(entries, [req("res_0", "replace-result", true), req("res_2", "replace-result", true)], "{ep:?}");
+        }
+    }
+
+    // --- § 7.4 the request-side gate and `enabled = false` ----------------------------------------
+
+    /// § 6.8.0: mode `off` with the shipped floor runs no screen, so no `unseen_host` appears on the
+    /// response side (the control: log-only screens and finds it). A test floor that reads
+    /// `max_severity` makes the screen run in mode `off` and blocks a tag-smuggling result.
+    #[tokio::test]
+    async fn mode_off_screens_nothing_and_a_screen_dependent_floor_does() {
+        let shipped = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        // A test fixture only: the shipped floor never reads `max_severity` (N2).
+        let floor = format!("// SPDX-License-Identifier: Apache-2.0\n{}\n", fixture_policy("detectors-block-high"));
+        let severity_floor = policy_dir(&floor, PERMIT_ALL);
+        let calls = [("fetch", r#"{"url":"https://other.example/x"}"#)];
+        for ep in EPS {
+            let body = results_body(ep, &[("read_page", "see https://seen.example/")]);
+            let off = stack(&shipped, TenantMode::Off, Det::default());
+            let ex = off.run(ep, &body, &calls).await;
+            assert_eq!(ex.status, StatusCode::OK, "{ep:?}");
+            assert_eq!(off.screens(), 0, "mode off screens nothing ({ep:?})");
+            assert!(!has(&call_record(&off.log.records(), "fetch"), "unseen_host", "unseen_host"), "{ep:?}");
+            let log_only = stack(&shipped, TenantMode::LogOnly, Det::default());
+            log_only.run(ep, &body, &calls).await;
+            assert_eq!(log_only.screens(), 1, "{ep:?}");
+            assert!(has(&call_record(&log_only.log.records(), "fetch"), "unseen_host", "unseen_host"), "the control ({ep:?})");
+
+            let gated = stack(&severity_floor, TenantMode::Off, Det::default());
+            let ex = gated.run(ep, &injected_body(ep), &[]).await;
+            assert_eq!(gated.screens(), 1, "the floor reads max_severity, so the screen runs ({ep:?})");
+            assert!(is_notice(&result_slot(ep, &ex.upstream_json(), 0)), "the floor blocks in mode off ({ep:?})");
+            assert_eq!(request_entries(&ex.entries), [req("read_page", "replace-result", true)], "{ep:?}");
+        }
+    }
+
+    /// A gateway config from TOML text, as `GatewayConfig::figment` reads it. The large `Err` is
+    /// `figment::Error`, the type that `Jail::expect_with` fixes (as in `decision_log_e2e.rs`).
+    #[allow(clippy::result_large_err)]
+    fn config(toml: &str) -> Result<GatewayConfig, String> {
+        let mut out = None;
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", toml)?;
+            out = Some(GatewayConfig::figment().extract::<GatewayConfig>().map_err(|e| e.to_string()));
+            Ok(())
+        });
+        out.expect("a result")
+    }
+
+    /// A config with the tool policy on `dir` in enforce mode, and this `[tool_policy.detectors]` body.
+    fn detectors_config(dir: &TempDir, decide_secs: u64, detectors: &str) -> Result<GatewayConfig, String> {
+        config(&format!(
+            "[upstream.openai]\napi_key = \"sk-test-key\"\n[tool_interception]\nenabled = true\ndecide_timeout_secs = {decide_secs}\n\
+             [tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"{}\" }}\n\
+             [tool_policy.detectors]\n{detectors}\n",
+            dir.path().display()
+        ))
+    }
+
+    /// § 6.10: `enabled = false` through the composition root. No pipeline, no finding of a
+    /// detector, `max_severity` is -1, and the starter policy on `max_severity` does not fire. The
+    /// switch alone stops the screen, also with a pipeline in place.
+    #[tokio::test]
+    async fn detectors_off_never_fires_a_severity_policy() {
+        let dir = policy_dir(SHIPPED_FLOOR, &starter());
+        let cfg = detectors_config(&dir, 5, "enabled = false").expect("loads");
+        cfg.validate().expect("validates");
+        let log = Arc::new(CaptureLog::default());
+        let rt = runtime::build_tool_policy(&cfg, recorder_over(&log), None).expect("builds");
+        assert!(rt.detectors.is_none(), "no pipeline");
+        let ti = runtime::tool_interception(&cfg, &rt);
+        let tp = rt.policy.map(|(_, tp)| tp);
+        let secret = secret_args();
+        let calls = [("fetch", secret.as_str())];
+        for ep in EPS {
+            log.clear();
+            let body = injected_body(ep);
+            let ex = exchange_with(ep, ORG_A_PRN, ti.clone(), tp.clone(), &body, &calls).await;
+            assert_eq!(ex.status, StatusCode::OK, "{ep:?}: {}", ex.text);
+            assert_eq!(call_of(&ex.entries, "fetch"), ALLOWED, "{ep:?}");
+            assert_eq!(ex.upstream.as_deref(), Some(body.as_bytes()), "{ep:?}");
+            assert!(request_entries(&ex.entries).is_empty(), "{ep:?}");
+            let records = log.records();
+            assert!(screen_records(&records).is_empty(), "{ep:?}: {records:#?}");
+            let call = call_record(&records, "fetch");
+            let cedar = call.cedar.as_ref().expect("a Cedar detail");
+            assert_eq!(cedar.max_severity, None, "max_severity is -1 ({ep:?})");
+            assert!(cedar.detection_disabled, "{ep:?}");
+            assert!(findings(&call).is_empty(), "{ep:?}: {:?}", findings(&call));
+        }
+        // The switch alone stops the screen: a stack with a counting pipeline and `enabled = false`.
+        let s = stack(&dir, TenantMode::Enforce, Det { enabled: false, ..Det::default() });
+        s.run(Ep::ChatJson, &injected_body(Ep::ChatJson), &calls).await;
+        assert_eq!(s.screens(), 0);
+    }
+
+    /// § 7.4 config (Task 19 has the unit cases): the gateway does not start with a `timeout_ms`
+    /// inside the margin, an unknown key, or `max_scan_bytes` below 65536. The defaults pass.
+    #[test]
+    fn a_bad_detectors_table_fails_at_start() {
+        let dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        detectors_config(&dir, 2, "").expect("loads").validate().expect("the defaults pass");
+        let edge = 2000 - DETECTOR_MARGIN_MS;
+        detectors_config(&dir, 2, &format!("timeout_ms = {edge}")).expect("loads").validate().expect("at the margin");
+        let err = detectors_config(&dir, 2, &format!("timeout_ms = {}", edge + 1))
+            .expect("loads")
+            .validate()
+            .expect_err("inside the margin");
+        assert!(err.contains("tool_policy.detectors.timeout_ms"), "{err}");
+        let err = detectors_config(&dir, 2, "timeot_ms = 100").expect_err("an unknown key");
+        assert!(err.contains("timeot_ms"), "{err}");
+        let err = detectors_config(&dir, 2, "max_scan_bytes = 65535").expect("loads").validate().expect_err("a small scan budget");
+        assert!(err.contains("tool_policy.detectors.max_scan_bytes"), "{err}");
+    }
+
+    // --- § 7.4 no evidence leak (A2) -------------------------------------------------------------
+
+    /// A2: one canary secret, one canary host and one canary injection phrase. After a blocked run
+    /// (the starter policy, enforce) and an observed run (log-only) on every endpoint, no captured
+    /// log line, report header, report comment, metric line or decision record holds a canary, and
+    /// neither does the `{:?}` of each type of § 6.2.4. stderr is not checked (§ 6.2.4).
+    #[tokio::test]
+    async fn no_canary_reaches_any_output() {
+        let metrics = paigasus_observability::init("paigasus-gateway");
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        let starter_dir = policy_dir(SHIPPED_FLOOR, &starter());
+        let allow_dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        let secret = secret_args();
+        let calls = [("fetch", secret.as_str())];
+        let mut records = Vec::new();
+        let mut blocked = 0;
+        for ep in EPS {
+            for (dir, mode) in [(&starter_dir, TenantMode::Enforce), (&allow_dir, TenantMode::LogOnly)] {
+                let s = stack(dir, mode, Det::default());
+                let ex = s.run(ep, &injected_body(ep), &calls).await;
+                assert_eq!(ex.status, StatusCode::OK, "{ep:?} {mode:?}");
+                if call_of(&ex.entries, "fetch") == BLOCKED {
+                    blocked += 1;
+                }
+                for (name, value) in &ex.sent.headers {
+                    assert_no_canary("a header", name.as_str().as_bytes());
+                    assert_no_canary("a header", value.as_bytes());
+                }
+                for line in ex.text.lines().filter(|l| l.starts_with(": ")) {
+                    assert_no_canary("a report comment", line.as_bytes());
+                }
+                let got = s.log.records();
+                assert!(got.iter().any(|r| has(r, "secret_in_args", "secret_in_args")), "the check is not vacuous ({ep:?} {mode:?})");
+                records.extend(got);
+            }
+        }
+        assert_eq!(blocked, 4, "the starter policy blocked on every endpoint");
+        for r in &records {
+            assert_no_canary("a decision record", format!("{r:?}").as_bytes());
+            assert_no_canary("a decision event", &proto::to_event(r).encode_to_vec());
+        }
+        let text = logs.text();
+        assert!(text.contains("tool-policy decision"), "the log capture saw the decision lines: {text}");
+        assert_no_canary("a log line", text.as_bytes());
+        let rendered = metrics.render();
+        assert!(rendered.contains(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL), "the metric check is not vacuous");
+        assert_no_canary("a metric line", rendered.as_bytes());
+
+        // The `{:?}` of each type of § 6.2.4, built from the canaries.
+        let mut debug = Vec::new();
+        let input = ToolInput::Json(secret.clone());
+        // No seen host: `unseen_host` fires, so an evidence entry holds the canary host.
+        let none_seen = HostSet::new();
+        let subject = CallSubject::new("fetch", &input, Declared::Yes).with_seen_hosts(&none_seen);
+        let detection = detect_call(&subject);
+        assert!(detection.findings.iter().any(|f| f.kind == "secret_in_args"), "{detection:?}");
+        assert!(
+            detection.findings.iter().flat_map(|f| &f.evidence).any(|e| e.host.as_deref() == Some(CANARY_HOST)),
+            "the Debug check sees an evidence entry with the canary host"
+        );
+        assert!(detection.hosts.contains(CANARY_HOST));
+        debug.push(format!("{subject:?}"));
+        debug.push(format!("{detection:?}"));
+        debug.push(format!("{:?}", detection.hosts));
+        let marker = injection_markers(&injected(), 0).expect("an injection finding");
+        for f in detection.findings.iter().chain([&marker]) {
+            debug.push(format!("{f:?}"));
+            for e in &f.evidence {
+                debug.push(format!("{e:?}"));
+                debug.push(format!("{:?}", e.location));
+            }
+        }
+        let call = Subject::Call {
+            index: 0,
+            invocation: ToolInvocation::new("fetch", ToolInput::Json(secret.clone()), Declared::Yes),
+            schema: None,
+        };
+        let result = Subject::Result {
+            index: 1,
+            tool: Some("read_page".to_owned()),
+            text: Arc::from(injected()),
+        };
+        debug.push(format!("{call:?}"));
+        debug.push(format!("{result:?}"));
+        let batch = DetectBatch::new(DetectSide::Response, Some(org_a()), Some("req".to_owned()), vec![call, result], Some(Arc::new(detection.hosts.clone())));
+        debug.push(format!("{batch:?}"));
+        for e in [DetectorError::Failed, DetectorError::WrongShape, DetectorError::Timeout, DetectorError::Panicked] {
+            debug.push(format!("{e:?}"));
+        }
+        let body = injected_body(Ep::ChatJson);
+        let ToolTurn::Parsed(facts) = parse_request(Format::OpenAiChat, body.as_bytes()) else {
+            panic!("a parsed turn")
+        };
+        let screen = screen_request(Format::OpenAiChat, body.as_bytes(), &facts, 1 << 20).expect("a screen");
+        assert!(screen.result_texts.iter().flatten().any(|t| t.contains(CANARY_PHRASE)), "the screen holds the text");
+        debug.push(format!("{screen:?}"));
+        let mut seen = HostSet::new();
+        seen.insert(CANARY_HOST);
+        debug.push(format!("{:?}", SeenHosts(Arc::new(seen))));
+        for d in &debug {
+            assert_no_canary("a Debug output", d.as_bytes());
+        }
+    }
+
+    // --- § 7.4 metrics ---------------------------------------------------------------------------
+
+    /// One counter series: the name and the sorted labels.
+    type Series = (String, Vec<(String, String)>);
+
+    /// Every counter series of one snapshot, with its value.
+    fn counters(snapshotter: &Snapshotter) -> HashMap<Series, u64> {
+        let mut out = HashMap::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            if let DebugValue::Counter(c) = value {
+                let key = key.key();
+                let mut labels: Vec<(String, String)> = key.labels().map(|l| (l.key().to_owned(), l.value().to_owned())).collect();
+                labels.sort();
+                out.insert((key.name().to_owned(), labels), c);
+            }
+        }
+        out
+    }
+
+    fn finding_series(side: &str, kind: &str, detector: &str, severity: &str) -> Series {
+        let mut labels: Vec<(String, String)> = [("side", side), ("kind", kind), ("detector", detector), ("severity", severity)]
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        labels.sort();
+        (names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL.to_owned(), labels)
+    }
+
+    /// § 6.11.3: the composition root primes every valid triple at zero on both sides. A finding
+    /// increments its triple, and a webhook finding counts under `webhook`. The overhead sample of
+    /// a request holds the pipeline time.
+    #[tokio::test]
+    async fn every_triple_is_primed_and_the_overhead_includes_the_pipeline() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+        let cfg = detectors_config(&dir, 5, "").expect("loads");
+        cfg.validate().expect("validates");
+        let rt = runtime::build_tool_policy(&cfg, Arc::new(DecisionRecorder::tracing()), None).expect("builds");
+        let primed = counters(&snapshotter);
+        for side in ["request", "response"] {
+            for (kind, detector, severity) in FINDING_TRIPLES {
+                assert_eq!(primed.get(&finding_series(side, kind, detector, severity)), Some(&0), "{side}/{kind}/{detector}/{severity}");
+            }
+        }
+        // The built-in findings of one request, through the composition root.
+        let ti = runtime::tool_interception(&cfg, &rt);
+        let tp = rt.policy.map(|(_, tp)| tp);
+        let secret = secret_args();
+        let ex = exchange_with(Ep::ChatJson, ORG_A_PRN, ti, tp, &injected_body(Ep::ChatJson), &[("fetch", secret.as_str())]).await;
+        assert_eq!(ex.status, StatusCode::OK);
+        let after = counters(&snapshotter);
+        assert_eq!(after.get(&finding_series("response", "secret_in_args", "secret_in_args", "high")), Some(&1), "{after:?}");
+        assert_eq!(after.get(&finding_series("request", "injection_markers", "injection_markers", "high")), Some(&1), "{after:?}");
+
+        // A webhook finding counts under `webhook`, whatever its detector name.
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let det = Det {
+            webhooks: vec![Arc::new(ErrDetector("hook_err"))],
+            ..Det::default()
+        };
+        let s = stack(&dir, TenantMode::Enforce, det);
+        s.run(Ep::ChatJson, &Ep::ChatJson.tools_body(&["fetch"]), &[("fetch", "{}")]).await;
+        let after = counters(&snapshotter);
+        assert_eq!(after.get(&finding_series("response", "detector_error", "webhook", "high")), Some(&1), "{after:?}");
+        assert!(
+            after.keys().all(|(_, labels)| labels.iter().all(|(_, v)| v != "hook_err")),
+            "a webhook name is never a label: {after:?}"
+        );
+
+        // The overhead sample holds the pipeline time: a webhook that takes 300 ms and finishes.
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let det = Det {
+            webhooks: vec![Arc::new(SlowDetector("hook_slow", Duration::from_millis(300)))],
+            timeout_ms: 4000,
+            ..Det::default()
+        };
+        let s = stack(&dir, TenantMode::Enforce, det);
+        s.run(Ep::ChatJson, &Ep::ChatJson.tools_body(&["fetch"]), &[("fetch", "{}")]).await;
+        let samples: Vec<f64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(k, _, _, _)| k.key().name() == names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS)
+            .flat_map(|(_, _, _, v)| match v {
+                DebugValue::Histogram(h) => h.into_iter().map(|x| x.into_inner()).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(samples.len(), 1, "{samples:?}");
+        assert!(samples[0] >= 0.3, "the overhead holds the 300 ms of the pipeline: {samples:?}");
+    }
+
+    // --- test-only detectors (P-2: integration tests cannot see `#[cfg(test)]` modules) ----------
+
+    /// The built-in detectors, counting the request screens (F9).
+    struct CountingStage {
+        inner: BuiltInDetector,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl BuiltInStage for CountingStage {
+        fn run(&self, batch: &DetectBatch) -> PipelineOutput {
+            if batch.side == DetectSide::Request {
+                self.requests.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.run(batch)
+        }
+    }
+
+    /// A webhook that waits, then finds nothing.
+    struct SlowDetector(&'static str, Duration);
+
+    #[async_trait::async_trait]
+    impl Detector for SlowDetector {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn detect(&self, batch: Arc<DetectBatch>) -> Result<Vec<Vec<Finding>>, DetectorError> {
+            tokio::time::sleep(self.1).await;
+            Ok(vec![Vec::new(); batch.subjects.len()])
+        }
+    }
+
+    /// A webhook that always fails.
+    struct ErrDetector(&'static str);
+
+    #[async_trait::async_trait]
+    impl Detector for ErrDetector {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn detect(&self, _batch: Arc<DetectBatch>) -> Result<Vec<Vec<Finding>>, DetectorError> {
+            Err(DetectorError::Failed)
+        }
+    }
+
+    /// A built-in stage that panics with a canary payload, as a dependency could.
+    struct PanicStage(&'static str);
+
+    impl BuiltInStage for PanicStage {
+        fn run(&self, _batch: &DetectBatch) -> PipelineOutput {
+            std::panic::panic_any(self.0)
         }
     }
 }

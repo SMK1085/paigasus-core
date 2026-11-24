@@ -347,8 +347,18 @@ fn counter_value(snapshotter: &Snapshotter, name: &str, labels: &[(&str, &str)])
         })
 }
 
+/// A request-side history finding: detector `kernel` and the severity of its triple (SMA-855 P-9).
 fn finding(snapshotter: &Snapshotter, kind: &str) -> u64 {
-    counter_value(snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", "request"), ("kind", kind)])
+    let severity = match kind {
+        "forged_history" => "high",
+        "mixed_sessions" => "medium",
+        _ => "low",
+    };
+    counter_value(
+        snapshotter,
+        names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+        &[("side", "request"), ("kind", kind), ("detector", "kernel"), ("severity", severity)],
+    )
 }
 
 /// Both requests of a conversation joined one session: request 2 has turn 2 and the session of

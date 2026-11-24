@@ -10,7 +10,7 @@ use std::sync::Arc;
 use cedar_policy::{Effect, Entities, Entity, EntityId, EntityTypeName, EntityUid, Policy, PolicyId, PolicySet};
 
 use super::normalise::normalise;
-use super::optimistic::{DROP_READS, optimistic};
+use super::optimistic::{DROP_READS, optimistic, screen_dependent};
 
 pub(crate) const ACTION_TYPE: &str = "Pgs::Gateway::Action";
 pub(crate) const GROUP_INVOKE: &str = "InvokeTool";
@@ -115,6 +115,8 @@ pub struct ToolPolicies {
     entities: Entities,
     /// The optimistic set of § 6.1.6, built from `set`.
     optimistic: PolicySet,
+    /// Whether a policy of `set` reads a screen-dependent part of the context (§ 6.8.0).
+    reads_screen_dependent: bool,
 }
 
 /// Parse one set. Return each policy with its `@id`, after the checks that both sets share.
@@ -233,10 +235,13 @@ impl ToolPolicies {
         ents.extend(names.iter().map(|n| Entity::new_no_attrs(action_uid(n), HashSet::from([invoke.clone()]))));
         let entities = Entities::from_entities(ents, None).map_err(|e| CompileError::Parse(e.to_string()))?;
         let optimistic = optimistic(&set, DROP_READS, true);
+        // A policy without a JSON form counts as dependent: the safe side.
+        let reads_screen_dependent = set.policies().any(|p| p.to_json().map_or(true, |json| screen_dependent(&json)));
         Ok(ToolPolicies {
             floor,
             set,
             optimistic,
+            reads_screen_dependent,
             origins,
             catalog: names,
             entities,
@@ -252,6 +257,14 @@ impl ToolPolicies {
     /// The merged policy set.
     pub(crate) fn set(&self) -> &PolicySet {
         &self.set
+    }
+
+    /// Whether a policy of the merged set reads a screen-dependent part of the context (§ 6.8.0):
+    /// `max_severity`, `call`, or `findings` in a form other than `contains` of a literal in
+    /// `SCREEN_INDEPENDENT_KINDS`. The request side screens a floor-only set only when this is true.
+    #[must_use]
+    pub fn reads_screen_dependent(&self) -> bool {
+        self.reads_screen_dependent
     }
 
     /// The optimistic set of § 6.1.6.
@@ -315,6 +328,15 @@ mod tests {
     fn compile_with_catalog(c: &[&str]) -> Result<ToolPolicies, CompileError> {
         let c: Vec<String> = c.iter().map(|s| (*s).to_owned()).collect();
         ToolPolicies::compile(floor(), "", &c)
+    }
+
+    /// The floor that the gateway ships.
+    const SHIPPED_FLOOR: &str = include_str!("../../../../services/paigasus-gateway/tool-policies/floor.cedar");
+
+    fn policies(floor: &str, tenant: &str, catalog: &[&str]) -> ToolPolicies {
+        let floor = Arc::new(ToolPolicies::compile_floor(floor).expect("floor"));
+        let catalog: Vec<String> = catalog.iter().map(|s| (*s).to_owned()).collect();
+        ToolPolicies::compile(floor, tenant, &catalog).expect("tenant")
     }
 
     fn parents(e: &Entities, uid: &EntityUid) -> Vec<String> {
@@ -412,5 +434,27 @@ mod tests {
         assert_eq!((t.set, t.id.as_str()), (PolicyOrigin::Tenant, "x"));
         assert_eq!(p.set.policies().count(), 2);
         assert!(p.set.policy(&PolicyId::new("floor/x")).is_some() && p.set.policy(&PolicyId::new("tenant/x")).is_some());
+    }
+
+    #[test]
+    fn screen_dependent_forms() {
+        let dep = |c: &str| policies("", &format!(r#"@id("f") forbid(principal, action, resource) when {{ {c} }};"#), &[]).reads_screen_dependent();
+        assert!(dep(r#"context.findings.contains("unseen_host")"#));
+        assert!(!dep(r#"context.findings.contains("secret_in_args")"#));
+        assert!(dep("context == {}"));
+        assert!(dep("context.findings.contains(context.request.model)"));
+        // The walk compares the decoded literal, so an escape cannot hide a dependent kind.
+        assert!(dep(r#"context.findings.contains("unseen\u{5f}host")"#));
+        assert!(!dep(r#"context.findings.contains("secret\u{5f}in_args")"#));
+        assert!(dep("context.max_severity >= 3") && dep(r#"context.call.declared == "no""#) && dep("context.findings.isEmpty()"));
+        assert!(dep("context has findings") && dep(r#"context.findings.containsAny(["secret_in_args"])"#));
+        // A read of other parts only is independent.
+        assert!(!dep(r#"context.request.model == "m" && context.input.x == 1"#));
+        // A permit counts too, and one dependent policy makes the set dependent.
+        assert!(policies("", r#"@id("p") permit(principal, action, resource) when { context.max_severity < 3 };"#, &[]).reads_screen_dependent());
+        let tenant = r#"@id("p") permit(principal, action, resource) when { context.findings.contains("injection_markers") };"#;
+        assert!(policies(SHIPPED_FLOOR, tenant, &[]).reads_screen_dependent());
+        assert!(!policies(SHIPPED_FLOOR, "", &[]).reads_screen_dependent());
+        assert!(!policies("", "", &[]).reads_screen_dependent());
     }
 }

@@ -10,11 +10,11 @@ mod raw;
 mod rewrite;
 mod snapshot;
 
-pub use calls::{CallOutcome, PolicyBasis, decide_calls, decide_calls_with};
-pub use mapping::{call_findings, ingress, invocation, name_collisions};
-pub use plan::{ChoiceRewrite, PlanItem, RefusalCause, RequestPlan, ResultTarget, plan_request};
+pub use calls::{CallOutcome, CallScan, PolicyBasis, decide_calls, decide_calls_with};
+pub use mapping::{call_findings, call_schema, ingress, invocation, name_collisions};
+pub use plan::{ChoiceRewrite, PlanItem, RefusalCause, RequestPlan, ResultTarget, ScreenRecord, plan_request};
 pub use rewrite::{result_notice, rewrite_request};
-pub use snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
+pub use snapshot::{OnUnavailable, PolicySet, PolicySnapshot, SeenHosts, TenantMode, TenantPart};
 
 /// The floor that ships with the file source (D15). This is the one copy in this crate
 /// (preflight F17). The gateway's `tool-policies/floor.cedar` holds the same policy.

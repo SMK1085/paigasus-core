@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use paigasus_kernel::detect::{HOSTS_OVERFLOW, HostSet, Severity, call_hosts};
 use paigasus_kernel::tool_policy::{
     ActionGroup, Declared, Effect, Facts, Findings, PolicyOrigin, PolicyRef, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, UNPARSED_ARGUMENTS, decide,
 };
@@ -134,7 +135,7 @@ fn context_shape() {
     );
     let p = policies("", &tenant, &["t"]);
     let mut findings = Findings::new();
-    findings.insert("name_collision");
+    findings.add("name_collision", Severity::High);
     let v = decide(&call("t", r#"{"a": 1}"#), &facts(), &findings, &p);
     assert_eq!(v.decision, Effect::Allow, "{v:?}");
     let v = decide(&call("t", r#"{"a": 1}"#), &facts(), &Findings::new(), &p);
@@ -222,7 +223,7 @@ fn bad_facts() -> Facts {
 fn findings(kinds: &[&str]) -> Findings {
     let mut f = Findings::new();
     for k in kinds {
-        f.insert(k);
+        f.add(k, if *k == "name_collision" { Severity::High } else { Severity::Medium });
     }
     f
 }
@@ -248,4 +249,219 @@ fn an_unevaluable_request_keeps_the_caller_findings() {
     let v = decide(&call("x", "{}"), &bad_facts(), &findings(&["name_collision"]), &p);
     assert!(v.floor_denied);
     assert!(v.findings.contains("name_collision"));
+}
+
+// SMA-855 Task 8: `context.max_severity`, `context.call.hosts` and the new `Verdict` fields.
+
+fn p_all() -> ToolPolicies {
+    policies("", ALL, &["t"])
+}
+
+/// A JSON object whose one string holds `n` distinct hosts.
+fn json_with_hosts(n: usize) -> String {
+    let urls: Vec<String> = (0..n).map(|i| format!("https://h{i:03}.example/")).collect();
+    format!(r#"{{"u":"{}"}}"#, urls.join(" "))
+}
+
+fn json_with_257_hosts() -> String {
+    json_with_hosts(257)
+}
+
+fn is_kernel_detector_error(f: &paigasus_kernel::detect::Finding) -> bool {
+    f.kind == "detector_error" && f.detector == "kernel" && f.severity == Severity::High
+}
+
+#[test]
+fn max_severity_is_minus_one_with_no_findings_and_the_highest_otherwise() {
+    let p = policies("", r#"@id("all") permit(principal, action, resource) when { context.max_severity == -1 };"#, &["t"]);
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p);
+    assert_eq!((v.decision, v.max_severity), (Effect::Allow, None));
+    let mut f = Findings::new();
+    f.add("x", Severity::Low);
+    f.add("y", Severity::High);
+    let v = decide(&call("t", "{}"), &facts(), &f, &p);
+    assert_eq!((v.decision, v.max_severity), (Effect::Deny, Some(Severity::High)));
+    let p3 = policies("", r#"@id("all") permit(principal, action, resource) when { context.max_severity == 3 };"#, &["t"]);
+    assert_eq!(decide(&call("t", "{}"), &facts(), &f, &p3).decision, Effect::Allow);
+}
+
+#[test]
+fn a_forbid_on_any_severity_does_not_deny_a_clean_call() {
+    // A4: a clean call has -1, so `>= 0` is false and the forbid neither fires nor errors.
+    let p = policies(r#"@id("f") forbid(principal, action, resource) when { context.max_severity >= 0 };"#, ALL, &["t"]);
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p);
+    assert_eq!((v.decision, v.errored.len()), (Effect::Allow, 0));
+    let mut f = Findings::new();
+    f.add("x", Severity::Info);
+    assert_eq!(decide(&call("t", "{}"), &facts(), &f, &p).decision, Effect::Deny);
+}
+
+#[test]
+fn hosts_are_sorted_unique_and_a_precomputed_set_is_used_as_given() {
+    let p = policies("", r#"@id("h") permit(principal, action, resource) when { context.call.hosts == ["a.example", "b.example"] };"#, &["t"]);
+    let scanned = call("t", r#"{"u":"https://b.example/ https://a.example/ https://a.example/x"}"#);
+    assert_eq!(decide(&scanned, &facts(), &Findings::new(), &p).decision, Effect::Allow);
+    let mut given = HostSet::new();
+    given.insert("a.example");
+    given.insert("b.example");
+    // The input has no host: only the given set can make the policy allow, so the kernel did not scan.
+    assert_eq!(decide(&call("t", "{}").with_hosts(given), &facts(), &Findings::new(), &p).decision, Effect::Allow);
+    assert_eq!(decide(&call("t", "{}"), &facts(), &Findings::new(), &p).decision, Effect::Deny);
+    // A set from `call_hosts` gives the same verdict as the kernel's own scan.
+    let precomputed = scanned.clone().with_hosts(call_hosts(&scanned.input));
+    assert_eq!(decide(&precomputed, &facts(), &Findings::new(), &p), decide(&scanned, &facts(), &Findings::new(), &p));
+    let empty = policies("", r#"@id("h") permit(principal, action, resource) when { context.call.hosts.isEmpty() };"#, &["t"]);
+    assert_eq!(decide(&call("t", "{}"), &facts(), &Findings::new(), &empty).decision, Effect::Allow);
+}
+
+#[test]
+fn the_same_hosts_from_either_path_for_many_inputs() {
+    let p = policies(
+        "",
+        r#"@id("h") permit(principal, action, resource) when { context.call.hosts.contains("h000.example") && context.call.hosts.contains("<overflow>") };"#,
+        &["t"],
+    );
+    for input in [
+        ToolInput::Json(json_with_257_hosts()),
+        ToolInput::Json(json_with_hosts(3)),
+        ToolInput::Text("see https://x.example/ and https://y.example".into()),
+        ToolInput::Json(format!(r#"{{"u":"https://{}.example/"}}"#, "a".repeat(1100))),
+    ] {
+        let c = ToolInvocation::new("t", input, Declared::Yes);
+        let pre = c.clone().with_hosts(call_hosts(&c.input));
+        assert_eq!(decide(&pre, &facts(), &Findings::new(), &p), decide(&c, &facts(), &Findings::new(), &p));
+    }
+    assert_eq!(decide(&call("t", &json_with_257_hosts()), &facts(), &Findings::new(), &p).decision, Effect::Allow);
+}
+
+#[test]
+fn detection_off_writes_minus_one_and_no_hosts() {
+    let p = policies(
+        "",
+        r#"@id("d") permit(principal, action, resource) when { context.max_severity == -1 && context.call.hosts.isEmpty() };"#,
+        &["t"],
+    );
+    let mut f = Findings::new();
+    f.add("x", Severity::High);
+    let off = facts().with_detection(false);
+    let c = call("t", r#"{"u":"https://a.example/"}"#);
+    let v = decide(&c, &off, &f, &p);
+    assert_eq!((v.decision, v.max_severity), (Effect::Allow, None));
+    assert!(v.findings.contains("x"), "the kinds set stays as today");
+    assert_eq!(decide(&c, &facts(), &f, &p).decision, Effect::Deny, "detection on: the same call is denied");
+    // No hosts-cap finding with detection off, from a scan or from a given set.
+    let v = decide(&call("t", &json_with_257_hosts()), &off, &Findings::new(), &p);
+    assert!(!v.added.iter().any(is_kernel_detector_error));
+    assert!(!v.findings.contains("detector_error"));
+    let given = call_hosts(&ToolInput::Json(json_with_257_hosts()));
+    assert!(given.overflowed());
+    let v = decide(&call("t", "{}").with_hosts(given), &off, &Findings::new(), &p);
+    assert_eq!(v.decision, Effect::Allow);
+    assert!(v.added.is_empty());
+}
+
+#[test]
+fn the_kernel_findings_are_in_added_with_their_severity() {
+    let v = decide(&ToolInvocation::new("t", ToolInput::Text("p".into()), Declared::Yes), &facts(), &Findings::new(), &p_all());
+    assert_eq!(
+        (v.added[0].kind.as_str(), v.added[0].severity, v.max_severity),
+        ("unparsed_arguments", Severity::Info, Some(Severity::Info))
+    );
+    assert_eq!(v.added[0].detector, "kernel");
+    let v = decide(&call("t", r#"{"a":1,"a":2}"#), &facts(), &Findings::new(), &p_all());
+    assert_eq!(
+        (v.added[0].kind.as_str(), v.added[0].severity, v.max_severity),
+        ("unparsed_arguments", Severity::Medium, Some(Severity::Medium))
+    );
+    let v = decide(&call("t", &json_with_257_hosts()), &facts(), &Findings::new(), &p_all());
+    assert!(v.added.iter().any(is_kernel_detector_error), "{v:?}");
+    assert_eq!(v.max_severity, Some(Severity::High));
+    assert!(v.findings.contains("detector_error"));
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p_all());
+    assert!(v.added.is_empty());
+    assert_eq!(v.max_severity, None);
+}
+
+#[test]
+fn the_hosts_cap_reaches_the_context_and_the_findings() {
+    // D36: the deny list of § 6.12 pairs a host match with `detector_error`.
+    let deny = r#"@id("d") forbid(principal, action, resource) when { context.call.hosts.containsAny(["zzz.example"]) || context.findings.contains("detector_error") };"#;
+    let p = policies("", &format!("{ALL} {deny}"), &["t"]);
+    // 256 hosts is at the cap: no overflow.
+    let v = decide(&call("t", &json_with_hosts(256)), &facts(), &Findings::new(), &p);
+    assert_eq!((v.decision, v.added.len(), v.max_severity), (Effect::Allow, 0, None));
+    // 257 hosts: the first 255 and the sentinel, and a kernel `detector_error`.
+    let v = decide(&call("t", &json_with_257_hosts()), &facts(), &Findings::new(), &p);
+    assert_eq!(v.decision, Effect::Deny);
+    assert_eq!(v.added.iter().filter(|f| is_kernel_detector_error(f)).count(), 1);
+    let shape = format!(
+        r#"@id("s") permit(principal, action, resource) when {{ context.call.hosts.contains("{HOSTS_OVERFLOW}") && context.call.hosts.contains("h254.example") && !context.call.hosts.contains("h255.example") }};"#
+    );
+    assert_eq!(
+        decide(&call("t", &json_with_257_hosts()), &facts(), &Findings::new(), &policies("", &shape, &["t"])).decision,
+        Effect::Allow
+    );
+    // An authority longer than 1024 bytes overflows the set too, with no other host.
+    let long = call("t", &format!(r#"{{"u":"https://{}.example/"}}"#, "a".repeat(1100)));
+    let v = decide(&long, &facts(), &Findings::new(), &p);
+    assert_eq!((v.decision, v.max_severity), (Effect::Deny, Some(Severity::High)));
+    assert!(v.added.iter().any(is_kernel_detector_error));
+    let only = format!(r#"@id("o") permit(principal, action, resource) when {{ context.call.hosts == ["{HOSTS_OVERFLOW}"] }};"#);
+    assert_eq!(decide(&long, &facts(), &Findings::new(), &policies("", &only, &["t"])).decision, Effect::Allow);
+    // A given set that overflowed gives the finding as well.
+    let given = call_hosts(&ToolInput::Json(json_with_257_hosts()));
+    let v = decide(&call("t", "{}").with_hosts(given), &facts(), &Findings::new(), &p);
+    assert_eq!(v.decision, Effect::Deny);
+    assert!(v.added.iter().any(is_kernel_detector_error));
+}
+
+#[test]
+fn errored_forbids_hold_only_forbids() {
+    let tenant = r#"@id("p") permit(principal, action, resource) when { context.input.missing == 1 };
+        @id("f") forbid(principal, action, resource) when { context.input.other == 1 };
+        @id("a") forbid(principal, action, resource) when { context.input has other && context.input.other == 1 };"#;
+    let p = policies("", tenant, &["t"]);
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p);
+    assert_eq!((v.errored.len(), v.errored_forbids.clone()), (2, vec![pref(PolicyOrigin::Tenant, "f")]));
+    assert!(v.errored_forbid);
+    let floor = r#"@id("z") forbid(principal, action, resource) when { context.input.q == 1 };"#;
+    let p = policies(floor, tenant, &["t"]);
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p);
+    assert_eq!(v.errored_forbids, vec![pref(PolicyOrigin::Floor, "z"), pref(PolicyOrigin::Tenant, "f")]);
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p_all());
+    assert!(v.errored_forbids.is_empty());
+}
+
+#[test]
+fn determining_forbids_hold_only_forbids() {
+    // A deny by an errored forbid: Cedar's reason set is the satisfied permit `all`.
+    let tenant = r#"@id("all") permit(principal, action, resource);
+        @id("e") forbid(principal, action, resource) when { context.input.missing == 1 };"#;
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &policies("", tenant, &["t"]));
+    assert_eq!((v.decision, v.determining.clone()), (Effect::Deny, vec![pref(PolicyOrigin::Tenant, "all")]));
+    assert!(v.determining_forbids.is_empty());
+    // A deny by satisfied forbids of both sets.
+    let floor = r#"@id("z") forbid(principal, action, resource);"#;
+    let tenant = r#"@id("all") permit(principal, action, resource); @id("f") forbid(principal, action, resource);"#;
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &policies(floor, tenant, &["t"]));
+    assert_eq!(v.determining_forbids, vec![pref(PolicyOrigin::Floor, "z"), pref(PolicyOrigin::Tenant, "f")]);
+    // An allow: the determining permits are not forbids.
+    let v = decide(&call("t", "{}"), &facts(), &Findings::new(), &p_all());
+    assert!(!v.determining.is_empty() && v.determining_forbids.is_empty());
+}
+
+#[test]
+fn a_whole_record_literal_on_call_is_false() {
+    // Release note of § 6.2.3: `context.call` now has two attributes.
+    let p = policies("", r#"@id("c") permit(principal, action, resource) when { context.call == {"declared": "yes"} };"#, &["t"]);
+    assert_eq!(decide(&call("t", "{}"), &facts(), &Findings::new(), &p).decision, Effect::Deny);
+    let p = policies("", r#"@id("c") permit(principal, action, resource) when { context.call.declared == "yes" };"#, &["t"]);
+    assert_eq!(decide(&call("t", "{}"), &facts(), &Findings::new(), &p).decision, Effect::Allow);
+}
+
+#[test]
+fn an_unevaluable_verdict_has_the_caller_severity_and_empty_lists() {
+    let v = decide(&call("x", "not json"), &bad_facts(), &findings(&["name_collision"]), &policies("", "", &[]));
+    assert_eq!(v.max_severity, Some(Severity::High));
+    assert!(v.added.is_empty() && v.errored_forbids.is_empty() && v.determining_forbids.is_empty());
 }

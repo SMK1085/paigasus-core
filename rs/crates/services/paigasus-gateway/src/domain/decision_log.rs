@@ -6,7 +6,7 @@
 #[cfg(test)]
 use std::sync::Mutex;
 
-use paigasus_gateway_core::decision_log::{AppliedEffect, DecisionRecord};
+use paigasus_gateway_core::decision_log::{AppliedEffect, DecisionRecord, FindingRecord};
 use paigasus_gateway_core::sanitize_name;
 use paigasus_kernel::tool_policy::{PolicyOrigin, PolicyRef};
 
@@ -48,18 +48,31 @@ fn refs(list: &[PolicyRef]) -> String {
         .join(",")
 }
 
+/// The findings of a line: `kind:severity` per finding, in record order, `unknown` for an unknown
+/// severity. Never the evidence (SMA-855 D3): a record has none.
+fn findings_field(list: &[FindingRecord]) -> String {
+    list.iter()
+        .map(|f| format!("{}:{}", f.kind, f.severity.map_or("unknown", |s| s.as_str())))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// The per-decision log line. It has the fields of the line that `decide_now` wrote before the decision log.
 /// The recorder writes it exactly when the decider ran for the report entry (`ReportedCall.detail` is set), so
 /// the set of lines stays the same as before the decision log (P-10, R11). A request-side record, an
 /// unenforceable entry and a `block_all` entry have no line. `verdict` is the applied effect: an observed hold
-/// writes `observe`. It never holds the arguments (A1).
+/// writes `observe`. `findings` lists the kinds and severities (SMA-855). It never holds the arguments
+/// (A1) or the evidence of a finding (SMA-855 D3).
 pub fn log_line(r: &DecisionRecord) {
     let verdict = match r.applied {
         AppliedEffect::Allow => "allow",
         AppliedEffect::Observe => "observe",
         _ => "block",
     };
-    let (determining, errored) = r.cedar.as_ref().map_or_else(|| (String::new(), String::new()), |c| (refs(&c.determining), refs(&c.errored)));
+    let (determining, errored, findings) = r.cedar.as_ref().map_or_else(
+        || (String::new(), String::new(), String::new()),
+        |c| (refs(&c.determining), refs(&c.errored), findings_field(&c.findings)),
+    );
     tracing::info!(
         request_id = r.request_id.as_deref().unwrap_or(""),
         tool = %r.tool.name,
@@ -68,6 +81,7 @@ pub fn log_line(r: &DecisionRecord) {
         mode = r.mode.map_or("", |m| m.as_str()),
         determining = %determining,
         errored = %errored,
+        findings = %findings,
         "tool-policy decision"
     );
 }

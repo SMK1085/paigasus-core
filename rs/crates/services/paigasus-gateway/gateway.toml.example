@@ -222,6 +222,14 @@
 # mode                  = "enforce"
 # on_policy_unavailable = "open"     # optional override of the global value
 
+# [tool_policy.detectors]            # SMA-855: the tool-call detectors; the table is optional
+# enabled        = true              # false builds no pipeline and runs no screen. A policy that reads
+#                                    # detector output then never fires on it: that is fail open
+# timeout_ms     = 500               # at least 1; an upper bound for the webhook and judge stages of one run.
+#                                    # With tool_policy.enabled: timeout_ms + 250 <= tool_interception.decide_timeout_secs * 1000
+# max_scan_bytes = 16777216          # at least 65536, no upper bound; the text that one run scans.
+#                                    # The default is responses.max_request_bytes, the largest request cap
+
 # --- SMA-755: the tool decision log (§ 5.12) ---
 # Records each tool-policy decision in a Redis stream, and a relay publishes it to NATS.
 # enabled = true needs [tool_policy] enabled = true, redis_url, digest_key, digest_key_id and [decision_log.nats].

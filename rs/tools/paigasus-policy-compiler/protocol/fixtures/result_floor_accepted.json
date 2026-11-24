@@ -1,7 +1,7 @@
 {
   "outcome": "accepted",
   "protocol_version": 1,
-  "compiler_generation": 2,
+  "compiler_generation": 3,
   "compiled": {
     "cedar_policies": "@id(\"floor-no-unregistered\")\nforbid(principal, action in Pgs::Gateway::Action::\"Unregistered\", resource) when { true };\n@id(\"floor-call-burst\")\n@scope(\"key\")\nforbid(principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource) when { context.p_floor_hcall_hburst_0__temporal_0 };",
     "cedar_schema_json": {
@@ -13,6 +13,13 @@
               "declared": {
                 "type": "EntityOrCommon",
                 "name": "__cedar::String"
+              },
+              "hosts": {
+                "type": "Set",
+                "element": {
+                  "type": "EntityOrCommon",
+                  "name": "__cedar::String"
+                }
               }
             }
           },
@@ -80,6 +87,10 @@
                     "name": "__cedar::String",
                     "required": false
                   },
+                  "max_severity": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::Long"
+                  },
                   "p_floor_hcall_hburst_0__temporal_0": {
                     "type": "Boolean"
                   },
@@ -125,6 +136,10 @@
                     "type": "EntityOrCommon",
                     "name": "__cedar::String",
                     "required": false
+                  },
+                  "max_severity": {
+                    "type": "EntityOrCommon",
+                    "name": "__cedar::Long"
                   },
                   "request": {
                     "type": "EntityOrCommon",

@@ -2,13 +2,14 @@
 //! The decisions of the calls of one hold, from a policy snapshot (§ 6.4, D33, D34, P-4 to P-6).
 
 use std::collections::BTreeSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use paigasus_kernel::tool_policy::{Effect, Findings, Verdict, decide};
+use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Finding, HostSet, Severity};
+use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, Verdict, decide};
 
 use super::mapping::{call_findings, invocation, name_collisions};
 use super::snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
-use crate::decision_log::CedarDetail;
+use crate::decision_log::{CedarDetail, records_of};
 use crate::turn::ToolTurn;
 use crate::types::{BlockCode, Decision, ToolCall};
 
@@ -54,6 +55,34 @@ fn unavailable(on: OnUnavailable) -> Decision {
     }
 }
 
+/// The kernel finding set of the gateway findings: each kind with its highest severity.
+pub(super) fn kernel_findings(given: &[Finding]) -> Findings {
+    let mut set = Findings::new();
+    for f in given {
+        set.add(&f.kind, f.severity);
+    }
+    set
+}
+
+/// The Cedar detail of one kernel verdict: the findings that the gateway gave (`given`) and the
+/// kernel-added ones. This is the one place that builds a detail from a verdict, so
+/// `detection_disabled` always comes from `facts.detection` (the default `false` is fail-wrong).
+pub(super) fn cedar_detail(v: &Verdict, given: &[Finding], declared: Declared, facts: &Facts, duration: Duration) -> CedarDetail {
+    let mut cedar = CedarDetail::new(
+        v.decision,
+        v.determining.clone(),
+        v.errored.clone(),
+        v.floor_denied,
+        records_of(given, v),
+        v.max_severity,
+        declared,
+        v.action_group,
+        duration,
+    );
+    cedar.detection_disabled = !facts.detection;
+    cedar
+}
+
 fn basis_of(v: &Verdict) -> PolicyBasis {
     if v.errored_forbid { PolicyBasis::ErroredForbid } else { PolicyBasis::Policy }
 }
@@ -89,20 +118,73 @@ fn outcome(v: Verdict, cedar: CedarDetail, tenant: TenantPart, mode: TenantMode,
     }
 }
 
+/// The detector output of one call (§ 6.9): the findings of `detect_call` and the hosts of its
+/// arguments. `hosts` is `None` when no scan read them; the kernel then reads them itself.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub struct CallScan {
+    pub findings: Vec<Finding>,
+    pub hosts: Option<HostSet>,
+}
+
+impl CallScan {
+    /// A scan with these findings and hosts.
+    #[must_use]
+    pub fn new(findings: Vec<Finding>, hosts: Option<HostSet>) -> Self {
+        Self { findings, hosts }
+    }
+}
+
+/// How the scans of `decide_calls` map to its calls.
+#[derive(Debug, Clone, Copy)]
+enum ScansFor<'a> {
+    /// No detector ran: no scan findings, and the kernel reads the hosts.
+    None,
+    /// One scan per call, in the order of the calls.
+    PerCall(&'a [CallScan]),
+    /// The count is wrong, so no scan can be matched to its call. Every call gets one
+    /// `detector_error` (detector `built_in`, high) in place of the scans (A3).
+    Mismatch,
+}
+
+fn scans_for(calls: usize, scans: &[CallScan]) -> ScansFor<'_> {
+    if scans.is_empty() {
+        ScansFor::None
+    } else if scans.len() == calls {
+        ScansFor::PerCall(scans)
+    } else {
+        ScansFor::Mismatch
+    }
+}
+
 /// One outcome per call, in order. The findings of a call are its request-level findings
-/// (`name_collision`); the kernel adds `unparsed_arguments` itself.
+/// (`name_collision`) and the findings of its scan; the kernel adds `unparsed_arguments` and the
+/// hosts-cap `detector_error` itself. The Cedar detail records all of them, each with its
+/// severity and detector, and the `max_severity` of the verdict.
+///
+/// `scans` is empty (no detectors ran) or has one entry per call, in the order of `calls`. When a
+/// scan has hosts, the invocation carries them, so the kernel does not read the arguments again
+/// (S8). Any other count is a defect of the caller: a debug build panics, and a release build
+/// uses no scan and gives every call a `detector_error` finding (detector `built_in`, high).
 ///
 /// `now` is the only time source (P-7): it is read before and after each kernel `decide`, and the
 /// difference is the `decide_duration` of the call. The core reads no clock of its own.
 #[must_use]
-pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
-    decide_calls_with(snapshot, turn, calls, &Findings::new(), now)
+pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+    decide_calls_with(snapshot, turn, calls, scans, &Findings::new(), now)
 }
 
 /// `decide_calls` with request-level findings (`extra`) that every call of the hold carries, in
-/// addition to its own findings (SMA-753).
+/// addition to its own findings (SMA-753). Each one has the detector `kernel` and the severity
+/// that `extra` holds for it.
 #[must_use]
-pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+    debug_assert!(scans.is_empty() || scans.len() == calls.len(), "one scan per call, or none");
+    decide_with(snapshot, turn, calls, scans_for(calls.len(), scans), extra, now)
+}
+
+/// `decide_calls_with` after the count check. It is also the release path of a wrong count.
+fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: ScansFor<'_>, extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
     let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
         // P-6: `closed` blocks in every tenant mode, `off` included.
         return calls
@@ -121,25 +203,29 @@ pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[To
     };
     calls
         .iter()
-        .map(|c| {
-            let inv = invocation(c, turn);
-            let started = now();
-            let mut findings = call_findings(c, &collisions);
-            for kind in extra.iter() {
-                findings.insert(kind);
+        .enumerate()
+        .map(|(i, c)| {
+            let mut inv = invocation(c, turn);
+            let mut given = call_findings(c, &collisions);
+            match scans {
+                ScansFor::None => {}
+                ScansFor::PerCall(s) => {
+                    if let Some(hosts) = s[i].hosts.clone() {
+                        inv = inv.with_hosts(hosts);
+                    }
+                    given.extend(s[i].findings.iter().cloned());
+                }
+                ScansFor::Mismatch => given.push(Finding::new(DETECTOR_BUILT_IN, DETECTOR_ERROR, Severity::High, "")),
             }
-            let v = decide(&inv, facts, &findings, policies);
+            for kind in extra.iter() {
+                // `iter` yields only kinds that the set holds, so the fallback never applies.
+                let severity = extra.severity(kind).unwrap_or(Severity::High);
+                given.push(Finding::new(DETECTOR_KERNEL, kind, severity, ""));
+            }
+            let started = now();
+            let v = decide(&inv, facts, &kernel_findings(&given), policies);
             let duration = now().saturating_duration_since(started);
-            let cedar = CedarDetail::new(
-                v.decision,
-                v.determining.clone(),
-                v.errored.clone(),
-                v.floor_denied,
-                v.findings.clone(),
-                inv.declared,
-                v.action_group,
-                duration,
-            );
+            let cedar = cedar_detail(&v, &given, inv.declared, facts, duration);
             outcome(v, cedar, *tenant, snapshot.mode, snapshot.on_unavailable)
         })
         .collect()
@@ -149,7 +235,8 @@ pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[To
 mod tests {
     use std::sync::Arc;
 
-    use paigasus_kernel::tool_policy::{Declared, Facts, RequestInfo, SessionInfo, ToolPolicies};
+    use paigasus_kernel::detect::SECRET_IN_ARGS;
+    use paigasus_kernel::tool_policy::{RequestInfo, SessionInfo, ToolPolicies};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
 
@@ -200,7 +287,7 @@ mod tests {
 
     fn one(set: PolicySet, mode: TenantMode, on: OnUnavailable, tool: &str) -> CallOutcome {
         let snap = PolicySnapshot::new(set, mode, on);
-        let mut out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call(tool)], &Instant::now);
+        let mut out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call(tool)], &[], &Instant::now);
         assert_eq!(out.len(), 1);
         out.remove(0)
     }
@@ -308,12 +395,15 @@ mod tests {
     #[test]
     fn one_outcome_per_call_in_order() {
         let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
-        let out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call("ok"), call("danger"), call("tdeny")], &Instant::now);
+        let out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call("ok"), call("danger"), call("tdeny")], &[], &Instant::now);
         assert_eq!(out.iter().map(|o| o.decision).collect::<Vec<_>>(), [Decision::Allow, BLOCK_POLICY, BLOCK_POLICY]);
         let floor_hit: Vec<bool> = out.iter().map(|o| o.verdict.as_ref().expect("verdict").floor_denied).collect();
         assert_eq!(floor_hit, [false, true, false]);
         let unavailable = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed);
-        assert_eq!(decide_calls(&unavailable, &ToolTurn::Unavailable("test"), &[call("a"), call("b"), call("c")], &Instant::now).len(), 3);
+        assert_eq!(
+            decide_calls(&unavailable, &ToolTurn::Unavailable("test"), &[call("a"), call("b"), call("c")], &[], &Instant::now).len(),
+            3
+        );
     }
 
     #[test]
@@ -332,10 +422,15 @@ mod tests {
         let turn = ToolTurn::Unavailable("test");
         let calls = [call("a"), call("b")];
         let mut extra = Findings::new();
-        extra.insert("forged_history");
-        let blocked = decide_calls_with(&snap, &turn, &calls, &extra, &Instant::now);
+        extra.add(paigasus_kernel::detect::FORGED_HISTORY, Severity::High);
+        let blocked = decide_calls_with(&snap, &turn, &calls, &[], &extra, &Instant::now);
         assert_eq!(blocked.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY]);
-        let allowed = decide_calls(&snap, &turn, &calls, &Instant::now);
+        // Each call records the extra finding with the detector `kernel` and its severity.
+        for o in &blocked {
+            let records = &o.cedar.as_ref().expect("cedar").findings;
+            assert_eq!(records, &[crate::decision_log::FindingRecord::new("forged_history", Some(Severity::High), DETECTOR_KERNEL, "")]);
+        }
+        let allowed = decide_calls(&snap, &turn, &calls, &[], &Instant::now);
         assert_eq!(allowed.iter().map(|o| o.decision).collect::<Vec<_>>(), [Decision::Allow, Decision::Allow]);
     }
 
@@ -353,8 +448,65 @@ mod tests {
             ..TurnFacts::default()
         });
         let snap = PolicySnapshot::new(available(SHIPPED_FLOOR, TenantPart::Off), TenantMode::Off, OnUnavailable::Open);
-        let out = decide_calls(&snap, &turn, &[call("send"), call("Send"), call("other")], &Instant::now);
+        let out = decide_calls(&snap, &turn, &[call("send"), call("Send"), call("other")], &[], &Instant::now);
         assert_eq!(out.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY, Decision::Allow]);
+    }
+
+    fn colliding_turn() -> ToolTurn {
+        let def = |name: &str| ToolDefinition {
+            name: name.to_owned(),
+            namespace: None,
+            kind: ToolCallKind::Function,
+            schema: None,
+        };
+        ToolTurn::Parsed(TurnFacts {
+            definitions: vec![def("send"), def("Send")],
+            definitions_complete: true,
+            ..TurnFacts::default()
+        })
+    }
+
+    fn kinds_and_severities(o: &CallOutcome) -> Vec<(&str, Option<Severity>, &str)> {
+        let c = o.cedar.as_ref().expect("cedar");
+        c.findings.iter().map(|f| (f.kind.as_str(), f.severity, f.detector.as_str())).collect()
+    }
+
+    #[test]
+    fn the_response_record_keeps_the_name_collision_and_the_kernel_findings() {
+        let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
+        let mut bad = call("send");
+        bad.arguments = "[1]".to_owned();
+        let out = decide_calls(&snap, &colliding_turn(), &[bad], &[], &Instant::now);
+        assert_eq!(
+            kinds_and_severities(&out[0]),
+            [("name_collision", Some(Severity::High), "kernel"), ("unparsed_arguments", Some(Severity::Medium), "kernel")]
+        );
+        assert_eq!(out[0].cedar.as_ref().expect("cedar").max_severity, Some(Severity::High));
+        assert!(!out[0].cedar.as_ref().expect("cedar").detection_disabled);
+    }
+
+    #[test]
+    fn with_detection_off_the_record_keeps_the_severities_and_no_max_severity() {
+        let PolicySet::Available { policies, tenant, facts } = available(FLOOR, TenantPart::Evaluated) else {
+            unreachable!("available() is always Available")
+        };
+        let set = PolicySet::Available {
+            policies,
+            tenant,
+            facts: facts.with_detection(false),
+        };
+        let snap = PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed);
+        let mut bad = call("send");
+        bad.arguments = "[1]".to_owned();
+        let out = decide_calls(&snap, &colliding_turn(), &[bad], &[], &Instant::now);
+        let c = out[0].cedar.as_ref().expect("cedar");
+        assert_eq!(c.max_severity, out[0].verdict.as_ref().expect("verdict").max_severity);
+        assert_eq!(c.max_severity, None);
+        assert!(c.detection_disabled);
+        assert_eq!(
+            kinds_and_severities(&out[0]),
+            [("name_collision", Some(Severity::High), "kernel"), ("unparsed_arguments", Some(Severity::Medium), "kernel")]
+        );
     }
 
     #[test]
@@ -382,7 +534,7 @@ mod tests {
             definitions_complete: true,
             ..TurnFacts::default()
         });
-        let out = decide_calls(&snap, &turn, &[call("ok"), call("danger")], &clock);
+        let out = decide_calls(&snap, &turn, &[call("ok"), call("danger")], &[], &clock);
         assert_eq!(next.get(), 4, "two reads per call");
         assert_eq!(out.len(), 2);
         let durations: Vec<Duration> = out.iter().map(|o| o.cedar.as_ref().expect("cedar").decide_duration).collect();
@@ -390,7 +542,8 @@ mod tests {
         for o in &out {
             let v = o.verdict.as_ref().expect("verdict");
             let c = o.cedar.as_ref().expect("cedar");
-            assert_eq!(c.findings, v.findings);
+            assert_eq!(c.findings.iter().map(|f| f.kind.clone()).collect::<BTreeSet<_>>(), v.findings);
+            assert_eq!(c.max_severity, v.max_severity);
             assert_eq!((c.effect, c.floor_denied, c.action_group), (v.decision, v.floor_denied, v.action_group));
             assert_eq!((&c.determining, &c.errored), (&v.determining, &v.errored));
         }
@@ -406,11 +559,125 @@ mod tests {
         for mode in MODES {
             for on in ONS {
                 let snap = PolicySnapshot::new(PolicySet::Unavailable, mode, on);
-                let out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &calls, &Instant::now);
+                let out = decide_calls(&snap, &ToolTurn::Unavailable("test"), &calls, &[], &Instant::now);
                 assert_eq!(out.len(), 2);
                 assert!(out.iter().all(|o| o.cedar.is_none() && o.verdict.is_none()), "{mode:?} {on:?}");
             }
         }
+    }
+
+    /// A snapshot whose tenant part is `tenant` (enforced) over the test floor.
+    fn tenant_snapshot(tenant: &str) -> PolicySnapshot {
+        let floor = Arc::new(ToolPolicies::compile_floor(FLOOR).expect("floor"));
+        let set = PolicySet::Available {
+            policies: Arc::new(ToolPolicies::compile(floor, tenant, &[]).expect("compile")),
+            tenant: TenantPart::Evaluated,
+            facts: facts(),
+        };
+        PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed)
+    }
+
+    fn secret() -> Finding {
+        Finding::new(SECRET_IN_ARGS, SECRET_IN_ARGS, Severity::High, "v1")
+    }
+
+    const FORBID_HIGH: &str = r#"
+        @id("all") permit(principal, action, resource);
+        @id("high") forbid(principal, action, resource) when { context.max_severity >= 3 };
+    "#;
+
+    #[test]
+    fn scan_findings_reach_the_decision_and_the_record() {
+        let snap = tenant_snapshot(FORBID_HIGH);
+        let turn = ToolTurn::Unavailable("test");
+        let o = &decide_calls(&snap, &turn, &[call("t")], &[CallScan::new(vec![secret()], None)], &Instant::now)[0];
+        assert_eq!(o.decision, BLOCK_POLICY);
+        let c = o.cedar.as_ref().expect("cedar");
+        assert_eq!(
+            (c.max_severity, c.findings[0].kind.as_str(), c.findings[0].detector.as_str()),
+            (Some(Severity::High), SECRET_IN_ARGS, SECRET_IN_ARGS)
+        );
+        assert!(o.verdict.as_ref().expect("verdict").findings.contains(SECRET_IN_ARGS));
+        // The same call with no scan is allowed: the scan finding made the deny.
+        assert_eq!(decide_calls(&snap, &turn, &[call("t")], &[], &Instant::now)[0].decision, Decision::Allow);
+    }
+
+    #[test]
+    fn given_hosts_are_used() {
+        let snap = tenant_snapshot(r#"@id("h") permit(principal, action, resource) when { context.call.hosts == ["x.example"] };"#);
+        let turn = ToolTurn::Unavailable("test");
+        let mut hosts = HostSet::new();
+        hosts.insert("x.example");
+        // The arguments are `{}`, so a kernel scan finds no host: only the given set can permit.
+        let o = &decide_calls(&snap, &turn, &[call("t")], &[CallScan::new(Vec::new(), Some(hosts))], &Instant::now)[0];
+        assert_eq!(o.decision, Decision::Allow);
+        assert_eq!(decide_calls(&snap, &turn, &[call("t")], &[CallScan::default()], &Instant::now)[0].decision, BLOCK_POLICY);
+    }
+
+    #[test]
+    fn no_scans_keeps_today() {
+        let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
+        let calls = [call("ok"), call("danger"), call("tdeny")];
+        let turn = ToolTurn::Unavailable("test");
+        let none = decide_calls(&snap, &turn, &calls, &[], &Instant::now);
+        let empty = decide_calls(&snap, &turn, &calls, &[CallScan::default(), CallScan::default(), CallScan::default()], &Instant::now);
+        let strip = |v: Vec<CallOutcome>| v.into_iter().map(|o| (o.decision, o.basis, o.verdict)).collect::<Vec<_>>();
+        assert_eq!(strip(none), strip(empty));
+    }
+
+    #[test]
+    fn the_record_keeps_the_collision_the_kernel_and_the_scan_findings() {
+        let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
+        let mut bad = call("send");
+        bad.arguments = "[1]".to_owned();
+        let scan = CallScan::new(vec![Finding::new(DETECTOR_BUILT_IN, "other", Severity::Low, "")], None);
+        let out = decide_calls(&snap, &colliding_turn(), &[bad], &[scan], &Instant::now);
+        assert_eq!(
+            kinds_and_severities(&out[0]),
+            [
+                ("name_collision", Some(Severity::High), "kernel"),
+                ("other", Some(Severity::Low), "built_in"),
+                ("unparsed_arguments", Some(Severity::Medium), "kernel")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wrong_scan_count_gives_every_call_a_detector_error() {
+        assert!(matches!(scans_for(2, &[]), ScansFor::None));
+        assert!(matches!(scans_for(1, &[CallScan::default()]), ScansFor::PerCall(_)));
+        let mut hosts = HostSet::new();
+        hosts.insert("x.example");
+        let one = [CallScan::new(vec![Finding::new(DETECTOR_BUILT_IN, "other", Severity::Low, "")], Some(hosts))];
+        for (n, scans) in [(2, &one[..]), (0, &one[..])] {
+            assert!(matches!(scans_for(n, scans), ScansFor::Mismatch), "{n}");
+        }
+        // The release path: `decide_calls` checks the count with a `debug_assert!` first.
+        let snap = tenant_snapshot(FORBID_HIGH);
+        let turn = ToolTurn::Unavailable("test");
+        let out = decide_with(&snap, &turn, &[call("a"), call("b")], scans_for(2, &one), &Findings::new(), &Instant::now);
+        assert_eq!(out.len(), 2);
+        for o in &out {
+            assert_eq!(o.decision, BLOCK_POLICY);
+            // No scan finding and no scan host reaches any call: only the error.
+            assert_eq!(kinds_and_severities(o), [(DETECTOR_ERROR, Some(Severity::High), DETECTOR_BUILT_IN)]);
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one scan per call, or none")]
+    fn a_wrong_scan_count_panics_in_a_debug_build() {
+        let snap = tenant_snapshot(FORBID_HIGH);
+        let _ = decide_calls(&snap, &ToolTurn::Unavailable("test"), &[call("a"), call("b")], &[CallScan::default()], &Instant::now);
+    }
+
+    #[test]
+    fn a_call_scan_debug_prints_counts_only() {
+        let mut hosts = HostSet::new();
+        hosts.insert("canary.example");
+        let d = format!("{:?}", CallScan::new(vec![secret()], Some(hosts)));
+        assert!(!d.contains("canary"), "{d}");
     }
 
     #[test]

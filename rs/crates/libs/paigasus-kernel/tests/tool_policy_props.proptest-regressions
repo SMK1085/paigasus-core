@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e06162b96c5736dc1affe52e68a8ff1f77ae22e9fd6ce03a389f35187b0d9fdd # shrinks to case = Case { floor: "", tenant: "@id(\"t0\") forbid(principal, action, resource) unless { (action in Pgs::Gateway::Action::\"InvokeTool\" && context.max_severity >= 0) };\n@id(\"t1\") permit(principal is Pgs::Iam::Principal, action, resource);\n", catalog: ["read_file"], name: "read_file", facts: Facts { principal: CedarUid { entity_type: "Pgs::Iam::Principal", entity_id: "u1" }, org: 0190a100-0000-7000-8000-0000000000aa, request: RequestInfo { scope: "prn:pgs:gateway:::scope/x", ingress: "responses", model: "m1" }, session: SessionInfo { id: "", turn: 0 }, detection: true }, request_findings: Findings({}), call: ToolInvocation { name: "read_file", input: Json("{}"), declared: Yes, hosts: Some(HostSet { len: 0 }) }, facts_with_session: Facts { principal: CedarUid { entity_type: "Pgs::Iam::Principal", entity_id: "u1" }, org: 0190a100-0000-7000-8000-0000000000aa, request: RequestInfo { scope: "prn:pgs:gateway:::scope/x", ingress: "responses", model: "m1" }, session: SessionInfo { id: "", turn: 0 }, detection: true }, call_findings: Findings({"ok": Info}), .. }

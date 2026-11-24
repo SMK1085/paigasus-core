@@ -425,6 +425,8 @@ mod tests {
             choice: ChoiceRewrite::Keep,
             refusals: BTreeMap::new(),
             entries: vec![RequestEntry::new("computer".to_owned(), RequestAction::ReplaceResult, true, RequestReason::ToolResultBlocked)],
+            entry_details: vec![None],
+            screen_records: Vec::new(),
         };
         assert!(!plan.is_noop());
         assert_eq!(rewrite_request(Format::OpenAiResponses, body, &plan), None);

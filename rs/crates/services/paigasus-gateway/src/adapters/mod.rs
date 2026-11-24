@@ -7,6 +7,7 @@
 //! store adapters (SMA-753).
 
 pub mod decision_log;
+pub mod detectors;
 pub mod history;
 pub mod http;
 pub mod iam;

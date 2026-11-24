@@ -263,6 +263,8 @@ pub struct Summary {
     pub shared_second: usize,
     pub gaps: Vec<InstanceGaps>,
     pub unregistered: usize,
+    /// Exported events of before SMA-855: their `max_severity` is inferred from the kinds (P-8).
+    pub severity_inferred: u64,
     /// Events that could not be decoded or mapped: a newer gateway or a forged entry. They are not in the trace.
     pub unmapped: usize,
     /// Set by the reader when the read stopped at `until + max_lag` while the stream held later messages (R5, R13).
@@ -330,6 +332,10 @@ impl fmt::Display for Summary {
         writeln!(f, "WARNING: the trace holds no tool arguments and no tool results.")?;
         writeln!(f, "  A policy that reads context.input or context.input_text gets an evaluation error on replay.")?;
         writeln!(f, "  A policy that uses a `response` or `error` event in a temporal block never matches.")?;
+        if self.severity_inferred > 0 {
+            writeln!(f, "severity inferred: {} (events of before the detectors: max_severity comes from the kinds)", self.severity_inferred)?;
+        }
+        writeln!(f, "A policy that reads context.call.hosts does not replay correctly: the trace holds hosts: [].")?;
         writeln!(f, "WARNING: Dogwood 1.2 checks each replayed call against its action schema. The trace has no tool")?;
         writeln!(f, "  arguments, so a tool with a required argument replays as DENY (\"nonconforming decision event\").")?;
         writeln!(f, "  Replay against a copy of your schema in which every context.input attribute is optional (`name?: Type`).")?;
@@ -416,11 +422,15 @@ pub fn export(args: &ExportArgs, events: impl IntoIterator<Item = Exported>) -> 
     let mut seconds: Vec<i64> = Vec::new();
     let mut skips: BTreeMap<usize, (SkipReason, usize)> = BTreeMap::new();
     let mut unregistered = 0usize;
+    let mut severity_inferred = 0u64;
     for record in &kept {
         match encode(record) {
             Encoded::Line(line) => {
                 if record.cedar.as_ref().is_some_and(|c| c.action_group == ActionGroup::Unregistered) {
                     unregistered += 1;
+                }
+                if record.cedar.as_ref().is_some_and(|c| c.severity_inferred) {
+                    severity_inferred += 1;
                 }
                 seconds.push(line.ts());
                 lines.push(line.to_string());
@@ -466,6 +476,7 @@ pub fn export(args: &ExportArgs, events: impl IntoIterator<Item = Exported>) -> 
             shared_second,
             gaps,
             unregistered,
+            severity_inferred,
             unmapped,
             read_stopped_at: None,
         },
@@ -475,7 +486,7 @@ pub fn export(args: &ExportArgs, events: impl IntoIterator<Item = Exported>) -> 
 
 #[cfg(test)]
 mod tests {
-    use paigasus_gateway_core::decision_log::{CedarDetail, DecisionRecord, RecordBasis, RecordHeader, ReportedCall, Side, build_response};
+    use paigasus_gateway_core::decision_log::{CedarDetail, DecisionRecord, FindingRecord, RecordBasis, RecordHeader, ReportedCall, Side, build_response};
     use paigasus_gateway_core::{Basis, BlockCode, DecisionContext, ReportDecision, ReportEntry};
     use paigasus_kernel::CedarUid;
     use paigasus_kernel::tool_policy::{Declared, Effect};
@@ -616,7 +627,8 @@ mod tests {
             vec![],
             vec![],
             false,
-            BTreeSet::new(),
+            Vec::new(),
+            None,
             Declared::Unknown,
             ActionGroup::Unregistered,
             Duration::ZERO,
@@ -646,6 +658,7 @@ sequence gaps: none (gaps inside the range only)\n\
 WARNING: the trace holds no tool arguments and no tool results.\n  \
 A policy that reads context.input or context.input_text gets an evaluation error on replay.\n  \
 A policy that uses a `response` or `error` event in a temporal block never matches.\n\
+A policy that reads context.call.hosts does not replay correctly: the trace holds hosts: [].\n\
 WARNING: Dogwood 1.2 checks each replayed call against its action schema. The trace has no tool\n  \
 arguments, so a tool with a required argument replays as DENY (\"nonconforming decision event\").\n  \
 Replay against a copy of your schema in which every context.input attribute is optional (`name?: Type`).\n\
@@ -656,6 +669,39 @@ WARNING: the trace is one history for the org. A policy with @scope(\"session\")
 --api-key. Session ids are empty until SMA-753.\n"
         );
         assert_eq!(out.summary.to_string(), expected);
+    }
+
+    #[test]
+    fn the_summary_counts_inferred_severities_and_warns_about_hosts() {
+        let old = |seq: u64, id: u128| {
+            let mut r = record(ORG, T0 + seq, 1, seq, id);
+            r.cedar = Some(CedarDetail::new(
+                Effect::Allow,
+                vec![],
+                vec![],
+                false,
+                vec![FindingRecord::new("name_collision", None, "", "")],
+                None,
+                Declared::Yes,
+                ActionGroup::Catalog,
+                Duration::ZERO,
+            ));
+            let mut e = to_event(&r);
+            e.cedar.as_mut().unwrap().findings = vec![pb::Finding {
+                kind: "name_collision".into(),
+                ..Default::default()
+            }];
+            Exported {
+                stored_at: r.decided_at + Duration::from_secs(1),
+                bytes: Bytes::from(e.encode_to_vec()),
+            }
+        };
+        let out = export(&args_of(&[]), vec![old(1, 1), old(2, 2), plain(T0 + 3, 3, 3)]).expect("export");
+        assert_eq!(out.summary.severity_inferred, 2);
+        assert!(out.lines[0].contains("max_severity: 3,"), "{}", out.lines[0]);
+        let text = out.summary.to_string();
+        assert!(text.contains("severity inferred: 2"), "{text}");
+        assert!(text.contains("A policy that reads context.call.hosts does not replay correctly: the trace holds hosts: []."), "{text}");
     }
 
     #[test]

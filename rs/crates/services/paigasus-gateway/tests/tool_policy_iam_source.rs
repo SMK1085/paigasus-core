@@ -526,7 +526,7 @@ async fn decide_through_iam(s: &Server_, tools: &[&str], calls: &[&str]) -> Deci
         .collect();
     let answer = serde_json::json!({"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":tool_calls},"finish_reason":"tool_calls"}]}).to_string();
     let parsed = parse_body(Format::OpenAiChat, answer.as_bytes(), 1 << 20).expect("answer").calls;
-    let outcomes = decide_calls(&out.snapshot, &turn, &parsed, &std::time::Instant::now);
+    let outcomes = decide_calls(&out.snapshot, &turn, &parsed, &[], &std::time::Instant::now);
     let ids = |r: &[paigasus_kernel::tool_policy::PolicyRef]| r.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
     Decided {
         upstream,

@@ -14,15 +14,17 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use metrics::counter;
-use paigasus_gateway_core::decision_log::ReportedCall;
+use paigasus_gateway_core::decision_log::{FindingRecord, ReportedCall};
 use paigasus_gateway_core::{DecisionContext, LatestTurn, ReportDecision, SessionContext, StoreBudget, ToolCall, ToolTurn};
+use paigasus_kernel::detect::{DETECTOR_KERNEL, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, Severity};
 use paigasus_kernel::mint_uuid7;
-use paigasus_kernel::tool_policy::{FORGED_HISTORY, Findings, HISTORY_TRUNCATED, MIXED_SESSIONS, normalise};
+use paigasus_kernel::tool_policy::{Findings, normalise};
 use paigasus_observability::names;
 use tokio::time::Instant;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
+use crate::application::tool_policy::decider::count_finding;
 use crate::domain::decision_log::Entropy;
 use crate::domain::limits::{Clock, UnavailableKind};
 use crate::domain::tool_history::{
@@ -263,13 +265,17 @@ impl ToolHistory {
             .await?;
 
         let mut findings = Findings::new();
+        // The metric labels come from the closed triple table (SMA-855 P-9): detector `kernel`.
         if link.mixed_sessions {
-            findings.insert(MIXED_SESSIONS);
-            counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "request", "kind" => MIXED_SESSIONS).increment(1);
+            findings.add(MIXED_SESSIONS, Severity::Medium);
+            count_finding("request", &FindingRecord::new(MIXED_SESSIONS, Some(Severity::Medium), DETECTOR_KERNEL, ""), None);
         }
         if link.forged_results > 0 {
-            findings.insert(FORGED_HISTORY);
-            counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => "request", "kind" => FORGED_HISTORY).increment(link.forged_results as u64);
+            findings.add(FORGED_HISTORY, Severity::High);
+            let forged = FindingRecord::new(FORGED_HISTORY, Some(Severity::High), DETECTOR_KERNEL, "");
+            for _ in 0..link.forged_results {
+                count_finding("request", &forged, None);
+            }
         }
 
         let turn_no = link.turn;
@@ -338,7 +344,7 @@ impl ToolHistory {
             session.mark_reserved(ids);
             count_trimmed(&reply);
             if !reply.truncated.is_empty() {
-                findings.insert(HISTORY_TRUNCATED);
+                findings.add(HISTORY_TRUNCATED, Severity::Low);
             }
         }
         findings
@@ -547,8 +553,21 @@ mod tests {
         counter(s, names::GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL, &[("op", op), ("kind", kind)])
     }
 
+    /// The severity label of a history kind (SMA-855 P-9): its triple in `FINDING_TRIPLES`.
+    fn severity_of(kind: &str) -> &'static str {
+        match kind {
+            "forged_history" => "high",
+            "mixed_sessions" => "medium",
+            _ => "low",
+        }
+    }
+
     fn finding(s: &Snapshotter, kind: &str) -> Option<u64> {
-        counter(s, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", "request"), ("kind", kind)])
+        counter(
+            s,
+            names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+            &[("side", "request"), ("kind", kind), ("detector", "kernel"), ("severity", severity_of(kind))],
+        )
     }
 
     fn turn(calls: &[&str], results: &[&str]) -> ToolTurn {
@@ -672,7 +691,12 @@ mod tests {
         assert!(!linked.session.findings.contains("mixed_sessions"));
         assert!(linked.pending.is_none(), "no touch and no result");
         let m = crate::application::tool_policy::testing::Snap::take(&snap);
-        let f = |k: &str| m.counter(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", "request"), ("kind", k)]);
+        let f = |k: &str| {
+            m.counter(
+                names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
+                &[("side", "request"), ("kind", k), ("detector", "kernel"), ("severity", severity_of(k))],
+            )
+        };
         assert_eq!((f("forged_history"), f("mixed_sessions")), (2, 0));
     }
 

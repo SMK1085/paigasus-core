@@ -758,6 +758,8 @@ pub struct ToolPolicyConfig {
     pub nats: Option<ToolPolicyNatsConfig>,
     /// TOML only (figment's environment provider cannot express an array of tables).
     pub org: Vec<OrgToolPolicyConfig>,
+    /// SMA-855 § 6.10: the tool-call detectors. The table is optional.
+    pub detectors: DetectorsConfig,
 }
 
 impl Default for ToolPolicyConfig {
@@ -773,8 +775,54 @@ impl Default for ToolPolicyConfig {
             source: None,
             nats: None,
             org: Vec::new(),
+            detectors: DetectorsConfig::default(),
         }
     }
+}
+
+/// D35: the time that the pipeline deadline leaves for the work it does not cover (the built-in
+/// run, the Cedar `decide` of each call, the kernel host pass and the scheduler delay). The value
+/// is provisional. The builder sets it from a measured p99. This is the only place that holds it.
+pub const DETECTOR_MARGIN_MS: u64 = 250;
+
+/// The smallest `tool_policy.detectors.max_scan_bytes` (§ 6.10).
+const MIN_DETECTOR_SCAN_BYTES: usize = 65_536;
+
+/// `[tool_policy.detectors]` (SMA-855 § 6.10, D23). The table is optional. A misspelt key fails
+/// extraction.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DetectorsConfig {
+    /// `false` builds no pipeline and runs no screen. That is fail open for a policy that reads
+    /// detector output, so it is a switch for an incident.
+    pub enabled: bool,
+    /// An upper bound for the webhook and judge stages of one run.
+    pub timeout_ms: u64,
+    /// The text that one run scans. The default is `responses.max_request_bytes` (16 MiB), the
+    /// largest request cap of any route (S12), so a request at the default caps is scanned in full.
+    /// There is no upper bound (R10).
+    pub max_scan_bytes: usize,
+}
+
+impl Default for DetectorsConfig {
+    fn default() -> Self {
+        DetectorsConfig {
+            enabled: true,
+            timeout_ms: 500,
+            max_scan_bytes: 16_777_216,
+        }
+    }
+}
+
+/// What the gateway reads at run time from `[tool_policy.detectors]` (built by
+/// `ToolPolicyConfig::detector_settings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectorSettings {
+    pub enabled: bool,
+    pub timeout: Duration,
+    pub max_scan_bytes: usize,
+    /// `DETECTOR_MARGIN_MS` as a `Duration`.
+    pub margin: Duration,
 }
 
 /// The tenant mode as the config spells it (D8). D33: there is no `floor_mode`.
@@ -1001,6 +1049,7 @@ impl ToolPolicyConfig {
                 self.load_timeout_ms, ti.decide_timeout_secs
             ));
         }
+        self.detectors.validate(self.enabled, ti)?;
         let mut seen = HashSet::new();
         for (i, entry) in self.org.iter().enumerate() {
             let Some(id) = parse_org_uuid(&entry.id) else {
@@ -1050,6 +1099,17 @@ impl ToolPolicyConfig {
         Ok(())
     }
 
+    /// The runtime view of `[tool_policy.detectors]`. Meaningful only after `validate` returned `Ok`.
+    #[must_use]
+    pub fn detector_settings(&self) -> DetectorSettings {
+        DetectorSettings {
+            enabled: self.detectors.enabled,
+            timeout: Duration::from_millis(self.detectors.timeout_ms),
+            max_scan_bytes: self.detectors.max_scan_bytes,
+            margin: Duration::from_millis(DETECTOR_MARGIN_MS),
+        }
+    }
+
     /// The runtime view: durations, the per-org map keyed by the parsed `Uuid`, and the defaults.
     /// The values are meaningful only after `validate` returned `Ok`.
     ///
@@ -1078,6 +1138,27 @@ impl ToolPolicyConfig {
             // Only the IAM source returns the tenant settings. The file source has none.
             settings_from_source: matches!(self.source, Some(PolicySourceConfig::Iam {})),
         }
+    }
+}
+
+impl DetectorsConfig {
+    /// The rules of spec § 6.10. Each message names the key. The D35 margin rule holds only when
+    /// `[tool_policy]` is enabled, so a disabled table never refuses a valid `[tool_interception]`.
+    fn validate(&self, tool_policy_enabled: bool, ti: &ToolInterceptionConfig) -> Result<(), String> {
+        if self.timeout_ms == 0 {
+            return Err("tool_policy.detectors.timeout_ms must be at least 1".to_string());
+        }
+        if self.max_scan_bytes < MIN_DETECTOR_SCAN_BYTES {
+            return Err(format!("tool_policy.detectors.max_scan_bytes must be at least {MIN_DETECTOR_SCAN_BYTES}; got {}", self.max_scan_bytes));
+        }
+        let decide_ms = ti.decide_timeout_secs.saturating_mul(1000);
+        if tool_policy_enabled && self.timeout_ms.saturating_add(DETECTOR_MARGIN_MS) > decide_ms {
+            return Err(format!(
+                "tool_policy.detectors.timeout_ms ({}) plus the {DETECTOR_MARGIN_MS} ms margin must not exceed tool_interception.decide_timeout_secs ({}) in milliseconds",
+                self.timeout_ms, ti.decide_timeout_secs
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2183,6 +2264,97 @@ mod tests {
             let err = tp_load(&tp_toml(body)).expect("loads").validate().expect_err(body);
             assert!(err.contains(key), "{body}: {err}");
         }
+    }
+
+    // --- SMA-855 `[tool_policy.detectors]` -------------------------------------------------------
+
+    /// A TOML that enables tool policy with the given `decide_timeout_secs` and detector body.
+    fn det_toml(decide: u64, body: &str) -> String {
+        format!(
+            "{}\n[tool_interception]\nenabled = true\ndecide_timeout_secs = {decide}\n\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"file\", dir = \"/p\" }}\n\n[tool_policy.detectors]\n{body}\n",
+            valid_toml()
+        )
+    }
+
+    #[test]
+    fn detectors_defaults_pass() {
+        let cfg = tp_load(&tp_enabled_toml("")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let s = cfg.tool_policy.detector_settings();
+        assert!(s.enabled);
+        assert_eq!(s.timeout, Duration::from_millis(500));
+        assert_eq!(s.max_scan_bytes, 16_777_216);
+        assert_eq!(s.margin, Duration::from_millis(DETECTOR_MARGIN_MS));
+        // The default scan budget covers the largest request cap of any route (S12, R10).
+        assert!(s.max_scan_bytes >= cfg.responses.max_request_bytes);
+    }
+
+    #[test]
+    fn detectors_disabled_loads_and_validates() {
+        let cfg = tp_load(&det_toml(5, "enabled = false")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        assert!(!cfg.tool_policy.detector_settings().enabled);
+    }
+
+    #[test]
+    fn timeout_equal_to_decide_timeout_fails() {
+        let cfg = tp_load(&det_toml(2, "timeout_ms = 2000")).expect("loads");
+        let err = cfg.validate().expect_err("D35");
+        assert!(err.contains("tool_policy.detectors.timeout_ms"), "{err}");
+        assert!(err.contains("tool_interception.decide_timeout_secs"), "{err}");
+    }
+
+    #[test]
+    fn timeout_inside_the_margin_fails_and_at_the_margin_passes() {
+        let decide_ms = 3_000_u64;
+        let inside = decide_ms - DETECTOR_MARGIN_MS + 1;
+        let cfg = tp_load(&det_toml(3, &format!("timeout_ms = {inside}"))).expect("loads");
+        let err = cfg.validate().expect_err("inside the margin");
+        assert!(err.contains("tool_policy.detectors.timeout_ms"), "{err}");
+        let exact = decide_ms - DETECTOR_MARGIN_MS;
+        let cfg = tp_load(&det_toml(3, &format!("timeout_ms = {exact}"))).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn the_margin_rule_holds_only_when_tool_policy_is_enabled() {
+        let toml = format!("{}\n[tool_interception]\ndecide_timeout_secs = 1\n\n[tool_policy.detectors]\ntimeout_ms = 5000\n", valid_toml());
+        let cfg = tp_load(&toml).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn an_unknown_detectors_key_fails() {
+        let err = tp_load(&det_toml(5, "typo = 1")).expect_err("deny_unknown_fields");
+        assert!(err.contains("typo"), "{err}");
+    }
+
+    #[test]
+    fn small_scan_budget_and_zero_timeout_fail() {
+        let cfg = tp_load(&det_toml(5, "max_scan_bytes = 65535")).expect("loads");
+        let err = cfg.validate().expect_err("scan budget");
+        assert!(err.contains("tool_policy.detectors.max_scan_bytes"), "{err}");
+        let cfg = tp_load(&det_toml(5, "max_scan_bytes = 65536")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let cfg = tp_load(&det_toml(5, "timeout_ms = 0")).expect("loads");
+        let err = cfg.validate().expect_err("zero timeout");
+        assert!(err.contains("tool_policy.detectors.timeout_ms"), "{err}");
+    }
+
+    #[test]
+    fn the_example_file_parses() {
+        let example = include_str!("../gateway.toml.example");
+        let start = example.find("# [tool_policy.detectors]").expect("the example holds the detectors block");
+        let block: Vec<String> = example[start..]
+            .lines()
+            .take_while(|l| l.starts_with('#') && !l.trim_start_matches('#').trim().is_empty() || l.trim() == "#")
+            .map(|l| l.strip_prefix("# ").or_else(|| l.strip_prefix('#')).unwrap_or(l).to_string())
+            .collect();
+        let cfg = tp_load(&format!("{}\n{}\n", valid_toml(), block.join("\n"))).expect("the uncommented block parses");
+        let s = cfg.tool_policy.detector_settings();
+        assert!(s.enabled);
+        assert_eq!(s.timeout, Duration::from_millis(500));
+        assert_eq!(s.max_scan_bytes, 16_777_216);
     }
 
     // --- SMA-755 `[decision_log]` ---------------------------------------------------------------

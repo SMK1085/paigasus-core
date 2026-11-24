@@ -23,12 +23,14 @@ use tokio_util::task::TaskTracker;
 
 use crate::adapters::decision_log::jetstream;
 use crate::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, prime_decision_log_metrics, run_relay, run_writer};
+use crate::adapters::detectors::BuiltInDetector;
 use crate::adapters::http::interception::ToolInterception;
 use crate::adapters::iam::client::build_channel;
 use crate::adapters::nats::PolicyEvents;
 use crate::adapters::policy_source::file::FilePolicySource;
 use crate::adapters::policy_source::iam::IamPolicySource;
 use crate::application::decision_log::DecisionRecorder;
+use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::ToolHistory;
 use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
 use crate::config::{GatewayConfig, PolicySourceConfig};
@@ -273,6 +275,9 @@ pub struct ToolPolicyRuntime {
     pub cedar: Option<Arc<CedarDecider>>,
     /// The one decision recorder (P-8). `None` with the tool policy off: nothing is recorded.
     pub recorder: Option<Arc<DecisionRecorder>>,
+    /// The one detector pipeline (SMA-855 § 6.6.4). `None` with the tool policy off or with
+    /// `[tool_policy.detectors] enabled = false`.
+    pub detectors: Option<Arc<DetectorPipeline>>,
     /// The tool history (SMA-753). `None` with the tool policy off or without `[tool_history]`.
     pub history: Option<Arc<ToolHistory>>,
 }
@@ -311,6 +316,7 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
             decider: Arc::new(AllowAll),
             cedar: None,
             recorder: None,
+            detectors: None,
             history: None,
         });
     }
@@ -343,8 +349,12 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
         );
     }
     prime_tool_policy_metrics();
+    let detectors = build_detectors(config);
     let mut cedar = CedarDecider::new(Arc::clone(&recorder));
-    let mut request_side = RequestToolPolicy::new(Arc::clone(&cache), settings, Arc::clone(&recorder));
+    if let Some(pipeline) = &detectors {
+        cedar = cedar.with_detectors(Arc::clone(pipeline), config.tool_interception.limits().decide_timeout, config.tool_policy.detector_settings());
+    }
+    let mut request_side = RequestToolPolicy::new(Arc::clone(&cache), settings, Arc::clone(&recorder)).with_detectors(detectors.clone(), config.tool_policy.detector_settings());
     if let Some(h) = &history {
         cedar = cedar.with_history(Arc::clone(h));
         request_side = request_side.with_history(Arc::clone(h));
@@ -355,8 +365,26 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
         decider: Arc::clone(&cedar) as Arc<dyn ToolCallDecider>,
         cedar: Some(cedar),
         recorder: Some(recorder),
+        detectors,
         history,
     })
+}
+
+/// The one detector pipeline of the gateway (SMA-855 § 6.6.4): the built-in stage only, no webhook
+/// and no judge yet. With `[tool_policy.detectors] enabled = false` there is none, and one info
+/// line says so at boot.
+fn build_detectors(config: &GatewayConfig) -> Option<Arc<DetectorPipeline>> {
+    let settings = config.tool_policy.detector_settings();
+    if !settings.enabled {
+        tracing::info!("tool-policy detectors are off: findings come only from the kernel");
+        return None;
+    }
+    Some(Arc::new(DetectorPipeline::new(
+        Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
+        Vec::new(),
+        None,
+        settings.timeout,
+    )))
 }
 
 /// SMA-752 § 6.3.5: the NATS invalidation subscription for `cache`, only with `[tool_policy]
@@ -489,6 +517,37 @@ mod tool_policy_tests {
         assert!(std::ptr::addr_eq(Arc::as_ptr(&cedar_as_dyn), Arc::as_ptr(&rt.decider)), "the runtime decider is the Cedar decider");
     }
 
+    /// SMA-855 § 6.6.4: with the detectors on (the default), one pipeline, and the Cedar decider
+    /// holds that same pipeline.
+    #[test]
+    fn detectors_on_build_one_pipeline_for_the_decider() {
+        let rt = build_tool_policy(&enabled_config(), rec(), None).expect("builds");
+        let pipeline = rt.detectors.as_ref().expect("the detectors are on by default");
+        let held = rt.cedar.as_ref().and_then(|c| c.pipeline()).expect("the decider holds the pipeline");
+        assert!(Arc::ptr_eq(pipeline, held));
+    }
+
+    /// `[tool_policy.detectors] enabled = false`: no pipeline, and one info line at boot.
+    #[test]
+    fn detectors_off_builds_no_pipeline_and_logs_once() {
+        let cfg = config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n[tool_policy.detectors]\nenabled = false\n"
+            ),
+            true,
+        );
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        let rt = build_tool_policy(&cfg, rec(), None).expect("builds");
+        assert!(rt.detectors.is_none());
+        assert!(rt.cedar.as_ref().expect("the Cedar decider").pipeline().is_none());
+        let text = logs.text();
+        assert_eq!(text.matches("tool-policy detectors are off: findings come only from the kernel").count(), 1, "{text}");
+        // With the detectors on, the line does not appear.
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+        build_tool_policy(&enabled_config(), rec(), None).expect("builds");
+        assert!(!logs.text().contains("tool-policy detectors are off"));
+    }
+
     /// With the tool policy off nothing is recorded: no recorder is kept.
     #[test]
     fn the_tool_policy_off_keeps_no_recorder() {
@@ -499,24 +558,30 @@ mod tool_policy_tests {
     }
 
     #[test]
-    fn prime_tool_policy_metrics_primes_twelve_series_at_zero() {
+    fn prime_tool_policy_metrics_primes_every_triple_at_zero() {
+        use crate::application::tool_policy::FINDING_TRIPLES;
         let debugging = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = debugging.snapshotter();
         let _local = metrics::set_default_local_recorder(&debugging);
         build_tool_policy(&enabled_config(), rec(), None).expect("builds");
+        let others = ["info", "low", "medium", "high"].map(|s| ("other", "other", s));
+        let mut n = 0;
         for side in ["request", "response"] {
-            for kind in crate::application::tool_policy::FINDING_KINDS {
-                let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &[("side", side), ("kind", kind)]);
-                assert_eq!(v, Some(0), "{side}/{kind} is primed at 0");
+            for (kind, detector, severity) in FINDING_TRIPLES.into_iter().chain(others) {
+                let labels = [("side", side), ("kind", kind), ("detector", detector), ("severity", severity)];
+                let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &labels);
+                assert_eq!(v, Some(0), "{side}/{kind}/{detector}/{severity} is primed at 0");
+                n += 1;
             }
         }
+        assert_eq!(n, 40);
         let series = snapshotter
             .snapshot()
             .into_vec()
             .into_iter()
             .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL)
             .count();
-        assert_eq!(series, 12);
+        assert_eq!(series, 40);
     }
 
     /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.

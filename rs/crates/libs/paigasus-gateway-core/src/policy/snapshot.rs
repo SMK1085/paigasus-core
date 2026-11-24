@@ -3,10 +3,12 @@
 //! the effective `on_policy_unavailable`. The gateway builds it once per request; the decider
 //! reads it from `DecisionContext` and never loads policies itself.
 
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use paigasus_kernel::detect::HostSet;
 use paigasus_kernel::tool_policy::{Facts, ToolPolicies};
 
 /// The tenant mode (§ 6.4). It applies only to a deny that tenant policies decided: a floor deny
@@ -69,6 +71,17 @@ pub enum PolicySet {
     Unavailable,
 }
 
+/// The hosts that the request side saw (§ 6.8.1, D14). The response side reads them for
+/// `unseen_host`. `Debug` prints the count only (§ 6.2.4).
+#[derive(Clone)]
+pub struct SeenHosts(pub Arc<HostSet>);
+
+impl fmt::Debug for SeenHosts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SeenHosts {{ len: {} }}", self.0.len())
+    }
+}
+
 /// One request's policy snapshot (D30).
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -78,6 +91,9 @@ pub struct PolicySnapshot {
     pub on_unavailable: OnUnavailable,
     /// The time the request side took to build this snapshot and apply the plan (preflight F14).
     pub request_elapsed: Duration,
+    /// The seen hosts of the request screen. `None` when no screen ran (§ 6.8.0), so
+    /// `unseen_host` does not run.
+    pub seen_hosts: Option<SeenHosts>,
     /// The decider time of this request, summed over every decide call. The gateway records one
     /// overhead sample per request from [`PolicySnapshot::overhead`] (preflight F14).
     decide_elapsed: Nanos,
@@ -115,6 +131,7 @@ impl PolicySnapshot {
             mode,
             on_unavailable,
             request_elapsed: Duration::ZERO,
+            seen_hosts: None,
             decide_elapsed: Nanos::default(),
             later_request_elapsed: Nanos::default(),
         }
@@ -150,6 +167,13 @@ impl PolicySnapshot {
         self.request_elapsed + self.later_request_elapsed() + self.decide_elapsed()
     }
 
+    /// Set the seen hosts of the request screen (§ 6.8.1).
+    #[must_use]
+    pub fn with_seen_hosts(mut self, seen: SeenHosts) -> Self {
+        self.seen_hosts = Some(seen);
+        self
+    }
+
     /// Set the request-side elapsed time (preflight F14).
     #[must_use]
     pub fn with_request_elapsed(mut self, elapsed: Duration) -> Self {
@@ -175,6 +199,20 @@ mod tests {
         assert_eq!(s.request_elapsed, Duration::ZERO);
         let s = s.with_request_elapsed(Duration::from_millis(7));
         assert_eq!(s.request_elapsed, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn a_new_snapshot_has_no_seen_hosts_and_the_builder_sets_them() {
+        let s = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Off, OnUnavailable::Open);
+        assert!(s.seen_hosts.is_none());
+        let mut set = HostSet::new();
+        set.insert("canary-host.example");
+        let s = s.with_seen_hosts(SeenHosts(Arc::new(set)));
+        let seen = s.seen_hosts.as_ref().expect("seen hosts");
+        assert!(seen.0.contains("canary-host.example"));
+        let debug = format!("{s:?}");
+        assert!(debug.contains("SeenHosts { len: 1 }"), "{debug}");
+        assert!(!debug.contains("canary-host"), "{debug}");
     }
 
     #[test]

@@ -5,7 +5,8 @@
 //! A new compiler generation or schema revision makes the stored live sets stale. The job
 //! compiles each stale set again, one at a time, with no transaction open:
 //!
-//! - The same output: a new live version with the origin `recompile` and its published event.
+//! - The same output, or one that only adds Record attributes to the schema: a new live version
+//!   with the origin `recompile` and its published event.
 //! - Another output, or a rejection: a held row with a report. The old version stays live, and
 //!   an admin accepts or discards the held row (`held.rs`). A held row enqueues no event (Q3).
 //!
@@ -37,7 +38,7 @@ use tokio::task::JoinSet;
 use paigasus_iam_core::authz::model::root_prn;
 use paigasus_iam_core::tool_policy::{
     CompiledOutput, HeldReport, HeldStatus, HeldVersion, ReportRejection, TOOL_SCHEMA_REVISION, ToolEntry, ToolPolicySetKey, ToolPolicyState, ToolPolicyVersion, VersionOrigin, diff_outputs,
-    failed_report, outputs_identical,
+    failed_report, outputs_equivalent_for_recompile,
 };
 use paigasus_iam_core::{Action, Clock, IdGenerator};
 use paigasus_kernel::Prn;
@@ -336,7 +337,9 @@ impl<I: IdGenerator + 'static, C: Clock + 'static> ToolPolicyService<I, C> {
         match &compiled {
             Compiled::Accepted(out) => {
                 let old = decode_compiled(&live.compiled)?;
-                if outputs_identical(&old, out) {
+                // An output that only adds Record attributes is the same enforcement (SMA-855
+                // spec section 6.13.2). The catalog coupling and the diff report stay exact.
+                if outputs_equivalent_for_recompile(&old, out) {
                     self.write_identical(author, &target, &state, live, out, &catalog).await
                 } else {
                     let write = HeldWrite {
@@ -464,7 +467,7 @@ mod tests {
     use paigasus_iam_core::authz::model::root_prn;
     use paigasus_iam_core::tool_policy::{
         CompileOutcome, CompiledOutput, CompilerFailure, HeldResult, HeldStatus, HeldVersion, RecompileLock, Rejection, ReportRejection, STARTER_TOOL_POLICY_SOURCE, SetKind, TOOL_SCHEMA_REVISION,
-        ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus, base_schema_json, failed_report, tenant_schema_json,
+        ToolPolicyRepository, ToolPolicySetKey, ToolPolicyVersion, VersionOrigin, VersionStatus, base_schema_json, failed_report, outputs_identical, tenant_schema_json,
     };
     use paigasus_iam_core::{Action, DomainEvent, EventType};
     use paigasus_observability::names;
@@ -495,6 +498,11 @@ mod tests {
     /// A live version 1 of the set of `key`, not stored. Its output is the identity output of
     /// `source`.
     fn live_row(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32, schema_revision: u32) -> ToolPolicyVersion {
+        live_row_with(h, key, source, generation, schema_revision, &identity(&key, source))
+    }
+
+    /// A live version 1 of the set of `key`, not stored, with `output` as its compiled output.
+    fn live_row_with(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32, schema_revision: u32, output: &CompiledOutput) -> ToolPolicyVersion {
         let catalog_revision = matches!(key, ToolPolicySetKey::Tenant(_)).then_some(0);
         let meta = CompiledMeta {
             key,
@@ -509,7 +517,7 @@ mod tests {
             key,
             version: 1,
             source: source.to_owned(),
-            compiled: encode_compiled(&meta, &identity(&key, source)),
+            compiled: encode_compiled(&meta, output),
             compiler_generation: generation,
             schema_revision,
             catalog_revision,
@@ -632,6 +640,102 @@ mod tests {
         assert!(events(&h).is_empty());
         let state = h.repo.state(&tenant(&h)).await.unwrap();
         assert_eq!((state.live_version, state.last_version), (1, 2));
+    }
+
+    /// `schema` without the two attributes of schema revision 2 (SMA-855): `max_severity` in the
+    /// context of every action and `hosts` in `CallInfo`. This is the revision-1 shape. The
+    /// policy text and the conditions do not change.
+    fn without_revision_2_attributes(mut schema: serde_json::Value) -> serde_json::Value {
+        let gateway = &mut schema["Pgs::Gateway"];
+        for action in gateway["actions"].as_object_mut().unwrap().values_mut() {
+            assert!(action["appliesTo"]["context"]["attributes"].as_object_mut().unwrap().remove("max_severity").is_some());
+        }
+        assert!(gateway["commonTypes"]["CallInfo"]["attributes"].as_object_mut().unwrap().remove("hosts").is_some());
+        schema
+    }
+
+    /// The identity output of `source` for `key` at schema revision 1.
+    fn revision_1(key: &ToolPolicySetKey, source: &str) -> CompiledOutput {
+        let mut out = identity(key, source);
+        out.cedar_schema_json = without_revision_2_attributes(out.cedar_schema_json);
+        out
+    }
+
+    /// A live version 1 of the set of `key` at schema revision 1, with the revision-1 output.
+    fn seed_revision_1(h: &Harness, key: ToolPolicySetKey, source: &str, generation: u32) {
+        h.repo.seed_live(live_row_with(h, key, source, generation, 1, &revision_1(&key, source)));
+    }
+
+    /// The output of `source` for `key` from the current generator: revision 1 plus the two
+    /// added attributes.
+    fn additive(key: &ToolPolicySetKey, source: &str) -> CompiledOutput {
+        identity(key, source)
+    }
+
+    #[tokio::test]
+    async fn an_additive_schema_change_writes_an_identical_version() {
+        let h = harness();
+        seed_revision_1(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 0);
+        let out = additive(&tenant(&h), STARTER_TOOL_POLICY_SOURCE);
+        assert!(!outputs_identical(&revision_1(&tenant(&h), STARTER_TOOL_POLICY_SOURCE), &out), "the control: the schema differs");
+        h.compiler.push(Ok(CompileOutcome::Accepted(out.clone())));
+        assert_eq!(ran(boot_run(&h).await), one(tenant(&h), RecompileOutcome::Identical { version: 2 }));
+        assert!(h.repo.held_rows(&tenant(&h)).is_empty());
+        let v = live(&h, &tenant(&h)).await;
+        assert_eq!((v.version, v.origin, v.compiler_generation, v.schema_revision), (2, VersionOrigin::Recompile, 1, TOOL_SCHEMA_REVISION));
+        assert_eq!(decode_compiled(&v.compiled).unwrap(), out, "the new live version stores the new schema");
+    }
+
+    #[tokio::test]
+    async fn a_generation_and_revision_bump_with_an_additive_schema_writes_identical() {
+        // P-7, the shape of Task 17: the rows are at generation 2 and schema revision 1, the
+        // compiler is at generation 3, and the output only adds the two attributes.
+        assert_eq!(TOOL_SCHEMA_REVISION, 2, "the rows below are stale by the schema revision too");
+        let h = harness();
+        h.compiler.set_generation(3);
+        seed_revision_1(&h, ToolPolicySetKey::Floor, FLOOR_DENY, 2);
+        seed_revision_1(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 2);
+        // The job compiles the floor first, then the tenant set.
+        h.compiler.push(Ok(CompileOutcome::Accepted(additive(&ToolPolicySetKey::Floor, FLOOR_DENY))));
+        h.compiler.push(Ok(CompileOutcome::Accepted(additive(&tenant(&h), STARTER_TOOL_POLICY_SOURCE))));
+        assert_eq!(
+            ran(boot_run(&h).await),
+            vec![
+                SetRecompile {
+                    key: ToolPolicySetKey::Floor,
+                    base_version: 1,
+                    outcome: RecompileOutcome::Identical { version: 2 },
+                },
+                SetRecompile {
+                    key: tenant(&h),
+                    base_version: 1,
+                    outcome: RecompileOutcome::Identical { version: 2 },
+                },
+            ]
+        );
+        assert_eq!(h.compiler.calls(), 2, "the job selected both stale rows");
+        for key in [ToolPolicySetKey::Floor, tenant(&h)] {
+            assert!(h.repo.held_rows(&key).is_empty(), "{key:?} has a held row");
+            let v = live(&h, &key).await;
+            assert_eq!((v.version, v.origin, v.compiler_generation, v.schema_revision), (2, VersionOrigin::Recompile, 3, TOOL_SCHEMA_REVISION));
+        }
+
+        // The control: the same bump, but one policy text changes in the tenant output.
+        let h = harness();
+        h.compiler.set_generation(3);
+        seed_revision_1(&h, ToolPolicySetKey::Floor, FLOOR_DENY, 2);
+        seed_revision_1(&h, tenant(&h), STARTER_TOOL_POLICY_SOURCE, 2);
+        h.compiler.push(Ok(CompileOutcome::Accepted(additive(&ToolPolicySetKey::Floor, FLOOR_DENY))));
+        let mut changed = additive(&tenant(&h), STARTER_TOOL_POLICY_SOURCE);
+        changed.cedar_policies = changed.cedar_policies.replacen("permit", "forbid", 1);
+        assert_ne!(changed.cedar_policies, STARTER_TOOL_POLICY_SOURCE, "the control changes a policy text");
+        h.compiler.push(Ok(CompileOutcome::Accepted(changed)));
+        let results = ran(boot_run(&h).await);
+        assert_eq!(results[0].outcome, RecompileOutcome::Identical { version: 2 });
+        assert_eq!(results[1].outcome, RecompileOutcome::HeldDifferent { version: 2 });
+        let held = h.repo.held(&tenant(&h)).await.unwrap().unwrap();
+        assert_eq!((held.status, held.report.result, held.compiler_generation), (HeldStatus::Held, HeldResult::Different, 3));
+        assert_eq!(live(&h, &tenant(&h)).await.compiler_generation, 2, "the old version stays live");
     }
 
     #[tokio::test]

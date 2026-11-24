@@ -16,6 +16,7 @@ mod policy;
 mod protocol;
 mod report;
 mod responses;
+mod screen;
 mod session;
 mod sse;
 mod turn;
@@ -27,10 +28,11 @@ pub use interceptor::{Action, DeciderError, Interceptor, Metric};
 pub use json::Malformed;
 pub use limits::{Limits, OnFailure};
 pub use policy::{
-    CallOutcome, ChoiceRewrite, OnUnavailable, PlanItem, PolicyBasis, PolicySet, PolicySnapshot, RefusalCause, RequestPlan, ResultTarget, TenantMode, TenantPart, call_findings, decide_calls,
-    decide_calls_with, ingress, invocation, name_collisions, plan_request, result_notice, rewrite_request,
+    CallOutcome, CallScan, ChoiceRewrite, OnUnavailable, PlanItem, PolicyBasis, PolicySet, PolicySnapshot, RefusalCause, RequestPlan, ResultTarget, ScreenRecord, SeenHosts, TenantMode, TenantPart,
+    call_findings, call_schema, decide_calls, decide_calls_with, ingress, invocation, name_collisions, plan_request, result_notice, rewrite_request,
 };
 pub use report::{ReportDecision, ReportEntry, RequestAction, RequestEntry, RequestReason, notice_line, notice_ref, reason_label, report_header, request_comments, sanitize_name};
+pub use screen::{RequestScreen, ScreenError, screen_request, screens, seen_hosts};
 pub use session::{SessionContext, StoreBudget};
 pub use turn::{LatestTurn, MAX_LINK_IDS, PriorCall, ResultShape, ToolChoice, ToolDefinition, ToolResultRef, ToolTurn, TurnFacts, parse_request};
 pub use types::{Basis, BlockCode, Decision, Format, HoldKey, ToolCall, ToolCallKind};

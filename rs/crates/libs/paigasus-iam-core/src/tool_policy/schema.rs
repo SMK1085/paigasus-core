@@ -14,7 +14,11 @@ use super::model::{ToolEntry, ToolKind};
 
 /// The revision of the generated schema and of the JSON Schema mapping (spec section 6.2).
 /// Bump it when `tool_schema_is_pinned_to_the_declared_revision` fails.
-pub const TOOL_SCHEMA_REVISION: u32 = 1;
+///
+/// Revision 2 (SMA-855 spec section 6.13.1) adds `context.max_severity` (`Long`) and
+/// `CallInfo.hosts` (`Set<String>`). Both are additions only, so the re-compile job keeps every
+/// live set current (`outputs_equivalent_for_recompile`).
+pub const TOOL_SCHEMA_REVISION: u32 = 2;
 
 /// The Cedar entity type of every tool action.
 pub const ACTION_NAMESPACE: &str = "Pgs::Gateway::Action";
@@ -44,6 +48,7 @@ fn applies_to(input: Value, input_text_required: bool) -> Value {
                 "input": required(input, true),
                 "input_text": { "type": "String", "required": input_text_required },
                 "findings": { "type": "Set", "element": { "type": "String" }, "required": true },
+                "max_severity": { "type": "Long", "required": true },
                 "call": { "type": "CallInfo", "required": true },
                 "request": { "type": "RequestInfo", "required": true },
                 "session": { "type": "SessionInfo", "required": true }
@@ -82,7 +87,8 @@ pub fn base_schema_json() -> Value {
                 "CallInfo": {
                     "type": "Record",
                     "attributes": {
-                        "declared": { "type": "String", "required": true }
+                        "declared": { "type": "String", "required": true },
+                        "hosts": { "type": "Set", "element": { "type": "String" }, "required": true }
                     }
                 }
             },
@@ -411,7 +417,7 @@ mod tests {
     }
 
     /// The `blake3` hash of the schema output that `TOOL_SCHEMA_REVISION` pins.
-    const EXPECTED_TOOL_SCHEMA_HASH: &str = "7e3d7fe6c945b4fc96bb33e3cac2b497e2166e2600f39ab94a147efdc0f8946c";
+    const EXPECTED_TOOL_SCHEMA_HASH: &str = "8f608ec7998f01180b2a178dcea7f3d4f20dcd55a7d580ea6243a52e9540e77d";
 
     /// The pin test for `TOOL_SCHEMA_REVISION` (spec section 6.2), in the style of
     /// `starter_policy_content_is_pinned_to_the_declared_revision` in `authz/roles.rs`.

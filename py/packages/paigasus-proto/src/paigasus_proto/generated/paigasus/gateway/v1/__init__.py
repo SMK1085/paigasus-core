@@ -15,6 +15,7 @@ __all__ = (
     "DecisionMode",
     "DecisionSide",
     "Finding",
+    "FindingSeverity",
     "HealthServiceStub",
     "PolicyOrigin",
     "PolicyRef",
@@ -177,6 +178,43 @@ class DecisionSide(betterproto2.Enum):
         }
 
 
+class FindingSeverity(betterproto2.Enum):
+    """
+    The severity of a finding: the Cedar level plus 1, because proto3 needs 0 for UNSPECIFIED.
+    An event written before SMA-855 holds UNSPECIFIED (an unknown severity).
+    """
+
+    UNSPECIFIED = 0
+
+    INFO = 1
+
+    LOW = 2
+
+    MEDIUM = 3
+
+    HIGH = 4
+
+    @classmethod
+    def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
+        return {
+            0: "FINDING_SEVERITY_UNSPECIFIED",
+            1: "FINDING_SEVERITY_INFO",
+            2: "FINDING_SEVERITY_LOW",
+            3: "FINDING_SEVERITY_MEDIUM",
+            4: "FINDING_SEVERITY_HIGH",
+        }
+
+    @classmethod
+    def betterproto_renamed_proto_names_to_value(cls) -> dict[str, int]:
+        return {
+            "FINDING_SEVERITY_UNSPECIFIED": 0,
+            "FINDING_SEVERITY_INFO": 1,
+            "FINDING_SEVERITY_LOW": 2,
+            "FINDING_SEVERITY_MEDIUM": 3,
+            "FINDING_SEVERITY_HIGH": 4,
+        }
+
+
 class PolicyOrigin(betterproto2.Enum):
     UNSPECIFIED = 0
 
@@ -240,6 +278,8 @@ class RequestAction(betterproto2.Enum):
 
     REFUSE = 4
 
+    SCREEN_RESULT = 5
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
@@ -248,6 +288,7 @@ class RequestAction(betterproto2.Enum):
             2: "REQUEST_ACTION_REPLACE_RESULT",
             3: "REQUEST_ACTION_RESET_TOOL_CHOICE",
             4: "REQUEST_ACTION_REFUSE",
+            5: "REQUEST_ACTION_SCREEN_RESULT",
         }
 
     @classmethod
@@ -258,6 +299,7 @@ class RequestAction(betterproto2.Enum):
             "REQUEST_ACTION_REPLACE_RESULT": 2,
             "REQUEST_ACTION_RESET_TOOL_CHOICE": 3,
             "REQUEST_ACTION_REFUSE": 4,
+            "REQUEST_ACTION_SCREEN_RESULT": 5,
         }
 
 
@@ -318,6 +360,12 @@ class CedarDetail(betterproto2.Message):
         optional=True,
     )
 
+    detection_disabled: "bool" = betterproto2.field(9, betterproto2.TYPE_BOOL)
+    """
+    SMA-855: the detectors were off (Facts.detection false), so the kernel wrote
+    max_severity -1 although the findings can hold severities. False for an older event.
+    """
+
 
 default_message_pool.register_message("paigasus.gateway.v1", "CedarDetail", CedarDetail)
 
@@ -355,8 +403,22 @@ default_message_pool.register_message(
 @dataclass(eq=False, repr=False)
 class Finding(betterproto2.Message):
     kind: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    severity: "FindingSeverity" = betterproto2.field(
+        2, betterproto2.TYPE_ENUM, default_factory=lambda: FindingSeverity(0)
+    )
     """
-    Field 2 is kept for the severity (SMA-754). Do not use it for anything else.
+    SMA-855: the field that SMA-755 kept free
+    """
+
+    detector: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+    """
+    "kernel", "built_in", "undeclared_tool", ..., later a webhook name or "judge"
+    """
+
+    detector_version: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+    """
+    for example "v1"; empty when the detector has no version
     """
 
 

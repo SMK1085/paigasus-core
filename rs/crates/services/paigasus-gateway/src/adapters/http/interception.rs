@@ -147,7 +147,8 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
     let (decisions, basis) = if n == 0 {
         (Vec::new(), Basis::Decider)
     } else {
-        let fut = ti.decider.decide(Arc::clone(&ctx), turn, calls.calls.clone());
+        // The body is the hold: its decide_timeout starts now (D35).
+        let fut = ti.decider.decide_by(Arc::clone(&ctx), turn, calls.calls.clone(), Instant::now());
         match tokio::time::timeout(limits.decide_timeout, fut).await {
             Ok(Ok(d)) if d.len() == n => (d, Basis::Decider),
             _ => {
@@ -242,7 +243,10 @@ impl Relay {
         while self.pending.is_none() {
             let Some((hold, calls)) = self.decide_queue.pop_front() else { return };
             if self.icpt.is_deciding(hold) {
-                let fut = self.ti.decider.decide(Arc::clone(&self.ctx), Arc::clone(&self.turn), calls);
+                // The deadline of the hold counts from its completion, not from now: it can have
+                // waited behind an earlier hold (D35, P-10).
+                let hold_start = self.icpt.deciding_since(hold).unwrap_or_else(Instant::now);
+                let fut = self.ti.decider.decide_by(Arc::clone(&self.ctx), Arc::clone(&self.turn), calls, hold_start);
                 self.pending = Some((hold, fut));
             }
         }
@@ -629,6 +633,51 @@ mod tests {
         assert!(text.contains(r#""name":"read_file","input":{}"#), "the allowed call is forwarded: {text}");
     }
 
+    /// Records the hold start that the relay gives and the instant of the call, and allows
+    /// everything after `wait`.
+    struct HoldStarts {
+        wait: Duration,
+        seen: Arc<std::sync::Mutex<Vec<(Instant, Instant)>>>,
+    }
+
+    impl ToolCallDecider for HoldStarts {
+        fn decide(&self, _ctx: Arc<DecisionContext>, _turn: Arc<ToolTurn>, _calls: Vec<ToolCall>) -> DecideFuture {
+            unreachable!("the relay calls decide_by")
+        }
+
+        fn decide_by(&self, _ctx: Arc<DecisionContext>, _turn: Arc<ToolTurn>, calls: Vec<ToolCall>, hold_start: Instant) -> DecideFuture {
+            self.seen.lock().expect("lock").push((hold_start, Instant::now()));
+            let wait = self.wait;
+            Box::pin(async move {
+                tokio::time::sleep(wait).await;
+                Ok(vec![DecidedCall::from(Decision::Allow); calls.len()])
+            })
+        }
+    }
+
+    /// SMA-855 D35, P-10: the second hold of a stream waits behind the first decision, and the
+    /// relay still gives its own completion instant as the hold start, not the instant its
+    /// decision starts. The first decision takes 300 ms; the assertion needs only 200 ms of the
+    /// wait, so a loaded runner (which only makes the wait longer) cannot red it.
+    #[tokio::test]
+    async fn a_queued_hold_is_decided_by_its_own_completion() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let decider = Arc::new(HoldStarts {
+            wait: Duration::from_millis(300),
+            seen: Arc::clone(&seen),
+        });
+        let text = run(decider, Limits::defaults(), two_tool_blocks("read_file", "list_dir", Duration::ZERO)).await;
+        assert!(text.contains(r#""name":"list_dir","input":{}"#), "{text}");
+        let seen = seen.lock().expect("lock").clone();
+        assert_eq!(seen.len(), 2, "two holds, two decide_by calls");
+        let (hold_start, called) = seen[1];
+        assert!(
+            called.saturating_duration_since(hold_start) >= Duration::from_millis(200),
+            "{:?}",
+            called.saturating_duration_since(hold_start)
+        );
+    }
+
     /// Counts the decide calls of the Cedar decider.
     #[derive(Default)]
     struct CountingCedar(Arc<AtomicUsize>);
@@ -970,6 +1019,70 @@ mod tests {
                 assert!(records[0].arguments.is_none(), "the log does not want it");
             }
         }
+    }
+
+    /// SMA-855 D35, S3 (Task 23, the Task 21 carry), end to end through the relay: two holds, the
+    /// real Cedar decider with the detector pipeline, and a slow webhook that takes most of the
+    /// hold budget. Only an Anthropic stream has two holds, and the gateway has no Anthropic route
+    /// yet, so this test drives the relay itself. Time is paused, so the values are exact.
+    ///
+    /// Both holds complete at t = 0. The first run ends at 600 ms, inside its deadline of 750 ms.
+    /// The second run starts at 600 ms and ends at the absolute deadline `hold start +
+    /// decide_timeout - margin` = 750 ms: the decider gives `detector_error` (record basis
+    /// `RecordBasis::Policy`), not `RecordBasis::OnFailure`. With a relative deadline (`now + timeout_ms` = 1350 ms) the relay would
+    /// rule `on_failure` at 1000 ms. Keep-alive comments go out while the holds wait.
+    #[tokio::test(start_paused = true)]
+    async fn two_holds_with_a_slow_detector_use_the_absolute_deadline() {
+        use crate::adapters::detectors::BuiltInDetector;
+        use crate::application::detectors::DetectorPipeline;
+        use crate::application::tool_policy::CedarDecider;
+        use crate::application::tool_policy::testing::SlowDetector;
+        use crate::config::{DETECTOR_MARGIN_MS, DetectorSettings};
+        use paigasus_gateway_core::TenantMode;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let decide_timeout = Duration::from_secs(1);
+        let settings = DetectorSettings {
+            enabled: true,
+            timeout: Duration::from_millis(750),
+            max_scan_bytes: 16 << 20,
+            margin: Duration::from_millis(DETECTOR_MARGIN_MS),
+        };
+        assert!(settings.timeout + settings.margin <= decide_timeout, "the config rule holds");
+        let pipeline = Arc::new(DetectorPipeline::new(
+            Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
+            vec![Arc::new(SlowDetector("hook_slow", Duration::from_millis(600)))],
+            None,
+            settings.timeout,
+        ));
+        let (log, rec) = memory_recorder(false, false);
+        let decider = CedarDecider::new(Arc::clone(&rec)).with_detectors(pipeline, decide_timeout, settings);
+        let limits = Limits {
+            decide_timeout,
+            keepalive: Duration::from_millis(100),
+            ..Limits::defaults()
+        };
+        let ti = ti_with_recorder(limits, Arc::new(decider), &rec);
+        let text = run_ctx(ti, cedar_ctx(TenantMode::Enforce).await, tool_blocks(&["fetch_a", "fetch_b"], Duration::ZERO)).await;
+
+        let records = log.records();
+        assert_eq!(names_of(&records), ["fetch_a", "fetch_b"], "{records:?}");
+        let has_error = |r: &DecisionRecord| r.cedar.as_ref().is_some_and(|c| c.findings.iter().any(|f| f.kind == "detector_error" && f.detector == "hook_slow"));
+        assert!(records.iter().all(|r| r.basis == RecordBasis::Policy && r.applied == AppliedEffect::Allow), "{records:?}");
+        assert!(!has_error(&records[0]), "the first hold finished inside its run: {:?}", records[0]);
+        assert!(has_error(&records[1]), "the absolute deadline cut the second hold: {:?}", records[1]);
+        assert!(text.contains(r#""name":"fetch_b","input":{}"#), "the second call is allowed and forwarded: {text}");
+        assert!(!text.contains(r#""basis":"on_failure""#), "{text}");
+        assert!(text.matches(": keep-alive\n\n").count() >= 2, "keep-alives while the holds wait: {text}");
+        let on_failure = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(k, _, _, _)| k.key().name() == names::GATEWAY_TOOL_INTERCEPTION_ON_FAILURE_TOTAL)
+            .count();
+        assert_eq!(on_failure, 0, "no on_failure increment");
     }
 
     // ---- the settle (SMA-753) ------------------------------------------------------------------

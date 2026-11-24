@@ -2,56 +2,14 @@
 //! The public types of the tool policy decision. Every public type is `#[non_exhaustive]`, so a
 //! caller makes a value with its `new` constructor.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
 use crate::CedarUid;
+use crate::detect::{HostSet, Severity};
 
-/// The finding that two tool names have the same normal form in one request.
-pub const NAME_COLLISION: &str = "name_collision";
-/// The finding that the arguments of a call are not one strict JSON object.
-pub const UNPARSED_ARGUMENTS: &str = "unparsed_arguments";
-/// The finding that the calls of one history belong to more than one session.
-pub const MIXED_SESSIONS: &str = "mixed_sessions";
-/// The finding that the history of a request contains a call that the gateway did not see.
-pub const FORGED_HISTORY: &str = "forged_history";
-/// The finding that the history store cut the events of a history at a cap or at the retention limit.
-pub const HISTORY_TRUNCATED: &str = "history_truncated";
-
-/// The arguments of a tool call, as the model sent them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ToolInput {
-    /// The raw JSON text. The kernel parses it and reads each number from its original text.
-    Json(String),
-    /// Free text, for the tool kinds `custom`, `apply_patch` and `other`.
-    Text(String),
-}
-
-/// Whether the name of a call is among the tool definitions of the request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Declared {
-    /// The name is among the definitions.
-    Yes,
-    /// The definitions are complete and the name is not among them.
-    No,
-    /// The definitions are not complete, so the kernel cannot tell.
-    Unknown,
-}
-
-impl Declared {
-    /// The value in `context.call.declared`.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Yes => "yes",
-            Self::No => "no",
-            Self::Unknown => "unknown",
-        }
-    }
-}
+pub use crate::detect::{Declared, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, NAME_COLLISION, ToolInput, UNPARSED_ARGUMENTS};
 
 /// One tool call to decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,13 +21,29 @@ pub struct ToolInvocation {
     pub input: ToolInput,
     /// Whether the name is among the request definitions.
     pub declared: Declared,
+    /// The hosts of the arguments, when the caller has them already (`CallDetection.hosts`).
+    /// `None`: `decide` reads them from `input` with `call_hosts`.
+    pub hosts: Option<HostSet>,
 }
 
 impl ToolInvocation {
-    /// Make an invocation.
+    /// Make an invocation with no precomputed hosts.
     #[must_use]
     pub fn new(name: impl Into<String>, input: ToolInput, declared: Declared) -> Self {
-        Self { name: name.into(), input, declared }
+        Self {
+            name: name.into(),
+            input,
+            declared,
+            hosts: None,
+        }
+    }
+
+    /// Set the hosts of the arguments, so that `decide` does not read the input again. The set
+    /// must come from `call_hosts` of the same input.
+    #[must_use]
+    pub fn with_hosts(mut self, hosts: HostSet) -> Self {
+        self.hosts = Some(hosts);
+        self
     }
 }
 
@@ -97,7 +71,8 @@ impl RequestInfo {
     }
 }
 
-/// The session facts. The gateway has no session yet, so it passes the placeholder (D14).
+/// The session facts. With the session history of SMA-753, the gateway passes the linked session.
+/// Without a history, it passes the placeholder (D14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SessionInfo {
@@ -133,42 +108,71 @@ pub struct Facts {
     pub request: RequestInfo,
     /// The session facts.
     pub session: SessionInfo,
+    /// Whether the detectors are on. With `false`, the context holds `max_severity: -1` and
+    /// `call.hosts: []`, and the kernel adds no hosts-cap finding (§ 6.10).
+    pub detection: bool,
 }
 
 impl Facts {
-    /// Make the facts.
+    /// Make the facts, with the detectors on.
     #[must_use]
     pub fn new(principal: CedarUid, org: Uuid, request: RequestInfo, session: SessionInfo) -> Self {
-        Self { principal, org, request, session }
+        Self {
+            principal,
+            org,
+            request,
+            session,
+            detection: true,
+        }
+    }
+
+    /// Set whether the detectors are on.
+    #[must_use]
+    pub fn with_detection(mut self, on: bool) -> Self {
+        self.detection = on;
+        self
     }
 }
 
-/// The set of finding kinds that the gateway saw about a request or a call.
+/// The finding kinds that the gateway saw about a request or a call, each with its highest severity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Findings(BTreeSet<String>);
+pub struct Findings(BTreeMap<String, Severity>);
 
 impl Findings {
     /// Make an empty set.
     #[must_use]
     pub fn new() -> Self {
-        Self(BTreeSet::new())
+        Self(BTreeMap::new())
     }
 
-    /// Add a finding kind.
-    pub fn insert(&mut self, kind: &str) {
-        self.0.insert(kind.to_owned());
+    /// Add a finding kind. If the kind is present, the higher severity stays.
+    pub fn add(&mut self, kind: &str, severity: Severity) {
+        let entry = self.0.entry(kind.to_owned()).or_insert(severity);
+        *entry = (*entry).max(severity);
+    }
+
+    /// The highest severity in the set, or `None` if the set is empty.
+    #[must_use]
+    pub fn max_severity(&self) -> Option<Severity> {
+        self.0.values().copied().max()
+    }
+
+    /// The severity of a kind, or `None` if the set does not hold the kind.
+    #[must_use]
+    pub fn severity(&self, kind: &str) -> Option<Severity> {
+        self.0.get(kind).copied()
     }
 
     /// Whether the set holds the kind.
     #[must_use]
     pub fn contains(&self, kind: &str) -> bool {
-        self.0.contains(kind)
+        self.0.contains_key(kind)
     }
 
     /// The kinds, in sorted order.
     pub fn iter(&self) -> impl Iterator<Item = &str> {
-        self.0.iter().map(String::as_str)
+        self.0.keys().map(String::as_str)
     }
 }
 
@@ -190,14 +194,16 @@ mod tests {
     }
 
     #[test]
-    fn findings_keep_sorted_unique_kinds() {
+    fn findings_keep_the_highest_severity_per_kind() {
         let mut f = Findings::new();
-        assert!(!f.contains(NAME_COLLISION));
-        f.insert(UNPARSED_ARGUMENTS);
-        f.insert(NAME_COLLISION);
-        f.insert(NAME_COLLISION);
-        assert!(f.contains(NAME_COLLISION) && f.contains(UNPARSED_ARGUMENTS));
+        assert_eq!(f.max_severity(), None);
+        f.add(UNPARSED_ARGUMENTS, Severity::Info);
+        f.add(NAME_COLLISION, Severity::High);
+        f.add(UNPARSED_ARGUMENTS, Severity::Medium);
+        f.add(UNPARSED_ARGUMENTS, Severity::Low);
         assert_eq!(f.iter().collect::<Vec<_>>(), [NAME_COLLISION, UNPARSED_ARGUMENTS]);
+        assert_eq!(f.max_severity(), Some(Severity::High));
+        assert_eq!(f.severity(UNPARSED_ARGUMENTS), Some(Severity::Medium));
     }
 
     #[test]
@@ -208,10 +214,16 @@ mod tests {
         };
         let org = Uuid::nil();
         let f = Facts::new(uid.clone(), org, RequestInfo::new("s", "responses", "m"), SessionInfo::new("sid", 3));
-        assert_eq!((f.principal, f.org), (uid, org));
+        assert_eq!((f.principal.clone(), f.org), (uid, org));
         assert_eq!((f.request.scope.as_str(), f.request.ingress.as_str(), f.request.model.as_str()), ("s", "responses", "m"));
         assert_eq!((f.session.id.as_str(), f.session.turn), ("sid", 3));
+        assert!(f.detection, "the detectors are on by default");
+        assert!(!f.with_detection(false).detection);
         let c = ToolInvocation::new("n", ToolInput::Text("t".into()), Declared::No);
+        assert_eq!(c.hosts, None);
+        let mut h = HostSet::new();
+        h.insert("a.example");
+        assert_eq!(c.clone().with_hosts(h.clone()).hosts, Some(h));
         assert_eq!((c.name.as_str(), c.input, c.declared), ("n", ToolInput::Text("t".into()), Declared::No));
     }
 }

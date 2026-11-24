@@ -2,8 +2,11 @@
 //! The mapping from gateway-core types into the kernel tool-policy types (SMA-752 Task 7).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use paigasus_kernel::tool_policy::{Declared, Findings, NAME_COLLISION, ToolInput, ToolInvocation, normalise};
+use paigasus_kernel::detect::{DETECTOR_KERNEL, Finding, Severity};
+use paigasus_kernel::tool_policy::{Declared, NAME_COLLISION, ToolInput, ToolInvocation, normalise};
+use serde_json::Value;
 
 use crate::turn::{ToolDefinition, ToolTurn};
 use crate::types::{Format, ToolCall, ToolCallKind};
@@ -36,12 +39,10 @@ pub(crate) fn definition_call_name(d: &ToolDefinition) -> String {
     if d.kind == ToolCallKind::Other && n == "computer_use_preview" { "computer".to_owned() } else { n }
 }
 
-/// The kernel invocation for a call. The name stays raw: the kernel normalises it.
-#[must_use]
-pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
-    let raw = call.display_name();
-    let input = match call.kind {
-        ToolCallKind::Custom | ToolCallKind::ApplyPatch | ToolCallKind::Other => ToolInput::Text(call.arguments.clone()),
+/// The kernel input for call arguments: text for a custom-style call, JSON for the others.
+pub(crate) fn input_for(kind: ToolCallKind, arguments: &str) -> ToolInput {
+    match kind {
+        ToolCallKind::Custom | ToolCallKind::ApplyPatch | ToolCallKind::Other => ToolInput::Text(arguments.to_owned()),
         ToolCallKind::Function
         | ToolCallKind::LegacyFunctionCall
         | ToolCallKind::AnthropicToolUse
@@ -49,8 +50,39 @@ pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
         | ToolCallKind::LocalShell
         | ToolCallKind::Shell
         | ToolCallKind::ToolSearch
-        | ToolCallKind::McpApprovalRequest => ToolInput::Json(call.arguments.clone()),
-    };
+        | ToolCallKind::McpApprovalRequest => ToolInput::Json(arguments.to_owned()),
+    }
+}
+
+/// Whether a call of this kind carries JSON arguments that a definition's JSON schema describes.
+fn has_json_schema(kind: ToolCallKind) -> bool {
+    matches!(kind, ToolCallKind::Function | ToolCallKind::LegacyFunctionCall | ToolCallKind::AnthropicToolUse)
+}
+
+/// The schema of the one definition that declares this call. `None` for zero or two matching
+/// definitions, for a schema that is not an object, for incomplete definitions (the declaring
+/// definition can be one that is not visible), and unless the call is a JSON-schema kind equal
+/// to the definition's kind: a `custom` call never gets a `function` schema (A7).
+#[must_use]
+pub fn call_schema(call: &ToolCall, turn: &ToolTurn) -> Option<Arc<Value>> {
+    let ToolTurn::Parsed(f) = turn else { return None };
+    if !f.definitions_complete || !has_json_schema(call.kind) {
+        return None;
+    }
+    let n = normalise(&call.display_name());
+    let mut hits = f.definitions.iter().filter(|d| definition_call_name(d) == n);
+    let first = hits.next()?;
+    if hits.next().is_some() || first.kind != call.kind {
+        return None;
+    }
+    first.schema.clone().filter(|s| s.is_object())
+}
+
+/// The kernel invocation for a call. The name stays raw: the kernel normalises it.
+#[must_use]
+pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
+    let raw = call.display_name();
+    let input = input_for(call.kind, &call.arguments);
     let declared = match turn {
         ToolTurn::Parsed(f) => {
             let n = normalise(&raw);
@@ -71,21 +103,22 @@ pub fn invocation(call: &ToolCall, turn: &ToolTurn) -> ToolInvocation {
     ToolInvocation::new(raw, input, declared)
 }
 
-/// The request-level findings for one call: `name_collision` when its normalised name is in the set.
+/// The request-level findings for one call: `name_collision` (detector `kernel`, `high`, no
+/// version) when its normalised name is in the set.
 #[must_use]
-pub fn call_findings(call: &ToolCall, collisions: &BTreeSet<String>) -> Findings {
-    let mut f = Findings::new();
+pub fn call_findings(call: &ToolCall, collisions: &BTreeSet<String>) -> Vec<Finding> {
     if collisions.contains(&normalise(&call.display_name())) {
-        f.insert(NAME_COLLISION);
+        vec![Finding::new(DETECTOR_KERNEL, NAME_COLLISION, Severity::High, "")]
+    } else {
+        Vec::new()
     }
-    f
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use paigasus_kernel::tool_policy::{Effect, Facts, RequestInfo, SessionInfo, ToolPolicies, decide};
+    use paigasus_kernel::tool_policy::{Effect, Facts, Findings, RequestInfo, SessionInfo, ToolPolicies, decide};
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
 
@@ -225,7 +258,75 @@ mod tests {
     #[test]
     fn collision_finding_per_call() {
         let set = name_collisions(&[def("a", None), def("A", None), def("b", None)]);
-        assert!(call_findings(&call(" A", ToolCallKind::Function), &set).contains(NAME_COLLISION));
-        assert!(!call_findings(&call("b", ToolCallKind::Function), &set).contains(NAME_COLLISION));
+        let found = call_findings(&call(" A", ToolCallKind::Function), &set);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (found[0].kind.as_str(), found[0].severity, found[0].detector.as_str(), found[0].version.as_str()),
+            (NAME_COLLISION, Severity::High, DETECTOR_KERNEL, "")
+        );
+        assert!(call_findings(&call("b", ToolCallKind::Function), &set).is_empty());
+    }
+
+    #[test]
+    fn call_schema_needs_exactly_one_object_schema() {
+        let with = |name: &str, schema: Option<Value>| {
+            let mut d = def(name, None);
+            d.schema = schema.map(Arc::new);
+            d
+        };
+        let turn_of = |definitions: Vec<ToolDefinition>| {
+            ToolTurn::Parsed(TurnFacts {
+                definitions,
+                definitions_complete: true,
+                ..TurnFacts::default()
+            })
+        };
+        let c = call("read", ToolCallKind::Function);
+        let obj = serde_json::json!({"type": "object"});
+        let one = turn_of(vec![with("read", Some(obj.clone())), with("other", None)]);
+        assert_eq!(call_schema(&c, &one).as_deref(), Some(&obj));
+        let two = turn_of(vec![with("read", Some(obj.clone())), with("Read", Some(obj.clone()))]);
+        assert_eq!(call_schema(&c, &two), None);
+        let boolean = turn_of(vec![with("read", Some(serde_json::json!(true)))]);
+        assert_eq!(call_schema(&c, &boolean), None);
+        assert_eq!(call_schema(&c, &turn_of(vec![with("other", Some(obj))])), None);
+    }
+
+    #[test]
+    fn call_schema_needs_a_json_call_of_the_definition_kind() {
+        let obj = serde_json::json!({"type": "object"});
+        let with_kind = |kind: ToolCallKind| {
+            let mut d = def("read", None);
+            d.kind = kind;
+            d.schema = Some(Arc::new(obj.clone()));
+            d
+        };
+        let complete = |d: ToolDefinition| turn(vec![d], true);
+        // A custom (text) call gets no schema, also from a function definition of the same name.
+        assert_eq!(call_schema(&call("read", ToolCallKind::Custom), &complete(with_kind(ToolCallKind::Function))), None);
+        assert_eq!(call_schema(&call("read", ToolCallKind::Custom), &complete(with_kind(ToolCallKind::Custom))), None);
+        // A JSON call of another kind than the definition gets no schema.
+        assert_eq!(call_schema(&call("read", ToolCallKind::Function), &complete(with_kind(ToolCallKind::Custom))), None);
+        assert_eq!(call_schema(&call("read", ToolCallKind::Function), &complete(with_kind(ToolCallKind::LegacyFunctionCall))), None);
+        // Each JSON-schema kind matches its own definition kind.
+        for k in [ToolCallKind::Function, ToolCallKind::LegacyFunctionCall, ToolCallKind::AnthropicToolUse] {
+            assert_eq!(call_schema(&call("read", k), &complete(with_kind(k))).as_deref(), Some(&obj), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn call_schema_is_none_for_incomplete_definitions() {
+        let mut d = def("read", None);
+        d.schema = Some(Arc::new(serde_json::json!({"type": "object"})));
+        let c = call("read", ToolCallKind::Function);
+        assert!(call_schema(&c, &turn(vec![d.clone()], true)).is_some());
+        assert_eq!(call_schema(&c, &turn(vec![d], false)), None);
+        assert_eq!(call_schema(&c, &ToolTurn::Unavailable("malformed")), None);
+    }
+
+    #[test]
+    fn input_for_picks_json_or_text_by_kind() {
+        assert!(matches!(input_for(ToolCallKind::Custom, "x"), ToolInput::Text(_)));
+        assert!(matches!(input_for(ToolCallKind::Function, "{}"), ToolInput::Json(_)));
     }
 }
