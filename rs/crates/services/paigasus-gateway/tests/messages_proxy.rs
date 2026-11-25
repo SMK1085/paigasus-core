@@ -641,9 +641,14 @@ fn policy_dir() -> TempDir {
 
 /// The enforced request side over the file source in `dir`.
 fn tool_policy(dir: &TempDir) -> Option<Arc<RequestToolPolicy>> {
+    tool_policy_in(dir, TenantMode::Enforce)
+}
+
+/// The request side over the file source in `dir`, in `mode`.
+fn tool_policy_in(dir: &TempDir, mode: TenantMode) -> Option<Arc<RequestToolPolicy>> {
     let settings = ToolPolicySettings {
         enabled: true,
-        default_mode: TenantMode::Enforce,
+        default_mode: mode,
         on_policy_unavailable: OnUnavailable::Closed,
         refresh: Duration::from_secs(30),
         max_stale: Duration::from_secs(300),
@@ -810,4 +815,79 @@ async fn the_request_log_carries_the_endpoint_and_the_beta_values() {
         .find(|l| l.contains("chat completion proxied") && l.contains("endpoint=\"chat_completions\""))
         .unwrap_or_else(|| panic!("no chat line:\n{text}"));
     assert!(!line.contains("anthropic_beta"), "{line}");
+}
+
+/// D19 (fix round 1): with the tool policy on and interception off, a nested duplicate key is a
+/// 400 `invalid-request-schema` in the Anthropic envelope before admission, in enforce and in
+/// log-only mode, and the upstream sees no request. In log-only mode the policy forwards a turn it
+/// cannot read, so only the D19 parse stops the body there. The same body without the duplicate
+/// passes.
+#[tokio::test]
+async fn a_nested_duplicate_is_refused_with_the_policy_on_and_interception_off() {
+    let dir = policy_dir();
+    let dup = r#"{"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read_file","name":"blocked_rm","input_schema":{"type":"object"}}]}"#;
+    for mode in [TenantMode::LogOnly, TenantMode::Enforce] {
+        let mock = MockOpenAi::spawn_json(StatusCode::OK, OK_BODY).await;
+        let store = RecordingStore::new();
+        let app = app(
+            &mock.base_url,
+            Opts {
+                limits: Some(limits(rules(Some(5), None, None), store.clone())),
+                ti: None,
+                tp: tool_policy_in(&dir, mode),
+                ..Opts::default()
+            },
+        );
+        let sent = message(&app, dup).await;
+        assert_eq!(
+            assert_envelope(&sent, StatusCode::BAD_REQUEST, "invalid_request_error").as_deref(),
+            Some("invalid-request-schema"),
+            "{mode:?}"
+        );
+        assert_eq!(store.checks(), 0, "nothing is admitted ({mode:?})");
+        assert_eq!(mock.request_count(), 0, "the upstream sees no request ({mode:?})");
+        let clean = message(&app, &tools_body(&["read_file"])).await;
+        assert_eq!(clean.status, StatusCode::OK, "{mode:?}: {}", clean.text());
+        assert_eq!(store.checks(), 1, "{mode:?}");
+    }
+}
+
+/// D15 (fix round 1): the record cap of the route is `[messages] max_record_bytes`, not the
+/// shared interception limit (1 MiB). With interception on, a record of about 8 KiB passes under
+/// an 8 MiB route cap and is dropped under a 4 KiB route cap. The shared limit would pass it.
+#[tokio::test]
+async fn the_record_and_hold_caps_are_the_messages_limits() {
+    let filler = format!("BIGRECORD{}", "x".repeat(8 * 1024));
+    let start = json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","content":[],
+        "usage":{"input_tokens":3,"output_tokens":1}}});
+    let records = vec![
+        record(&start),
+        record(&json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})),
+        record(&json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":filler}})),
+        record(&json!({"type":"content_block_stop","index":0})),
+        record(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}})),
+        record(&json!({"type":"message_stop"})),
+    ];
+    assert!(records[2].len() > 8 * 1024 && records[2].len() < CoreLimits::defaults().max_record_bytes);
+    let mock = MockOpenAi::spawn_raw_sse(records.clone()).await;
+    let run = |max_record_bytes: usize| {
+        let app = app(
+            &mock.base_url,
+            Opts {
+                messages: Some(MessagesSettings { max_record_bytes, ..settings() }),
+                ti: ti(Arc::new(AllowAll)),
+                ..Opts::default()
+            },
+        );
+        async move { message(&app, STREAM).await }
+    };
+    let wide = run(8 * MIB).await;
+    assert_eq!(wide.status, StatusCode::OK);
+    assert_eq!(wide.text(), records.concat(), "under the route cap every record passes");
+    let narrow = run(4096).await;
+    assert_eq!(narrow.status, StatusCode::OK);
+    assert!(!narrow.text().contains("BIGRECORD"), "over the route cap the record fails: {}", narrow.text());
+    // With no call held, the over-cap record is dropped and the other records pass unchanged.
+    let without_big: String = records.iter().enumerate().filter(|(i, _)| *i != 2).map(|(_, r)| r.as_str()).collect();
+    assert_eq!(narrow.text(), without_big, "only the over-cap record is dropped");
 }

@@ -62,6 +62,7 @@ pub static RESPONSES: Endpoint = Endpoint {
     upstream: Upstream::OpenAi(UpstreamRoute::Responses),
     format: Format::OpenAiResponses,
     parse: parse_responses,
+    strict_with_policy: false,
     non_stream_usage: responses_usage::non_stream_usage,
     stream_usage: || StreamUsage::Responses(ResponsesUsageScanner::new()),
     terminal: RESPONSES_TERMINAL_SSE_ERROR,

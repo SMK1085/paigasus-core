@@ -73,8 +73,12 @@ pub struct Endpoint {
     pub upstream: Upstream,
     /// The wire format the interceptor reads.
     pub format: Format,
-    /// Parse a COPY of the body. The second argument says whether interception is enabled.
+    /// Parse a COPY of the body. The second argument says whether interception is enabled (and,
+    /// with [`strict_with_policy`](Self::strict_with_policy), the tool policy too).
     pub parse: fn(&[u8], bool) -> Result<RequestFacts, GatewayError>,
+    /// SMA-750 D19: the second argument of [`parse`](Self::parse) is also `true` when only the
+    /// tool policy is on. `false` keeps the OpenAI routes as they were.
+    pub strict_with_policy: bool,
     /// The usage a non-stream 2xx body reports.
     pub non_stream_usage: fn(&[u8]) -> BodyUsage,
     /// A new usage reader for one stream.
@@ -95,7 +99,8 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     // Parse a COPY only to read the facts; the ORIGINAL `body` bytes flow upstream verbatim.
     // The parse function splits its failures (SMA-588): a body that PARSED but did not match the
     // type is reported distinctly from one that could not be read at all.
-    let RequestFacts { model, stream, request_estimate } = match (endpoint.parse)(&body, state.tool_interception.is_some()) {
+    let strict = state.tool_interception.is_some() || (endpoint.strict_with_policy && state.tool_policy.is_some());
+    let RequestFacts { model, stream, request_estimate } = match (endpoint.parse)(&body, strict) {
         Ok(facts) => facts,
         Err(e) => return e.into_response(),
     };

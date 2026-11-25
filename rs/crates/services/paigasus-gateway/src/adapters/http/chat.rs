@@ -73,6 +73,7 @@ pub static CHAT: Endpoint = Endpoint {
     upstream: Upstream::OpenAi(UpstreamRoute::ChatCompletions),
     format: Format::OpenAiChat,
     parse: parse_chat,
+    strict_with_policy: false,
     non_stream_usage: usage::non_stream_usage,
     stream_usage: || StreamUsage::Chat(UsageScanner::new()),
     terminal: TERMINAL_SSE_ERROR,

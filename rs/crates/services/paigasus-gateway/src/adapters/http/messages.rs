@@ -10,8 +10,8 @@
 //!   [`AnthropicClient::forward`](crate::adapters::anthropic::AnthropicClient::forward). No other
 //!   caller header goes upstream.
 //! - **Parse** (§ 8): a COPY of the body is read into [`MessagesRequest`]. The failure split is
-//!   SMA-588. D19: a duplicate top-level key is refused in both modes; with interception on, a
-//!   duplicate key at any depth is refused. The pipeline calls the parse before the limits, so a
+//!   SMA-588. D19: a duplicate top-level key is refused in both modes; with interception or the
+//!   tool policy on (`strict_with_policy`), a duplicate key at any depth is refused. The pipeline calls the parse before the limits, so a
 //!   refused request uses no quota.
 //! - **Usage** (D10): the readers of [`anthropic_usage`](super::anthropic_usage).
 //! - **Terminal frame** (D13): [`MESSAGES_TERMINAL_SSE_ERROR`].
@@ -63,6 +63,7 @@ pub static MESSAGES: Endpoint = Endpoint {
     upstream: Upstream::Anthropic(AnthropicRoute::Messages),
     format: Format::AnthropicMessages,
     parse: parse_messages,
+    strict_with_policy: true,
     non_stream_usage: anthropic_usage::non_stream_usage,
     stream_usage: || StreamUsage::Anthropic(AnthropicUsageScanner::new()),
     terminal: MESSAGES_TERMINAL_SSE_ERROR,
@@ -89,7 +90,8 @@ fn messages_limits(ti: &ToolInterception, state: &AppState) -> Limits {
 /// `stream` not a bool) is `InvalidRequestSchema`. D19 runs between the two: serde keeps the last
 /// of two duplicate keys and Anthropic may keep the first, so the gateway could read
 /// `stream:false` while the upstream reads `stream:true`.
-fn parse_messages(body: &[u8], interception: bool) -> Result<RequestFacts, GatewayError> {
+/// `strict` is true when interception or the tool policy is on (D19).
+fn parse_messages(body: &[u8], strict: bool) -> Result<RequestFacts, GatewayError> {
     let value: Value = serde_json::from_slice(body).map_err(|e| match e.classify() {
         serde_json::error::Category::Data => GatewayError::InvalidRequestSchema,
         serde_json::error::Category::Syntax | serde_json::error::Category::Eof | serde_json::error::Category::Io => GatewayError::BadRequestBody,
@@ -98,7 +100,7 @@ fn parse_messages(body: &[u8], interception: bool) -> Result<RequestFacts, Gatew
     if !dups.top.is_empty() {
         return Err(GatewayError::BadRequestBody);
     }
-    if interception && dups.any {
+    if strict && dups.any {
         return Err(GatewayError::InvalidRequestSchema);
     }
     let dto = MessagesRequest::deserialize(&value).map_err(|_| GatewayError::InvalidRequestSchema)?;
@@ -200,17 +202,18 @@ mod tests {
         }
     }
 
-    /// D19: a duplicate key below the top level is a 400 `InvalidRequestSchema` with interception
-    /// on, and passes with interception off. The same body without the duplicate passes.
+    /// D19: a duplicate key below the top level is a 400 `InvalidRequestSchema` in strict mode
+    /// (interception or the tool policy on), and passes otherwise. The same body without the
+    /// duplicate passes.
     #[test]
-    fn a_nested_duplicate_is_refused_only_with_interception() {
+    fn a_nested_duplicate_is_refused_only_with_interception_or_the_policy() {
         for raw in [
             r#"{"model":"m","messages":[{"role":"user","content":"a","content":"b"}]}"#,
             r#"{"model":"m","messages":[],"tools":[{"name":"t","input_schema":{"type":"object","type":"string"}}]}"#,
             r#"{"model":"m","messages":[],"metadata":{"user_id":"a","user_id":"b"}}"#,
         ] {
             assert!(matches!(parse(raw, true), Err(GatewayError::InvalidRequestSchema)), "{raw}");
-            assert!(parse(raw, false).is_ok(), "{raw}: interception off passes the body");
+            assert!(parse(raw, false).is_ok(), "{raw}: interception and the policy off pass the body");
         }
         assert!(parse(r#"{"model":"m","messages":[{"role":"user","content":"a"}],"metadata":{"user_id":"a","User_id":"b"}}"#, true).is_ok());
     }
