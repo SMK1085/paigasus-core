@@ -251,15 +251,35 @@ async fn a_non_stream_blocked_tool_use_is_rewritten_with_the_header() {
     assert_eq!(sent.status, StatusCode::OK);
     let text = sent.text();
     assert!(!text.contains("CANARY"), "{text}");
-    assert!(
-        text.contains("[paigasus] tool call \\\"blocked_rm\\\" was blocked (policy).") || text.contains("was blocked (policy)"),
-        "{text}"
-    );
     let v = sent.json();
+    assert_eq!(v["content"][0], json!({"type":"text","text":"Sure."}), "{v}");
+    assert_eq!(v["content"][1]["type"], "text", "the blocked slot becomes a text block: {v}");
+    assert_eq!(v["content"][1]["text"], "[paigasus] tool call \"blocked_rm\" was blocked (policy).", "{v}");
     assert!(v["content"].as_array().expect("content").iter().all(|b| b["type"] != "tool_use"), "{v}");
+    assert_eq!(v["stop_reason"], "end_turn", "no call is left, so the turn ends: {v}");
     let header = sent.header("paigasus-tool-decisions");
     assert!(!header.is_empty(), "the decisions header is present");
     assert!(header.contains("blocked_rm"), "{header}");
+}
+
+/// One blocked and one allowed call: the blocked slot becomes the notice, the allowed call stays
+/// in its slot, and the stop reason stays `tool_use`.
+#[tokio::test]
+async fn a_non_stream_mixed_body_keeps_the_tool_use_stop_reason() {
+    let body = json!({"id":"msg_1","type":"message","role":"assistant","model":"claude-x",
+        "content":[{"type":"tool_use","id":"toolu_1","name":"blocked_rm","input":{"p":"CANARY"}},
+                   {"type":"tool_use","id":"toolu_2","name":"read_file","input":{"p":1}}],
+        "stop_reason":"tool_use","usage":{"input_tokens":3,"output_tokens":5}})
+    .to_string();
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, body).await;
+    let sent = message(&app(&mock.base_url, ti(Arc::new(BlockNamed)), None), NON_STREAM).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert!(!sent.text().contains("CANARY"), "{}", sent.text());
+    let v = sent.json();
+    assert_eq!(v["content"][0]["type"], "text", "{v}");
+    assert_eq!(v["content"][0]["text"], "[paigasus] tool call \"blocked_rm\" was blocked (policy).", "{v}");
+    assert_eq!(v["content"][1], json!({"type":"tool_use","id":"toolu_2","name":"read_file","input":{"p":1}}), "{v}");
+    assert_eq!(v["stop_reason"], "tool_use", "{v}");
 }
 
 /// § 8, D16: a body that cannot be checked is a 502 under `block`.
