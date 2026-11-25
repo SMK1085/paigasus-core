@@ -181,7 +181,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     let result = state.openai.send(endpoint.route, body, stream).await;
 
     let (response, status) = match result {
-        Ok(UpstreamResponse::Full { status, body: upstream_body }) => {
+        Ok(UpstreamResponse::Full { status, body: upstream_body, .. }) => {
             // Non-stream: the upstream head AND body have both landed, so this is a genuine
             // full-request latency, not just TTFB (see the NOTE on the stream arm below).
             record_upstream_call(status, started, endpoint.name);
@@ -228,7 +228,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                 }
             }
         }
-        Ok(UpstreamResponse::Stream { status, stream: upstream }) => {
+        Ok(UpstreamResponse::Stream { status, stream: upstream, .. }) => {
             // NOTE: for `stream:true` this records TTFB (time-to-first-byte / response head), NOT
             // stream completion — the call is considered "done" for metrics purposes the moment
             // the upstream response head arrives. A mid-stream SSE failure (handled below by the

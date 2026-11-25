@@ -44,7 +44,7 @@ async fn non_stream_returns_upstream_status_and_body_verbatim() {
     let resp = client.chat_completion(sample_body(), false).await.expect("egress succeeds");
 
     match resp {
-        UpstreamResponse::Full { status, body } => {
+        UpstreamResponse::Full { status, body, .. } => {
             assert_eq!(status.as_u16(), 200);
             assert_eq!(body, Bytes::from(canned), "the upstream body is forwarded verbatim");
         }
@@ -63,7 +63,7 @@ async fn non_2xx_upstream_is_returned_verbatim_not_an_error() {
     let resp = client.chat_completion(sample_body(), false).await.expect("a non-2xx upstream is not a send error");
 
     match resp {
-        UpstreamResponse::Full { status, body } => {
+        UpstreamResponse::Full { status, body, .. } => {
             assert_eq!(status.as_u16(), 429);
             assert_eq!(body, Bytes::from(envelope));
         }
@@ -80,7 +80,7 @@ async fn stream_yields_chunks_in_order_unbuffered() {
     let resp = client.chat_completion(sample_body(), true).await.expect("egress succeeds");
 
     let mut stream = match resp {
-        UpstreamResponse::Stream { status, stream } => {
+        UpstreamResponse::Stream { status, stream, .. } => {
             assert_eq!(status.as_u16(), 200);
             stream
         }

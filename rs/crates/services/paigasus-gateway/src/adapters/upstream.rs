@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, HeaderValue};
 
 /// The upstream provider a client talks to. It names the client and the config key in texts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,42 @@ impl std::fmt::Display for Provider {
     }
 }
 
+/// The upstream response headers that the gateway passes on (SMA-750 D8). The other upstream
+/// headers are dropped, and `location` is never kept.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseHead {
+    pub request_id: Option<HeaderValue>,
+    pub retry_after: Option<HeaderValue>,
+    pub should_retry: Option<HeaderValue>,
+    /// The upstream `content-type`. `apply` never writes it.
+    pub content_type: Option<HeaderValue>,
+}
+
+impl ResponseHead {
+    /// Read the D8 headers from an upstream response.
+    pub fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            request_id: headers.get("request-id").cloned(),
+            retry_after: headers.get(reqwest::header::RETRY_AFTER).cloned(),
+            should_retry: headers.get("x-should-retry").cloned(),
+            content_type: headers.get(reqwest::header::CONTENT_TYPE).cloned(),
+        }
+    }
+
+    /// Insert `request-id`, `retry-after` and `x-should-retry` when present. Never `content-type`.
+    pub fn apply(&self, headers: &mut HeaderMap) {
+        if let Some(v) = &self.request_id {
+            headers.insert("request-id", v.clone());
+        }
+        if let Some(v) = &self.retry_after {
+            headers.insert(reqwest::header::RETRY_AFTER, v.clone());
+        }
+        if let Some(v) = &self.should_retry {
+            headers.insert("x-should-retry", v.clone());
+        }
+    }
+}
+
 /// The boxed, UNBUFFERED chunk stream the [`UpstreamResponse::Stream`] path yields. Each item is a
 /// raw upstream body chunk as it arrived off the socket. `'static + Send` so axum can own it.
 /// Dropping it cancels the upstream request (cancel-on-drop).
@@ -57,6 +94,8 @@ pub enum UpstreamResponse {
     Full {
         /// The upstream HTTP status.
         status: StatusCode,
+        /// The D8 response headers and the upstream `content-type`.
+        head: ResponseHead,
         /// The complete upstream response body.
         body: Bytes,
     },
@@ -64,6 +103,8 @@ pub enum UpstreamResponse {
     Stream {
         /// The upstream HTTP status.
         status: StatusCode,
+        /// The D8 response headers and the upstream `content-type`.
+        head: ResponseHead,
         /// The unbuffered upstream byte stream; dropping it cancels the request.
         stream: UpstreamByteStream,
     },
@@ -73,7 +114,7 @@ impl std::fmt::Debug for UpstreamResponse {
     // Manual `Debug`: the stream is not `Debug`, and printing it would consume the body.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UpstreamResponse::Full { status, body } => f.debug_struct("UpstreamResponse::Full").field("status", status).field("body_len", &body.len()).finish(),
+            UpstreamResponse::Full { status, body, .. } => f.debug_struct("UpstreamResponse::Full").field("status", status).field("body_len", &body.len()).finish(),
             UpstreamResponse::Stream { status, .. } => f.debug_struct("UpstreamResponse::Stream").field("status", status).finish_non_exhaustive(),
         }
     }

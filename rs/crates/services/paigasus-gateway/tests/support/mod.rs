@@ -24,7 +24,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 
 /// What a request the mock received looked like (captured before any response is produced).
 #[derive(Clone)]
@@ -35,6 +35,10 @@ pub struct RecordedRequest {
     pub body: Bytes,
     /// The request path the mock saw (SMA-769: which upstream route the gateway called).
     pub path: String,
+    /// The HTTP method the mock saw.
+    pub method: String,
+    /// The raw query string, if any.
+    pub query: Option<String>,
 }
 
 impl RecordedRequest {
@@ -61,6 +65,15 @@ enum MockResponse {
     /// Stream: emit each element VERBATIM as one frame — no `data:` prefix and no terminator are
     /// added, so a test controls line endings and record shape exactly (SMA-677).
     RawSse { chunks: Vec<String> },
+    /// Non-stream with extra response headers and a chosen content type.
+    JsonWithHeaders {
+        status: StatusCode,
+        content_type: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+    /// A `3xx` with a `location` header.
+    Redirect { status: StatusCode, location: String },
 }
 
 /// A Drop guard carried inside the abortable-stream response body: dropping it (which hyper does
@@ -125,6 +138,22 @@ impl MockOpenAi {
         Self::spawn(MockResponse::RawSse { chunks }).await
     }
 
+    /// Start a mock that answers with `status`, the content type, the extra headers and the body.
+    pub async fn spawn_json_with_headers(status: StatusCode, content_type: &str, headers: Vec<(String, String)>, body: impl Into<String>) -> Self {
+        Self::spawn(MockResponse::JsonWithHeaders {
+            status,
+            content_type: content_type.to_owned(),
+            headers,
+            body: body.into(),
+        })
+        .await
+    }
+
+    /// Start a mock that answers every request with a redirect.
+    pub async fn spawn_redirect(status: StatusCode, location: String) -> Self {
+        Self::spawn(MockResponse::Redirect { status, location }).await
+    }
+
     /// How many requests reached the upstream (SMA-677: a refused request makes none).
     pub fn request_count(&self) -> usize {
         self.state.requests.load(Ordering::SeqCst)
@@ -136,7 +165,13 @@ impl MockOpenAi {
             recorded: Mutex::new(None),
             requests: AtomicUsize::new(0),
         });
-        let router = Router::new().route("/v1/chat/completions", post(handle)).route("/v1/responses", post(handle)).with_state(state.clone());
+        let router = Router::new()
+            .route("/v1/chat/completions", post(handle))
+            .route("/v1/responses", post(handle))
+            .route("/v1/messages", post(handle))
+            .route("/v1/messages/count_tokens", post(handle))
+            .route("/v1/models", get(handle))
+            .with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
@@ -157,15 +192,29 @@ impl MockOpenAi {
 
 /// Records the inbound request, then answers per the configured [`MockResponse`]. `Bytes` is the
 /// body-consuming extractor, so it comes last.
-async fn handle(State(state): State<Arc<MockState>>, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle(State(state): State<Arc<MockState>>, method: axum::http::Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
     *state.recorded.lock().expect("recorded lock not poisoned") = Some(RecordedRequest {
         headers: headers.clone(),
         body: body.clone(),
         path: uri.path().to_owned(),
+        method: method.to_string(),
+        query: uri.query().map(str::to_owned),
     });
 
     match &state.response {
+        MockResponse::JsonWithHeaders { status, content_type, headers, body } => {
+            let mut b = Response::builder().status(*status).header(axum::http::header::CONTENT_TYPE, content_type.as_str());
+            for (k, v) in headers {
+                b = b.header(k.as_str(), v.as_str());
+            }
+            b.body(Body::from(body.clone())).expect("build response")
+        }
+        MockResponse::Redirect { status, location } => Response::builder()
+            .status(*status)
+            .header(axum::http::header::LOCATION, location.as_str())
+            .body(Body::empty())
+            .expect("build redirect"),
         MockResponse::DelayedJson { delay, status, body } => {
             tokio::time::sleep(*delay).await;
             (*status, [(axum::http::header::CONTENT_TYPE, "application/json")], body.clone()).into_response()
