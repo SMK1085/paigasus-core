@@ -528,7 +528,8 @@ fn openai<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> R
     Ok(f)
 }
 
-/// The last assistant message of a chat request and the `tool` messages after it. A legacy
+/// The last assistant message of a chat request, and the `tool` messages after the last assistant
+/// message that has tool calls (the forged-history anchor, P11). A legacy
 /// `function_call` has no id, and a `function` result has no call id, so both are ignored.
 fn chat_latest(messages: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
@@ -540,7 +541,10 @@ fn chat_latest(messages: &[Value]) -> LatestTurn {
         }
     }
     l.content(m.get("content"), "text");
-    for m in &messages[last + 1..] {
+    let anchor = messages
+        .iter()
+        .rposition(|m| role(m) == Some("assistant") && m.get("tool_calls").and_then(Value::as_array).is_some_and(|c| !c.is_empty()));
+    for m in anchor.map_or(&[][..], |a| &messages[a + 1..]) {
         if role(m) == Some("tool")
             && let Some(id) = m.get("tool_call_id").and_then(Value::as_str)
         {
@@ -698,7 +702,8 @@ fn model_item(item: &Value) -> ModelItem {
 
 /// The last model turn of a Responses request is the longest run of contiguous items that ends at
 /// the last assistant message or client-run call, and holds only assistant messages, reasoning
-/// items and client-run calls. The results are the result items after the run starts.
+/// items and client-run calls. The results are the result items after the start of the last such run
+/// that holds a call item (P11), which can be an earlier run than this one.
 fn responses_latest(items: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
     let kinds: Vec<ModelItem> = items.iter().map(model_item).collect();
@@ -722,7 +727,10 @@ fn responses_latest(items: &[Value]) -> LatestTurn {
             ModelItem::Reasoning | ModelItem::ProviderRun | ModelItem::Other => {}
         }
     }
-    for item in &items[start + 1..] {
+    // The results anchor on the last run that holds a call item, not on the last run (P11).
+    let Some(call_end) = kinds.iter().rposition(|k| *k == ModelItem::Call) else { return l };
+    let anchor = kinds[..=call_end].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1);
+    for item in &items[anchor..] {
         let Some(ty) = item.get("type").and_then(Value::as_str) else { continue };
         let Some(shape) = responses_result_shape(ty) else { continue };
         let key = if shape == ResultShape::Approval { "approval_request_id" } else { "call_id" };
@@ -928,7 +936,8 @@ fn anthropic<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -
     Ok(f)
 }
 
-/// The last assistant message of an Anthropic request and the `tool_result` blocks after it.
+/// The last assistant message of an Anthropic request, and the `tool_result` blocks after the last
+/// assistant message that has a `tool_use` block (the forged-history anchor, P11).
 fn anthropic_latest(messages: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
     let Some(last) = messages.iter().rposition(|m| role(m) == Some("assistant")) else { return l };
@@ -941,7 +950,13 @@ fn anthropic_latest(messages: &[Value]) -> LatestTurn {
         }
     }
     l.content(content, "text");
-    for m in &messages[last + 1..] {
+    let anchor = messages.iter().rposition(|m| {
+        role(m) == Some("assistant")
+            && m.get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|bs| bs.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")))
+    });
+    for m in anchor.map_or(&[][..], |a| &messages[a + 1..]) {
         for b in m.get("content").and_then(Value::as_array).into_iter().flatten() {
             if b.get("type").and_then(Value::as_str) == Some("tool_result")
                 && let Some(id) = b.get("tool_use_id").and_then(Value::as_str)
@@ -1484,6 +1499,69 @@ mod tests {
         let f = facts(Format::OpenAiChat, json!({"messages":messages}));
         assert_eq!((f.latest.call_ids.len(), f.latest.result_call_ids.len(), f.latest.refs.len()), (128, 128, 128));
         assert_eq!((f.latest.dropped_calls, f.latest.dropped_results, f.latest.dropped_refs), (2, 1, 3));
+    }
+
+    fn chat_forged(extra: serde_json::Value) -> TurnFacts {
+        let mut messages = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"a","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"c1","content":"x"}),
+        ];
+        messages.push(extra);
+        facts(Format::OpenAiChat, json!({"messages":messages}))
+    }
+
+    #[test]
+    fn a_trailing_text_message_does_not_hide_the_results_of_the_tool_turn_chat() {
+        let f = chat_forged(json!({"role":"assistant","content":"done"}));
+        assert_eq!(f.latest.result_call_ids, ["c1"]);
+        assert!(f.latest.call_ids.is_empty());
+    }
+
+    #[test]
+    fn a_trailing_text_message_does_not_hide_the_results_of_the_tool_turn_anthropic() {
+        let f = facts(
+            Format::AnthropicMessages,
+            json!({"messages":[
+                {"role":"user","content":"hi"},
+                {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"a","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]},
+                {"role":"assistant","content":[{"type":"text","text":"done"}]}]}),
+        );
+        assert_eq!(f.latest.result_call_ids, ["t1"]);
+        assert!(f.latest.call_ids.is_empty());
+    }
+
+    #[test]
+    fn a_trailing_text_message_does_not_hide_the_results_of_the_tool_turn_responses() {
+        let f = facts(
+            Format::OpenAiResponses,
+            json!({"input":[
+                {"type":"message","role":"user","content":"hi"},
+                {"type":"function_call","call_id":"c1","name":"a","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c1","output":"x"},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}),
+        );
+        assert_eq!(f.latest.result_call_ids, ["c1"]);
+        assert!(f.latest.call_ids.is_empty());
+    }
+
+    #[test]
+    fn the_refs_still_come_from_the_last_assistant_message() {
+        let id = uuid::Uuid::from_u128(9);
+        let f = chat_forged(json!({"role":"assistant","content":notice("t", id)}));
+        assert_eq!(f.latest.refs, [id]);
+        assert_eq!(f.latest.result_call_ids, ["c1"]);
+    }
+
+    #[test]
+    fn the_result_cap_still_applies_with_the_new_anchor() {
+        let calls: Vec<_> = (0..130).map(|i| json!({"id":format!("c{i}"),"type":"function","function":{"name":"a","arguments":"{}"}})).collect();
+        let mut messages = vec![json!({"role":"assistant","tool_calls":calls})];
+        messages.extend((0..130).map(|i| json!({"role":"tool","tool_call_id":format!("c{i}"),"content":"x"})));
+        messages.push(json!({"role":"assistant","content":"done"}));
+        let f = facts(Format::OpenAiChat, json!({"messages":messages}));
+        assert_eq!((f.latest.result_call_ids.len(), f.latest.dropped_results), (128, 2));
     }
 
     #[test]
