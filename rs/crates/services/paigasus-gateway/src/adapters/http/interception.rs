@@ -1023,8 +1023,8 @@ mod tests {
 
     /// SMA-855 D35, S3 (Task 23, the Task 21 carry), end to end through the relay: two holds, the
     /// real Cedar decider with the detector pipeline, and a slow webhook that takes most of the
-    /// hold budget. Only an Anthropic stream has two holds, and the gateway has no Anthropic route
-    /// yet, so this test drives the relay itself. Time is paused, so the values are exact.
+    /// hold budget. Only an Anthropic stream has two holds. The test stays a unit test because it
+    /// pins the relay timing: it drives the relay itself, and time is paused, so the values are exact.
     ///
     /// Both holds complete at t = 0. The first run ends at 600 ms, inside its deadline of 750 ms.
     /// The second run starts at 600 ms and ends at the absolute deadline `hold start +

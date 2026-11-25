@@ -3,8 +3,8 @@
 //! Cedar decider and a file policy source, against the mock upstream.
 //!
 //! A test that names no endpoint runs for each endpoint of [`EPS`]: Chat non-stream, Chat stream,
-//! Responses non-stream and Responses stream. The Anthropic endpoint does not exist in the gateway
-//! yet (SMA-750), so it has no test here.
+//! Responses non-stream and Responses stream. The Anthropic route (`/v1/messages`, SMA-750) has
+//! its own test at the end of this file.
 
 mod support;
 
@@ -2341,4 +2341,80 @@ mod detectors {
             std::panic::panic_any(self.0)
         }
     }
+}
+
+// --- SMA-750: the Anthropic route ------------------------------------------------------------
+
+/// SMA-750 D9, § 6.5: the request policy applies through `POST /v1/messages`. The denied definition
+/// leaves the upstream body, the request entry is the first frame of the stream, and the denied
+/// call is blocked and never reaches the client.
+#[tokio::test]
+async fn the_anthropic_route_applies_the_request_policy() {
+    use paigasus_gateway::adapters::anthropic::AnthropicClient;
+    use paigasus_gateway::adapters::http::MessagesSettings;
+    use paigasus_gateway::config::AnthropicConfig;
+
+    let dir = policy_dir(FLOOR, TENANT);
+    let record = |v: Value| format!("event: {}\ndata: {v}\n\n", v["type"].as_str().expect("a type"));
+    let mut records = vec![record(
+        json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}),
+    )];
+    for (i, (name, input)) in CALLS.iter().enumerate() {
+        records.push(record(
+            json!({"type":"content_block_start","index":i,"content_block":{"type":"tool_use","id":format!("toolu_{i}"),"name":name,"input":{}}}),
+        ));
+        records.push(record(json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":input}})));
+        records.push(record(json!({"type":"content_block_stop","index":i})));
+    }
+    records.push(record(
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5}}),
+    ));
+    records.push(record(json!({"type":"message_stop"})));
+    let mock = MockOpenAi::spawn_raw_sse(records).await;
+    let cfg = AnthropicConfig {
+        base_url: mock.base_url.clone(),
+        api_key: secrecy::SecretString::from("operator-anthropic-test-key".to_owned()),
+        extra_ca_bundle_path: None,
+        default_version: "2023-06-01".to_owned(),
+        non_stream_timeout_secs: 600,
+    };
+    let app = router(AppState {
+        iam: ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN),
+        openai: Arc::new(openai(&mock.base_url, Duration::from_secs(30))),
+        max_request_bytes: MIB,
+        capabilities: Capabilities { chat_stream: true },
+        limits: None,
+        dpop_enabled: false,
+        tool_interception: cedar(),
+        tool_policy: tool_policy(&dir, TenantMode::Enforce),
+        responses: None,
+        anthropic: Some(Arc::new(AnthropicClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(300)).expect("client builds"))),
+        messages: Some(Arc::new(MessagesSettings {
+            max_request_bytes: 32 * MIB,
+            max_record_bytes: 8 * MIB,
+            max_held_bytes: 32 * MIB,
+            max_hold: Duration::from_secs(600),
+        })),
+    });
+    let tools: Vec<Value> = ["read_file", "blocked_rm"]
+        .iter()
+        .map(|n| json!({"name":n,"description":"d","input_schema":{"type":"object"}}))
+        .collect();
+    let body = json!({"model":"claude-x","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}],"tools":tools}).to_string();
+    let sent = send_to(&app, "/v1/messages", &body).await;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    let text = sent.text();
+    assert!(!text.contains("CANARY"), "{text}");
+    assert!(text.contains(r#"[paigasus] tool call \"blocked_rm\" was blocked (policy)."#), "{text}");
+    let first = text.split("\n\n").next().expect("a first frame");
+    let entry: Value = serde_json::from_str(first.strip_prefix(": paigasus-decision ").expect("a decision comment first")).expect("json");
+    assert_eq!(
+        (entry["side"].as_str(), entry["tool"].as_str(), entry["action"].as_str(), entry["enforced"].as_bool()),
+        (Some("request"), Some("blocked_rm"), Some("remove-definition"), Some(true)),
+        "{entry}"
+    );
+    let up: Value = serde_json::from_slice(&mock.recorded().expect("recorded").body).expect("json");
+    let names: Vec<&str> = up["tools"].as_array().expect("tools").iter().map(|t| t["name"].as_str().expect("name")).collect();
+    assert_eq!(names, ["read_file"], "the denied definition is not sent upstream");
+    assert_decided_with_the_snapshot(&comments(&text));
 }
