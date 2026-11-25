@@ -10,6 +10,7 @@
 //! but never authorizes, and carries no body limit.
 
 pub mod anthropic_error;
+pub mod anthropic_passthrough;
 pub mod anthropic_usage;
 pub mod auth;
 pub(crate) mod bytes;
@@ -185,6 +186,7 @@ pub fn router(state: AppState) -> Router {
             };
             Router::new()
                 .route("/v1/messages", post(messages::create_message).fallback(anthropic_error::method_not_allowed))
+                .route("/v1/messages/count_tokens", post(anthropic_passthrough::count_tokens).fallback(anthropic_error::method_not_allowed))
                 .route_layer(axum::middleware::from_fn_with_state(anthropic_auth, require_iam_auth))
                 .route_layer(DefaultBodyLimit::max(settings.max_request_bytes))
                 .route_layer(axum::middleware::map_response(anthropic_error::rerender))
@@ -192,6 +194,27 @@ pub fn router(state: AppState) -> Router {
         None => Router::new()
             .route("/v1/messages", any(anthropic_error::not_found))
             .route("/v1/messages/count_tokens", any(anthropic_error::not_found)),
+    };
+
+    // SMA-750 D11, D20: `GET /v1/models` is a group of its own, mounted with `[messages]`. The
+    // `anthropic-version` check is the OUTERMOST layer, outside auth and the re-render, so an OpenAI
+    // caller always gets the OpenAI-envelope 404 and no credential challenge. With the header, the
+    // request goes through the Anthropic auth, the body limit and the re-render. With `[messages]`
+    // off the path is not mounted and answers the plain 404 of an unknown path.
+    let models = match &state.messages {
+        Some(settings) => {
+            let anthropic_auth = AuthState {
+                accept_x_api_key: true,
+                ..auth_state.clone()
+            };
+            Router::new()
+                .route("/v1/models", get(anthropic_passthrough::list_models).fallback(anthropic_error::method_not_allowed))
+                .route_layer(axum::middleware::from_fn_with_state(anthropic_auth, require_iam_auth))
+                .route_layer(DefaultBodyLimit::max(settings.max_request_bytes))
+                .route_layer(axum::middleware::map_response(anthropic_error::rerender))
+                .route_layer(axum::middleware::from_fn(anthropic_passthrough::require_anthropic_version))
+        }
+        None => Router::new(),
     };
 
     // SMA-505: its own group, because discovery authenticates but does not authorize, and needs
@@ -206,6 +229,7 @@ pub fn router(state: AppState) -> Router {
         .merge(protected)
         .merge(responses)
         .merge(messages)
+        .merge(models)
         .merge(discovery)
         .layer(paigasus_observability::http_metrics_layer("gateway"))
         // SMA-504 D10: mirrors IAM's placement exactly — outermost, so an auth rejection is
