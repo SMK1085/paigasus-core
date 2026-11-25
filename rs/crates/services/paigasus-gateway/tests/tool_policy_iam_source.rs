@@ -461,32 +461,49 @@ async fn an_iam_that_is_down_at_boot_does_not_stop_the_gateway() {
     assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Unavailable));
 }
 
-// --- SMA-753 D16: a set with history conditions loads with empty slots ---------------------------
+// --- SMA-753: a set with history conditions loads; its slots are still empty ---------------------
 //
-// This build fills no history slot. The kernel builds each Cedar request with no schema
-// (`decide.rs`), so a policy that reads `context.<slot>` errors. An errored forbid denies and an
-// errored permit does not allow (SMA-752 D26). So only the history policies fail closed, and the
-// other policies of the set still decide. A rollback from PR 2 to this build is then safe.
+// The cache maps and validates the conditions at load (PR 2), but no code fills a slot yet. The
+// kernel builds each Cedar request with no schema (`decide.rs`), so a policy that reads
+// `context.<slot>` errors. An errored forbid denies and an errored permit does not allow (SMA-752
+// D26). So only the history policies fail closed, and the other policies of the set still decide.
 
-fn slot_condition(policy_id: &str) -> pb::HistoryCondition {
+/// The window limit that these answers report.
+const MAX_WINDOW_MS: u64 = 86_400_000;
+
+/// A valid `formerly` condition on `slot`: a call of `rm` in the session within one minute.
+fn slot_condition(slot: &str, policy_id: &str) -> pb::HistoryCondition {
+    let tool = pb::HistoryPredicate {
+        node: Some(pb::history_predicate::Node::Tool(pb::ToolMatch {
+            name_key: "rm".to_owned(),
+            any_catalog_tool: false,
+        })),
+    };
     pb::HistoryCondition {
-        slot: "h0".to_owned(),
+        slot: slot.to_owned(),
         policy_id: policy_id.to_owned(),
-        ..Default::default()
+        scope: pb::HistoryScope::Session as i32,
+        window_ms: 60_000,
+        shape: Some(pb::history_condition::Shape::Formerly(pb::FormerlyShape { predicate: Some(tool) })),
     }
 }
 
 /// A tenant answer of IAM with one history condition on the slot `h0`.
 fn tenant_with_slot(mode: pb::ToolPolicyMode, text: &str) -> pb::GetCompiledToolPoliciesResponse {
     let mut r = tenant_response(5, mode, text);
-    r.set.as_mut().expect("set").conditions.push(slot_condition("t"));
+    let set = r.set.as_mut().expect("set");
+    set.conditions.push(slot_condition("h0", "t"));
+    set.max_window_ms = MAX_WINDOW_MS;
     r
 }
 
-/// A floor answer of IAM with one history condition on the slot `h0`.
+/// A floor answer of IAM with one history condition on the slot `fh0`. A tenant slot must not
+/// equal a floor slot, so the floor uses its own name.
 fn floor_with_slot(text: &str) -> pb::GetCompiledFloorPoliciesResponse {
     let mut r = floor_response(2, text);
-    r.set.as_mut().expect("set").conditions.push(slot_condition("floor-h"));
+    let set = r.set.as_mut().expect("set");
+    set.conditions.push(slot_condition("fh0", "floor-h"));
+    set.max_window_ms = MAX_WINDOW_MS;
     r
 }
 
@@ -574,7 +591,7 @@ async fn a_tenant_set_with_a_history_condition_loads_and_only_its_slot_policies_
 
 #[tokio::test]
 async fn a_floor_with_a_history_condition_loads_and_its_slot_forbid_denies_in_every_mode() {
-    const FLOOR_SLOTS: &str = r#"@id("floor-h") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when { context.h0 };
+    const FLOOR_SLOTS: &str = r#"@id("floor-h") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when { context.fh0 };
         @id("floor-del") forbid(principal, action == Pgs::Gateway::Action::"del", resource);"#;
     const PERMIT: &str = r#"@id("p") permit(principal, action, resource);"#;
     for mode in [pb::ToolPolicyMode::Enforce, pb::ToolPolicyMode::LogOnly, pb::ToolPolicyMode::Off] {
@@ -595,7 +612,7 @@ async fn a_negated_slot_forbid_also_denies() {
     // empty slot errors too, so the forbid denies. It must never allow.
     const TENANT_NOT: &str = r#"@id("p") permit(principal, action, resource);
         @id("t") forbid(principal, action == Pgs::Gateway::Action::"rm", resource) when { !context.h0 };"#;
-    const FLOOR_NOT: &str = r#"@id("floor-h") forbid(principal, action == Pgs::Gateway::Action::"del", resource) when { !context.h0 };"#;
+    const FLOOR_NOT: &str = r#"@id("floor-h") forbid(principal, action == Pgs::Gateway::Action::"del", resource) when { !context.fh0 };"#;
     let s = start().await;
     s.script_floor(Ok(floor_with_slot(FLOOR_NOT)));
     s.script_tenant(Ok(tenant_with_slot(pb::ToolPolicyMode::Enforce, TENANT_NOT)));

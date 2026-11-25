@@ -14,8 +14,8 @@ use bytes::Bytes;
 use metrics::{counter, histogram};
 use paigasus_gateway_core::decision_log::FindingRecord;
 use paigasus_gateway_core::{
-    DecisionContext, Format, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, RequestPlan, RequestScreen, SeenHosts, SessionContext, TenantMode, TenantPart,
-    ToolTurn, TurnFacts, ingress, name_collisions, plan_request, rewrite_request, screen_request, screens, seen_hosts,
+    DecisionContext, Format, HistoryPolicy, OnUnavailable, PolicySet, PolicySnapshot, RefusalCause, RequestAction, RequestEntry, RequestPlan, RequestScreen, SeenHosts, SessionContext, TenantMode,
+    TenantPart, ToolTurn, TurnFacts, ingress, name_collisions, plan_request, rewrite_request, screen_request, screens, seen_hosts,
 };
 use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_KERNEL, Evidence, Finding, HostSet, NAME_COLLISION, Severity, detector_error};
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
@@ -23,7 +23,7 @@ use paigasus_kernel::{Prn, to_cedar_uid};
 use paigasus_observability::names;
 use uuid::Uuid;
 
-use super::cache::{Lookup, PolicyCache};
+use super::cache::{CompiledTenant, FloorEntry, Lookup, PolicyCache};
 use super::decider::count_finding;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
@@ -32,6 +32,24 @@ use crate::config::{DetectorSettings, ToolPolicySettings};
 use crate::domain::detectors::{DetectBatch, PipelineOutput, SCAN_LIMIT, Side as DetectSide, Stage, Subject, UNSCANNED_SHAPE};
 use crate::domain::org_of;
 use crate::domain::tool_policy::TenantSettings;
+
+/// The history policy that a snapshot carries (SMA-753 spec P6): `None` when it has no condition
+/// and no field to store, so a request with no history rule pays nothing for it.
+fn carried(history: Arc<HistoryPolicy>) -> Option<Arc<HistoryPolicy>> {
+    (!history.conditions().is_empty() || !history.fields().is_empty()).then_some(history)
+}
+
+/// The policies, the tenant part and the history policy of a request whose floor is available.
+/// An evaluated tenant set brings its own history policy. Mode `off` and an unavailable tenant
+/// set get the floor conditions alone (spec P7).
+fn policies_of(cache: &PolicyCache, org: Uuid, floor: &FloorEntry, tenant: Option<Lookup<CompiledTenant>>) -> (Arc<ToolPolicies>, TenantPart, Option<Arc<HistoryPolicy>>) {
+    let (policies, part, history) = match tenant {
+        None => (Arc::clone(&floor.floor_only), TenantPart::Off, cache.floor_history(org, floor)),
+        Some(Lookup::Ready(t)) => (t.policies, TenantPart::Evaluated, t.history),
+        Some(Lookup::Unavailable) => (Arc::clone(&floor.floor_only), TenantPart::Unavailable, cache.floor_history(org, floor)),
+    };
+    (policies, part, carried(history))
+}
 
 /// Why the request side refuses a request. Each refusal is a 400 (P-10, SMA-776).
 /// `UnreadableTurn` and `UnknownToolChoice` are a 400 `invalid-request-body`.
@@ -294,34 +312,33 @@ impl RequestToolPolicy {
     }
 
     /// The policies of a request (§ 6.4). The whole lookup waits at most `load_timeout` (D31).
-    async fn policy_set(&self, ctx: &DecisionContext, org: Option<Uuid>, mode: TenantMode, on: OnUnavailable, model: &str, format: Format) -> PolicySet {
+    async fn policy_set(&self, ctx: &DecisionContext, org: Option<Uuid>, mode: TenantMode, on: OnUnavailable, model: &str, format: Format) -> (PolicySet, Option<Arc<HistoryPolicy>>) {
         // P-6: a PRN that does not parse is the same case as an unavailable floor. A scope that
         // parses but names no org has no resource to evaluate against, so it is unavailable too.
         let (Some(org), Ok(principal)) = (org, Prn::parse(&ctx.principal)) else {
-            return PolicySet::Unavailable;
+            return (PolicySet::Unavailable, None);
         };
         let deadline = tokio::time::Instant::now() + self.settings.load_timeout;
         // The cache ends each wait at `deadline` and then runs its `open` fallback, so no outer
         // timeout is needed: an outer one would drop that fallback (CodeRabbit, PR 475).
         let Lookup::Ready(floor) = self.cache.floor_until(on, deadline).await else {
-            return PolicySet::Unavailable;
+            return (PolicySet::Unavailable, None);
         };
-        let (policies, tenant): (Arc<ToolPolicies>, TenantPart) = if mode == TenantMode::Off {
+        let tenant = if mode == TenantMode::Off {
             // The tenant set is not consulted in mode off (P-4).
-            (Arc::clone(&floor.floor_only), TenantPart::Off)
+            None
         } else {
-            match self.cache.tenant_until(org, &floor, on, deadline).await {
-                Lookup::Ready(t) => (t, TenantPart::Evaluated),
-                Lookup::Unavailable => (Arc::clone(&floor.floor_only), TenantPart::Unavailable),
-            }
+            Some(self.cache.tenant_until(org, &floor, on, deadline).await)
         };
+        let (policies, tenant, history) = policies_of(&self.cache, org, &floor, tenant);
         let facts = Facts::new(to_cedar_uid(&principal), org, RequestInfo::new(ctx.scope.clone(), ingress(format), model), SessionInfo::placeholder()).with_detection(self.detectors.enabled);
-        PolicySet::Available {
+        let set = PolicySet::Available {
             policies,
             floor_only: Arc::clone(&floor.floor_only),
             tenant,
             facts,
-        }
+        };
+        (set, history)
     }
 
     /// The policies of a request when the source returns the tenant settings (spec §9.3, R2).
@@ -330,7 +347,7 @@ impl RequestToolPolicy {
     /// floor lookup always uses the GLOBAL fail mode: a floor outage never follows a tenant value
     /// (spec §3.4, preflight F6). The tenant lookup always runs, also in mode `off`, because a
     /// fresh load can change the mode. The settings after the lookup (`fin`) decide the mode.
-    async fn policy_set_from_source(&self, ctx: &DecisionContext, org: Uuid, model: &str, format: Format) -> (PolicySet, TenantSettings) {
+    async fn policy_set_from_source(&self, ctx: &DecisionContext, org: Uuid, model: &str, format: Format) -> (PolicySet, Option<Arc<HistoryPolicy>>, TenantSettings) {
         let global = self.settings.on_policy_unavailable;
         let pre = self.cache.tenant_settings(org).unwrap_or(TenantSettings {
             mode: TenantMode::Enforce,
@@ -338,26 +355,20 @@ impl RequestToolPolicy {
         });
         let fin_of = || self.cache.tenant_settings(org).unwrap_or(pre);
         let Ok(principal) = Prn::parse(&ctx.principal) else {
-            return (PolicySet::Unavailable, fin_of());
+            return (PolicySet::Unavailable, None, fin_of());
         };
         let deadline = tokio::time::Instant::now() + self.settings.load_timeout;
         let Lookup::Ready(floor) = self.cache.floor_until(global, deadline).await else {
-            return (PolicySet::Unavailable, fin_of());
+            return (PolicySet::Unavailable, None, fin_of());
         };
         // The set and the settings come from one cache entry, so a load that lands between two
         // reads cannot pair a set with the mode of another load. `pre.on_unavailable` is only the
         // default: a stored entry with settings decides the fallback by its own fail mode.
         let (tenant, settings) = self.cache.tenant_with_settings_until(org, &floor, pre.on_unavailable, deadline).await;
         let fin = settings.unwrap_or(pre);
-        let (policies, part): (Arc<ToolPolicies>, TenantPart) = if fin.mode == TenantMode::Off {
-            // The tenant set is not consulted in mode off (P-4), even when the lookup returned one.
-            (Arc::clone(&floor.floor_only), TenantPart::Off)
-        } else {
-            match tenant {
-                Lookup::Ready(t) => (t, TenantPart::Evaluated),
-                Lookup::Unavailable => (Arc::clone(&floor.floor_only), TenantPart::Unavailable),
-            }
-        };
+        // The tenant set is not consulted in mode off (P-4), even when the lookup returned one.
+        let tenant = (fin.mode != TenantMode::Off).then_some(tenant);
+        let (policies, part, history) = policies_of(&self.cache, org, &floor, tenant);
         let facts = Facts::new(to_cedar_uid(&principal), org, RequestInfo::new(ctx.scope.clone(), ingress(format), model), SessionInfo::placeholder()).with_detection(self.detectors.enabled);
         (
             PolicySet::Available {
@@ -366,6 +377,7 @@ impl RequestToolPolicy {
                 tenant: part,
                 facts,
             },
+            history,
             fin,
         )
     }
@@ -478,11 +490,11 @@ impl RequestToolPolicy {
 
     async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refused> {
         let org = org_of(&ctx.scope);
-        let (mut set, mode, on) = match org {
+        let (mut set, history, mode, on) = match org {
             // The source returns the tenant settings: they decide the mode and the fail mode. The
             // turn check follows the lookup, because the lookup can change the mode.
             Some(o) if self.settings.settings_from_source => {
-                let (set, fin) = self.policy_set_from_source(ctx, o, model, format).await;
+                let (set, history, fin) = self.policy_set_from_source(ctx, o, model, format).await;
                 // A floor outage follows the global value, never the tenant's (spec §3.4, F6).
                 let on = if matches!(set, PolicySet::Unavailable) {
                     self.settings.on_policy_unavailable
@@ -490,13 +502,14 @@ impl RequestToolPolicy {
                     fin.on_unavailable
                 };
                 self.check_turn(ctx, turn, fin.mode)?;
-                (set, fin.mode, on)
+                (set, history, fin.mode, on)
             }
             _ => {
                 // D7, D34: the settings of the scope's org; without an org, the global values.
                 let (mode, on) = org.map_or((self.settings.default_mode, self.settings.on_policy_unavailable), |o| self.settings.tenant(o));
                 self.check_turn(ctx, turn, mode)?;
-                (self.policy_set(ctx, org, mode, on, model, format).await, mode, on)
+                let (set, history) = self.policy_set(ctx, org, mode, on, model, format).await;
+                (set, history, mode, on)
             }
         };
         // Spec D4, D5, F14: link only when the history is on, the org is known and the mode is
@@ -521,7 +534,10 @@ impl RequestToolPolicy {
         } else {
             ctx
         };
-        let snapshot = PolicySnapshot::new(set, mode, on);
+        let mut snapshot = PolicySnapshot::new(set, mode, on);
+        if let Some(h) = history {
+            snapshot = snapshot.with_history(h);
+        }
 
         let (body, entries, seen) = if let ToolTurn::Parsed(facts) = turn {
             // One finding per colliding tool name (SMA-755 § 5.9).
@@ -607,9 +623,9 @@ mod tests {
     use crate::adapters::policy_source::iam::tenant_from_response;
     use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, Snap, chat_request, settings, settings_from_source};
     use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
-    use paigasus_proto::paigasus::iam::v1::{
-        CompiledToolPolicySet, GetCompiledToolPoliciesResponse, HistoryCondition, ToolPolicyFailMode, ToolPolicyMode, ToolPolicySetKind, ToolPolicySettings as ProtoSettings,
-    };
+    use paigasus_gateway_core::HistoryPolicy;
+    use paigasus_kernel::tool_policy::history::{Catalog, Part};
+    use paigasus_proto::paigasus::iam::v1::{CompiledToolPolicySet, GetCompiledToolPoliciesResponse, ToolPolicyFailMode, ToolPolicyMode, ToolPolicySetKind, ToolPolicySettings as ProtoSettings};
 
     const FORBID_X: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"x", resource);"#;
 
@@ -1174,7 +1190,7 @@ mod tests {
     }
 
     /// A source that answers as IAM does: a proto answer, mapped by the IAM adapter. Its tenant set
-    /// holds a history condition. The set loads, and its slot `h0` stays empty (SMA-753 D16).
+    /// holds a valid history condition. The set loads. No code fills the slot `h0` yet.
     struct IamHistoryAnswer(GetCompiledToolPoliciesResponse);
 
     #[async_trait::async_trait]
@@ -1183,6 +1199,8 @@ mod tests {
             Ok(PolicyText {
                 text: testing::FLOOR.to_owned(),
                 version: "f1".to_owned(),
+                conditions: Vec::new(),
+                max_window_ms: testing::MAX_WINDOW_MS,
             })
         }
         async fn tenant(&self, org: Uuid) -> Result<TenantPolicies, SourceError> {
@@ -1201,11 +1219,9 @@ mod tests {
                 org_id: testing::ORG_A.hyphenated().to_string(),
                 version: 2,
                 cedar_policies: HISTORY_SET.to_owned(),
-                conditions: vec![HistoryCondition {
-                    slot: "h0".to_owned(),
-                    policy_id: "h".to_owned(),
-                    ..Default::default()
-                }],
+                conditions: vec![testing::formerly("h0", "y", "amount")],
+                max_window_ms: testing::MAX_WINDOW_MS,
+                catalog_names: vec!["y".to_owned()],
                 ..Default::default()
             }),
             settings: Some(ProtoSettings {
@@ -1243,8 +1259,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_org_in_log_only_with_a_history_set_loads_it_and_observes_the_slot_forbid() {
-        // D16: the set loads. The forbid that reads the empty slot errors, and an errored forbid
-        // denies (SMA-752 D26), so log_only observes a policy denial, not an unavailable set.
+        // The set loads. The forbid that reads the empty slot errors, and an errored forbid denies
+        // (SMA-752 D26), so log_only observes a policy denial, not an unavailable set.
         let policy = history_policy(ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, OnUnavailable::Closed);
         let out = run(&policy, chat_request(&["x", "y"], "")).await.expect("apply");
         assert_eq!(out.snapshot.mode, TenantMode::LogOnly);
@@ -1254,7 +1270,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_enforced_history_set_loads_and_no_fail_mode_decides() {
-        // D16: the set is available, so neither the tenant fail mode nor the global value decides.
+        // The set is available, so neither the tenant fail mode nor the global value decides.
         // The forbid that reads the empty slot blocks `y` with `policy` in both cases.
         for (fail, global) in [(ToolPolicyFailMode::Open, OnUnavailable::Closed), (ToolPolicyFailMode::Closed, OnUnavailable::Open)] {
             let policy = history_policy(ToolPolicyMode::Enforce, fail, global);
@@ -1263,6 +1279,54 @@ mod tests {
             assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }), "{fail:?}");
             assert_eq!(decide_y(&out.snapshot), Decision::Block { code: BlockCode::Policy }, "{fail:?}");
         }
+    }
+
+    fn slots_of(history: &HistoryPolicy) -> Vec<&str> {
+        history.conditions().iter().map(|c| c.slot.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_carries_the_tenant_history_policy() {
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        source.set_settings(from_source(TenantMode::Enforce, OnUnavailable::Closed));
+        source.set_floor_conditions(vec![testing::formerly("floor_a", "rm", "force")]);
+        source.set_tenant_conditions(vec![testing::formerly("t_a", "send", "amount")], &["send"]);
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Enforce));
+        let out = run(&policy, chat_request(&["send"], "")).await.expect("apply");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }));
+        let history = out.snapshot.history.as_ref().expect("the tenant history policy");
+        assert_eq!(slots_of(history), ["floor_a", "t_a"]);
+        assert!(history.has_part(Part::Tenant));
+        // The snapshot refers to the cache entry: a second request gets the same `Arc`.
+        let again = run(&policy, chat_request(&["send"], "")).await.expect("apply");
+        assert!(Arc::ptr_eq(history, again.snapshot.history.as_ref().expect("history")));
+        // A set with no condition gives no history policy.
+        let plain = testing::policy(&FakeSource::new(testing::FLOOR, testing::PERMIT_ALL), settings(TenantMode::Enforce));
+        assert!(run(&plain, chat_request(&["send"], "")).await.expect("apply").snapshot.history.is_none());
+    }
+
+    #[tokio::test]
+    async fn mode_off_carries_the_floor_history_policy() {
+        let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        source.set_settings(from_source(TenantMode::Off, OnUnavailable::Closed));
+        source.set_floor_conditions(vec![testing::formerly("floor_a", "rm", "force")]);
+        source.set_tenant_conditions(vec![testing::formerly("t_a", "send", "amount")], &["send"]);
+        let policy = testing::policy(&source, settings_from_source(TenantMode::Enforce));
+        let out = run(&policy, chat_request(&["send"], "")).await.expect("apply");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Off, .. }));
+        let history = out.snapshot.history.as_ref().expect("the floor history policy");
+        assert_eq!(slots_of(history), ["floor_a"], "the floor conditions only");
+        assert!(!history.has_part(Part::Tenant));
+        assert_eq!(history.catalog(), &Catalog::known(["send".to_owned()]), "the last known catalog of the org");
+        // An unavailable tenant set also gets the floor history policy. With no known settings the
+        // mode is `enforce` and the fail mode is the global `closed`.
+        let failing = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
+        failing.set_floor_conditions(vec![testing::formerly("floor_a", "rm", "force")]);
+        failing.set_fail_tenant(true);
+        let policy = testing::policy(&failing, settings_from_source(TenantMode::Enforce));
+        let out = run(&policy, chat_request(&["send"], "")).await.expect("apply");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
+        assert_eq!(slots_of(out.snapshot.history.as_ref().expect("the floor history policy")), ["floor_a"]);
     }
 
     #[tokio::test]

@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use metrics_util::debugging::{DebugValue, Snapshotter};
 use paigasus_gateway_core::{OnUnavailable, TenantMode};
+use paigasus_proto::paigasus::iam::v1 as pb;
+use pb::{history_condition, history_predicate, literal_value};
 use uuid::Uuid;
 
 use super::{CacheSettings, PolicyCache, RequestToolPolicy};
@@ -47,6 +49,41 @@ pub(crate) struct FakeSource {
     fail_tenant: AtomicBool,
     /// When set, the floor load fails.
     fail_floor: AtomicBool,
+    /// The history conditions of the floor and of the tenant set (SMA-753).
+    floor_conditions: Mutex<Vec<pb::HistoryCondition>>,
+    tenant_conditions: Mutex<Vec<pb::HistoryCondition>>,
+    /// The tenant catalog.
+    catalog: Mutex<Vec<String>>,
+}
+
+/// The window limit that the fake source reports with every set.
+pub(crate) const MAX_WINDOW_MS: u64 = 86_400_000;
+
+/// A valid `formerly` condition: a call of `tool` with the Long argument `path` equal to 1, in the
+/// session, within one minute.
+pub(crate) fn formerly(slot: &str, tool: &str, path: &str) -> pb::HistoryCondition {
+    let node = |n| Some(Box::new(pb::HistoryPredicate { node: Some(n) }));
+    let tool = history_predicate::Node::Tool(pb::ToolMatch {
+        name_key: tool.to_owned(),
+        any_catalog_tool: false,
+    });
+    let field = history_predicate::Node::Field(pb::FieldComparison {
+        path: vec![path.to_owned()],
+        op: pb::ComparisonOp::Eq as i32,
+        value: Some(pb::LiteralValue {
+            value: Some(literal_value::Value::LongValue(1)),
+        }),
+    });
+    let predicate = pb::HistoryPredicate {
+        node: Some(history_predicate::Node::AllOf(Box::new(pb::PredicatePair { left: node(tool), right: node(field) }))),
+    };
+    pb::HistoryCondition {
+        slot: slot.to_owned(),
+        policy_id: "p".to_owned(),
+        scope: pb::HistoryScope::Session as i32,
+        window_ms: 60_000,
+        shape: Some(history_condition::Shape::Formerly(pb::FormerlyShape { predicate: Some(predicate) })),
+    }
 }
 
 impl FakeSource {
@@ -60,7 +97,22 @@ impl FakeSource {
             tenant_settings: Mutex::new(None),
             fail_tenant: AtomicBool::new(false),
             fail_floor: AtomicBool::new(false),
+            floor_conditions: Mutex::new(Vec::new()),
+            tenant_conditions: Mutex::new(Vec::new()),
+            catalog: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Replace the floor conditions. The floor version holds their count, so a new count reloads.
+    pub(crate) fn set_floor_conditions(&self, conditions: Vec<pb::HistoryCondition>) {
+        *self.floor_conditions.lock().unwrap() = conditions;
+    }
+
+    /// Replace the tenant conditions and the catalog; the version changes.
+    pub(crate) fn set_tenant_conditions(&self, conditions: Vec<pb::HistoryCondition>, catalog: &[&str]) {
+        *self.tenant_conditions.lock().unwrap() = conditions;
+        *self.catalog.lock().unwrap() = catalog.iter().map(|s| (*s).to_owned()).collect();
+        self.tenant.lock().unwrap().1 += 1;
     }
 
     /// Replace the tenant text; the version changes.
@@ -110,9 +162,12 @@ impl PolicySource for FakeSource {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
+        let conditions = self.floor_conditions.lock().unwrap().clone();
         Ok(PolicyText {
-            version: format!("{}", text.len()),
+            version: format!("{}:{}", text.len(), conditions.len()),
             text,
+            conditions,
+            max_window_ms: MAX_WINDOW_MS,
         })
     }
 
@@ -128,10 +183,11 @@ impl PolicySource for FakeSource {
         }
         Ok(TenantPolicies {
             text,
-            catalog: Vec::new(),
+            catalog: self.catalog.lock().unwrap().clone(),
             version: version.to_string(),
             settings: *self.tenant_settings.lock().unwrap(),
-            refused: false,
+            conditions: self.tenant_conditions.lock().unwrap().clone(),
+            max_window_ms: MAX_WINDOW_MS,
         })
     }
 }
