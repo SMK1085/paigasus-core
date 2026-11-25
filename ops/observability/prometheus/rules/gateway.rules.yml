@@ -71,3 +71,9 @@ groups:
         for: 0m
         labels: { severity: warning }
         annotations: { summary: "A gateway decision-log task panicked and restarted", description: "A decision-log writer or relay task caught a panic in the last 15m. This is a defect. See RUNBOOK-observability.md, section \"Gateway decision log\"." }
+      - alert: GatewayToolInterceptionMalformedRecords
+        # SMA-750 § 3. The metric has no endpoint label, so this alert covers every route that uses tool interception.
+        expr: sum(increase(gateway_tool_interception_records_dropped_total{reason="malformed"}[15m])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Gateway tool interception dropped malformed upstream records", description: "The tool-call interceptor dropped malformed upstream SSE records in the last 15m. The metric has no endpoint label, so this covers every route with interception, not only /v1/messages. A new upstream event or block type is the usual cause. See RUNBOOK-anthropic-messages.md, section 5.", runbook_url: "docs/ops/RUNBOOK-anthropic-messages.md#5-malformed-records-alert" }

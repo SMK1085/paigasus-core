@@ -10,6 +10,14 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+### Added
+
+- Three routes for the Anthropic Messages API: `POST /v1/messages`, `POST /v1/messages/count_tokens`
+  and `GET /v1/models`. They forward to Anthropic with the key of the operator. They use the
+  same authentication, limits, budget and tool-call policy as the OpenAI routes. Two new tables
+  turn them on: `[upstream.anthropic]` and `[messages]`. With `[messages] enabled = false`, the
+  default, the routes answer 404. See `docs/ops/RUNBOOK-anthropic-messages.md` (SMA-750).
+
 ## [0.3.0] - 2026-11-20
 
 ### Added

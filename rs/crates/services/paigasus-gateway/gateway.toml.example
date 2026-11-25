@@ -203,6 +203,12 @@
 
 # SMA-750: the Anthropic Messages route, POST /v1/messages. Off by default; with
 # enabled = false the route answers 404. It needs [upstream.anthropic] above.
+# Operator notes (docs/ops/RUNBOOK-anthropic-messages.md):
+# - The routes are POST /v1/messages, POST /v1/messages/count_tokens and GET /v1/models.
+# - x-api-key is read as a Bearer token. If both headers exist, x-api-key wins.
+# - Server tools and the MCP connector are not enforceable by the tool policy.
+# - GET /v1/models lists every model of the operator account.
+# - To roll back, set enabled = false and restart. The routes then answer 404.
 #
 # [messages]
 # enabled           = false      # env GATEWAY_MESSAGES__ENABLED
