@@ -159,6 +159,48 @@ mod tests {
         assert_eq!(base, again);
     }
 
+    fn hmac_of(key: &str, parts: &[&[u8]]) -> Vec<u8> {
+        let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key.as_bytes()).unwrap();
+        for p in parts {
+            m.update(p);
+        }
+        m.finalize().into_bytes().to_vec()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn the_digest_bytes_match_an_independent_hmac() {
+        let (id, digest) = single().current(org(1), &path(&["a"]), &Scalar::Str("x".into())).unwrap();
+        let expected = hmac_of(K1, &[b"00000000-0000-0000-0000-000000000001", &[0], b"a", &[0], b"s", b"x"]);
+        assert_eq!(digest.0.as_slice(), &expected[..16]);
+        assert_eq!(hex(&digest.0), "dae3046d4be4d264f56d81c99947980d");
+        assert_eq!(id, key(K1).id());
+    }
+
+    #[test]
+    fn the_key_id_bytes_match_an_independent_hmac_of_the_label() {
+        let expected = hmac_of(K1, &[b"paigasus-history-kid"]);
+        assert_eq!(key(K1).id().0.as_slice(), &expected[..8]);
+        assert_eq!(key(K1).id().to_hex(), "85ada7abdf64ec57");
+    }
+
+    #[test]
+    fn the_scalar_kinds_give_different_digests() {
+        let d = single();
+        let at = |v: Scalar| d.current(org(1), &path(&["a"]), &v).unwrap().1;
+        let (s, b, n) = (at(Scalar::Str("1".into())), at(Scalar::Bool(true)), at(Scalar::Decimal(10_000)));
+        assert!(s != b && s != n && b != n);
+    }
+
+    #[test]
+    fn the_key_length_boundary_is_32_bytes() {
+        assert!(HistoryKey::new(SecretString::from("k".repeat(31))).is_err());
+        assert!(HistoryKey::new(SecretString::from("k".repeat(32))).is_ok());
+    }
+
     #[test]
     fn a_literal_gets_both_digests_and_a_call_value_gets_the_current_one() {
         let d = HmacHistoryDigester::new(Some(key(K1)), Some(key(K2))).unwrap();
