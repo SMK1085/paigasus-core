@@ -7,10 +7,12 @@
 
 mod compile;
 mod decide;
+pub mod history;
 pub(crate) mod input;
 mod normalise;
 mod optimistic;
 mod types;
+pub(crate) mod walk;
 
 pub use compile::{ActionGroup, CompileError, FloorPolicies, PolicyOrigin, PolicyRef, ToolPolicies};
 pub use decide::{Effect, Verdict, decide};

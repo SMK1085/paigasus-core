@@ -2,13 +2,10 @@
 //! The mapping of tool arguments into `context.input` (§ 6.1.4).
 
 use cedar_policy::RestrictedExpression;
-use serde_json::value::RawValue;
 
 use super::ToolInput;
-use crate::detect::input::{NumberClass, Unparsed, classify_number, elements, first_byte, nesting_ok, strict_entries};
-
-/// A value nested deeper than this becomes a string of its raw JSON text (§ 6.1.4).
-const MAX_DEPTH: usize = 16;
+use super::walk::{Arg, parse_arguments};
+use crate::detect::input::Unparsed;
 
 /// The result of mapping the arguments of one call.
 pub(crate) struct MappedInput {
@@ -17,69 +14,25 @@ pub(crate) struct MappedInput {
     pub unparsed: bool,
 }
 
-/// `Ok(None)` is a JSON null: the key is left out.
-type Walk = Result<Option<RestrictedExpression>, Unparsed>;
-/// Check a container that is too deep to map: a duplicate key at any depth still makes the
-/// arguments unparsed.
-fn validate(raw: &RawValue) -> Result<(), Unparsed> {
-    let text = raw.get();
-    match first_byte(text) {
-        b'{' => strict_entries(text)?.into_iter().try_for_each(|(_, v)| validate(v)),
-        b'[' => elements(text)?.into_iter().try_for_each(validate),
-        _ => Ok(()),
-    }
-}
-
-fn walk(raw: &RawValue, depth: usize) -> Walk {
-    let text = raw.get();
-    let first = first_byte(text);
-    // A null member is left out at every depth. Any other value deeper than MAX_DEPTH, a scalar
-    // too, becomes a string of its raw JSON text.
-    if depth > MAX_DEPTH && first != b'n' {
-        validate(raw)?;
-        return Ok(Some(RestrictedExpression::new_string(text.to_owned())));
-    }
-    match first {
-        b'{' => {
-            let mut fields = Vec::new();
-            for (key, value) in strict_entries(text)? {
-                if let Some(expr) = walk(value, depth + 1)? {
-                    fields.push((key, expr));
-                }
+fn to_expr(arg: &Arg) -> Result<RestrictedExpression, Unparsed> {
+    Ok(match arg {
+        Arg::Record(fields) => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (key, value) in fields {
+                out.push((key.clone(), to_expr(value)?));
             }
-            RestrictedExpression::new_record(fields).map(Some).map_err(|_| Unparsed)
+            RestrictedExpression::new_record(out).map_err(|_| Unparsed)?
         }
-        b'[' => {
-            let mut items = Vec::new();
-            for value in elements(text)? {
-                if let Some(expr) = walk(value, depth + 1)? {
-                    items.push(expr);
-                }
-            }
-            Ok(Some(RestrictedExpression::new_set(items)))
-        }
-        b'"' => serde_json::from_str::<String>(text).map(|s| Some(RestrictedExpression::new_string(s))).map_err(|_| Unparsed),
-        b't' => Ok(Some(RestrictedExpression::new_bool(true))),
-        b'f' => Ok(Some(RestrictedExpression::new_bool(false))),
-        b'n' => Ok(None),
-        _ => Ok(Some(match classify_number(text) {
-            NumberClass::Long(n) => RestrictedExpression::new_long(n),
-            NumberClass::Decimal(d) => RestrictedExpression::new_decimal(d),
-            NumberClass::Text(t) => RestrictedExpression::new_string(t),
-        })),
-    }
+        Arg::Set(items) => RestrictedExpression::new_set(items.iter().map(to_expr).collect::<Result<Vec<_>, _>>()?),
+        Arg::Str(s) | Arg::TextNumber(s) | Arg::RawText(s) => RestrictedExpression::new_string(s.clone()),
+        Arg::Bool(b) => RestrictedExpression::new_bool(*b),
+        Arg::Long(n) => RestrictedExpression::new_long(*n),
+        Arg::Decimal(d) => RestrictedExpression::new_decimal(d),
+    })
 }
 
 fn empty_record() -> RestrictedExpression {
     RestrictedExpression::new_record(std::iter::empty()).expect("an empty record has no duplicate key")
-}
-
-fn parse_object(raw: &str) -> Option<RestrictedExpression> {
-    let value: &RawValue = serde_json::from_str(raw).ok()?;
-    if first_byte(value.get()) != b'{' || !nesting_ok(value.get()) {
-        return None;
-    }
-    walk(value, 1).ok().flatten()
 }
 
 /// Map the arguments of one call into `context.input` and `context.input_text`.
@@ -90,23 +43,17 @@ fn parse_object(raw: &str) -> Option<RestrictedExpression> {
 /// a value (object, array or scalar) deeper than 16 becomes a string of its raw JSON text.
 /// Arguments that nest deeper than 128 levels are unparsed.
 pub(crate) fn map_input(input: &ToolInput) -> MappedInput {
-    match input {
-        ToolInput::Text(text) => MappedInput {
-            input: empty_record(),
-            input_text: Some(text.clone()),
-            unparsed: true,
+    let parsed = parse_arguments(input);
+    match parsed.args.as_ref().map(to_expr) {
+        Some(Ok(expr)) => MappedInput {
+            input: expr,
+            input_text: parsed.input_text,
+            unparsed: false,
         },
-        ToolInput::Json(raw) => match parse_object(raw) {
-            Some(input) => MappedInput {
-                input,
-                input_text: None,
-                unparsed: false,
-            },
-            None => MappedInput {
-                input: empty_record(),
-                input_text: None,
-                unparsed: true,
-            },
+        _ => MappedInput {
+            input: empty_record(),
+            input_text: parsed.input_text,
+            unparsed: true,
         },
     }
 }

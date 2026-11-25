@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use paigasus_kernel::CedarUid;
 use paigasus_kernel::detect::{HostSet, Severity};
+use paigasus_kernel::tool_policy::history::{Extracted, FieldPath, PathSet, Scalar, extract_fields};
 use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, ToolVerdict, decide, decide_tool};
 use proptest::prelude::*;
 use proptest::sample::{select, subsequence};
@@ -238,4 +239,62 @@ fn the_generator_reaches_every_verdict() {
         floor >= 50 && tenant >= 50 && may >= 50 && allowed >= 50,
         "floor {floor}, tenant {tenant}, may {may}, allowed {allowed}"
     );
+}
+
+/// A generated JSON object whose members are strings, bools, integers and nested objects. The
+/// keys and strings are plain, so a Cedar string literal holds them without an escape.
+fn json_object() -> impl Strategy<Value = serde_json::Value> {
+    let leaf = prop_oneof![
+        "[a-z0-9 ]{0,6}".prop_map(serde_json::Value::from),
+        any::<bool>().prop_map(serde_json::Value::from),
+        (-1_000_000i64..1_000_000).prop_map(serde_json::Value::from),
+    ];
+    let member = leaf.prop_recursive(3, 12, 3, |inner| {
+        prop::collection::btree_map("[a-z]{1,3}", inner, 1..4).prop_map(|m| serde_json::Value::Object(m.into_iter().collect()))
+    });
+    prop::collection::btree_map("[a-z]{1,3}", member, 1..4).prop_map(|m| serde_json::Value::Object(m.into_iter().collect()))
+}
+
+fn leaf_paths(value: &serde_json::Value, prefix: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, member) in map {
+                prefix.push(key.clone());
+                leaf_paths(member, prefix, out);
+                prefix.pop();
+            }
+        }
+        _ => out.push(prefix.clone()),
+    }
+}
+
+proptest! {
+    /// `map_input` and `extract_fields` read one walk: a stored string or integer at a path is the
+    /// value that `context.input.<path>` holds in a Cedar evaluation.
+    #[test]
+    fn map_input_and_extract_fields_agree(value in json_object()) {
+        let mut paths = Vec::new();
+        leaf_paths(&value, &mut Vec::new(), &mut paths);
+        let plan: PathSet = paths.iter().map(|p| FieldPath::new(p.clone()).expect("a plain path")).collect();
+        let input = ToolInput::Json(value.to_string());
+        let extracted = extract_fields(&input, &plan);
+        prop_assert!(!extracted.is_unparsed());
+        for path in &plan {
+            let rhs = match extracted.get(path) {
+                Some(Extracted::Scalar(Scalar::Str(s))) => format!("\"{s}\""),
+                Some(Extracted::Long(n)) => n.to_string(),
+                Some(Extracted::Scalar(Scalar::Bool(b))) => b.to_string(),
+                other => return Err(TestCaseError::fail(format!("unexpected extraction {other:?}"))),
+            };
+            // Bracket access: a generated key can be a Cedar keyword such as `is`.
+            let access: String = path.segments().iter().map(|s| format!("[\"{s}\"]")).collect();
+            let tenant = format!("@id(\"t\") permit(principal, action, resource) when {{ context.input{access} == {rhs} }};");
+            let floor = Arc::new(ToolPolicies::compile_floor("").expect("empty floor"));
+            let policies = ToolPolicies::compile(floor, &tenant, &["x".to_owned()]).expect("tenant compiles");
+            let call = ToolInvocation::new("x", input.clone(), Declared::Yes);
+            let facts = facts("u1", "m1", SessionInfo::new("s", 0));
+            let verdict = decide(&call, &facts, &Findings::new(), &policies);
+            prop_assert_eq!(verdict.decision, Effect::Allow, "context.input.{} differs from the stored field", path.joined());
+        }
+    }
 }
