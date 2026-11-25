@@ -21,7 +21,7 @@
 - Every new gateway Docker test binary goes into a gateway override of `rs/.config/nextest.toml` with `test-group = 'docker-containers'`.
 - A new in-tree `{ workspace = true }` dependency needs a `dependsOn` entry and the `fileGroups.upstreams` entries in the crate's `moon.yml` (`ci/CLAUDE.md`, A6 of `repo:affected-smoke`).
 - No `Bytes` parameter in a function of `adapters/http/` (`repo:http-extractor-envelope`).
-- Constants (spec P1, P3, P4, P7; design D11): `RETENTION_MS = 90_000_000` (one value, in the kernel, re-exported by the gateway domain); `MAX_WINDOW_MS = 86_400_000`; `MAX_EVENTS_PER_TOOL = 10_000`; `MAX_READ_SETS = 64`; `MAX_READ_EVENTS = 20_000`; `MAX_INDEXED_TOOLS = 256`; `MAX_PREDICATE_DEPTH = 32` (from `paigasus_iam_core`, do not copy the value: the gateway-core mapping uses its own constant `MAX_PREDICATE_DEPTH: usize = 32` with a test that it equals the IAM value in Task 17); digest length **16 bytes**; key id **first 8 bytes of `HMAC-SHA-256(key, "paigasus-history-kid")`, lower-case hex**; minimum key length **32 bytes**.
+- Constants (spec P1, P3, P4, P7; design D11): `RETENTION_MS = 90_000_000` (one value, in the kernel, re-exported by the gateway domain); `MAX_WINDOW_MS = 86_400_000`; `MAX_EVENTS_PER_TOOL = 10_000`; `MAX_READ_SETS = 64`; `MAX_READ_EVENTS = 20_000`; `MAX_INDEXED_TOOLS = 256`; `MAX_PREDICATE_DEPTH = 32` (the gateway-core mapping keeps its own constant `MAX_PREDICATE_DEPTH: usize = 32`, guarded by the equality test with the IAM value in Task 17); digest length **16 bytes**; key id **first 8 bytes of `HMAC-SHA-256(key, "paigasus-history-kid")`, lower-case hex**; minimum key length **32 bytes**.
 - Digest input (spec P3): `HMAC-SHA-256(key, org || 0x00 || path || 0x00 || tag || value)`, cut to 16 bytes. `org` is the 36-character hyphenated lower-case UUID text. `path` is the segments joined with `.`. Tags: `s` + UTF-8 bytes; `b` + `1` or `0`; `d` + the scaled value (decimal × 10,000) as an 8-byte big-endian `i64`.
 - Event body (spec P3): keeps `v: 1`. New members: `f` (object, path → value), `kid` (hex key id), `b: 1` (unparsed, and then no `f`). A `Long` is a JSON number, a digest is base64url with no padding, `Absent` is `null`, `Mistyped` is `{"x":1}`.
 - Reserved context names (spec P2): `input`, `input_text`, `findings`, `max_severity`, `call`, `request`, `session`.
@@ -29,6 +29,7 @@
 - Config (spec P3, P13): `[tool_history] digest_key`, `previous_digest_key` (env `GATEWAY_TOOL_HISTORY__DIGEST_KEY`, `GATEWAY_TOOL_HISTORY__PREVIOUS_DIGEST_KEY`); IAM `tool_policies.history_conditions` (env `IAM_TOOL_POLICIES__HISTORY_CONDITIONS`, default `false`); chart `zones.iam.backend.toolPolicies.historyConditions` (default `false`).
 - `Debug` of a key, of `ExtractedFields`, of `Fields` and of a digest prints no value: counts, key ids and fixed names only.
 - The decision record gets no slot value and no field (spec § 2, ADR-0027 (i)).
+- A test that the plan shows with an empty body `{}` must assert the rule in its name. A test that asserts nothing is a defect.
 
 ## Plan decisions
 
@@ -36,7 +37,7 @@ The spec leaves these to the builder (§ 5). Each task uses them.
 
 - **D-A. Unbound literals.** The kernel `Literal` has a third variant, `Literal::Unbound(Scalar)`, for a string, bool or decimal literal before the digester binds it. `bind_digests` turns it into `Literal::Digests`. The evaluator treats `Unbound` and an empty `Digests` the same way: the slot is missing with reason `no_key`. The reason: a floor literal digest depends on the org (the digest input holds the org), but the floor is cached once for every org.
 - **D-B. No key.** With no history key, a string, bool or decimal argument value at a stored path is stored as `Mistyped`, not left out. So `sum_within` over a field that holds `"4000"` stays fail closed (A3). The value is still not stored (A4).
-- **D-C. A non-Long value at a `sum_within` path.** On any event whose predicate is true or unknown, a stored value other than `Long` or `Absent` (a `Digest` or `Mistyped`), or unparsed arguments, makes the slot missing (reason `unknown`). A path that is not in the event adds 0 (design R3). This is the general form of the decided-call rule (spec P1).
+- **D-C. A non-Long value at a `sum_within` path.** On an event whose predicate is unknown, the slot is missing (reason `unknown`), whatever the stored value is (spec P1). On an event whose predicate is true, a stored value other than `Long` or `Absent` (a `Digest` or `Mistyped`), or unparsed arguments, makes the slot missing (reason `unknown`). A path that is not in the event adds 0 (design R3). This is the general form of the decided-call rule (spec P1).
 - **D-D. Hold intent.** `SessionContext` keeps a list of `(CallFacts, Uuid)` entries. The decider adds the entries of a hold at the first poll of its future, before the reserve. The report site claims, for each report entry that has call facts and no decision id, the oldest unclaimed entry with equal `CallFacts`. A claimed entry is removed.
 - **D-E. Append under a known id.** An append under an id that a reserve already wrote replaces the body, the verdict and the score of that one member. It never adds a second event (`ZADD` and `HSET` on the same member and key). So an append after a reserve that returned late counts the call once.
 - **D-F. The cache bundle.** A tenant lookup returns `CompiledTenant { policies, history }`. The cache keeps the last known `Catalog` and `FieldPlan` of each org in a separate map, so a later unavailable set still stores the right fields (design D7) and a floor condition still knows the catalog (spec P7).
@@ -45,7 +46,7 @@ The spec leaves these to the builder (§ 5). Each task uses them.
 
 1. **A condition path deeper than 16 levels.** `context.input` holds the raw JSON text there as a Cedar string. `extract_fields` must store the same value (a string digest of the raw text), not `Mistyped`. Test: Task 1 `a_value_below_depth_16_is_its_raw_text_string`.
 2. **A decimal argument with more than four fraction digits** (`1.23456`) or an exponent (`1e2`). `classify_number` makes `1.23456` a Text number, so the field is `Mistyped` and a comparison on it is unknown (the slot is missing), while `1e2` is `Long(100)`. Test: Task 1 `numbers_are_classified_as_context_input_classifies_them`.
-3. **A tool name that differs from the catalog `name_key` only in case or Unicode form** (`"Send"`, `"send"`). The event tool is `normalise(display_name)`, and load validation refuses a `name_key` that is not in normal form, so both count. Test: Task 10 `a_call_named_in_another_case_counts_for_its_name_key`.
+3. **A tool name that differs from the catalog `name_key` only in case or Unicode form** (`"Send"`, `"send"`). The event tool is `normalise(display_name)`, and load validation refuses a `name_key` that is not in normal form, so both count. Test: Task 11 `a_call_named_in_another_case_counts_for_its_name_key`.
 4. **A history that holds events under the previous key during a rotation.** The literal holds both digests, so an old event still matches. An event under a third key id is unknown. Test: Task 2 `an_event_under_the_previous_key_matches_and_an_unknown_key_is_unknown`.
 5. **Two calls with the same call facts in one hold** (a provider that repeats `call_0` in one message). Each report entry claims its own intent entry, in order. Test: Task 8 `equal_call_facts_claim_their_intents_in_order`.
 
@@ -68,19 +69,19 @@ The spec leaves these to the builder (§ 5). Each task uses them.
 #[non_exhaustive] #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldPath(Vec<String>);            // new(segments) -> Result<Self, PathError>; segments(); joined() -> "a.b"
 #[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct KeyId(pub [u8; 8]);               // to_hex(); from_hex(&str) -> Option<Self>
+pub struct KeyId(pub [u8; 8]);               // new([u8; 8]) -> Self; to_hex(); from_hex(&str) -> Option<Self>
 #[non_exhaustive] #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Digest(pub [u8; 16]);             // Debug prints "Digest(..)"
+pub struct Digest(pub [u8; 16]);             // new([u8; 16]) -> Self (the tuple constructor is closed outside the kernel by non_exhaustive); Debug prints "Digest(..)"
 #[non_exhaustive] #[derive(Clone, PartialEq, Eq)]
 pub enum Scalar { Str(String), Bool(bool), Decimal(i64) }   // canonical_bytes() -> Vec<u8> (tag + value, spec P3)
 pub type PathSet = std::collections::BTreeSet<FieldPath>;
 #[non_exhaustive] #[derive(Clone, PartialEq, Eq)]
 pub enum Extracted { Long(i64), Scalar(Scalar), Absent, Mistyped }
-#[non_exhaustive] #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive] #[derive(Clone, PartialEq, Eq)]   // Debug is hand-written: counts only
 pub struct ExtractedFields { /* None = unparsed */ }  // is_unparsed(); get(&FieldPath) -> Option<&Extracted>; into_fields(self, org: Uuid, d: &dyn HistoryDigester) -> (Fields, Option<KeyId>)
 #[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field { Long(i64), Digest(Digest), Absent, Mistyped }
-#[non_exhaustive] #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive] #[derive(Clone, PartialEq, Eq)]   // Debug is hand-written: counts only
 pub enum Fields { Unparsed, Values(std::collections::BTreeMap<FieldPath, Field>) }
 pub trait HistoryDigester: Send + Sync {
     /// The digest under the current key, or None when the gateway has no key.
@@ -95,7 +96,7 @@ Rules:
 - `FieldPath::new` refuses an empty path, an empty segment and a segment that holds `.` (spec P3, P5).
 - `extract_fields`: unparsed arguments give `is_unparsed()`. Else for each path: walk `Record`s by segment. A missing member or a dropped null gives `Absent`. A path through a non-record gives `Absent`. The value: `Long` → `Long`; `Str` and `RawText` → `Scalar::Str`; `Bool` → `Scalar::Bool`; `Decimal(text)` → `Scalar::Decimal(scaled)` (parse the kernel decimal text, × 10,000); `Record`, `Set`, `TextNumber` → `Mistyped`.
 - `into_fields`: `Scalar` → `Field::Digest` under `current`, or `Field::Mistyped` when `current` is `None` (plan decision D-B). The key id is `Some` only when at least one digest was made.
-- `Debug` of `ExtractedFields` and `Fields` prints the path count and `unparsed` only.
+- `Debug` of `ExtractedFields` and `Fields` is written by hand (no derive, because a derived `Debug` prints paths and `Long` values). It prints the path count and `unparsed` only.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -151,7 +152,13 @@ fn scalar_canonical_bytes() {
 }
 
 #[test]
-fn debug_prints_no_value() { /* format!("{:?}", extracted) and Fields contain neither "secret-value" nor its digest bytes */ }
+fn debug_prints_no_value() { /* format!("{:?}", extracted) and Fields contain neither "secret-value", nor a path name, nor a Long value, nor its digest bytes; they hold the path count */ }
+
+#[test]
+fn key_id_and_digest_build_outside_the_module_with_new() {
+    assert_eq!(KeyId::new([7; 8]).0, [7; 8]);
+    assert_eq!(Digest::new([9; 16]).0, [9; 16]);
+}
 ```
 
 In `tests/tool_policy_props.rs`, add `map_input_and_extract_fields_agree`: for generated JSON objects with string, bool, integer and nested values, every `Scalar::Str(s)` at a path satisfies `context.input.<path> == "<s>"` in a Cedar evaluation, and every `Long(n)` satisfies `context.input.<path> == n`. All existing `input.rs` tests stay and pass unchanged.
@@ -215,21 +222,28 @@ pub struct Missing { pub slot: String, pub part: Part, pub reason: MissingReason
 pub struct Evaluation { pub slots: Slots, pub missing: Vec<Missing> }
 pub struct ToolSet { pub names: BTreeSet<String>, pub catalog: bool, pub every: bool }
 
+impl Predicate {
+    pub fn tools(&self) -> ToolSet;                       // the tool set of the whole predicate (rules below)
+    /// The per-field walk of spec P3: one `(ToolSet, &FieldTest)` for each `FieldTest`, where the
+    /// `ToolSet` is the tool set that holds at that test (the same `AllOf`/`AnyOf` rules as `tools()`).
+    /// The only walk. `Task 5` `FieldPlan::of` calls it.
+    pub fn field_tests(&self) -> Vec<(ToolSet, &FieldTest)>;
+}
 impl Condition {
-    pub fn tools(&self) -> ToolSet;                       // the path walk of spec P3
-    pub fn paths(&self) -> PathSet;                       // every FieldTest path, plus the sum_within path
+    pub fn tools(&self) -> ToolSet;                       // = self.shape's predicate .tools()
     pub fn bind_digests(&self, org: Uuid, d: &dyn HistoryDigester) -> Condition;   // Unbound -> Digests(d.all(..))
 }
 pub fn evaluate(conditions: &[Condition], window: &Window, hold: &[Event], index: usize, now_ms: u64, catalog: &Catalog) -> Evaluation;
 ```
 
 Rules (spec P1; plan decision D-C):
+- `Predicate::tools()` and `Predicate::field_tests()` share one walk (no second walk anywhere). `Condition::paths()` does not exist. `FieldPlan::of` (Task 5) takes the `sum_within` path from the shape and the test paths from `field_tests()`.
 - `tools()`: `Tool(NameKey(k))` → `{k}`; `AnyCatalogTool` → `catalog: true`; `AllOf` → intersection, where a side with `every` is neutral; `AnyOf` → union; `Not`, `EventKind` and `Field` → `every`.
 - Window of a condition: an event counts when `ts_ms >= now_ms.saturating_sub(window_ms)`, also when `ts_ms > now_ms`. The events of the condition's scope come from the `WindowSet`s of that scope, de-duplicated by id, plus `hold[0..=index]`.
-- The sets that a condition reads: the sets of its scope whose `tool` is in `tools().names`, every catalog tool when `catalog`, and the `Every` set; all sets of the scope when `every`. A read set with `truncated`, or with `mark_ms >= window start`, makes the slot missing (`Truncated`). A required set that is not in the window makes the slot missing (`Store`).
+- The sets that a condition reads: the sets of its scope whose `tool` is in `tools().names`, and every catalog tool when `catalog`. The condition requires the `Every` set only when `ToolSet.every` is true, or when `catalog` is true and the catalog is unknown (then it reads all sets of the scope). A named-tool condition does not require the `Every` set. `ReadPlan::of` (Task 5) uses the same rule. A read set with `truncated`, or with `mark_ms >= window start`, makes the slot missing (`Truncated`). A required set that is not in the window makes the slot missing (`Store`).
 - `FieldTest` result table: spec P1. `Literal::Unbound`, or `Digests` with no entry, makes the slot missing (`NoKey`) before any event is read.
 - `AllOf`, `AnyOf`, `Not`: Kleene logic.
-- Shapes: spec P1 (`formerly`, `count_within` with the range rule, `sum_within` with plan decision D-C, negative adds 0, saturating sum).
+- Shapes: spec P1 (`formerly`, `count_within` with the range rule, `sum_within` with plan decision D-C: an event whose predicate is unknown makes the slot missing whatever its value, negative adds 0, saturating sum).
 - Order of the pre-checks: `window_ms > RETENTION_MS` → `Retention`; unbound digest → `NoKey`; `AnyCatalogTool` in the predicate and `catalog` unknown → `Catalog`; `Window::unavailable(r)` → `r`; then the set checks; then the events (`Unknown`).
 
 - [ ] **Step 1: Write the failing tests**
@@ -264,6 +278,12 @@ One helper `ev(ts_s, kind, tool, fields)` and `win(scope, events)`. The tests (a
 #[test] fn an_event_under_the_previous_key_matches_and_an_unknown_key_is_unknown() {
     // literal Digests[(k1, d1), (k0, d0)]: an event under k0 with d0 -> true; under k9 -> Unknown
 }
+#[test] fn a_sum_event_with_an_unknown_predicate_makes_the_slot_missing_even_with_a_long() { /* Field test on an unknown key id, Long 5 at the sum path: Missing{reason: Unknown} */ }
+#[test] fn a_named_tool_condition_does_not_require_the_every_set() { /* window with only the send set: slot has a value. An Not(..) condition with no Every set: Missing{reason: Store}. AnyCatalogTool with an unknown catalog requires Every */ }
+#[test] fn field_tests_gives_each_field_test_its_own_tool_set() { /* AllOf(Tool(send), Field(a)) -> [({send}, a)]; AnyOf(AllOf(Tool(x), Field(a)), Field(b)) -> [({x}, a), (every, b)] */ }
+#[test] fn missing_reason_as_str_gives_the_metric_labels_and_all_lists_each_once() { /* the 8 labels of the Global Constraints; ALL.len() == 8, no duplicate */ }
+#[test] fn part_as_str_gives_floor_and_tenant() { assert_eq!((Part::Floor.as_str(), Part::Tenant.as_str()), ("floor", "tenant")); }
+#[test] fn catalog_contains_is_none_when_unknown() { /* known(["a"]).contains("a") == Some(true), ("b") == Some(false); unknown().contains("a") == None */ }
 #[test] fn tools_walk_intersects_all_of_and_unites_any_of() {
     // AllOf(Tool(send), Field) -> {send}; AnyOf(Tool(a), Tool(b)) -> {a, b}; Not(Tool(a)) -> every; AllOf(AnyCatalogTool, Tool(a)) -> {a}, catalog
 }
@@ -275,7 +295,7 @@ One helper `ev(ts_s, kind, tool, fields)` and `win(scope, events)`. The tests (a
 Run: `cd rs && cargo nextest run -p paigasus-kernel --features tool-policy --test history_evaluate`
 Expected: FAIL to compile (`evaluate` not found).
 
-- [ ] **Step 3: Implement the types in `history/types.rs`, `tools()`/`paths()`/`bind_digests` in `history/tools.rs`, and `evaluate` in `history/evaluate.rs`**
+- [ ] **Step 3: Implement the types in `history/types.rs`, `Predicate::tools()`/`Predicate::field_tests()`/`Condition::tools()`/`bind_digests` in `history/tools.rs`, and `evaluate` in `history/evaluate.rs`**
 
 Use an internal `enum Tri { True, False, Unknown }`. Evaluate each condition on its own; one condition's missing slot never touches another slot.
 
@@ -472,7 +492,7 @@ git commit -m "feat(rs): map and validate the IAM history conditions in gateway-
 - Modify: the callers of `decide_calls_with` (`application/tool_policy/decider.rs`): pass `&[]` for now
 
 **Interfaces:**
-- Consumes: Tasks 2 and 4.
+- Consumes: Tasks 2 and 4. `FieldPlan::of` calls `Predicate::field_tests()` (Task 2) and adds the `sum_within` path from the shape. It has no walk of its own.
 - Produces:
 
 ```rust
@@ -490,12 +510,12 @@ pub struct ReadSet { pub scope: Scope, pub tool: SetTool }
 pub struct ReadPlan { pub w_max_ms: u64, pub sets: Vec<ReadSet> }   // sorted, no duplicates
 impl ReadPlan { pub fn of(conditions: &[Condition], catalog: &Catalog) -> Option<ReadPlan>; }   // None with no condition
 #[derive(Debug)]
-pub struct HistoryPolicy { /* bound conditions (floor first), FieldPlan, Option<ReadPlan>, Catalog */ }
+pub struct HistoryPolicy { /* bound conditions (floor first), Arc<FieldPlan>, Option<ReadPlan>, Catalog */ }
 impl HistoryPolicy {
     pub fn build(floor: &[Condition], tenant: &[Condition], org: Uuid, catalog: Catalog, stored: Option<&FieldPlan>, d: &dyn HistoryDigester) -> Self;
     pub fn conditions(&self) -> &[Condition];
     pub fn has_part(&self, part: Part) -> bool;
-    pub fn fields(&self) -> &FieldPlan;
+    pub fn fields(&self) -> &Arc<FieldPlan>;   // HistoryPolicy stores Arc<FieldPlan>; the interceptor clones the Arc (Task 8)
     pub fn read(&self) -> Option<&ReadPlan>;
     pub fn catalog(&self) -> &Catalog;
 }
@@ -509,7 +529,7 @@ pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[To
 
 Rules:
 - `slots` is empty (no slots for any call) or holds one entry per call. Another count is a caller defect: debug panic, release uses no slots (the same pattern as `scans`).
-- `ReadPlan::of`: one `ReadSet` per (scope of a condition, tool): a name gives `Tool(name)`, the `catalog` flag gives `Tool(t)` for each catalog tool (`Every` when the catalog is unknown), `every` gives `Every`. `w_max_ms` is the largest `window_ms`.
+- `ReadPlan::of`: one `ReadSet` per (scope of a condition, tool): a name gives `Tool(name)`, the `catalog` flag gives `Tool(t)` for each catalog tool (`Every` when the catalog is unknown), `every` gives `Every`. A condition with only named tools adds no `Every` set (the Task 2 rule). `w_max_ms` is the largest `window_ms`.
 - `HistoryPolicy::build` binds every condition with `bind_digests(org, d)`. Its `FieldPlan` is the plan of all conditions, united with `stored` when it is `Some`.
 - `policy/plan.rs` (request side) keeps `decide()` with no slots (spec P2).
 
@@ -523,6 +543,11 @@ Rules:
 #[test] fn history_policy_binds_the_literals_of_both_parts() {}
 #[test] fn each_call_gets_its_own_slots() { /* two calls, slots [{over: true}, {over: false}], forbid when context.over: Block, Allow */ }
 #[test] fn with_tenant_unavailable_decides_with_the_floor_only() {}
+#[test] fn field_plan_union_merges_per_tool_and_every_tool_paths() {}
+#[test] fn field_plan_is_empty_only_with_no_path() { assert!(FieldPlan::default().is_empty()); }
+#[test] fn history_policy_has_part_is_true_only_for_a_part_with_conditions() {}
+#[test] fn with_history_sets_the_snapshot_history_and_keeps_the_rest() {}
+#[test] fn the_field_plan_of_a_named_tool_condition_adds_no_every_tool_path() { /* the plan comes from field_tests(), with the same sets as the evaluator reads */ }
 ```
 
 In `policy/plan.rs` tests (spec P2): `a_slot_forbid_errors_in_both_decisions_and_is_no_difference` (`forbid when { context.s }`: no result replacement) and `a_findings_and_slot_forbid_is_replaced` (`forbid when { context.findings.contains("secret_in_args") && context.s }` with the finding on the result: the result is replaced).
@@ -558,7 +583,6 @@ git commit -m "feat(rs): add the field plan, the read plan and per-call slots to
 - Create: `rs/crates/services/paigasus-gateway/src/adapters/history/digest.rs`
 - Modify: `rs/crates/services/paigasus-gateway/src/adapters/history/mod.rs` (export)
 - Modify: `rs/crates/services/paigasus-gateway/src/config.rs:244-300` (`ToolHistoryConfig`: two fields, `validate`)
-- Modify: `rs/crates/services/paigasus-gateway/Cargo.toml` (`base64 = { workspace = true }`)
 - Test: `digest.rs` unit tests, `config.rs` tests
 
 **Interfaces:**
@@ -578,7 +602,7 @@ impl HistoryDigester for HmacHistoryDigester { /* spec P3 digest input; cut to 1
 // config.rs, ToolHistoryConfig: #[serde(skip_serializing)] pub digest_key: Option<SecretString>, #[serde(skip_serializing)] pub previous_digest_key: Option<SecretString>
 ```
 
-`ToolHistoryConfig::validate` calls `HmacHistoryDigester::from_config` and prefixes the error with `tool_history.digest_key: ` or `tool_history.previous_digest_key: `. With no key, `runtime.rs` logs one `warn!` at boot: `"[tool_history] has no digest_key: conditions on string, bool or decimal values have no value (missing slot, reason no_key)"`. The wiring of the digester into the runtime is in Task 7 (cache) and Task 9 (history).
+`ToolHistoryConfig::validate` calls `HmacHistoryDigester::from_config` and prefixes the error with `tool_history.digest_key: ` or `tool_history.previous_digest_key: `. This task does not touch `runtime.rs`. The wiring of the digester into the runtime is in Task 7 (cache), and the boot warning for a missing key is in Task 7 too, because Task 7 is the first task that builds the digester in `runtime.rs` (a warning in Task 6 would have no call site). Task 9 passes the same digester to the history. The `base64` dependency is added in Task 9, where the digest encoding first uses it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -626,7 +650,7 @@ git commit -m "feat(rs): add the history digest key, its rotation pair and the H
 - Modify: `rs/crates/services/paigasus-gateway/src/adapters/policy_source/file.rs` (empty conditions)
 - Modify: `rs/crates/services/paigasus-gateway/src/application/tool_policy/cache.rs` (`FloorEntry`, `TenantData`, `tenant_set`, `build`, `load`; remove `store_refused`, the `refused` branch and their tests; new `CompiledTenant`, `last_known`, `with_digester`)
 - Modify: `rs/crates/services/paigasus-gateway/src/application/tool_policy/request.rs` (consume `CompiledTenant`; put `HistoryPolicy` on the snapshot)
-- Modify: `rs/crates/services/paigasus-gateway/src/runtime.rs` (build the digester once; `PolicyCache::with_digester`)
+- Modify: `rs/crates/services/paigasus-gateway/src/runtime.rs` (build the digester once with `HmacHistoryDigester::from_config`; `PolicyCache::with_digester`; with no key, log one boot `warn!`: `"[tool_history] has no digest_key: conditions on string, bool or decimal values have no value (missing slot, reason no_key)"`)
 - Modify: `rs/crates/services/paigasus-gateway/src/application/tool_policy/testing.rs` (`FakeSource` can carry conditions)
 - Test: `cache.rs`, `iam.rs`, `request.rs` tests
 
@@ -711,7 +735,7 @@ git commit -m "feat(rs): carry the history conditions from the policy source int
 - Modify: `rs/crates/libs/paigasus-gateway-core/src/interceptor.rs` (`with_field_plan`, `apply_decision`)
 - Modify: `rs/crates/libs/paigasus-gateway-core/src/body.rs` (`reported` takes the plan)
 - Modify: `rs/crates/libs/paigasus-gateway-core/src/decision_log/build.rs` (test: no field in a record)
-- Modify: `rs/crates/services/paigasus-gateway/src/adapters/http/interception.rs` (pass `ctx.policy.history.fields()` to the interceptor and to `reported`)
+- Modify: `rs/crates/services/paigasus-gateway/src/adapters/http/interception.rs` (pass `Arc::clone(ctx.policy.history.fields())` to `with_field_plan`, and `&**` of it to `reported`)
 
 **Interfaces:**
 - Consumes: `extract_fields`, `ExtractedFields` (Task 1), `FieldPlan` (Task 5).
@@ -775,8 +799,9 @@ git commit -m "feat(rs): carry the stored fields on report entries and keep the 
 **Files:**
 - Modify: `rs/crates/services/paigasus-gateway/src/domain/tool_history.rs` (types; re-export kernel `RETENTION_MS`)
 - Modify: `rs/crates/services/paigasus-gateway/src/adapters/history/memory.rs`, `adapters/history/redis.rs` (encoding, scripts)
-- Modify: `rs/crates/services/paigasus-gateway/src/application/tool_history.rs` (`settle_plan`, `reserve` fills the new call fields, `run_settle`; `ToolHistory::new` takes the digester)
+- Modify: `rs/crates/services/paigasus-gateway/src/application/tool_history.rs` (`settle_plan`, `reserve` sends empty call fields (Task 10 fills them), `run_settle`; `ToolHistory::new` takes the digester)
 - Modify: `rs/crates/services/paigasus-gateway/src/runtime.rs` (pass the one digester)
+- Modify: `rs/crates/services/paigasus-gateway/Cargo.toml` (`base64 = { workspace = true }`; the digest encoding in `adapters/history/` is its first use, so `:machete` stays green)
 - Modify: `rs/crates/services/paigasus-gateway/tests/support/history_contract.rs`, `tests/history_store_memory.rs`, `tests/history_store_redis.rs`
 
 **Interfaces:**
@@ -803,6 +828,8 @@ Rules:
 - Settle (spec P8): `Allow` keeps (or writes) the link as in PR 1. `Deny` deletes a `c:` key only when its `e` equals the event id.
 - Append (spec P9): writes the verdict of the call. Only `Allow` writes `c:` links. An id that a reserve wrote keeps one event (plan decision D-E).
 - `settle_plan` (spec P9, plan decision D-D): the id is `decision_id`, else `claim(call facts)`. A reserved id gives a settle (Allow or Deny, both with the call ids). An unreserved id, or no id, with call facts gives an append with the entry verdict (`Allow` → allow, `Block` → deny) and its fields; no id mints one. No call facts gives nothing.
+- `reserve` in this task sends `Fields::Values(empty)` and key id `None` for each `CallEvent`. The `policy` parameter and the field plan start in Task 10, which fills the fields from `policy.fields().paths_for(tool)`.
+- Accepted transient state: between Task 9 and Task 11 nothing records hold intents, so `claim_intent` finds nothing. A timed-out hold under `allow` can count twice, and an interceptor block appends. Task 11 restores the end state with its own tests. In this task, run `cargo nextest run -p paigasus-gateway --test tool_history` and change only a test that asserts the old R10 count. Change no other test.
 - `ToolHistory::settle` uses `session.claim_intent` and digests `ReportedCall.fields` with `into_fields(org, digester)`; `None` fields give `Fields::Values(empty)`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -856,7 +883,7 @@ git commit -m "feat(rs): store argument fields, link calls in the reserve and re
 **Files:**
 - Modify: `rs/crates/services/paigasus-gateway/src/domain/tool_history.rs` (read types, constants)
 - Modify: `rs/crates/services/paigasus-gateway/src/adapters/history/memory.rs`, `adapters/history/redis.rs`
-- Modify: `rs/crates/services/paigasus-gateway/src/application/tool_history.rs` (`reserve` returns the window)
+- Modify: `rs/crates/services/paigasus-gateway/src/application/tool_history.rs` (`reserve` returns the window and fills the call fields from the field plan)
 - Modify: `rs/crates/libs/paigasus-observability/src/names.rs` (`GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL`, `ALL`, the registered test)
 - Modify: `docs/ops/RUNBOOK-observability.md` § 2.3 (one row)
 - Modify: `tests/support/history_contract.rs`, `tests/history_store_redis.rs`
@@ -921,7 +948,7 @@ Expected: FAIL to compile (`ReadRequest` not found).
 
 - [ ] **Step 3: Implement both adapters and the application changes**
 
-The `CedarDecider` calls `reserve(.., ctx.policy.and_then(|s| s.history.as_deref()))` and keeps only `outcome.findings` in this task. Task 11 uses the window.
+Task 9 sent empty fields in the reserve. This task fills them: for each call, `policy.fields().paths_for(tool)` (an empty plan with no policy) and `extract_fields`, then `into_fields(org, digester)` into `CallEvent.fields` and `CallEvent.key`. The `CedarDecider` calls `reserve(.., ctx.policy.and_then(|s| s.history.as_deref()))` and keeps only `outcome.findings` in this task. Task 11 uses the window.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -963,8 +990,8 @@ pub fn hold_slots(policy: Option<&HistoryPolicy>, outcome: &StoreOutcome, calls:
 Rules (spec P7 table, one row per arm):
 - `policy` `None` or no condition: no slots, `tenant_unavailable: false`, no missing (A6).
 - `Disabled` (no `[tool_history]`): every slot missing, reason `disabled`, both parts; `tenant_unavailable: false`.
-- `NoSession` (the request had a lookup error): floor slots `no_session`; `tenant_unavailable` when the policy has a tenant condition.
-- `Read` with `WindowRead::Failed`: floor slots `store`; `tenant_unavailable` when the policy has a tenant condition.
+- `NoSession` (the request had a lookup error): floor slots `no_session`; `tenant_unavailable` when the policy has a tenant condition. Each tenant condition slot is also counted as missing with reason `no_session`, as the tenant part becomes unavailable for this hold (spec P7).
+- `Read` with `WindowRead::Failed`: floor slots `store`; `tenant_unavailable` when the policy has a tenant condition. Each tenant condition slot is also counted as missing with reason `store`.
 - `Read` with `WindowRead::Read(w)`: `evaluate(policy.conditions(), &w, &hold, i, now_ms, policy.catalog())` for each call `i`.
 - `NotNeeded` with conditions cannot happen (`ReadPlan::of` gives `Some` for any condition): treat it as `Failed`.
 - The decider: record the hold intent (Task 8) first; then reserve; then `hold_slots`; when `tenant_unavailable`, decide the hold on `snapshot.with_tenant_unavailable()` (spec P7: under `open` every tenant policy is observed for that hold, under `closed` every call is blocked); count each `Missing` in `gateway_tool_history_slots_missing_total{part, reason}`; `forget_intent(ids)` before it returns.
@@ -980,6 +1007,8 @@ In `slots.rs` tests, one test per row of the spec P7 table:
 #[test] fn no_history_table_misses_every_slot_as_disabled_and_keeps_the_tenant() {}
 #[test] fn a_store_failure_misses_the_floor_slots_and_makes_a_conditioned_tenant_unavailable() {}
 #[test] fn a_store_failure_keeps_a_tenant_without_conditions() {}
+#[test] fn an_unavailable_tenant_counts_each_of_its_slots_as_missing_with_store_or_no_session() { /* HoldSlots.missing holds a Missing{part: Tenant, reason: store} (or no_session) for each tenant condition slot, and the 16 primed pairs can all count */ }
+#[test] fn the_not_needed_branch_is_treated_as_failed() {}
 #[test] fn no_session_misses_the_floor_slots_and_makes_a_conditioned_tenant_unavailable() {}
 #[test] fn a_truncated_set_misses_only_its_slots() {}
 #[test] fn an_unknown_event_misses_its_slot() {}
@@ -1426,18 +1455,17 @@ For each row: make the change, run the command, confirm FAIL, then delete the ma
 | M1 | The reserve reads no window (`WindowRead::NotNeeded`) | `history_cap_redis::three_concurrent_sends_pass_the_cap_only_twice`, `decider::a_sum_cap_denies_the_third_call_of_a_hold` |
 | M2 | `settle_plan` gives no append | `tool_history::a_denied_call_with_no_reserved_event_is_appended_as_deny` |
 | M3 | The window is half-open (`ts_ms > start`) | `history_evaluate::the_window_is_closed_and_a_future_event_is_inside_every_window` |
-| M4 | Restore the `now` upper bound (drop `ts_ms > now`) | the same test, and `history_cap_redis::the_cap_holds_with_a_50_ms_clock_skew` |
+| M4 | Restore the `now` upper bound, or remove the future-event rule (the same mutation; the row M10 is merged here) | the same test, and `history_cap_redis::the_cap_holds_with_a_50_ms_clock_skew` |
 | M5 | A store error allows (`hold_slots` gives no missing slot on `Failed`) | `slots::a_store_failure_misses_the_floor_slots_and_makes_a_conditioned_tenant_unavailable` |
 | M6 | Remove the reserve link (P8) | `history_contract::the_reserve_writes_the_call_links_of_each_call` (both adapters) |
 | M7 | Ignore the append verdict (always `allow`) | `history_contract::an_appended_denied_call_counts_and_writes_no_link` |
 | M8 | Fail the read on a missing body | `history_contract::a_missing_body_is_skipped_and_counted` |
 | M9 | Remove the `Key` to principal alias | `tool_history::a_key_scope_without_an_api_key_reads_the_principal_sets` |
-| M10 | Remove the future-event rule | `history_evaluate::the_window_is_closed_and_a_future_event_is_inside_every_window` |
 | M11 | Keep the hold's own events in the window | `tool_history::the_hold_own_events_are_removed_from_the_window`, `history_evaluate::the_events_of_a_window_and_the_hold_are_counted_once_by_id` |
 | M12 | Remove the truncation mark (no `x:` write) | `history_contract::a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns` |
 | M13 | Unknown counts as false | `history_evaluate::count_within_takes_the_value_only_when_every_possible_count_agrees`, `history_parity::every_corpus_decision_replays_through_the_production_chain` (`unknown_value`) |
 
-Run per row: `cd rs && cargo nextest run --no-fail-fast -p <crate> <filter>` (the Redis rows with `--test history_store_redis` or `--test history_cap_redis`).
+Run per row: `cd rs && cargo nextest run --no-fail-fast -p <crate> <filter>` (the Redis rows with `--test history_store_redis` or `--test history_cap_redis`). Each kernel row (M3, M4, M13 `history_evaluate`) adds `--features tool-policy`: `cd rs && cargo nextest run --no-fail-fast -p paigasus-kernel --features tool-policy --test history_evaluate <filter>`. Without the feature the test file compiles to zero tests and proves nothing. Check that the failing output names the test.
 
 - [ ] **Step 3: Record the results**
 
