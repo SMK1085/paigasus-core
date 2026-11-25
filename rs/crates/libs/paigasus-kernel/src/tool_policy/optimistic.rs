@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use super::compile::{PolicyOrigin, ToolPolicies};
 use super::decide::request;
+use super::history::Slots;
 use super::types::{Facts, Findings};
 use crate::detect::SCREEN_INDEPENDENT_KINDS;
 
@@ -278,7 +279,7 @@ pub(crate) fn optimistic(merged: &PolicySet, drop_reads: &[ContextAttr], strip_p
 /// Evaluate a given optimistic set for the tool `name`, with Cedar's normal handling: an errored
 /// policy is skipped, so an errored forbid does not deny.
 fn evaluate(set: &PolicySet, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> ToolVerdict {
-    let Some((request, entities, ..)) = request(None, name, facts, findings, policies) else {
+    let Some((request, entities, ..)) = request(None, name, facts, findings, &Slots::new(), policies) else {
         return ToolVerdict::MayAllow;
     };
     let response = Authorizer::new().is_authorized(&request, set, &entities);
@@ -361,6 +362,13 @@ mod tests {
         // The kept forbid is the one of the merged set.
         let p = policies("", r#"@id("f") forbid(principal, action, resource) when { context.request.model == "m" };"#, &[]);
         assert_eq!(p.optimistic_set().policies().next().map(|q| q.id().to_string()), Some("tenant/f".to_owned()));
+    }
+
+    #[test]
+    fn a_forbid_that_reads_a_slot_is_never_optimistic() {
+        assert!(dropped("context.slot_x"), "the optimistic context has no slots, so the forbid is dropped");
+        let p = policies("", &format!("{ALLOW_ALL} @id(\"f\") forbid(principal, action, resource) when {{ context.slot_x }};"), &[]);
+        assert_eq!(decide_tool("x", &facts(0), &Findings::new(), &p), ToolVerdict::MayAllow);
     }
 
     #[test]

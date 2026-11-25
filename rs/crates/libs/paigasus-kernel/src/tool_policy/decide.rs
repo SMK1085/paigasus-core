@@ -8,6 +8,7 @@ use cedar_policy::{AuthorizationError, Authorizer, Context, Decision, Entities, 
 use std::collections::BTreeSet;
 
 use super::compile::{ActionGroup, PolicyOrigin, PolicyRef, RESOURCE_TYPE, ToolPolicies, action_entity};
+use super::history::Slots;
 use super::input::map_input;
 use super::normalise::normalise;
 use super::types::{Facts, Findings, ToolInput, ToolInvocation, UNPARSED_ARGUMENTS};
@@ -105,13 +106,19 @@ fn record<const N: usize>(pairs: [(&str, RestrictedExpression); N]) -> Restricte
     RestrictedExpression::new_record(pairs.into_iter().map(|(k, v)| (k.to_owned(), v))).expect("the record keys are distinct")
 }
 
+/// The names that the kernel itself puts at the top of the context. A history slot with one of
+/// these names is skipped, so a slot cannot shadow a kernel value (or make a duplicate key).
+pub const RESERVED_CONTEXT_NAMES: [&str; 7] = ["input", "input_text", "findings", "max_severity", "call", "request", "session"];
+
 /// The Cedar context of a call. `None` is the optimistic context of `decide_tool`:
 /// `input` is `{}`, `call.declared` is `"yes"`, `call.hosts` is `[]` and `max_severity` is -1.
 ///
 /// The hosts come from `call.hosts` when the caller gave them, else from one `call_hosts` scan.
 /// With `facts.detection` false, `max_severity` is -1, `call.hosts` is `[]` and the kernel adds
 /// no hosts-cap finding.
-pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &Findings) -> (Context, Seen) {
+///
+/// Each history slot is a Bool at the top of the context. A slot with a reserved name is skipped.
+pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &Findings, slots: &Slots) -> (Context, Seen) {
     let mut kinds: BTreeSet<String> = findings.iter().map(str::to_owned).collect();
     let empty = HostSet::new();
     let scanned: HostSet;
@@ -158,6 +165,12 @@ pub(crate) fn context(call: Option<&ToolInvocation>, facts: &Facts, findings: &F
     if let Some(text) = input_text {
         pairs.push(("input_text".to_owned(), RestrictedExpression::new_string(text)));
     }
+    pairs.extend(
+        slots
+            .iter()
+            .filter(|(name, _)| !RESERVED_CONTEXT_NAMES.contains(name))
+            .map(|(name, value)| (name.to_owned(), RestrictedExpression::new_bool(value))),
+    );
     (Context::from_pairs(pairs).expect("the context keys are distinct"), Seen { kinds, added, max_severity })
 }
 
@@ -172,12 +185,12 @@ fn sorted(mut refs: Vec<PolicyRef>) -> Vec<PolicyRef> {
 
 /// The Cedar request and the entities for the tool `name`, with the context of `call` (or the
 /// optimistic context for `None`), what the kernel added to it, and the action group. `None` if Cedar cannot build the request.
-pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Option<(Request, Entities, Seen, ActionGroup)> {
+pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, findings: &Findings, slots: &Slots, policies: &ToolPolicies) -> Option<(Request, Entities, Seen, ActionGroup)> {
     let (action, entities, group) = action_entity(policies, &normalise(name));
     let org = facts.org.as_hyphenated().to_string();
     let principal = uid(&facts.principal.entity_type, &facts.principal.entity_id)?;
     let resource = uid(RESOURCE_TYPE, &org)?;
-    let (context, seen) = context(call, facts, findings);
+    let (context, seen) = context(call, facts, findings, slots);
     let request = Request::new(principal, action, resource, context, None).ok()?;
     Some((request, entities, seen, group))
 }
@@ -189,7 +202,15 @@ pub(crate) fn request(call: Option<&ToolInvocation>, name: &str, facts: &Facts, 
 /// `errored_forbid` true.
 #[must_use]
 pub fn decide(call: &ToolInvocation, facts: &Facts, findings: &Findings, policies: &ToolPolicies) -> Verdict {
-    let Some((request, entities, seen, action_group)) = request(Some(call), &call.name, facts, findings, policies) else {
+    decide_with_slots(call, facts, findings, &Slots::new(), policies)
+}
+
+/// Decide one tool call with the history slots in the context. Like `decide`, which passes no
+/// slots. A policy that reads a slot that is not there errors, and an errored forbid denies.
+/// A slot with a reserved name (`RESERVED_CONTEXT_NAMES`) is skipped.
+#[must_use]
+pub fn decide_with_slots(call: &ToolInvocation, facts: &Facts, findings: &Findings, slots: &Slots, policies: &ToolPolicies) -> Verdict {
+    let Some((request, entities, seen, action_group)) = request(Some(call), &call.name, facts, findings, slots, policies) else {
         return Verdict::unevaluable(findings, action_entity(policies, &normalise(&call.name)).2);
     };
     let response = Authorizer::new().is_authorized(&request, policies.set(), &entities);

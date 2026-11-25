@@ -15,7 +15,7 @@ mod types;
 pub(crate) mod walk;
 
 pub use compile::{ActionGroup, CompileError, FloorPolicies, PolicyOrigin, PolicyRef, ToolPolicies};
-pub use decide::{Effect, Verdict, decide};
+pub use decide::{Effect, RESERVED_CONTEXT_NAMES, Verdict, decide, decide_with_slots};
 pub use normalise::normalise;
 pub use optimistic::{ToolVerdict, decide_tool};
 pub use types::{Declared, FORGED_HISTORY, Facts, Findings, HISTORY_TRUNCATED, MIXED_SESSIONS, NAME_COLLISION, RequestInfo, SessionInfo, ToolInput, ToolInvocation, UNPARSED_ARGUMENTS};
