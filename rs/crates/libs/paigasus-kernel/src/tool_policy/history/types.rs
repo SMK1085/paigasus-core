@@ -28,9 +28,9 @@ impl Part {
     }
 }
 
-/// The events that a condition reads.
+/// The events that a condition reads. The order is the declaration order (the read plan sorts by it).
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Scope {
     Session,
     Principal,
@@ -130,7 +130,7 @@ pub enum Shape {
 
 impl Shape {
     /// The predicate of the shape.
-    pub(super) fn predicate(&self) -> &Predicate {
+    pub fn predicate(&self) -> &Predicate {
         match self {
             Self::Formerly { predicate } | Self::CountWithin { predicate, .. } | Self::SumWithin { predicate, .. } => predicate,
         }
@@ -248,6 +248,11 @@ impl Catalog {
 
     pub fn unknown() -> Self {
         Self(None)
+    }
+
+    /// The tool names of the catalog, or `None` when the catalog is not known.
+    pub fn names(&self) -> Option<&HashSet<String>> {
+        self.0.as_ref()
     }
 
     /// `None` when the catalog is not known.

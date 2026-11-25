@@ -316,7 +316,12 @@ impl RequestToolPolicy {
             }
         };
         let facts = Facts::new(to_cedar_uid(&principal), org, RequestInfo::new(ctx.scope.clone(), ingress(format), model), SessionInfo::placeholder()).with_detection(self.detectors.enabled);
-        PolicySet::Available { policies, tenant, facts }
+        PolicySet::Available {
+            policies,
+            floor_only: Arc::clone(&floor.floor_only),
+            tenant,
+            facts,
+        }
     }
 
     /// The policies of a request when the source returns the tenant settings (spec §9.3, R2).
@@ -354,7 +359,15 @@ impl RequestToolPolicy {
             }
         };
         let facts = Facts::new(to_cedar_uid(&principal), org, RequestInfo::new(ctx.scope.clone(), ingress(format), model), SessionInfo::placeholder()).with_detection(self.detectors.enabled);
-        (PolicySet::Available { policies, tenant: part, facts }, fin)
+        (
+            PolicySet::Available {
+                policies,
+                floor_only: Arc::clone(&floor.floor_only),
+                tenant: part,
+                facts,
+            },
+            fin,
+        )
     }
 
     /// Apply the tool policy to one request (§ 6.5). `turn` must be `parse_request(format, &body)`:

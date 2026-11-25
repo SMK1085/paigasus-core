@@ -326,7 +326,7 @@ fn decide_now(
     };
     // No scan when no pipeline ran: the kernel then reads the hosts of each call itself.
     let (scans, mut late) = found.map(scans_of).unwrap_or_default();
-    let outcomes = decide_calls_with(snapshot, turn, calls, &scans, &extra, &Instant::now);
+    let outcomes = decide_calls_with(snapshot, turn, calls, &scans, &extra, &[], &Instant::now);
     let mode = snapshot.mode.as_str();
     // The digest is computed inside the timed region, so it is part of the overhead sample (§ 5.3).
     let digests: Vec<_> = calls.iter().map(|c| recorder.digest(&c.arguments)).collect();

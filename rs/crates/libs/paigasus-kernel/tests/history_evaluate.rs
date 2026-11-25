@@ -575,6 +575,42 @@ fn slots_insert_get_iter_and_is_empty() {
 }
 
 #[test]
+fn a_known_catalog_lists_its_names_and_an_unknown_catalog_lists_none() {
+    let known = Catalog::known(["send".to_owned(), "search".to_owned()]);
+    let expected: HashSet<String> = ["send".to_owned(), "search".to_owned()].into();
+    assert_eq!(known.names(), Some(&expected));
+    assert_eq!(Catalog::unknown().names(), None);
+}
+
+#[test]
+fn the_shape_predicate_is_the_predicate_of_each_shape() {
+    let shapes = [
+        Shape::Formerly { predicate: tool("a") },
+        Shape::CountWithin {
+            predicate: tool("a"),
+            op: CmpOp::Ge,
+            threshold: 1,
+        },
+        Shape::SumWithin {
+            predicate: tool("a"),
+            path: p("amount"),
+            op: CmpOp::Le,
+            threshold: 1,
+        },
+    ];
+    for shape in &shapes {
+        assert_eq!(shape.predicate(), &tool("a"), "{shape:?}");
+    }
+}
+
+#[test]
+fn scopes_order_session_then_principal_then_key() {
+    let mut scopes = vec![Scope::Key, Scope::Session, Scope::Principal];
+    scopes.sort();
+    assert_eq!(scopes, [Scope::Session, Scope::Principal, Scope::Key]);
+}
+
+#[test]
 fn an_unavailable_window_gives_its_reason_after_the_pre_checks() {
     let w = Window::unavailable(MissingReason::NoSession);
     assert_eq!(one(&formerly(tool("send")), &w), Err(MissingReason::NoSession));

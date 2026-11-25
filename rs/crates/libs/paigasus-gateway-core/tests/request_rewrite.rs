@@ -41,7 +41,8 @@ fn facts(format: Format) -> Facts {
 fn snapshot(format: Format, floor: &str, tenant: &str, mode: TenantMode) -> PolicySnapshot {
     let floor = Arc::new(ToolPolicies::compile_floor(floor).expect("floor"));
     let set = PolicySet::Available {
-        policies: Arc::new(ToolPolicies::compile(floor, tenant, &[]).expect("compile")),
+        policies: Arc::new(ToolPolicies::compile(Arc::clone(&floor), tenant, &[]).expect("compile")),
+        floor_only: Arc::new(ToolPolicies::compile(floor, "", &[]).expect("floor only")),
         tenant: TenantPart::Evaluated,
         facts: facts(format),
     };

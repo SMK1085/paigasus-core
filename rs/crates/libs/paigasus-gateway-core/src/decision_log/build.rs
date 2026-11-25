@@ -247,6 +247,7 @@ mod tests {
         let policies = Arc::new(ToolPolicies::compile(Arc::new(ToolPolicies::compile_floor("").unwrap()), "", &[]).unwrap());
         let snap = PolicySnapshot::new(
             PolicySet::Available {
+                floor_only: Arc::clone(&policies),
                 policies,
                 tenant: TenantPart::Evaluated,
                 facts,
