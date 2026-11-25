@@ -89,7 +89,7 @@ impl Limits {
         }
         match self.store.check_and_admit(&caller.principal_prn, org, &policy, self.clock.now()).await {
             Ok(LimitDecision::Admit(ticket)) => Ok(ChargeGuard::new(Arc::clone(self), ticket, org, NoTicket::NoBudget)),
-            Ok(LimitDecision::Refused(failed)) => match choose_refusal(&failed) {
+            Ok(LimitDecision::Refused(failed)) => match choose_refusal(&failed, self.clock.now()) {
                 Some(refusal) => {
                     if let Some(reason) = refusal.reason() {
                         counter!(names::GATEWAY_LIMIT_REFUSALS_TOTAL, "reason" => reason.as_label()).increment(1);
@@ -208,6 +208,10 @@ mod tests {
     use std::num::NonZeroU64;
     use std::sync::atomic::Ordering;
 
+    fn unix_secs(t: std::time::SystemTime) -> i64 {
+        i64::try_from(t.duration_since(std::time::UNIX_EPOCH).expect("after the epoch").as_secs()).expect("fits")
+    }
+
     fn nz(n: u64) -> NonZeroU64 {
         NonZeroU64::new(n).expect("non-zero")
     }
@@ -312,7 +316,8 @@ mod tests {
             refusal,
             LimitRefusal::BudgetExhausted {
                 period: BudgetPeriod::Monthly,
-                resets_at_unix: 1_793_491_200
+                resets_at_unix: 1_793_491_200,
+                retry_after_secs: u32::try_from(1_793_491_200 - unix_secs(at("2026-10-02T12:00:00Z"))).expect("fits")
             }
         );
         assert_eq!(counter(&snapshotter, names::GATEWAY_LIMIT_REFUSALS_TOTAL, &[("reason", "org_budget")]), Some(1));

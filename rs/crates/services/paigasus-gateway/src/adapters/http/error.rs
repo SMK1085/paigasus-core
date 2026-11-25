@@ -28,6 +28,12 @@ use crate::domain::limits::{BudgetPeriod, LimitRefusal};
 /// `paigasus-retryable`. Sent only on the two limit refusals.
 pub const SHOULD_RETRY_HEADER: &str = "x-should-retry";
 
+/// Rides in the extensions of every rendered `GatewayError` response. The Anthropic route
+/// group reads it to re-render the body in its own envelope and to keep every header. An
+/// upstream body never carries it, so the re-render layer never touches one (SMA-750 R5).
+#[derive(Clone, Copy, Debug)]
+pub struct RenderedError(pub GatewayError);
+
 /// The OpenAI-compatible error envelope: a single `error` object. `#[derive(Serialize)]` only —
 /// the gateway never deserializes its own error bodies.
 #[derive(Debug, Serialize)]
@@ -118,7 +124,12 @@ pub enum GatewayError {
     /// The org used its token budget for the current period (D6) → 429,
     /// `type: "insufficient_quota"`, `x-should-retry: false`. Not retryable: a retry in seconds
     /// cannot succeed, and each retry costs 2-3 IAM RPCs before the refusal.
-    BudgetExhausted { resets_at_unix: i64, period: BudgetPeriod },
+    BudgetExhausted {
+        resets_at_unix: i64,
+        period: BudgetPeriod,
+        /// The seconds until `resets_at_unix`. Only the Anthropic rendering sends it.
+        retry_after_secs: u32,
+    },
 
     // ---- tool interception (SMA-749) ---------------------------------------------------------
     /// Interception is on with `on_failure = "block"`, and a 2xx non-stream answer could not be
@@ -157,7 +168,15 @@ impl From<LimitRefusal> for GatewayError {
     fn from(refusal: LimitRefusal) -> Self {
         match refusal {
             LimitRefusal::RateLimited { retry_after_secs, .. } => GatewayError::RateLimited { retry_after_secs },
-            LimitRefusal::BudgetExhausted { period, resets_at_unix } => GatewayError::BudgetExhausted { resets_at_unix, period },
+            LimitRefusal::BudgetExhausted {
+                period,
+                resets_at_unix,
+                retry_after_secs,
+            } => GatewayError::BudgetExhausted {
+                resets_at_unix,
+                period,
+                retry_after_secs,
+            },
             LimitRefusal::Unscoped => GatewayError::Internal,
         }
     }
@@ -195,7 +214,7 @@ impl GatewayError {
     /// `type` is one of OpenAI's coarse error kinds (SDKs read it); `code` is the canonical
     /// registry spelling every case now emits (SMA-504 — `Internal` no longer emits `None`);
     /// `param` names the request field at fault, or `None`.
-    fn parts(self) -> (StatusCode, &'static str, Option<&'static str>, Option<&'static str>, &'static str) {
+    pub(crate) fn parts(self) -> (StatusCode, &'static str, Option<&'static str>, Option<&'static str>, &'static str) {
         match self {
             GatewayError::MissingBearer => (
                 StatusCode::UNAUTHORIZED,
@@ -306,9 +325,9 @@ impl GatewayError {
 
     /// The caller-safe message. Static for every case except the budget refusal, which names the
     /// period and the reset instant (D8) — never a count and never the org id.
-    fn message(self) -> String {
+    pub(crate) fn message(self) -> String {
         match self {
-            GatewayError::BudgetExhausted { resets_at_unix, period } => match DateTime::<Utc>::from_timestamp(resets_at_unix, 0) {
+            GatewayError::BudgetExhausted { resets_at_unix, period, .. } => match DateTime::<Utc>::from_timestamp(resets_at_unix, 0) {
                 Some(instant) => format!(
                     "The organization token budget for {} is used up. It resets at {}.",
                     period.label_at_reset(resets_at_unix),
@@ -364,6 +383,7 @@ impl IntoResponse for GatewayError {
             },
         };
         let mut response = (status, Json(envelope)).into_response();
+        response.extensions_mut().insert(RenderedError(self));
         let headers = response.headers_mut();
         headers.insert(RETRYABLE_HEADER, HeaderValue::from_static(self.retryable().as_wire()));
         match self {
@@ -420,6 +440,7 @@ mod tests {
         let resp = GatewayError::BudgetExhausted {
             resets_at_unix: NOV_1,
             period: BudgetPeriod::Monthly,
+            retry_after_secs: 100,
         }
         .into_response();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -438,6 +459,7 @@ mod tests {
             let resp = GatewayError::BudgetExhausted {
                 resets_at_unix,
                 period: BudgetPeriod::Monthly,
+                retry_after_secs: 100,
             }
             .into_response();
             assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -454,6 +476,7 @@ mod tests {
             GatewayError::BudgetExhausted {
                 resets_at_unix: 1_791_158_400,
                 period: BudgetPeriod::Weekly,
+                retry_after_secs: 100,
             }
             .into_response(),
         )
@@ -463,6 +486,7 @@ mod tests {
             GatewayError::BudgetExhausted {
                 resets_at_unix: 1_790_985_600,
                 period: BudgetPeriod::Daily,
+                retry_after_secs: 100,
             }
             .into_response(),
         )
@@ -482,11 +506,13 @@ mod tests {
         assert_eq!(
             GatewayError::from(LimitRefusal::BudgetExhausted {
                 period: BudgetPeriod::Daily,
-                resets_at_unix: NOV_1
+                resets_at_unix: NOV_1,
+                retry_after_secs: 42
             }),
             GatewayError::BudgetExhausted {
                 resets_at_unix: NOV_1,
-                period: BudgetPeriod::Daily
+                period: BudgetPeriod::Daily,
+                retry_after_secs: 42
             }
         );
         assert_eq!(GatewayError::from(LimitRefusal::Unscoped), GatewayError::Internal, "D2/Q11: fail-closed as 500 internal");
@@ -542,7 +568,8 @@ mod tests {
         assert_eq!(
             GatewayError::BudgetExhausted {
                 resets_at_unix: 0,
-                period: BudgetPeriod::Monthly
+                period: BudgetPeriod::Monthly,
+                retry_after_secs: 1
             }
             .into_response()
             .status(),

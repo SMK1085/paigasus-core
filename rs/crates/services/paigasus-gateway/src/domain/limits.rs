@@ -413,6 +413,8 @@ pub enum LimitRefusal {
     BudgetExhausted {
         period: BudgetPeriod,
         resets_at_unix: i64,
+        /// The seconds from the refusal to `resets_at_unix`: at least 1, at most `u32::MAX`.
+        retry_after_secs: u32,
     },
     /// D2: the scope names no org, and an org rate or a budget applies (fail-closed, Q11).
     Unscoped,
@@ -435,13 +437,21 @@ impl LimitRefusal {
 }
 
 /// D8: the org budget first, then the principal rate, then the org rate. `Retry-After` is the
-/// largest wait over every failed rate check, at least 1 s. `None` for an empty list.
-pub fn choose_refusal(failed: &[FailedCheck]) -> Option<LimitRefusal> {
+/// largest wait over every failed rate check, at least 1 s. A budget refusal carries the seconds
+/// from `now` to the reset. `None` for an empty list.
+pub fn choose_refusal(failed: &[FailedCheck], now: SystemTime) -> Option<LimitRefusal> {
     if let Some((period, resets_at_unix)) = failed.iter().find_map(|check| match check {
         FailedCheck::Budget { period, resets_at_unix } => Some((*period, *resets_at_unix)),
         _ => None,
     }) {
-        return Some(LimitRefusal::BudgetExhausted { period, resets_at_unix });
+        let now_unix = now.duration_since(UNIX_EPOCH).map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+        let wait = resets_at_unix.saturating_sub(now_unix).max(1);
+        let retry_after_secs = u32::try_from(wait).unwrap_or(u32::MAX);
+        return Some(LimitRefusal::BudgetExhausted {
+            period,
+            resets_at_unix,
+            retry_after_secs,
+        });
     }
     let retry_after_secs = failed
         .iter()
@@ -956,6 +966,32 @@ mod tests {
         RateCounts { previous, current, elapsed_ms, limit }
     }
 
+    /// A fixed instant 100 s before the November reset.
+    fn now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(u64::try_from(unix("2026-11-01T00:00:00Z") - 100).expect("positive"))
+    }
+
+    #[test]
+    fn the_budget_refusal_carries_the_seconds_to_reset() {
+        let reset = unix("2026-11-01T00:00:00Z");
+        let budget = FailedCheck::Budget {
+            period: BudgetPeriod::Monthly,
+            resets_at_unix: reset,
+        };
+        let wait = |now: SystemTime| match choose_refusal(&[budget], now) {
+            Some(LimitRefusal::BudgetExhausted { retry_after_secs, .. }) => retry_after_secs,
+            other => panic!("not a budget refusal: {other:?}"),
+        };
+        assert_eq!(wait(now()), 100);
+        let past = UNIX_EPOCH + Duration::from_secs(u64::try_from(reset + 5).unwrap());
+        assert_eq!(wait(past), 1, "a reset in the past still waits at least 1 s");
+        let far = FailedCheck::Budget {
+            period: BudgetPeriod::Monthly,
+            resets_at_unix: i64::MAX,
+        };
+        assert!(matches!(choose_refusal(&[far], now()), Some(LimitRefusal::BudgetExhausted { retry_after_secs: u32::MAX, .. })));
+    }
+
     /// D8 precedence: budget, then principal rate, then org rate; Retry-After = max, at least 1.
     #[test]
     fn the_refusal_follows_the_d8_precedence() {
@@ -966,30 +1002,31 @@ mod tests {
         let principal = FailedCheck::PrincipalRate(rate(0, 2, 59_999, 2)); // 31 s
         let org = FailedCheck::OrgRate(rate(10, 5, 30_000, 10)); // 6 s
         assert_eq!(
-            choose_refusal(&[org, principal, budget]),
+            choose_refusal(&[org, principal, budget], now()),
             Some(LimitRefusal::BudgetExhausted {
                 period: BudgetPeriod::Monthly,
-                resets_at_unix: unix("2026-11-01T00:00:00Z")
+                resets_at_unix: unix("2026-11-01T00:00:00Z"),
+                retry_after_secs: 100
             })
         );
         assert_eq!(
-            choose_refusal(&[org, principal]),
+            choose_refusal(&[org, principal], now()),
             Some(LimitRefusal::RateLimited {
                 retry_after_secs: 31,
                 reason: RefusalReason::PrincipalRate
             })
         );
         assert_eq!(
-            choose_refusal(&[org]),
+            choose_refusal(&[org], now()),
             Some(LimitRefusal::RateLimited {
                 retry_after_secs: 6,
                 reason: RefusalReason::OrgRate
             })
         );
-        assert_eq!(choose_refusal(&[]), None);
+        assert_eq!(choose_refusal(&[], now()), None);
         // The minimum is 1 s even when the counts would admit at once.
         assert_eq!(
-            choose_refusal(&[FailedCheck::OrgRate(rate(0, 0, 0, 1))]),
+            choose_refusal(&[FailedCheck::OrgRate(rate(0, 0, 0, 1))], now()),
             Some(LimitRefusal::RateLimited {
                 retry_after_secs: 1,
                 reason: RefusalReason::OrgRate

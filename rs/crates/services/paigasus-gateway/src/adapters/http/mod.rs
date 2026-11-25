@@ -9,6 +9,7 @@
 //! SMA-505) is a THIRD, separately-protected group: it authenticates via [`auth::require_authenticated`]
 //! but never authorizes, and carries no body limit.
 
+pub mod anthropic_error;
 pub mod auth;
 pub(crate) mod bytes;
 pub mod chat;
