@@ -4,8 +4,8 @@
 - **Parent design:** `docs/superpowers/specs/2026-11-22-sma-753-session-history-design.md` (called
   "the design" below). Sven approved it at Gate 1, revision 2, on 2026-11-22.
 - **PR 1:** #527, squash commit `7f1b1f58`
-- **Status:** draft revision 2, 2026-11-25. Revision 2 adds the results of the builder check and of
-  the adversarial challenge (§ 8).
+- **Status:** approved by Sven at Gate 1, revision 2, 2026-11-25. Revision 2 adds the results of the
+  builder check and of the adversarial challenge (§ 8).
 
 ## 1. Intent
 
@@ -106,7 +106,7 @@ The kernel module `tool_policy::history` holds the types. Each public type is `#
 |---|---|
 | `Long`, literal `Long` | the comparison |
 | `Digest`, literal digests | true when the digest under the event's key id is the same, false otherwise |
-| `Digest` and a `Long` literal, or the reverse | false (different types) |
+| `Digest` and a `Long` literal, or the reverse | unknown (different types: the value cannot be read as the rule expects) |
 | `Absent` (the path was captured, and the arguments have no value there) | false |
 | the path is not in the event (the event is older than the path, design R3) | false |
 | `Mistyped` (an object, an array, or a Text number), or unparsed arguments | unknown |
@@ -498,6 +498,13 @@ verdict "needs rework") gave these changes.
   the settle delete guard, R-new-1 and R2 wording, narrower path collection, more metric reasons,
   more proto comments, an additive kernel API, a missing-body metric, nested corpus paths, and more
   mutation checks.
+
+**Correction after Gate 1 (plan review, 2026-11-25)**
+
+- The P1 table said that a digest compared with a Long literal is false. That let
+  `formerly(transfer{amount > 1000})` miss `{"amount":"2000"}`, which is the fail-open case of Sven's
+  decision of 2026-11-25. A different type is now unknown. The plan decisions D-B and D-C apply the
+  same rule to a missing key and to a `sum_within` path.
 
 **Not folded in**
 
