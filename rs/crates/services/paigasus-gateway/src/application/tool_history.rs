@@ -23,7 +23,7 @@ use paigasus_gateway_core::decision_log::{CallFacts, FindingRecord, ReportedCall
 use paigasus_gateway_core::{DecisionContext, HistoryPolicy, LatestTurn, ReadPlan, ReportDecision, SessionContext, StoreBudget, ToolCall, ToolTurn, call_fields};
 use paigasus_kernel::detect::{DETECTOR_KERNEL, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, Severity};
 use paigasus_kernel::mint_uuid7;
-use paigasus_kernel::tool_policy::history::{Event, EventKind as KernelEventKind, Fields, HistoryDigester, KeyId, Scope as KernelScope, Window, WindowSet};
+use paigasus_kernel::tool_policy::history::{Event, EventKind as KernelEventKind, Fields, HistoryDigester, KeyId, MissingReason, Scope as KernelScope, Window, WindowSet};
 use paigasus_kernel::tool_policy::{Findings, normalise};
 use paigasus_observability::names;
 use tokio::time::Instant;
@@ -31,6 +31,7 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::application::tool_policy::decider::count_finding;
+use crate::application::tool_policy::slots::PARTS as SLOT_PARTS;
 use crate::domain::decision_log::Entropy;
 use crate::domain::limits::{Clock, UnavailableKind};
 use crate::domain::tool_history::{
@@ -209,7 +210,7 @@ fn stored_fields(reported: &ReportedCall, org: Uuid, digester: &dyn HistoryDiges
     }
 }
 
-/// Prime every series of the three history metrics at 0.
+/// Prime every series of the history metrics at 0, the 16 `(part, reason)` pairs of the slots metric included.
 pub fn prime_tool_history_metrics() {
     for op in OPS {
         for kind in UnavailableKind::ALL.map(UnavailableKind::as_label).into_iter().chain(["deadline"]) {
@@ -223,6 +224,11 @@ pub fn prime_tool_history_metrics() {
         counter!(names::GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL, "reason" => reason).absolute(0);
     }
     counter!(names::GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL).absolute(0);
+    for part in SLOT_PARTS {
+        for reason in MissingReason::ALL {
+            counter!(names::GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL, "part" => part.as_str(), "reason" => reason.as_str()).absolute(0);
+        }
+    }
 }
 
 fn count_error(op: &'static str, kind: &'static str) {
@@ -1437,7 +1443,16 @@ mod tests {
         }
         let series = snap.snapshot().into_vec().into_iter().filter(|(k, ..)| k.key().name().starts_with("gateway_tool_history_")).count();
         assert_eq!(counter(&snap, names::GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL, &[]), Some(0));
-        assert_eq!(series, 20 + 3 + 2 + 1);
+        for part in ["floor", "tenant"] {
+            for reason in ["disabled", "store", "no_session", "truncated", "unknown", "retention", "no_key", "catalog"] {
+                assert_eq!(
+                    counter(&snap, names::GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL, &[("part", part), ("reason", reason)]),
+                    Some(0),
+                    "{part}/{reason}"
+                );
+            }
+        }
+        assert_eq!(series, 20 + 3 + 2 + 1 + 16);
     }
 
     use paigasus_gateway_core::HistoryPolicy;

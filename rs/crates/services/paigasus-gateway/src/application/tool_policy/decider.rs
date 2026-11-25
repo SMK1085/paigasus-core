@@ -8,9 +8,12 @@
 //! absolute deadline from the hold start (D35), and then decides. The pipeline runs inside this one
 //! future, which the relay polls: still nothing is spawned (D30).
 //!
-//! SMA-753: the decider mints the decision ids first. With a history and a session, the future then
-//! reserves one pending event per call under those ids (spec D8), before the pipeline run. The
-//! decision reads the session findings and the reserve findings. A dropped future drops the reserve.
+//! SMA-753: the decider mints the decision ids first. The future records the hold intent (spec P9).
+//! Then, with a history and a session, it reserves one pending event per call under those ids
+//! (spec D8) and reads the history window, before the pipeline run. The slots of every call come
+//! from that window (spec P7). A failed read can make the tenant part unavailable for the hold.
+//! The decision reads the session findings and the reserve findings. A dropped future drops the
+//! reserve and keeps the intent.
 //!
 //! The decider writes no log line. It counts the decision metrics and computes the keyed argument digest for
 //! the decision log. The recorder writes the per-decision line (SMA-755). Metrics never hold the arguments
@@ -20,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use metrics::counter;
-use paigasus_gateway_core::decision_log::{DecisionDetail, FindingRecord, RecordBasis};
+use paigasus_gateway_core::decision_log::{CallFacts, DecisionDetail, FindingRecord, RecordBasis};
 use paigasus_gateway_core::{
     CallScan, DecideFuture, DecidedCall, Decision, DecisionContext, OnUnavailable, PolicySet, PolicySnapshot, TenantMode, ToolCall, ToolCallDecider, ToolTurn, call_schema, decide_calls_with,
     invocation,
@@ -33,6 +36,7 @@ use uuid::Uuid;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::ToolHistory;
+use crate::application::tool_policy::slots::{HoldSlots, StoreOutcome, count_missing, hold_slots};
 use crate::config::DetectorSettings;
 use crate::domain::detectors::{DetectBatch, PipelineOutput, Side, Stage, Subject};
 
@@ -283,10 +287,12 @@ fn available(ctx: &DecisionContext) -> Option<&PolicySnapshot> {
 }
 
 /// What one hold carries into the decision (SMA-753): the request-level findings that every call
-/// carries, and one decision id per call, minted before the reserve.
+/// carries, one decision id per call, minted before the reserve, and the history slots of the
+/// calls (spec P7), computed once before any decision.
 struct HoldFacts {
     extra: Findings,
     ids: Vec<Uuid>,
+    slots: HoldSlots,
 }
 
 /// Add every kind of `from` to `into`, each with its severity.
@@ -315,7 +321,7 @@ fn decide_now(
     hold: HoldFacts,
     started: tokio::time::Instant,
 ) -> Vec<DecidedCall> {
-    let HoldFacts { extra, ids } = hold;
+    let HoldFacts { extra, ids, slots } = hold;
     let fallback;
     let snapshot = match ctx.policy.as_deref() {
         Some(s) => s,
@@ -326,7 +332,18 @@ fn decide_now(
     };
     // No scan when no pipeline ran: the kernel then reads the hosts of each call itself.
     let (scans, mut late) = found.map(scans_of).unwrap_or_default();
-    let outcomes = decide_calls_with(snapshot, turn, calls, &scans, &extra, &[], &Instant::now);
+    count_missing(&slots.missing);
+    // Spec P7: a tenant part with a condition whose window is not readable is unavailable for this
+    // hold only. The hold is decided on the floor-only set, and the tenant's `on_unavailable`
+    // decides. The copy is for this decision only: its time sums are never read.
+    let tenant_unavailable;
+    let decide_on = if slots.tenant_unavailable {
+        tenant_unavailable = snapshot.with_tenant_unavailable();
+        &tenant_unavailable
+    } else {
+        snapshot
+    };
+    let outcomes = decide_calls_with(decide_on, turn, calls, &scans, &extra, &slots.per_call, &Instant::now);
     let mode = snapshot.mode.as_str();
     // The digest is computed inside the timed region, so it is part of the overhead sample (§ 5.3).
     let digests: Vec<_> = calls.iter().map(|c| recorder.digest(&c.arguments)).collect();
@@ -342,7 +359,8 @@ fn decide_now(
         }
     }
     // Preflight F14: the decider records no sample. It adds its time to the request's snapshot,
-    // and the gateway records one sample per request (`OverheadSample`), however many holds.
+    // and the gateway records one sample per request (`OverheadSample`), however many holds. It is
+    // the snapshot of `ctx`, never the tenant-unavailable copy, so the sample keeps this time.
     if let Some(s) = ctx.policy.as_deref() {
         s.add_decide_elapsed(started.elapsed());
     }
@@ -363,38 +381,75 @@ impl ToolCallDecider for CedarDecider {
     fn decide_by(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>, hold_start: Instant) -> DecideFuture {
         // The ids come first (SMA-753 spec D1): the reserve writes its events under them.
         let ids: Vec<Uuid> = calls.iter().map(|_| self.recorder.mint_decision_id()).collect();
-        let recorder = Arc::clone(&self.recorder);
-        let history = self.history.clone();
-        // D27: the pipeline runs only with the detectors on and an available policy set.
-        let detectors = self.detectors.clone().filter(|_| available(&ctx).is_some());
+        let hold = Hold {
+            recorder: Arc::clone(&self.recorder),
+            history: self.history.clone(),
+            // D27: the pipeline runs only with the detectors on and an available policy set.
+            detectors: self.detectors.clone().filter(|_| available(&ctx).is_some()),
+            hold_start,
+        };
         // One future that the relay polls: the reserve and the pipeline run inside it, and nothing
-        // is spawned (SMA-749 D25, D30). A store error is counted inside `reserve` and changes no
-        // decision (SMA-753 PR 1).
+        // is spawned (SMA-749 D25, D30).
         Box::pin(async move {
-            let mut extra = Findings::new();
-            if let Some(session) = ctx.session.as_deref() {
-                merge_findings(&mut extra, &session.findings);
-                if let Some(history) = &history {
-                    // The reserve round trip is part of the overhead sample (SMA-753 spec § 9). Its
-                    // region ends before the timer of `decide_now` starts, so nothing counts twice.
-                    let started = Instant::now();
-                    let history_policy = ctx.policy.as_deref().and_then(|s| s.history.as_deref());
-                    // Only the findings are used here: no decision reads the window or the hold events yet.
-                    let found = history.reserve(&ctx, session, &calls, &ids, history_policy).await.findings;
-                    if let Some(s) = ctx.policy.as_deref() {
-                        s.add_decide_elapsed(started.elapsed());
-                    }
-                    merge_findings(&mut extra, &found);
-                }
+            // Spec P9, plan decision D-D: the hold intent is recorded at the first poll, before the
+            // reserve. A future that the interceptor drops keeps it, so the report site can settle
+            // the reserved events. Every return of the future forgets it: `run` has one exit.
+            let session = ctx.session.clone();
+            if let Some(s) = &session {
+                s.record_intent(calls.iter().map(CallFacts::of).zip(ids.iter().copied()).collect());
             }
-            // The overhead timer starts before the pipeline run (§ 6.9).
-            let started = tokio::time::Instant::now();
-            let found = match (&detectors, available(&ctx)) {
-                (Some(detectors), Some(snapshot)) => Some(detectors.pipeline.run(call_batch(snapshot, &ctx, &turn, &calls), detectors.deadline(hold_start)).await),
-                _ => None,
-            };
-            Ok(decide_now(&recorder, &ctx, &turn, &calls, found, HoldFacts { extra, ids }, started))
+            let decided = hold.run(&ctx, &turn, &calls, &ids).await;
+            if let Some(s) = &session {
+                s.forget_intent(&ids);
+            }
+            Ok(decided)
         })
+    }
+}
+
+/// What the future of one hold needs from the decider.
+struct Hold {
+    recorder: Arc<DecisionRecorder>,
+    history: Option<Arc<ToolHistory>>,
+    detectors: Option<Detectors>,
+    hold_start: Instant,
+}
+
+impl Hold {
+    /// The reserve, the slots, the pipeline and the decision of one hold. It always gives one
+    /// decision per call: a store error changes only the slots (spec P7).
+    async fn run(self, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall], ids: &[Uuid]) -> Vec<DecidedCall> {
+        let mut extra = Findings::new();
+        if let Some(session) = ctx.session.as_deref() {
+            merge_findings(&mut extra, &session.findings);
+        }
+        let history_policy = ctx.policy.as_deref().and_then(|s| s.history.as_deref());
+        let store = match (&self.history, ctx.session.as_deref()) {
+            (None, _) => StoreOutcome::Disabled,
+            // The history is on, so the request side linked: no session means a lookup error.
+            (Some(_), None) => StoreOutcome::NoSession,
+            (Some(history), Some(session)) => {
+                // The reserve round trip is part of the overhead sample (SMA-753 spec § 9). Its
+                // region ends before the timer below starts, so nothing counts twice.
+                let started = Instant::now();
+                let reserved = history.reserve(ctx, session, calls, ids, history_policy).await;
+                if let Some(s) = ctx.policy.as_deref() {
+                    s.add_decide_elapsed(started.elapsed());
+                }
+                merge_findings(&mut extra, &reserved.findings);
+                StoreOutcome::Read(reserved)
+            }
+        };
+        // The overhead timer starts before the slots and the pipeline run (§ 6.9).
+        let started = tokio::time::Instant::now();
+        // Spec P1: the slots of every call are computed once, before any decision.
+        let slots = hold_slots(history_policy, &store, calls.len());
+        let found = match (&self.detectors, available(ctx)) {
+            (Some(detectors), Some(snapshot)) => Some(detectors.pipeline.run(call_batch(snapshot, ctx, turn, calls), detectors.deadline(self.hold_start)).await),
+            _ => None,
+        };
+        let hold = HoldFacts { extra, ids: ids.to_vec(), slots };
+        decide_now(&self.recorder, ctx, turn, calls, found, hold, started)
     }
 }
 
@@ -1096,5 +1151,304 @@ mod tests {
         let decided = decide_by(&decider, ctx.with_session(session(Findings::new())), turn, &["ok"]).await;
         assert_eq!(decided[0].decision, Decision::Allow);
         assert!(snap.decide_elapsed() >= WAIT, "the reserve wait is in the decide time: {:?}", snap.decide_elapsed());
+    }
+
+    // ---- the history slots (SMA-753 spec P7) ---------------------------------------------------
+
+    use paigasus_proto::paigasus::iam::v1 as pb;
+
+    use crate::application::tool_history::prime_tool_history_metrics;
+
+    /// Permit all, and forbid every call when the slot `under` is false or missing.
+    const CAP_TENANT: &str = r#"@id("p") permit(principal, action, resource); @id("cap") forbid(principal, action, resource) when { !context.under };"#;
+    /// The test floor, and a floor forbid of `send` when the slot `fcap` is false or missing.
+    const CAP_FLOOR: &str = r#"@id("floor-rm") forbid(principal, action == Pgs::Gateway::Action::"rm", resource); @id("floor-cap") forbid(principal, action == Pgs::Gateway::Action::"send", resource) when { !context.fcap };"#;
+    const OBSERVE_UNAVAILABLE: Decision = Decision::Observe { would: BlockCode::PolicyUnavailable };
+    const SEND_2000: (&str, &str) = ("send", r#"{"amount":2000}"#);
+    const SEND_100: (&str, &str) = ("send", r#"{"amount":100}"#);
+
+    fn under() -> pb::HistoryCondition {
+        testing::sum_within("under", "send", "amount", 5000)
+    }
+
+    fn fcap() -> pb::HistoryCondition {
+        testing::sum_within("fcap", "send", "amount", 5000)
+    }
+
+    /// The request side of a chat request with these sets and conditions, in `mode`, with `on` for ORG_A.
+    async fn history_ctx(floor: (&str, Vec<pb::HistoryCondition>), tenant: (&str, Vec<pb::HistoryCondition>), mode: TenantMode, on: OnUnavailable) -> (DecisionContext, ToolTurn) {
+        let source = FakeSource::new(floor.0, tenant.0);
+        source.set_floor_conditions(floor.1);
+        source.set_tenant_conditions(tenant.1, &["send"]);
+        let mut s = settings(mode);
+        s.orgs.insert(ORG_A, (mode, Some(on)));
+        let policy = testing::policy(&source, s);
+        let body = chat_request(&[], "");
+        let turn = parse_request(Format::OpenAiChat, &body);
+        let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
+        let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+        assert!(out.snapshot.history.is_some(), "the snapshot carries the conditions");
+        (ctx.with_policy(out.snapshot), turn)
+    }
+
+    /// `under` in the tenant set, and a forbid of `x` that reads no slot.
+    async fn cap_ctx(on: OnUnavailable) -> (DecisionContext, ToolTurn) {
+        let tenant = r#"@id("p") permit(principal, action, resource); @id("cap") forbid(principal, action, resource) when { !context.under }; @id("x") forbid(principal, action == Pgs::Gateway::Action::"x", resource);"#;
+        history_ctx((testing::FLOOR, Vec::new()), (tenant, vec![under()]), TenantMode::Enforce, on).await
+    }
+
+    fn with_store(store: Arc<dyn SessionStore>) -> CedarDecider {
+        CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(history_over(store))
+    }
+
+    /// The decisions of one hold of `items` (name, arguments).
+    async fn hold_of(decider: &CedarDecider, ctx: &DecisionContext, turn: &ToolTurn, items: &[(&str, &str)]) -> Vec<Decision> {
+        let out = decider.decide(Arc::new(ctx.clone()), Arc::new(turn.clone()), calls_with(items)).await.expect("decide");
+        out.into_iter().map(|d| d.decision).collect()
+    }
+
+    #[tokio::test]
+    async fn a_sum_cap_denies_the_third_call_of_a_hold() {
+        let decider = with_store(Arc::new(MemorySessionStore::new()));
+        let (ctx, turn) = history_ctx((testing::FLOOR, Vec::new()), (CAP_TENANT, vec![under()]), TenantMode::Enforce, OnUnavailable::Closed).await;
+        let ctx = ctx.with_session(session(Findings::new()));
+        assert_eq!(
+            hold_of(&decider, &ctx, &turn, &[SEND_2000, SEND_2000, SEND_2000]).await,
+            [Decision::Allow, Decision::Allow, BLOCK_POLICY]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_call_still_counts_for_the_next_hold() {
+        let decider = with_store(Arc::new(MemorySessionStore::new()));
+        let (ctx, turn) = history_ctx((testing::FLOOR, Vec::new()), (CAP_TENANT, vec![under()]), TenantMode::Enforce, OnUnavailable::Closed).await;
+        let ctx = ctx.with_session(session(Findings::new()));
+        assert_eq!(
+            hold_of(&decider, &ctx, &turn, &[SEND_2000, SEND_2000, SEND_2000]).await,
+            [Decision::Allow, Decision::Allow, BLOCK_POLICY]
+        );
+        // The three events count in the next hold, the denied one too: 6000 + 100 is over the cap.
+        assert_eq!(hold_of(&decider, &ctx, &turn, &[SEND_100]).await, [BLOCK_POLICY]);
+        // Control: another session has no events, so the same call is allowed.
+        let other = Arc::new(SessionContext::new(
+            ORG_A,
+            uuid::Uuid::from_u128(0x0190a1f0_0000_7000_8000_000000000099),
+            1,
+            Findings::new(),
+            StoreBudget::new(Duration::from_secs(1)),
+        ));
+        assert_eq!(hold_of(&decider, &ctx.clone().with_session(other), &turn, &[SEND_100]).await, [Decision::Allow]);
+    }
+
+    #[tokio::test]
+    async fn a_store_error_under_open_observes_every_tenant_policy_for_that_hold() {
+        let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
+        let items = [SEND_100, ("x", "{}"), ("rm", "{}")];
+        // The forbid of `x` reads no slot: it is observed too. The floor still blocks `rm`.
+        let failed = ctx.clone().with_session(session(Findings::new()));
+        assert_eq!(
+            hold_of(&with_store(Arc::new(Down)), &failed, &turn, &items).await,
+            [OBSERVE_UNAVAILABLE, OBSERVE_UNAVAILABLE, BLOCK_POLICY]
+        );
+        // Control: with a store that works, the tenant set is evaluated.
+        let ok = ctx.with_session(session(Findings::new()));
+        assert_eq!(
+            hold_of(&with_store(Arc::new(MemorySessionStore::new())), &ok, &turn, &items).await,
+            [Decision::Allow, BLOCK_POLICY, BLOCK_POLICY]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_error_under_closed_blocks_the_hold() {
+        let (ctx, turn) = cap_ctx(OnUnavailable::Closed).await;
+        let ctx = ctx.with_session(session(Findings::new()));
+        let items = [SEND_100, ("x", "{}"), ("rm", "{}")];
+        assert_eq!(hold_of(&with_store(Arc::new(Down)), &ctx, &turn, &items).await, [BLOCK_UNAVAILABLE, BLOCK_UNAVAILABLE, BLOCK_POLICY]);
+    }
+
+    #[tokio::test]
+    async fn a_floor_slot_forbid_denies_on_a_store_error_in_every_mode() {
+        for mode in [TenantMode::Enforce, TenantMode::LogOnly, TenantMode::Off] {
+            for on in [OnUnavailable::Open, OnUnavailable::Closed] {
+                let (ctx, turn) = history_ctx((CAP_FLOOR, vec![fcap()]), (testing::PERMIT_ALL, Vec::new()), mode, on).await;
+                let failed = ctx.clone().with_session(session(Findings::new()));
+                assert_eq!(hold_of(&with_store(Arc::new(Down)), &failed, &turn, &[SEND_100]).await, [BLOCK_POLICY], "{mode:?} {on:?}");
+                // Control: with a working store the floor slot is true.
+                let ok = ctx.with_session(session(Findings::new()));
+                assert_eq!(
+                    hold_of(&with_store(Arc::new(MemorySessionStore::new())), &ok, &turn, &[SEND_100]).await,
+                    [Decision::Allow],
+                    "{mode:?} {on:?}"
+                );
+            }
+        }
+    }
+
+    /// The value of every series of the slots metric, by `(part, reason)`.
+    fn slot_series(snapshotter: &metrics_util::debugging::Snapshotter) -> std::collections::BTreeMap<(String, String), u64> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL)
+            .map(|(k, _, _, v)| {
+                let label = |n: &str| k.key().labels().find(|l| l.key() == n).map(|l| l.value().to_owned()).unwrap_or_default();
+                let value = match v {
+                    metrics_util::debugging::DebugValue::Counter(c) => c,
+                    _ => 0,
+                };
+                ((label("part"), label("reason")), value)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_slots_missing_metric_is_primed_and_counts_part_and_reason() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        prime_tool_history_metrics();
+        let primed = slot_series(&snapshotter);
+        assert_eq!(primed.len(), 16, "{primed:?}");
+        assert!(primed.values().all(|v| *v == 0), "{primed:?}");
+
+        let (ctx, turn) = history_ctx((CAP_FLOOR, vec![fcap()]), (CAP_TENANT, vec![under()]), TenantMode::Enforce, OnUnavailable::Closed).await;
+        // A store error: both slots of each of the two calls miss with `store`.
+        let failed = ctx.clone().with_session(session(Findings::new()));
+        hold_of(&with_store(Arc::new(Down)), &failed, &turn, &[SEND_100, SEND_100]).await;
+        // A history and no session: `no_session`. No history: `disabled`.
+        hold_of(&with_store(Arc::new(MemorySessionStore::new())), &ctx, &turn, &[SEND_100]).await;
+        let plain = CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
+        hold_of(&plain, &ctx.clone().with_session(session(Findings::new())), &turn, &[SEND_100]).await;
+        // A working store gives both slots: nothing counts.
+        hold_of(&with_store(Arc::new(MemorySessionStore::new())), &ctx.with_session(session(Findings::new())), &turn, &[SEND_100]).await;
+
+        let got = slot_series(&snapshotter);
+        let n = |part: &str, reason: &str| got.get(&(part.to_owned(), reason.to_owned())).copied().unwrap_or(u64::MAX);
+        for part in ["floor", "tenant"] {
+            assert_eq!((n(part, "store"), n(part, "no_session"), n(part, "disabled")), (2, 1, 1), "{part}");
+        }
+        let others: u64 = got.iter().filter(|((_, r), _)| !["store", "no_session", "disabled"].contains(&r.as_str())).map(|(_, v)| *v).sum();
+        assert_eq!((got.len(), others), (16, 0), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_call_named_in_another_case_counts_for_its_name_key() {
+        let decider = with_store(Arc::new(MemorySessionStore::new()));
+        let (ctx, turn) = history_ctx((testing::FLOOR, Vec::new()), (CAP_TENANT, vec![under()]), TenantMode::Enforce, OnUnavailable::Closed).await;
+        let ctx = ctx.with_session(session(Findings::new()));
+        let items = [("Send", r#"{"amount":3000}"#), ("send", r#"{"amount":3000}"#)];
+        assert_eq!(
+            hold_of(&decider, &ctx, &turn, &items).await,
+            [Decision::Allow, BLOCK_POLICY],
+            "both names count for the name key `send`"
+        );
+    }
+
+    /// The memory store, with a reserve that first waits for a permit.
+    struct GatedReserve(MemorySessionStore, tokio::sync::Notify);
+
+    #[async_trait::async_trait]
+    impl SessionStore for GatedReserve {
+        async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            self.0.lookup(req).await
+        }
+        async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.write(req).await
+        }
+        async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.1.notified().await;
+            self.0.reserve(req).await
+        }
+        async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+            self.0.settle(req).await
+        }
+        async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.append(req).await
+        }
+    }
+
+    #[tokio::test]
+    async fn the_hold_intent_is_recorded_before_the_reserve_and_forgotten_after_the_decision() {
+        let gate = Arc::new(GatedReserve(MemorySessionStore::new(), tokio::sync::Notify::new()));
+        let decider = with_store(gate.clone());
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let s = session(Findings::new());
+        let ctx = Arc::new(ctx.with_session(Arc::clone(&s)));
+        let calls = calls_with(&[("ok", "{}")]);
+        let facts = CallFacts::of(&calls[0]);
+        let mut fut = decider.decide(Arc::clone(&ctx), Arc::new(turn.clone()), calls.clone());
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut fut).await.is_err(), "the reserve waits for the gate");
+        let claimed = s.claim_intent(&facts).expect("the intent is there while the reserve waits");
+        gate.1.notify_one();
+        let decided = fut.await.expect("decide");
+        assert_eq!(decided[0].decision_id, Some(claimed), "the intent holds the decision id of the call");
+        // A hold that runs to its end leaves no intent.
+        gate.1.notify_one();
+        decider.decide(ctx, Arc::new(turn), calls).await.expect("decide");
+        assert_eq!(s.claim_intent(&facts), None);
+    }
+
+    /// Whether `facts` has an intent in `s`. A claimed entry is put back.
+    fn has_intent(s: &SessionContext, facts: &CallFacts) -> bool {
+        match s.claim_intent(facts) {
+            Some(id) => {
+                s.record_intent(vec![(facts.clone(), id)]);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Start one hold of `ok` with a new session, poll it for 100 ms, then run it to its end:
+    /// `(an intent while it runs, an intent after it returned)`.
+    async fn intent_during_and_after(decider: &CedarDecider, ctx: DecisionContext, turn: ToolTurn) -> (bool, bool) {
+        let s = session(Findings::new());
+        let calls = calls_with(&[("ok", "{}")]);
+        let facts = CallFacts::of(&calls[0]);
+        let mut fut = decider.decide(Arc::new(ctx.with_session(Arc::clone(&s))), Arc::new(turn), calls);
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut fut).await.is_err(), "the hold still runs");
+        let during = has_intent(&s, &facts);
+        assert_eq!(fut.await.expect("decide").len(), 1);
+        (during, has_intent(&s, &facts))
+    }
+
+    /// `decider` with a pipeline whose one webhook sleeps 1 s: the pipeline timeout (500 ms) ends it.
+    fn slow_pipeline(decider: CedarDecider) -> CedarDecider {
+        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_secs(1)));
+        decider.with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![slow]), DECIDE_TIMEOUT, detector_settings())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_hold_intent_is_forgotten_on_every_return_path() {
+        let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        let plain = || CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
+        let slow_reserve = || with_store(Arc::new(SlowReserve(MemorySessionStore::new(), Duration::from_secs(5))));
+        let paths: Vec<(&str, CedarDecider, DecisionContext)> = vec![
+            // These three wait in the detector pipeline, and its timeout ends the wait.
+            ("no history (disabled)", slow_pipeline(plain()), ctx.clone()),
+            ("a reserve error", slow_pipeline(with_store(Arc::new(Down))), ctx.clone()),
+            ("a read window", slow_pipeline(with_store(Arc::new(MemorySessionStore::new()))), ctx.clone()),
+            // The reserve waits past the store budget of 1 s: the deadline ends it.
+            ("a reserve deadline", slow_reserve(), ctx.clone()),
+            // No snapshot: the fallback blocks every call after the reserve deadline.
+            ("no snapshot", slow_reserve(), DecisionContext::new(PRINCIPAL, ORG_A_PRN, None)),
+        ];
+        for (name, decider, ctx) in paths {
+            assert_eq!(intent_during_and_after(&decider, ctx, turn.clone()).await, (true, false), "{name}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_decide_time_of_an_unavailable_tenant_hold_is_in_the_request_snapshot() {
+        // `with_tenant_unavailable` copies the snapshot with its time sums. The decide time goes to
+        // the snapshot of the request, not to the copy.
+        let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
+        let snap = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
+        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_millis(50)));
+        let decider = with_store(Arc::new(Down)).with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![slow]), DECIDE_TIMEOUT, detector_settings());
+        let ctx = ctx.with_session(session(Findings::new()));
+        assert_eq!(hold_of(&decider, &ctx, &turn, &[SEND_100]).await, [OBSERVE_UNAVAILABLE]);
+        assert!(snap.decide_elapsed() >= Duration::from_millis(50), "{:?}", snap.decide_elapsed());
     }
 }

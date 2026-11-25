@@ -18,6 +18,7 @@ use paigasus_gateway_core::{
     TenantPart, ToolTurn, TurnFacts, ingress, name_collisions, plan_request, rewrite_request, screen_request, screens, seen_hosts,
 };
 use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_KERNEL, Evidence, Finding, HostSet, NAME_COLLISION, Severity, detector_error};
+use paigasus_kernel::tool_policy::history::Part;
 use paigasus_kernel::tool_policy::{Facts, RequestInfo, SessionInfo, ToolPolicies};
 use paigasus_kernel::{Prn, to_cedar_uid};
 use paigasus_observability::names;
@@ -512,10 +513,12 @@ impl RequestToolPolicy {
                 (set, history, mode, on)
             }
         };
-        // Spec D4, D5, F14: link only when the history is on, the org is known and the mode is
-        // `log_only` or `enforce`. The lookup is read only; the write waits for the admission.
+        // Spec D4, D5, F14, P7: link only when the history is on, the org is known, and the mode is
+        // `log_only` or `enforce` or the floor has a history condition (so a floor rule also works
+        // for a tenant in mode `off`). The lookup is read only; the write waits for the admission.
+        let floor_conditioned = history.as_ref().is_some_and(|h| h.has_part(Part::Floor));
         let linked = match (&self.history, org) {
-            (Some(h), Some(o)) if mode != TenantMode::Off => h.link(&ctx.principal, o, ctx.api_key_id.as_deref(), turn).await,
+            (Some(h), Some(o)) if mode != TenantMode::Off || floor_conditioned => h.link(&ctx.principal, o, ctx.api_key_id.as_deref(), turn).await,
             _ => None,
         };
         let (session, pending) = match linked {
@@ -624,7 +627,7 @@ mod tests {
     use crate::application::tool_policy::testing::{self, FakeSource, ORG_A_PRN, PRINCIPAL, Snap, chat_request, settings, settings_from_source};
     use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
     use paigasus_gateway_core::HistoryPolicy;
-    use paigasus_kernel::tool_policy::history::{Catalog, Part};
+    use paigasus_kernel::tool_policy::history::Catalog;
     use paigasus_proto::paigasus::iam::v1::{CompiledToolPolicySet, GetCompiledToolPoliciesResponse, ToolPolicyFailMode, ToolPolicyMode, ToolPolicySetKind, ToolPolicySettings as ProtoSettings};
 
     const FORBID_X: &str = r#"@id("p") permit(principal, action, resource); @id("t") forbid(principal, action == Pgs::Gateway::Action::"x", resource);"#;
@@ -1190,7 +1193,7 @@ mod tests {
     }
 
     /// A source that answers as IAM does: a proto answer, mapped by the IAM adapter. Its tenant set
-    /// holds a valid history condition. The set loads. No code fills the slot `h0` yet.
+    /// holds a valid history condition. The set loads. `decide_y` passes no slots, so `h0` is missing.
     struct IamHistoryAnswer(GetCompiledToolPoliciesResponse);
 
     #[async_trait::async_trait]

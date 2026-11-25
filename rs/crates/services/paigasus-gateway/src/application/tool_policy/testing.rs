@@ -86,6 +86,26 @@ pub(crate) fn formerly(slot: &str, tool: &str, path: &str) -> pb::HistoryConditi
     }
 }
 
+/// A `sum_within` condition: the sum of the Long argument `path` over the calls of `tool` in the
+/// session, within one minute, is at most `max`.
+pub(crate) fn sum_within(slot: &str, tool: &str, path: &str, max: i64) -> pb::HistoryCondition {
+    let predicate = pb::HistoryPredicate {
+        node: Some(history_predicate::Node::Tool(pb::ToolMatch {
+            name_key: tool.to_owned(),
+            any_catalog_tool: false,
+        })),
+    };
+    pb::HistoryCondition {
+        shape: Some(history_condition::Shape::SumWithin(pb::SumWithinShape {
+            predicate: Some(predicate),
+            field_path: vec![path.to_owned()],
+            op: pb::ComparisonOp::Le as i32,
+            threshold: max,
+        })),
+        ..formerly(slot, tool, path)
+    }
+}
+
 impl FakeSource {
     pub(crate) fn new(floor: &str, tenant: &str) -> Arc<Self> {
         Arc::new(FakeSource {
