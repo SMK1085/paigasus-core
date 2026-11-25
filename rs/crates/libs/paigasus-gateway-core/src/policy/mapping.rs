@@ -59,7 +59,7 @@ pub(crate) fn input_for(kind: ToolCallKind, arguments: &str) -> ToolInput {
 /// The stored fields of one call under a field plan (SMA-753 P3). `None` when no plan applies.
 /// The values stay in memory until the report site digests them; no record holds them.
 #[must_use]
-pub(crate) fn call_fields(call: &ToolCall, plan: Option<&FieldPlan>) -> Option<ExtractedFields> {
+pub fn call_fields(call: &ToolCall, plan: Option<&FieldPlan>) -> Option<ExtractedFields> {
     let plan = plan?;
     let paths = plan.paths_for(&normalise(&call.display_name()));
     Some(extract_fields(&input_for(call.kind, &call.arguments), &paths))
@@ -167,6 +167,22 @@ mod tests {
             kind,
             arguments: "{}".to_owned(),
         }
+    }
+
+    /// The reserve and the report sites share `call_fields` (SMA-753 Task 10): the paths of the
+    /// normalised tool name only, and nothing with no plan.
+    #[test]
+    fn call_fields_extracts_the_paths_of_the_plan_for_the_normalised_tool() {
+        use paigasus_kernel::tool_policy::history::{Extracted, FieldPath};
+        let plan = test_plan("send", "n");
+        let mut c = call("Send", ToolCallKind::Function);
+        c.arguments = r#"{"n":5,"m":7}"#.to_owned();
+        let fields = call_fields(&c, Some(&plan)).expect("a plan gives fields");
+        let n = FieldPath::new(vec!["n".to_owned()]).expect("path");
+        let m = FieldPath::new(vec!["m".to_owned()]).expect("path");
+        assert!(matches!(fields.get(&n), Some(Extracted::Long(5))));
+        assert!(fields.get(&m).is_none(), "a path outside the plan");
+        assert!(call_fields(&c, None).is_none());
     }
 
     fn turn(definitions: Vec<ToolDefinition>, definitions_complete: bool) -> ToolTurn {

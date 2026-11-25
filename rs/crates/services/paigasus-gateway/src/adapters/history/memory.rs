@@ -11,6 +11,12 @@
 //! The `c:` link rules and the stored fields follow the Redis adapter (`redis.rs` module doc). A
 //! body keeps the fields as values, not as JSON; `put_raw_body` decodes a JSON body for a test.
 //!
+//! The window read (spec P4) follows the Redis adapter too: the reserve reads after its writes, at
+//! most `MAX_READ_SETS` sets and `MAX_READ_EVENTS` events. A cap trim raises the truncation mark of
+//! its list (the largest removed time). A tool past `MAX_INDEXED_TOOLS` is not indexed, and it
+//! raises the every-tool mark of the history to the time of the write. A mark keeps the larger value
+//! and the expiry of its list (or of the index).
+//!
 //! The store keeps a clock: the highest `now_ms` of any write it has seen. A lookup reads at the
 //! higher of that clock and `LookupRequest::now_ms` (ruling T7-e), and does not move the clock. So a
 //! test with a fixed time never reads at wall time.
@@ -21,13 +27,13 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use paigasus_kernel::tool_policy::history::{Fields, KeyId};
+use paigasus_kernel::tool_policy::history::{Fields, KeyId, SetTool};
 use uuid::Uuid;
 
 use super::body::decode_body;
 use crate::domain::tool_history::{
-    AppendReply, AppendRequest, CallLink, EventKind, EventVerdict, Histories, HistoryStoreError, KEY_TTL_SECS, LookupReply, LookupRequest, MAX_EVENTS_PER_TOOL, RETENTION_MS, ReserveRequest, Scope,
-    SessionState, SessionStore, SettleRequest, StoredEvent, WriteRequest, link_digest,
+    AppendReply, AppendRequest, CallLink, EventKind, EventVerdict, Histories, HistoryStoreError, KEY_TTL_SECS, LookupReply, LookupRequest, MAX_EVENTS_PER_TOOL, MAX_INDEXED_TOOLS, MAX_READ_EVENTS,
+    MAX_READ_SETS, RETENTION_MS, ReadRequest, ReserveRequest, Scope, SessionState, SessionStore, SetWindow, SettleRequest, StoredEvent, WriteRequest, link_digest,
 };
 
 const TTL_MS: u64 = KEY_TTL_SECS * 1000;
@@ -88,6 +94,8 @@ struct State {
     /// `d:` links: (org, principal, decision id) to the session.
     decisions: HashMap<(Uuid, String, Uuid), Exp<Uuid>>,
     sessions: HashMap<(Uuid, Uuid), Exp<SessionState>>,
+    /// Truncation marks: (history, `Some(tool)`) for a list, (history, `None`) for every tool.
+    marks: HashMap<(HistoryKey, Option<String>), Exp<u64>>,
 }
 
 /// One event to add to every history of a request.
@@ -123,6 +131,24 @@ impl State {
         self.calls.retain(|_, e| e.alive(clock));
         self.decisions.retain(|_, e| e.alive(clock));
         self.sessions.retain(|_, e| e.alive(clock));
+        self.marks.retain(|_, e| e.alive(clock));
+    }
+
+    /// Raise a truncation mark to `value`: the larger value stays, and the expiry is `exp_ms` (the
+    /// expiry of its list or index) when that is later. A dead mark counts as absent.
+    fn raise_mark(&mut self, key: (HistoryKey, Option<String>), value: u64, exp_ms: u64) {
+        let clock = self.clock_ms;
+        let mark = self.marks.entry(key).or_insert(Exp { value, exp_ms });
+        if mark.alive(clock) {
+            mark.value = mark.value.max(value);
+            mark.exp_ms = mark.exp_ms.max(exp_ms);
+        } else {
+            *mark = Exp { value, exp_ms };
+        }
+    }
+
+    fn mark(&self, key: &(HistoryKey, Option<String>)) -> Option<u64> {
+        self.marks.get(key).filter(|m| m.alive(self.clock_ms)).map(|m| m.value)
     }
 
     fn touch_session(&mut self, org: Uuid, session: Uuid, turn: i64, now_ms: u64) {
@@ -143,9 +169,7 @@ impl State {
     fn add_events(&mut self, h: &Histories, events: &[NewEvent], now_ms: u64, window_from_ms: Option<u64>) -> AppendReply {
         let mut reply = AppendReply {
             written: events.len(),
-            trimmed_retention: 0,
-            trimmed_cap: 0,
-            truncated: Vec::new(),
+            ..AppendReply::empty()
         };
         // The ids that had a live body: a rewrite moves their list entry, as `ZADD` moves the
         // score of a member (plan decision D-E).
@@ -186,8 +210,13 @@ impl State {
             }
             let index = self.index.entry(key.clone()).or_insert_with(|| Exp::new(BTreeSet::new(), now_ms));
             index.exp_ms = index.exp_ms.max(now_ms.saturating_add(TTL_MS));
+            let mut index_full = false;
             for e in events {
-                index.value.insert(e.tool.clone());
+                if index.value.contains(&e.tool) || index.value.len() < MAX_INDEXED_TOOLS {
+                    index.value.insert(e.tool.clone());
+                } else {
+                    index_full = true;
+                }
                 let lkey = (key.clone(), e.tool.clone());
                 // An expired list (its expiry is before the time of this write) counts as absent: drop it, so its old members do not come back.
                 if self.lists.get(&lkey).is_some_and(|l| l.exp_ms < now_ms)
@@ -207,6 +236,10 @@ impl State {
                     list.value.insert(at, entry);
                 }
             }
+            if index_full {
+                let exp_ms = self.index.get(&key).map_or(0, |i| i.exp_ms);
+                self.raise_mark((key.clone(), None), now_ms, exp_ms);
+            }
             for tool in &tools {
                 let Some(list) = self.lists.get_mut(&(key.clone(), (*tool).to_string())) else { continue };
                 list.value.retain(|(ts, id)| {
@@ -217,10 +250,16 @@ impl State {
                     keep
                 });
                 let mut cut_in_window = false;
+                let mut largest_cut: Option<u64> = None;
                 let over = list.value.len().saturating_sub(MAX_EVENTS_PER_TOOL);
                 for (ts, id) in list.value.drain(..over) {
                     by_cap.insert(id);
+                    largest_cut = largest_cut.max(Some(ts));
                     cut_in_window |= window_from_ms.is_some_and(|w| ts >= w);
+                }
+                if let Some(cut) = largest_cut {
+                    let exp_ms = list.exp_ms;
+                    self.raise_mark((key.clone(), Some((*tool).to_string())), cut, exp_ms);
                 }
                 if cut_in_window {
                     let flag = (scope, (*tool).to_string());
@@ -270,6 +309,66 @@ impl State {
         let mut link = e.value.clone();
         link.result_written = self.bodies.get(&(org, link.event_id)).is_some_and(|b| b.alive(clock_ms) && b.value.result_written);
         Some(link)
+    }
+
+    /// The window read of a reserve (spec P4), at the clock and after its writes. A set past a read
+    /// limit, and every later set, is truncated with no event and no mark.
+    fn read_window(&self, h: &Histories, read: &ReadRequest) -> (Vec<SetWindow>, u64) {
+        let clock = self.clock_ms;
+        let mut window = Vec::with_capacity(read.sets.len());
+        let (mut read_events, mut missing, mut stopped) = (0usize, 0u64, false);
+        for (n, (scope, set)) in read.sets.iter().enumerate() {
+            let key = hkey(h.org, *scope, h.scope_id(*scope));
+            let (tools, index_mark): (Vec<String>, Option<u64>) = match set {
+                SetTool::Tool(t) => (vec![t.clone()], None),
+                SetTool::Every => (
+                    self.index.get(&key).filter(|i| i.alive(clock)).map(|i| i.value.iter().cloned().collect()).unwrap_or_default(),
+                    self.mark(&(key.clone(), None)),
+                ),
+                // A set kind that this adapter does not know: fail closed.
+                _ => {
+                    stopped = true;
+                    (Vec::new(), None)
+                }
+            };
+            let lists: Vec<&EventList> = tools
+                .iter()
+                .filter_map(|t| self.lists.get(&(key.clone(), t.clone())).filter(|l| l.alive(clock)).map(|l| &l.value))
+                .collect();
+            stopped = stopped || n >= MAX_READ_SETS;
+            if !stopped {
+                let count: usize = lists.iter().map(|l| l.iter().filter(|(ts, _)| *ts >= read.from_ms).count()).sum();
+                stopped = read_events + count > MAX_READ_EVENTS;
+                read_events += count;
+            }
+            let mut entry = SetWindow {
+                scope: *scope,
+                tool: set.clone(),
+                events: Vec::new(),
+                mark_ms: None,
+                truncated: stopped,
+            };
+            if !stopped {
+                entry.mark_ms = tools.iter().filter_map(|t| self.mark(&(key.clone(), Some(t.clone())))).chain(index_mark).max();
+                for (ts, id) in lists.iter().flat_map(|l| l.iter()).filter(|(ts, _)| *ts >= read.from_ms) {
+                    match self.bodies.get(&(h.org, *id)).filter(|b| b.alive(clock)) {
+                        Some(body) => entry.events.push(StoredEvent {
+                            id: *id,
+                            ts_ms: *ts,
+                            kind: body.value.kind,
+                            tool: body.value.tool.clone(),
+                            verdict: body.value.verdict,
+                            fields: body.value.fields.clone(),
+                            key: body.value.key,
+                        }),
+                        None => missing += 1,
+                    }
+                }
+                entry.events.sort_by_key(|e| (e.ts_ms, e.id));
+            }
+            window.push(entry);
+        }
+        (window, missing)
     }
 }
 
@@ -343,6 +442,12 @@ impl MemorySessionStore {
         Ok(())
     }
 
+    /// For the test harness: delete the body of one event, as an eviction does (spec P10). Its list
+    /// entries stay. `false` when no body was stored.
+    pub fn drop_body(&self, org: Uuid, id: Uuid) -> bool {
+        self.lock().bodies.remove(&(org, id)).is_some()
+    }
+
     /// For the test harness: the time to live in ms of every stored key of the org.
     pub fn ttls_ms(&self, org: Uuid, now_ms: u64) -> Vec<Option<u64>> {
         let st = self.lock();
@@ -354,6 +459,7 @@ impl MemorySessionStore {
         out.extend(st.calls.iter().filter(|(k, e)| k.0 == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
         out.extend(st.decisions.iter().filter(|(k, e)| k.0 == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
         out.extend(st.sessions.iter().filter(|(k, e)| k.0 == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
+        out.extend(st.marks.iter().filter(|(k, e)| k.0.org == org && e.alive(now_ms)).map(|(_, e)| ttl(e.exp_ms)));
         out
     }
 }
@@ -412,16 +518,7 @@ impl SessionStore for MemorySessionStore {
                 key: call.value.key,
             });
         }
-        let reply = if events.is_empty() {
-            AppendReply {
-                written: 0,
-                trimmed_retention: 0,
-                trimmed_cap: 0,
-                truncated: Vec::new(),
-            }
-        } else {
-            st.add_events(h, &events, req.now_ms, None)
-        };
+        let reply = if events.is_empty() { AppendReply::empty() } else { st.add_events(h, &events, req.now_ms, None) };
         if let Some(turn) = req.turn {
             st.touch_session(h.org, h.session, turn, req.now_ms);
         }
@@ -444,7 +541,7 @@ impl SessionStore for MemorySessionStore {
                 key: c.key,
             })
             .collect();
-        let reply = st.add_events(h, &events, req.now_ms, req.window_from_ms);
+        let mut reply = st.add_events(h, &events, req.now_ms, req.read.as_ref().map(|r| r.from_ms));
         let clock = st.clock_ms;
         for c in &req.calls {
             let key = (h.org, h.principal.clone(), c.id);
@@ -463,6 +560,9 @@ impl SessionStore for MemorySessionStore {
             }
         }
         st.touch_session(h.org, h.session, req.turn, req.now_ms);
+        if let Some(read) = &req.read {
+            (reply.window, reply.missing_bodies) = st.read_window(h, read);
+        }
         Ok(reply)
     }
 
@@ -618,7 +718,7 @@ mod tests {
             turn: 1,
             calls: vec![call_event(id)],
             now_ms,
-            window_from_ms: None,
+            read: None,
         }
     }
 
@@ -664,7 +764,7 @@ mod tests {
                 turn: 1,
                 calls: vec![call_event(4)],
                 now_ms: later,
-                window_from_ms: None,
+                read: None,
             })
             .await
             .unwrap();

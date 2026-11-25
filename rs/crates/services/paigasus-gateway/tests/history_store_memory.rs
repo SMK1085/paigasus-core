@@ -32,6 +32,10 @@ impl Harness for MemoryHarness {
     async fn put_raw_body(&self, org: Uuid, id: Uuid, body: &str) {
         self.store.put_raw_body(org, id, body).expect("a body that decodes");
     }
+
+    async fn drop_body(&self, org: Uuid, id: Uuid) {
+        assert!(self.store.drop_body(org, id), "the event exists");
+    }
 }
 
 fn harness() -> MemoryHarness {
@@ -263,6 +267,51 @@ async fn a_denied_append_under_a_reserved_id_deletes_its_own_link() {
 #[tokio::test]
 async fn a_result_copies_the_exact_fields_of_an_adversarial_call() {
     contract::a_result_copies_the_exact_fields_of_an_adversarial_call(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_window_returns_the_events_of_each_requested_set_in_order() {
+    contract::the_window_returns_the_events_of_each_requested_set_in_order(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_window_includes_future_events_and_the_pending_events_of_this_hold() {
+    contract::the_window_includes_future_events_and_the_pending_events_of_this_hold(&harness()).await;
+}
+
+#[tokio::test]
+async fn an_every_tool_read_returns_the_events_of_every_indexed_tool() {
+    contract::an_every_tool_read_returns_the_events_of_every_indexed_tool(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns() {
+    contract::a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_mark_keeps_the_larger_value() {
+    contract::the_mark_keeps_the_larger_value(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_read_over_64_sets_returns_the_rest_as_truncated() {
+    contract::a_read_over_64_sets_returns_the_rest_as_truncated(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_read_over_20_000_events_returns_the_rest_as_truncated() {
+    contract::a_read_over_20_000_events_returns_the_rest_as_truncated(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_tool_past_256_in_the_index_marks_every_tool() {
+    contract::a_tool_past_256_in_the_index_marks_every_tool(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_missing_body_is_skipped_and_counted() {
+    contract::a_missing_body_is_skipped_and_counted(&harness()).await;
 }
 
 #[tokio::test]

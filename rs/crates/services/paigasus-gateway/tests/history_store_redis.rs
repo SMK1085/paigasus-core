@@ -95,6 +95,10 @@ impl Harness for RedisHarness {
         // `HSET` answers 0 when it replaces a field: the event exists.
         assert_eq!(redis_cli(&self.node, &["HSET", &event_key(org, id), "b", body]).await, "0", "the event exists");
     }
+
+    async fn drop_body(&self, org: Uuid, id: Uuid) {
+        assert_eq!(redis_cli(&self.node, &["DEL", &event_key(org, id)]).await, "1", "the event exists");
+    }
 }
 
 /// The last line that `redis_cli` adds: the exit status of `redis-cli`.
@@ -197,6 +201,15 @@ contract_cases!(
     an_append_under_a_reserved_id_keeps_one_event,
     a_denied_append_under_a_reserved_id_deletes_its_own_link,
     a_result_copies_the_exact_fields_of_an_adversarial_call,
+    the_window_returns_the_events_of_each_requested_set_in_order,
+    the_window_includes_future_events_and_the_pending_events_of_this_hold,
+    an_every_tool_read_returns_the_events_of_every_indexed_tool,
+    a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns,
+    the_mark_keeps_the_larger_value,
+    a_read_over_64_sets_returns_the_rest_as_truncated,
+    a_read_over_20_000_events_returns_the_rest_as_truncated,
+    a_tool_past_256_in_the_index_marks_every_tool,
+    a_missing_body_is_skipped_and_counted,
 );
 
 #[tokio::test]
@@ -299,7 +312,7 @@ async fn an_unreserved_allowed_call_links_on_redis(fail_reserve: bool) {
     let parsed = parse_body(Format::OpenAiChat, body.to_string().as_bytes(), 1 << 20).expect("body");
     let decision_id = Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0000_00d1);
     let ctx = DecisionContext::new(SVC_PRINCIPAL, SVC_ORG_PRN, None).with_request(None, "chat", "m");
-    history.reserve(&ctx, &first, &parsed.calls, &[decision_id]).await;
+    history.reserve(&ctx, &first, &parsed.calls, &[decision_id], None).await;
     assert!(!first.is_reserved(decision_id));
     let reported = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(decision_id)], Basis::Decider, None);
     history.settle(&ctx.clone().with_session(first.clone()), &reported);

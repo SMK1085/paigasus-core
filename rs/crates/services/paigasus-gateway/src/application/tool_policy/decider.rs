@@ -378,7 +378,9 @@ impl ToolCallDecider for CedarDecider {
                     // The reserve round trip is part of the overhead sample (SMA-753 spec § 9). Its
                     // region ends before the timer of `decide_now` starts, so nothing counts twice.
                     let started = Instant::now();
-                    let found = history.reserve(&ctx, session, &calls, &ids).await;
+                    let history_policy = ctx.policy.as_deref().and_then(|s| s.history.as_deref());
+                    // Only the findings are used here: no decision reads the window or the hold events yet.
+                    let found = history.reserve(&ctx, session, &calls, &ids, history_policy).await.findings;
                     if let Some(s) = ctx.policy.as_deref() {
                         s.add_decide_elapsed(started.elapsed());
                     }

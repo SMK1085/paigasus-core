@@ -784,7 +784,7 @@ async fn seed_link(store: &MemorySessionStore, session: Uuid) {
             turn: 1,
             calls,
             now_ms,
-            window_from_ms: None,
+            read: None,
         })
         .await
         .expect("reserve");

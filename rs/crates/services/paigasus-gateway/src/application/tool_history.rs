@@ -8,18 +8,22 @@
 //! time. After the first store error, every later store call of the request is skipped. In PR 1 a
 //! store error has no policy effect: it is counted and the request continues. No client id (call id,
 //! result id, `ref`) becomes a metric label or a log field.
+//!
+//! The reserve also reads the history window of the policy set (spec P4) and gives it to the
+//! decider with the hold events. A failed read is `WindowRead::Failed`: the slots that need it are
+//! missing (fail closed, spec P7).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use metrics::counter;
 use paigasus_gateway_core::decision_log::{CallFacts, FindingRecord, ReportedCall};
-use paigasus_gateway_core::{DecisionContext, LatestTurn, ReportDecision, SessionContext, StoreBudget, ToolCall, ToolTurn};
+use paigasus_gateway_core::{DecisionContext, HistoryPolicy, LatestTurn, ReadPlan, ReportDecision, SessionContext, StoreBudget, ToolCall, ToolTurn, call_fields};
 use paigasus_kernel::detect::{DETECTOR_KERNEL, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, Severity};
 use paigasus_kernel::mint_uuid7;
-use paigasus_kernel::tool_policy::history::{Fields, HistoryDigester, KeyId};
+use paigasus_kernel::tool_policy::history::{Event, EventKind as KernelEventKind, Fields, HistoryDigester, KeyId, Scope as KernelScope, Window, WindowSet};
 use paigasus_kernel::tool_policy::{Findings, normalise};
 use paigasus_observability::names;
 use tokio::time::Instant;
@@ -30,8 +34,8 @@ use crate::application::tool_policy::decider::count_finding;
 use crate::domain::decision_log::Entropy;
 use crate::domain::limits::{Clock, UnavailableKind};
 use crate::domain::tool_history::{
-    AppendCall, AppendReply, AppendRequest, CallEvent, EventVerdict, Histories, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, ResultEvent, SessionStore, SettleItem, SettleRequest,
-    WriteRequest, history_tool, link_session,
+    AppendCall, AppendReply, AppendRequest, CallEvent, EventKind, EventVerdict, Histories, HistoryStoreError, LookupReply, LookupRequest, ReadRequest, ReserveRequest, ResultEvent, Scope,
+    SessionStore, SetWindow, SettleItem, SettleRequest, StoredEvent, WriteRequest, check_window, history_tool, link_session,
 };
 
 const OPS: [&str; 5] = ["lookup", "write", "reserve", "settle", "append"];
@@ -50,6 +54,83 @@ pub struct LinkedRequest {
 pub struct PendingWrite {
     session: Arc<SessionContext>,
     request: WriteRequest,
+}
+
+/// The history window of a hold (spec P4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowRead {
+    /// The policy set has no history condition: no set was read.
+    NotNeeded,
+    /// One `WindowSet` per set of the read plan, in its order, with the events of this hold
+    /// removed. A `Key` set of a caller with no API key holds the principal events (F14).
+    Read(Window),
+    /// The reserve failed, ran past the deadline, or the budget skipped it.
+    Failed,
+}
+
+/// What the reserve gives the decider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReserveOutcome {
+    /// `history_truncated` when the reply flags a set.
+    pub findings: Findings,
+    /// The time of the reserve: the time of the hold events, and the base of the window.
+    pub now_ms: u64,
+    /// One request event per call of the hold, in call order, with its stored fields.
+    pub hold: Vec<Event>,
+    pub window: WindowRead,
+}
+
+/// The store scope of a kernel scope. A `Key` scope with no API key is the principal history (D5,
+/// F14). A later kernel scope has no store scope: its sets stay out of the window, so the
+/// evaluator finds no set (fail closed).
+fn store_scope(scope: KernelScope, keyed: bool) -> Option<Scope> {
+    match scope {
+        KernelScope::Session => Some(Scope::Session),
+        KernelScope::Principal => Some(Scope::Principal),
+        KernelScope::Key if keyed => Some(Scope::Key),
+        KernelScope::Key => Some(Scope::Principal),
+        _ => None,
+    }
+}
+
+/// The store read of a read plan: `from_ms = now_ms - w_max` (saturating), and each set once in
+/// the plan order after the key alias.
+fn read_request(plan: &ReadPlan, now_ms: u64, keyed: bool) -> ReadRequest {
+    let mut seen = HashSet::new();
+    let sets = plan
+        .sets
+        .iter()
+        .filter_map(|s| store_scope(s.scope, keyed).map(|scope| (scope, s.tool.clone())))
+        .filter(|set| seen.insert(set.clone()))
+        .collect();
+    ReadRequest {
+        from_ms: now_ms.saturating_sub(plan.w_max_ms),
+        sets,
+    }
+}
+
+fn kernel_event(e: &StoredEvent) -> Event {
+    let kind = match e.kind {
+        EventKind::Call => KernelEventKind::Request,
+        EventKind::Result => KernelEventKind::Response,
+    };
+    Event::new(e.id, e.ts_ms, kind, e.tool.clone(), e.fields.clone(), e.key)
+}
+
+/// The kernel window of a checked reply: one set per plan set, under the kernel scope of the plan.
+/// The events of this hold (`own`) are removed: the evaluator gets them through the hold.
+fn window_of(plan: &ReadPlan, keyed: bool, reply: &[SetWindow], own: &HashSet<Uuid>) -> Window {
+    let sets = plan
+        .sets
+        .iter()
+        .filter_map(|s| {
+            let scope = store_scope(s.scope, keyed)?;
+            let got = reply.iter().find(|w| w.scope == scope && w.tool == s.tool)?;
+            let events = got.events.iter().filter(|e| !own.contains(&e.id)).map(kernel_event).collect();
+            Some(WindowSet::new(s.scope, s.tool.clone(), events, got.mark_ms, got.truncated))
+        })
+        .collect();
+    Window::new(sets)
 }
 
 /// The store calls that a report needs.
@@ -141,6 +222,7 @@ pub fn prime_tool_history_metrics() {
     for reason in REASONS {
         counter!(names::GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL, "reason" => reason).absolute(0);
     }
+    counter!(names::GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL).absolute(0);
 }
 
 fn count_error(op: &'static str, kind: &'static str) {
@@ -346,14 +428,47 @@ impl ToolHistory {
         }
     }
 
-    /// Inside the decide future. Returns the findings for the hold: `history_truncated` when the
-    /// reply flags a set. A store error is counted (op `reserve`) and gives no finding.
-    pub async fn reserve(&self, ctx: &DecisionContext, session: &SessionContext, calls: &[ToolCall], ids: &[Uuid]) -> Findings {
-        let mut findings = Findings::new();
+    /// Inside the decide future. Writes one pending event per call with the fields of the field
+    /// plan of `policy` (spec P3), and reads the window of its read plan (spec P4).
+    ///
+    /// The findings hold `history_truncated` when the reply flags a set. A store error is counted
+    /// (op `reserve`), gives no finding and a `Failed` window. A reply whose window does not hold
+    /// each requested set in order is a `decode` error. With no call, nothing is written or read.
+    pub async fn reserve(&self, ctx: &DecisionContext, session: &SessionContext, calls: &[ToolCall], ids: &[Uuid], policy: Option<&HistoryPolicy>) -> ReserveOutcome {
+        let now_ms = self.now_ms();
+        let mut outcome = ReserveOutcome {
+            findings: Findings::new(),
+            now_ms,
+            hold: Vec::new(),
+            window: WindowRead::NotNeeded,
+        };
         if calls.is_empty() {
-            return findings;
+            return outcome;
         }
         debug_assert_eq!(calls.len(), ids.len(), "one id per call");
+        // The helper of the report site: the reserve and the report store the same fields.
+        let plan = policy.map(|p| p.fields().as_ref());
+        let events: Vec<CallEvent> = calls
+            .iter()
+            .zip(ids)
+            .map(|(c, id)| {
+                let (fields, key) = call_fields(c, plan).map_or_else(|| (Fields::Values(BTreeMap::new()), None), |x| x.into_fields(session.org, self.digester.as_ref()));
+                CallEvent {
+                    id: *id,
+                    tool: history_tool(c),
+                    call_id: c.id.clone(),
+                    item_id: c.item_id(),
+                    fields,
+                    key,
+                }
+            })
+            .collect();
+        outcome.hold = events
+            .iter()
+            .map(|e| Event::new(e.id, now_ms, KernelEventKind::Request, e.tool.clone(), e.fields.clone(), e.key))
+            .collect();
+        let keyed = ctx.api_key_id.is_some();
+        let read_plan = policy.and_then(HistoryPolicy::read);
         let req = ReserveRequest {
             histories: Histories {
                 org: session.org,
@@ -362,32 +477,39 @@ impl ToolHistory {
                 session: session.session_id,
             },
             turn: session.info.turn,
-            // No field plan reaches the reserve yet, so it stores no fields.
-            calls: calls
-                .iter()
-                .zip(ids)
-                .map(|(c, id)| CallEvent {
-                    id: *id,
-                    tool: history_tool(c),
-                    call_id: c.id.clone(),
-                    item_id: c.item_id(),
-                    fields: Fields::Values(BTreeMap::new()),
-                    key: None,
-                })
-                .collect(),
-            now_ms: self.now_ms(),
-            // PR 1 reads no window (spec D15).
-            window_from_ms: None,
+            calls: events,
+            now_ms,
+            read: read_plan.map(|p| read_request(p, now_ms, keyed)),
         };
-        if let Some(reply) = self.timed(&session.budget, "reserve", self.store.reserve(&req)).await {
-            // Only a reserve that returned wrote its events. The report site appends the others.
-            session.mark_reserved(ids);
-            count_trimmed(&reply);
-            if !reply.truncated.is_empty() {
-                findings.add(HISTORY_TRUNCATED, Severity::Low);
+        let reply = self
+            .timed(&session.budget, "reserve", async {
+                let reply = self.store.reserve(&req).await?;
+                if let Some(read) = &req.read {
+                    check_window(read, &reply.window)?;
+                }
+                Ok(reply)
+            })
+            .await;
+        let Some(reply) = reply else {
+            if read_plan.is_some() {
+                outcome.window = WindowRead::Failed;
             }
+            return outcome;
+        };
+        // Only a reserve that returned wrote its events. The report site appends the others.
+        session.mark_reserved(ids);
+        count_trimmed(&reply);
+        if reply.missing_bodies > 0 {
+            counter!(names::GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL).increment(reply.missing_bodies);
         }
-        findings
+        if !reply.truncated.is_empty() {
+            outcome.findings.add(HISTORY_TRUNCATED, Severity::Low);
+        }
+        if let Some(plan) = read_plan {
+            let own: HashSet<Uuid> = ids.iter().copied().collect();
+            outcome.window = WindowRead::Read(window_of(plan, keyed, &reply.window, &own));
+        }
+        outcome
     }
 
     /// At the report site. Spawns one task on the tracker for the settle and, when needed, the append.
@@ -510,6 +632,8 @@ mod tests {
         mode: Mode,
         calls: AtomicUsize,
         reserve_reply: Mutex<VecDeque<AppendReply>>,
+        /// The `read` of each reserve, in call order.
+        reads: Mutex<Vec<Option<ReadRequest>>>,
     }
 
     impl Fake {
@@ -519,6 +643,7 @@ mod tests {
                 mode,
                 calls: AtomicUsize::new(0),
                 reserve_reply: Mutex::new(VecDeque::new()),
+                reads: Mutex::new(Vec::new()),
             })
         }
 
@@ -553,6 +678,7 @@ mod tests {
             self.inner.write(req).await
         }
         async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.reads.lock().unwrap().push(req.read.clone());
             self.gate().await?;
             if matches!(self.mode, Mode::FailReserve) {
                 return Err(HistoryStoreError::Unavailable {
@@ -738,7 +864,7 @@ mod tests {
         let first = link(&h, &turn(&[], &[])).await.expect("a session").session;
         let items = [("c-1", "Read_File")];
         let decision_id = u(0xd1);
-        h.reserve(&ctx(), &first, &calls(&items), &[decision_id]).await;
+        h.reserve(&ctx(), &first, &calls(&items), &[decision_id], None).await;
         let reported = reported_of(&items, &[(Decision::Allow, Some(decision_id))]);
         h.settle(&ctx().with_session(first.clone()), &reported);
         h.tasks().close();
@@ -786,7 +912,7 @@ mod tests {
             let s = link(&h, &turn(&[], &[])).await.expect("session").session;
             let id = format!("c-{n}");
             let items = [(id.as_str(), "t")];
-            h.reserve(&ctx(), &s, &calls(&items), &[u(0xa0 + n)]).await;
+            h.reserve(&ctx(), &s, &calls(&items), &[u(0xa0 + n)], None).await;
             h.settle(&ctx().with_session(s.clone()), &reported_of(&items, &[(Decision::Allow, Some(u(0xa0 + n)))]));
         }
         h.tasks().close();
@@ -820,7 +946,7 @@ mod tests {
         let budget = StoreBudget::new(Duration::from_secs(1));
         budget.fail();
         let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), budget));
-        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)]).await;
+        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)], None).await.findings;
         assert_eq!(findings, Findings::new());
         assert_eq!(store.count(), 1, "no second call");
         assert_eq!(errors(&snap, "reserve", "deadline").unwrap_or(0), 0);
@@ -833,7 +959,7 @@ mod tests {
         let budget = StoreBudget::new(Duration::from_secs(1));
         let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), budget));
         // The caller drops the reserve after 300 ms (a hold timeout).
-        let held = tokio::time::timeout(Duration::from_millis(300), h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)])).await;
+        let held = tokio::time::timeout(Duration::from_millis(300), h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)], None)).await;
         assert!(held.is_err());
         assert_eq!(session.budget.remaining(), Some(Duration::from_millis(700)));
     }
@@ -847,7 +973,7 @@ mod tests {
         let session = link(&h, &turn(&[], &[])).await.expect("600 ms of 1 s").session;
         assert_eq!(session.budget.remaining(), Some(Duration::from_millis(400)));
         // The reserve gets the 400 ms that are left, not a new second.
-        h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)], None).await;
         assert_eq!(errors(&snap, "reserve", "deadline"), Some(1));
         assert!(session.budget.is_failed());
     }
@@ -856,7 +982,7 @@ mod tests {
     async fn a_reserve_writes_one_pending_event_per_call_in_every_history() {
         let (store, h) = setup();
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
-        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "Read_File"), ("c-2", "write")]), &[u(1), u(2)]).await;
+        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "Read_File"), ("c-2", "write")]), &[u(1), u(2)], None).await.findings;
         assert_eq!(findings, Findings::new());
         for (scope, id) in [(Scope::Session, session.session_id.to_string()), (Scope::Principal, PRINCIPAL.to_owned()), (Scope::Key, KEY.to_owned())] {
             let a = store.inner.events(ORG_A, scope, &id, "read_file");
@@ -877,9 +1003,11 @@ mod tests {
             trimmed_retention: 1,
             trimmed_cap: 2,
             truncated: vec![(Scope::Session, "t".into())],
+            window: Vec::new(),
+            missing_bodies: 0,
         });
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
-        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)]).await;
+        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)], None).await.findings;
         assert!(findings.contains("history_truncated"));
         let m = crate::application::tool_policy::testing::Snap::take(&snap);
         let trimmed = |r: &str| m.counter(names::GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL, &[("reason", r)]);
@@ -893,12 +1021,12 @@ mod tests {
         let store = Fake::new(Mode::Fail);
         let h = history(&store, Duration::from_secs(1));
         let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), StoreBudget::new(Duration::from_secs(1))));
-        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)]).await;
+        let findings = h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)], None).await.findings;
         assert_eq!(findings, Findings::new());
         assert_eq!(errors(&snap, "reserve", "io"), Some(1));
         assert!(session.budget.is_failed());
         // The next store call of the request is skipped.
-        h.reserve(&ctx(), &session, &calls(&[("c-2", "t")]), &[u(2)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-2", "t")]), &[u(2)], None).await;
         assert_eq!(store.count(), 1);
     }
 
@@ -1052,7 +1180,7 @@ mod tests {
         let items = [("c-1", "a")];
         let parsed = calls(&items);
         session.record_intent(vec![(CallFacts::of(&parsed[0]), u(1))]);
-        h.reserve(&ctx(), &session, &parsed, &[u(1)]).await;
+        h.reserve(&ctx(), &session, &parsed, &[u(1)], None).await;
         h.settle(&ctx().with_session(session.clone()), &reported_of(&items, &[(Decision::Allow, None)]));
         drain_tasks(&h).await;
         let events = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "a");
@@ -1094,7 +1222,7 @@ mod tests {
         let (store, h) = setup();
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
         let items = [("c-1", "a"), ("c-2", "b"), ("c-3", "c")];
-        h.reserve(&ctx(), &session, &calls(&items[..2]), &[u(1), u(2)]).await;
+        h.reserve(&ctx(), &session, &calls(&items[..2]), &[u(1), u(2)], None).await;
         let reported = reported_of(&items, &[(Decision::Allow, Some(u(1))), (BLOCK, Some(u(2))), (Decision::Allow, None)]);
         h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
@@ -1127,7 +1255,7 @@ mod tests {
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
         session.budget.fail();
         let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, Some(u(1))), (Decision::Allow, None)]);
-        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], None).await;
         let before = store.count();
         h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
@@ -1149,7 +1277,7 @@ mod tests {
         let store = Fake::new(Mode::Fail);
         let h = history(&store, Duration::from_secs(1));
         let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), StoreBudget::new(Duration::from_secs(1))));
-        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], None).await;
         assert!(session.budget.is_failed());
         let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, Some(u(1))), (Decision::Allow, None)]);
         h.settle(&ctx().with_session(session.clone()), &reported);
@@ -1168,7 +1296,7 @@ mod tests {
         let store = Fake::new(Mode::FailSettle);
         let h = history(&store, Duration::from_secs(1));
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
-        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], None).await;
         let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, Some(u(1))), (Decision::Allow, None)]);
         h.settle(&ctx().with_session(session.clone()), &reported);
         h.tasks().close();
@@ -1209,7 +1337,7 @@ mod tests {
             first.budget.fail();
         }
         let items = [("c-1", "a"), ("c-2", "b")];
-        h.reserve(&ctx(), &first, &calls(&items), &[u(1), u(2)]).await;
+        h.reserve(&ctx(), &first, &calls(&items), &[u(1), u(2)], None).await;
         assert!(!first.is_reserved(u(1)) && !first.is_reserved(u(2)));
         h.settle(&ctx().with_session(first.clone()), &reported_of(&items, &[(Decision::Allow, Some(u(1))), (BLOCK, Some(u(2)))]));
         h.tasks().close();
@@ -1245,7 +1373,7 @@ mod tests {
     async fn a_reserve_marks_its_decision_ids() {
         let (_store, h) = setup();
         let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
-        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], None).await;
         assert!(session.is_reserved(u(1)));
         assert!(!session.is_reserved(u(2)));
     }
@@ -1260,8 +1388,8 @@ mod tests {
         let budget = StoreBudget::new(Duration::from_millis(10));
         budget.charge(Duration::from_millis(10));
         let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), budget));
-        h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)]).await;
-        h.reserve(&ctx(), &session, &calls(&[("c-2", "t")]), &[u(2)]).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "t")]), &[u(1)], None).await;
+        h.reserve(&ctx(), &session, &calls(&[("c-2", "t")]), &[u(2)], None).await;
         assert_eq!(store.count(), 0);
         assert_eq!(errors(&snap, "reserve", "deadline"), Some(1), "the first skip counts; it fails the budget");
         assert!(session.budget.is_failed());
@@ -1308,6 +1436,191 @@ mod tests {
             assert_eq!(counter(&snap, names::GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL, &[("reason", reason)]), Some(0));
         }
         let series = snap.snapshot().into_vec().into_iter().filter(|(k, ..)| k.key().name().starts_with("gateway_tool_history_")).count();
-        assert_eq!(series, 20 + 3 + 2);
+        assert_eq!(counter(&snap, names::GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL, &[]), Some(0));
+        assert_eq!(series, 20 + 3 + 2 + 1);
+    }
+
+    use paigasus_gateway_core::HistoryPolicy;
+    use paigasus_kernel::tool_policy::history::{
+        Catalog, CmpOp, Condition, Event, EventKind as KernelEventKind, FieldPath, FieldTest, Literal, Part, Predicate, Scope as KernelScope, SetTool, Shape, ToolMatch, Window, WindowSet, evaluate,
+    };
+
+    use crate::domain::tool_history::ReadRequest;
+
+    fn tool_is(name: &str) -> Predicate {
+        Predicate::Tool(ToolMatch::NameKey(name.into()))
+    }
+
+    /// `count_within(tool == name) >= 2` over one minute, in `scope`.
+    fn count_of(scope: KernelScope, name: &str) -> Condition {
+        Condition::new(
+            format!("c_{name}"),
+            Part::Tenant,
+            scope,
+            60_000,
+            Shape::CountWithin {
+                predicate: tool_is(name),
+                op: CmpOp::Ge,
+                threshold: 2,
+            },
+        )
+    }
+
+    fn policy_of(conditions: &[Condition]) -> HistoryPolicy {
+        HistoryPolicy::build(&[], conditions, ORG_A, Catalog::unknown(), None, &HmacHistoryDigester::keyless())
+    }
+
+    fn request_event(id: Uuid, ts_ms: u64, tool: &str) -> Event {
+        Event::new(id, ts_ms, KernelEventKind::Request, tool, no_fields(), None)
+    }
+
+    fn keyless_ctx() -> DecisionContext {
+        DecisionContext::new(PRINCIPAL, ORG_A_PRN, None).with_request(None, "chat", "m")
+    }
+
+    fn set(scope: KernelScope, tool: &str, events: Vec<Event>) -> WindowSet {
+        WindowSet::new(scope, SetTool::Tool(tool.into()), events, None, false)
+    }
+
+    /// The reply holds the pending events of this hold (spec P4); the application removes them, so
+    /// the hold counts once, through `hold`.
+    #[tokio::test]
+    async fn the_hold_own_events_are_removed_from_the_window() {
+        let (store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let policy = policy_of(&[count_of(KernelScope::Session, "a")]);
+        let first = h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], Some(&policy)).await;
+        assert_eq!(first.hold, vec![request_event(u(1), first.now_ms, "a")]);
+        assert_eq!(first.window, WindowRead::Read(Window::new(vec![set(KernelScope::Session, "a", vec![])])));
+        let second = h.reserve(&ctx(), &session, &calls(&[("c-2", "a")]), &[u(2)], Some(&policy)).await;
+        assert_eq!(
+            second.window,
+            WindowRead::Read(Window::new(vec![set(KernelScope::Session, "a", vec![request_event(u(1), first.now_ms, "a")])]))
+        );
+        let read = store.reads.lock().unwrap()[1].clone().expect("a read");
+        assert_eq!(read.from_ms, second.now_ms - 60_000, "from = now - w_max");
+        assert_eq!(read.sets, vec![(Scope::Session, SetTool::Tool("a".into()))]);
+    }
+
+    /// F14: with no API key, a `Key` condition reads the principal set. One store set serves the
+    /// `Principal` and the `Key` condition, and the window holds both kernel sets.
+    #[tokio::test]
+    async fn a_key_scope_without_an_api_key_reads_the_principal_sets() {
+        let (store, h) = setup();
+        let session = h.link(PRINCIPAL, ORG_A, None, &turn(&[], &[])).await.expect("a session").session;
+        let mut by_key = count_of(KernelScope::Key, "a");
+        by_key.slot = "k_a".into();
+        let policy = policy_of(&[by_key, count_of(KernelScope::Principal, "a")]);
+        let first = h.reserve(&keyless_ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], Some(&policy)).await;
+        let second = h.reserve(&keyless_ctx(), &session, &calls(&[("c-2", "a")]), &[u(2)], Some(&policy)).await;
+        let prior = || vec![request_event(u(1), first.now_ms, "a")];
+        let window = Window::new(vec![set(KernelScope::Principal, "a", prior()), set(KernelScope::Key, "a", prior())]);
+        assert_eq!(second.window, WindowRead::Read(window.clone()));
+        let read = store.reads.lock().unwrap()[1].clone().expect("a read");
+        assert_eq!(read.sets, vec![(Scope::Principal, SetTool::Tool("a".into()))], "one store set, no key set");
+        let e = evaluate(policy.conditions(), &window, &second.hold, 0, second.now_ms, policy.catalog());
+        assert_eq!((e.slots.get("k_a"), e.slots.get("c_a")), (Some(true), Some(true)), "{e:?}");
+    }
+
+    /// The reserve stores the fields of the field plan (spec P3), with the helper of the report
+    /// site, and the hold events carry them too.
+    #[tokio::test]
+    async fn the_reserve_stores_the_fields_of_the_field_plan() {
+        use paigasus_kernel::tool_policy::history::Field;
+
+        let (store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let n = FieldPath::new(vec!["n".to_owned()]).expect("a path");
+        let predicate = Predicate::AllOf(Box::new(tool_is("a")), Box::new(Predicate::Field(FieldTest::new(n.clone(), CmpOp::Eq, Literal::Long(5)))));
+        let policy = policy_of(&[Condition::new("f", Part::Tenant, KernelScope::Session, 60_000, Shape::Formerly { predicate })]);
+        let body = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [
+            {"id": "c-1", "type": "function", "function": {"name": "a", "arguments": "{\"n\":5,\"m\":7}"}}
+        ]}, "finish_reason": "tool_calls"}]});
+        let parsed = parse_body(Format::OpenAiChat, body.to_string().as_bytes(), 1 << 20).expect("body");
+        let out = h.reserve(&ctx(), &session, &parsed.calls, &[u(1)], Some(&policy)).await;
+        let want = Fields::Values([(n, Field::Long(5))].into_iter().collect());
+        assert_eq!(out.hold[0].fields, want, "only the path of the plan");
+        let stored = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "a");
+        assert_eq!((&stored[0].fields, stored[0].key), (&want, None));
+    }
+
+    #[tokio::test]
+    async fn a_reserve_error_gives_a_failed_window() {
+        let store = Fake::new(Mode::FailReserve);
+        let h = history(&store, Duration::from_secs(1));
+        let policy = policy_of(&[count_of(KernelScope::Session, "a")]);
+        let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), StoreBudget::new(Duration::from_secs(1))));
+        let out = h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], Some(&policy)).await;
+        assert_eq!(out.window, WindowRead::Failed);
+        assert_eq!(out.hold.len(), 1, "the hold events do not need the store");
+        // The failed budget skips the next reserve: still a failed window.
+        let out = h.reserve(&ctx(), &session, &calls(&[("c-2", "a")]), &[u(2)], Some(&policy)).await;
+        assert_eq!(out.window, WindowRead::Failed);
+        // No read plan: nothing was needed.
+        let out = h.reserve(&ctx(), &session, &calls(&[("c-3", "a")]), &[u(3)], None).await;
+        assert_eq!(out.window, WindowRead::NotNeeded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reserve_past_the_deadline_gives_a_failed_window() {
+        let store = Fake::new(Mode::Sleep(Duration::from_secs(2)));
+        let h = history(&store, Duration::from_secs(1));
+        let policy = policy_of(&[count_of(KernelScope::Session, "a")]);
+        let session = Arc::new(SessionContext::new(ORG_A, u(5), 1, Findings::new(), StoreBudget::new(Duration::from_secs(1))));
+        let out = h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], Some(&policy)).await;
+        assert_eq!(out.window, WindowRead::Failed);
+    }
+
+    #[tokio::test]
+    async fn no_read_plan_reads_nothing() {
+        let (store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let none = h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], None).await;
+        let empty = policy_of(&[]);
+        assert!(empty.read().is_none());
+        let no_conditions = h.reserve(&ctx(), &session, &calls(&[("c-2", "a")]), &[u(2)], Some(&empty)).await;
+        assert_eq!((none.window, no_conditions.window), (WindowRead::NotNeeded, WindowRead::NotNeeded));
+        assert_eq!(*store.reads.lock().unwrap(), vec![None, None], "no reserve reads a set");
+    }
+
+    /// A store adapter that leaves out a requested set gives a decode error (spec P4): a failed
+    /// window, never an empty set.
+    #[tokio::test]
+    async fn a_reply_without_the_requested_set_is_a_reserve_decode_error() {
+        let (rec, snap) = metrics();
+        let _local = metrics::set_default_local_recorder(&rec);
+        let (store, h) = setup();
+        store.reserve_reply.lock().unwrap().push_back(AppendReply {
+            written: 1,
+            trimmed_retention: 0,
+            trimmed_cap: 0,
+            truncated: Vec::new(),
+            window: Vec::new(),
+            missing_bodies: 0,
+        });
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let policy = policy_of(&[count_of(KernelScope::Session, "a")]);
+        let out = h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], Some(&policy)).await;
+        assert_eq!(out.window, WindowRead::Failed);
+        assert_eq!(errors(&snap, "reserve", "decode"), Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_missing_body_metric_is_primed_and_counts() {
+        let (rec, snap) = metrics();
+        let _local = metrics::set_default_local_recorder(&rec);
+        prime_tool_history_metrics();
+        let (store, h) = setup();
+        store.reserve_reply.lock().unwrap().push_back(AppendReply {
+            written: 1,
+            trimmed_retention: 0,
+            trimmed_cap: 0,
+            truncated: Vec::new(),
+            window: Vec::new(),
+            missing_bodies: 3,
+        });
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        h.reserve(&ctx(), &session, &calls(&[("c-1", "a")]), &[u(1)], None).await;
+        assert_eq!(counter(&snap, names::GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL, &[]), Some(3));
     }
 }

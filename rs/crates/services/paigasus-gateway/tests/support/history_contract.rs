@@ -14,10 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use paigasus_gateway::domain::tool_history::{
-    AppendCall, AppendRequest, CallEvent, CallLink, EventKind, EventVerdict, Histories, LookupRequest, MAX_EVENTS_PER_TOOL, RETENTION_MS, ReserveRequest, ResultEvent, Scope, SessionState,
-    SessionStore, SettleItem, SettleRequest, StoredEvent, WriteRequest,
+    AppendCall, AppendRequest, CallEvent, CallLink, EventKind, EventVerdict, Histories, LookupRequest, MAX_EVENTS_PER_TOOL, MAX_INDEXED_TOOLS, MAX_READ_EVENTS, MAX_READ_SETS, RETENTION_MS,
+    ReadRequest, ReserveRequest, ResultEvent, Scope, SessionState, SessionStore, SetWindow, SettleItem, SettleRequest, StoredEvent, WriteRequest,
 };
-use paigasus_kernel::tool_policy::history::{Digest, Field, FieldPath, Fields, KeyId};
+use paigasus_kernel::tool_policy::history::{Digest, Field, FieldPath, Fields, KeyId, SetTool};
 use uuid::Uuid;
 
 /// How a case reaches one backend.
@@ -30,6 +30,9 @@ pub trait Harness: Send + Sync {
     /// Replace the JSON body of one stored event (a body that another version wrote). The verdict
     /// and the result guard stay.
     async fn put_raw_body(&self, org: Uuid, id: Uuid, body: &str);
+    /// Delete the `e:` body of one event, as an expiry race or an eviction does (spec P10). The
+    /// history members stay.
+    async fn drop_body(&self, org: Uuid, id: Uuid);
 }
 
 const NOW: u64 = 1_700_000_000_000;
@@ -99,6 +102,7 @@ impl Ctx {
         }
     }
 
+    /// A reserve that reads no set. `window_from_ms` only sets the start of the truncation flag.
     fn reserve(&self, calls: Vec<CallEvent>, now_ms: u64, window_from_ms: Option<u64>) -> ReserveRequest {
         self.reserve_turn(1, calls, now_ms, window_from_ms)
     }
@@ -109,7 +113,15 @@ impl Ctx {
             turn,
             calls,
             now_ms,
-            window_from_ms,
+            read: window_from_ms.map(|from_ms| ReadRequest { from_ms, sets: Vec::new() }),
+        }
+    }
+
+    /// A reserve that reads `sets` from `from_ms`.
+    fn reserve_reading(&self, calls: Vec<CallEvent>, now_ms: u64, from_ms: u64, sets: Vec<(Scope, SetTool)>) -> ReserveRequest {
+        ReserveRequest {
+            read: Some(ReadRequest { from_ms, sets }),
+            ..self.reserve(calls, now_ms, None)
         }
     }
 
@@ -968,6 +980,161 @@ pub async fn a_result_copies_the_exact_fields_of_an_adversarial_call(h: &impl Ha
     assert_eq!((of(r2.id).tool.as_str(), &of(r2.id).fields, of(r2.id).key), (tool, &Fields::Unparsed, unparsed_key));
 }
 
+fn tool(name: &str) -> SetTool {
+    SetTool::Tool(name.into())
+}
+
+fn ids_of(set: &SetWindow) -> Vec<Uuid> {
+    set.events.iter().map(|e| e.id).collect()
+}
+
+/// The ids in the order of the window: by (`ts_ms`, id).
+fn sorted_ids(mut events: Vec<(u64, Uuid)>) -> Vec<Uuid> {
+    events.sort();
+    events.into_iter().map(|(_, id)| id).collect()
+}
+
+pub async fn the_window_returns_the_events_of_each_requested_set_in_order(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let old_a = call("a");
+    let b = calls("b", 2);
+    let new_a = call("a");
+    store.reserve(&ctx.reserve(vec![old_a.clone()], NOW - 30, None)).await.unwrap();
+    store.reserve(&ctx.reserve(b.clone(), NOW - 20, None)).await.unwrap();
+    store.reserve(&ctx.reserve(vec![new_a.clone()], NOW - 10, None)).await.unwrap();
+    let sets = vec![(Scope::Principal, tool("b")), (Scope::Session, tool("a")), (Scope::Key, tool("none"))];
+    let reply = store.reserve(&ctx.reserve_reading(vec![call("c")], NOW, NOW - 25, sets.clone())).await.unwrap();
+    let got: Vec<(Scope, SetTool)> = reply.window.iter().map(|w| (w.scope, w.tool.clone())).collect();
+    assert_eq!(got, sets, "one entry per requested set, in order");
+    assert_eq!(ids_of(&reply.window[0]), sorted_ids(b.iter().map(|c| (NOW - 20, c.id)).collect()));
+    assert_eq!(ids_of(&reply.window[1]), vec![new_a.id], "the event before the window start is not read");
+    let a = &reply.window[1].events[0];
+    assert_eq!((a.ts_ms, a.kind, a.tool.as_str(), a.verdict), (NOW - 10, EventKind::Call, "a", EventVerdict::Pending));
+    assert!(reply.window[2].events.is_empty());
+    for w in &reply.window {
+        assert_eq!((w.mark_ms, w.truncated), (None, false), "{:?}", w.tool);
+    }
+    assert_eq!(reply.missing_bodies, 0);
+}
+
+pub async fn the_window_includes_future_events_and_the_pending_events_of_this_hold(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    let future = call("a");
+    store.reserve(&ctx.reserve(vec![future.clone()], NOW + 50, None)).await.unwrap();
+    let hold = call("a");
+    let reply = store
+        .reserve(&ctx.reserve_reading(vec![hold.clone()], NOW, NOW - 100, vec![(Scope::Session, tool("a"))]))
+        .await
+        .unwrap();
+    let w = &reply.window[0];
+    assert_eq!(ids_of(w), vec![hold.id, future.id]);
+    assert_eq!((w.events[0].ts_ms, w.events[0].verdict), (NOW, EventVerdict::Pending));
+    assert_eq!(w.events[1].ts_ms, NOW + 50);
+}
+
+pub async fn an_every_tool_read_returns_the_events_of_every_indexed_tool(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    let (a, b, c) = (call("a"), call("b"), call("c"));
+    store.reserve(&ctx.reserve(vec![a.clone()], NOW - 3, None)).await.unwrap();
+    store.reserve(&ctx.reserve(vec![b.clone()], NOW - 2, None)).await.unwrap();
+    let reply = store
+        .reserve(&ctx.reserve_reading(vec![c.clone()], NOW, NOW - 100, vec![(Scope::Principal, SetTool::Every)]))
+        .await
+        .unwrap();
+    let w = &reply.window[0];
+    assert_eq!(ids_of(w), vec![a.id, b.id, c.id]);
+    let tools: Vec<&str> = w.events.iter().map(|e| e.tool.as_str()).collect();
+    assert_eq!(tools, ["a", "b", "c"]);
+    assert_eq!((w.mark_ms, w.truncated), (None, false));
+}
+
+pub async fn a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    fill(&store, &ctx, &calls("a", MAX_EVENTS_PER_TOOL), NOW - 100).await;
+    // The trim removes one event at NOW - 100: the mark is the largest removed score.
+    store.reserve(&ctx.reserve(calls("a", 1), NOW - 50, None)).await.unwrap();
+    // A later reserve appends only `b`, and reads `a` and every tool. The window start is after
+    // every event of `a`, so the read returns no event of `a`, but it returns the mark.
+    let sets = vec![(Scope::Session, tool("a")), (Scope::Session, SetTool::Every), (Scope::Principal, tool("b"))];
+    let reply = store.reserve(&ctx.reserve_reading(vec![call("b")], NOW, NOW - 10, sets)).await.unwrap();
+    assert!(reply.window[0].events.is_empty());
+    assert_eq!(reply.window[0].mark_ms, Some(NOW - 100));
+    assert_eq!(reply.window[1].mark_ms, Some(NOW - 100), "an every-tool read returns the largest mark of its sets");
+    assert_eq!(reply.window[1].events.len(), 1, "the event of b");
+    assert_eq!(reply.window[2].mark_ms, None, "a set with no trim has no mark");
+    assert!(reply.window.iter().all(|w| !w.truncated));
+}
+
+pub async fn the_mark_keeps_the_larger_value(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    fill(&store, &ctx, &calls("a", MAX_EVENTS_PER_TOOL), NOW - 100).await;
+    store.reserve(&ctx.reserve(calls("a", 1), NOW - 50, None)).await.unwrap();
+    // An event older than every event of the set: the trim removes it at once, at NOW - 200.
+    let reply = store.reserve(&ctx.reserve(calls("a", 1), NOW - 200, None)).await.unwrap();
+    assert_eq!(reply.trimmed_cap, 1);
+    let reply = store.reserve(&ctx.reserve_reading(vec![call("b")], NOW, NOW - 10, vec![(Scope::Principal, tool("a"))])).await.unwrap();
+    assert_eq!(reply.window[0].mark_ms, Some(NOW - 100));
+}
+
+pub async fn a_read_over_64_sets_returns_the_rest_as_truncated(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    let names: Vec<String> = (0..MAX_READ_SETS + 2).map(|i| format!("t{i}")).collect();
+    let first = call(&names[0]);
+    let last = call(&names[MAX_READ_SETS + 1]);
+    store.reserve(&ctx.reserve(vec![first.clone(), last.clone()], NOW - 1, None)).await.unwrap();
+    let sets: Vec<(Scope, SetTool)> = names.iter().map(|n| (Scope::Session, tool(n))).collect();
+    let reply = store.reserve(&ctx.reserve_reading(vec![call("z")], NOW, NOW - 100, sets)).await.unwrap();
+    assert_eq!(reply.window.len(), MAX_READ_SETS + 2);
+    let truncated: Vec<bool> = reply.window.iter().map(|w| w.truncated).collect();
+    assert!(truncated[..MAX_READ_SETS].iter().all(|t| !t), "the first 64 sets are read");
+    assert!(truncated[MAX_READ_SETS..].iter().all(|t| *t), "the rest is truncated");
+    assert_eq!(ids_of(&reply.window[0]), vec![first.id]);
+    assert!(reply.window[MAX_READ_SETS + 1].events.is_empty(), "a truncated set returns no event");
+}
+
+pub async fn a_read_over_20_000_events_returns_the_rest_as_truncated(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    fill(&store, &ctx, &calls("a", MAX_EVENTS_PER_TOOL), NOW - 10).await;
+    fill(&store, &ctx, &calls("b", MAX_EVENTS_PER_TOOL), NOW - 10).await;
+    let small = call("c");
+    store.reserve(&ctx.reserve(vec![small.clone()], NOW - 10, None)).await.unwrap();
+    const { assert!(2 * MAX_EVENTS_PER_TOOL + 1 > MAX_READ_EVENTS) };
+    // The every-tool set holds 20,002 events in the window (a, b, c and the hold): over the limit.
+    // The small set before it is read; the set after it is truncated too.
+    let sets = vec![(Scope::Session, tool("c")), (Scope::Principal, SetTool::Every), (Scope::Session, tool("d"))];
+    let reply = store.reserve(&ctx.reserve_reading(vec![call("e")], NOW, NOW - 100, sets)).await.unwrap();
+    let truncated: Vec<bool> = reply.window.iter().map(|w| w.truncated).collect();
+    assert_eq!(truncated, [false, true, true]);
+    assert_eq!(ids_of(&reply.window[0]), vec![small.id]);
+    assert!(reply.window[1].events.is_empty() && reply.window[2].events.is_empty());
+}
+
+pub async fn a_tool_past_256_in_the_index_marks_every_tool(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    let indexed: Vec<CallEvent> = (0..MAX_INDEXED_TOOLS).map(|i| call(&format!("t{i}"))).collect();
+    store.reserve(&ctx.reserve(indexed, NOW - 10, None)).await.unwrap();
+    let extra = call("extra");
+    let sets = vec![(Scope::Session, SetTool::Every), (Scope::Session, tool("extra"))];
+    let reply = store.reserve(&ctx.reserve_reading(vec![extra.clone()], NOW, NOW - 100, sets)).await.unwrap();
+    let every = &reply.window[0];
+    assert_eq!(every.events.len(), MAX_INDEXED_TOOLS, "the new tool is not in the index");
+    assert!(every.events.iter().all(|e| e.id != extra.id));
+    assert_eq!(every.mark_ms, Some(NOW), "the history gets the every-tool mark");
+    assert_eq!(ids_of(&reply.window[1]), vec![extra.id], "the new tool still has its own set");
+    assert_eq!(reply.window[1].mark_ms, None);
+}
+
+pub async fn a_missing_body_is_skipped_and_counted(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(false), h.store().await);
+    let (gone, stays) = (call("a"), call("a"));
+    store.reserve(&ctx.reserve(vec![gone.clone(), stays.clone()], NOW - 10, None)).await.unwrap();
+    h.drop_body(ctx.org, gone.id).await;
+    let reply = store.reserve(&ctx.reserve_reading(vec![call("b")], NOW, NOW - 100, vec![(Scope::Session, tool("a"))])).await.unwrap();
+    assert_eq!(ids_of(&reply.window[0]), vec![stays.id]);
+    assert!(!reply.window[0].truncated, "a missing body is not a truncation");
+    assert_eq!(reply.missing_bodies, 1);
+}
+
 /// Every case, in table order. The Redis binary calls this once per image.
 pub async fn run_all(h: &impl Harness) {
     a_reserve_appends_one_pending_event_per_history(h).await;
@@ -1015,4 +1182,13 @@ pub async fn run_all(h: &impl Harness) {
     an_append_under_a_reserved_id_keeps_one_event(h).await;
     a_denied_append_under_a_reserved_id_deletes_its_own_link(h).await;
     a_result_copies_the_exact_fields_of_an_adversarial_call(h).await;
+    the_window_returns_the_events_of_each_requested_set_in_order(h).await;
+    the_window_includes_future_events_and_the_pending_events_of_this_hold(h).await;
+    an_every_tool_read_returns_the_events_of_every_indexed_tool(h).await;
+    a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns(h).await;
+    the_mark_keeps_the_larger_value(h).await;
+    a_read_over_64_sets_returns_the_rest_as_truncated(h).await;
+    a_read_over_20_000_events_returns_the_rest_as_truncated(h).await;
+    a_tool_past_256_in_the_index_marks_every_tool(h).await;
+    a_missing_body_is_skipped_and_counted(h).await;
 }
