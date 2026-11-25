@@ -569,3 +569,40 @@ in CORE `tests/fixtures/anthropic/recorded/` (streams, timing) and GW `tests/fix
   run.
 - Pending Task 14: the Claude Code session recording (event, block and delta types, and the
   `anthropic-beta` values) and the D9 follow-up-turn check.
+
+### 15.1 Claude Code conformance (Task 14, 2026-11-26)
+
+Setup: Claude Code 2.1.332 in `-p` mode, model `claude-sonnet-4-6`, through a local gateway on the
+branch. The gateway ran the real router, `AnthropicClient`, interception, and limits with a large
+budget. A test decider blocked `Bash` calls that run `rm`. The test fake IAM authenticated the
+caller, because no local real IAM exists (no IdP for the admin bootstrap). The real IAM path is
+covered by the route tests with the same fake. A local recording proxy captured the raw Anthropic
+traffic. The harness was not committed.
+
+Results (9 sessions):
+
+| Check | Result |
+|---|---|
+| A session with tool calls, `ANTHROPIC_API_KEY` (`x-api-key`) | Pass |
+| A session with tool calls, `ANTHROPIC_AUTH_TOKEN` (`Authorization: Bearer`) | Pass |
+| `GET /v1/models` with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` | Pass: 9 calls, one per session, all 200 |
+| `POST /v1/messages/count_tokens` | Pass: 3 calls in 9 sessions, all 200 |
+| Prompt caching: `cache_read_input_tokens` above 0 from the second turn on | Pass (for example 21 710, 31 126) |
+| The blocked tool: Claude Code shows the notice, and the file stays | Pass |
+| The session continues after the block (`--continue`) | Pass |
+| D9, all calls blocked after a `thinking` block: follow-up turn | 200 (2 of 2) |
+| D9, one call blocked and one allowed after a `thinking` block: follow-up turn | 200 (2 of 2) |
+| Claude Code recovery from a D9 400 | Not measured: no 400 happened |
+| `/context` and `/model` in the interactive UI | Not measured: `-p` mode only. The endpoints behind them (`count_tokens`, `models`) were called and answered 200 |
+
+Types seen: events `message_start`, `content_block_start`, `content_block_delta`,
+`content_block_stop`, `message_delta`, `message_stop`, `ping`. Blocks `text`, `thinking`,
+`tool_use`. Deltas `text_delta`, `thinking_delta`, `signature_delta`, `input_json_delta`. All are
+in the Task 1 list and in the Task 12 table, so no fix was needed.
+
+`anthropic-beta` values that Claude Code sent: `advanced-tool-use-2025-11-20`,
+`claude-code-20250219`, `context-management-2025-06-27`, `effort-2025-11-24`,
+`interleaved-thinking-2025-05-14`, `thinking-token-count-2026-05-13`, and on `count_tokens`
+`token-counting-2024-11-01`.
+
+Claude Code also sent two `GET /` probes per run. They got a 404, as § 13 expects.
