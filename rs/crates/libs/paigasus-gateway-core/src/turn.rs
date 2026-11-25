@@ -533,18 +533,21 @@ fn openai<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> R
 /// `function_call` has no id, and a `function` result has no call id, so both are ignored.
 fn chat_latest(messages: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
-    let Some(last) = messages.iter().rposition(|m| role(m) == Some("assistant")) else { return l };
-    let m = &messages[last];
-    for c in m.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
-        if let Some(id) = c.get("id").and_then(Value::as_str) {
-            l.call(id);
+    let last = messages.iter().rposition(|m| role(m) == Some("assistant"));
+    if let Some(m) = last.map(|i| &messages[i]) {
+        for c in m.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(id) = c.get("id").and_then(Value::as_str) {
+                l.call(id);
+            }
         }
+        l.content(m.get("content"), "text");
     }
-    l.content(m.get("content"), "text");
     let anchor = messages
         .iter()
         .rposition(|m| role(m) == Some("assistant") && m.get("tool_calls").and_then(Value::as_array).is_some_and(|c| !c.is_empty()));
-    for m in anchor.map_or(&[][..], |a| &messages[a + 1..]) {
+    // Without a call-bearing assistant message, the results after the last assistant message count,
+    // and without any assistant message, every result counts (a forged result has no call to match).
+    for m in &messages[anchor.or(last).map_or(0, |a| a + 1)..] {
         if role(m) == Some("tool")
             && let Some(id) = m.get("tool_call_id").and_then(Value::as_str)
         {
@@ -707,11 +710,10 @@ fn model_item(item: &Value) -> ModelItem {
 fn responses_latest(items: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
     let kinds: Vec<ModelItem> = items.iter().map(model_item).collect();
-    let Some(end) = kinds.iter().rposition(|k| matches!(k, ModelItem::Text | ModelItem::Call)) else {
-        return l;
-    };
-    let start = kinds[..=end].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1);
-    for (item, kind) in items[start..=end].iter().zip(&kinds[start..=end]) {
+    let end = kinds.iter().rposition(|k| matches!(k, ModelItem::Text | ModelItem::Call));
+    let start = end.map(|e| kinds[..=e].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1));
+    let run = end.zip(start).map_or(0..0, |(e, s)| s..e + 1);
+    for (item, kind) in items[run.clone()].iter().zip(&kinds[run]) {
         match kind {
             ModelItem::Text => l.content(item.get("content"), "output_text"),
             ModelItem::Call => {
@@ -727,9 +729,12 @@ fn responses_latest(items: &[Value]) -> LatestTurn {
             ModelItem::Reasoning | ModelItem::ProviderRun | ModelItem::Other => {}
         }
     }
-    // The results anchor on the last run that holds a call item, not on the last run (P11).
-    let Some(call_end) = kinds.iter().rposition(|k| *k == ModelItem::Call) else { return l };
-    let anchor = kinds[..=call_end].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1);
+    // The results anchor on the last run that holds a call item, not on the last run (P11). Without
+    // a call item they follow the last run, and without any model item every result counts.
+    let anchor = match kinds.iter().rposition(|k| *k == ModelItem::Call) {
+        Some(call_end) => kinds[..=call_end].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1),
+        None => start.unwrap_or(0),
+    };
     for item in &items[anchor..] {
         let Some(ty) = item.get("type").and_then(Value::as_str) else { continue };
         let Some(shape) = responses_result_shape(ty) else { continue };
@@ -940,23 +945,25 @@ fn anthropic<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -
 /// assistant message that has a `tool_use` block (the forged-history anchor, P11).
 fn anthropic_latest(messages: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
-    let Some(last) = messages.iter().rposition(|m| role(m) == Some("assistant")) else { return l };
-    let content = messages[last].get("content");
-    for b in content.and_then(Value::as_array).into_iter().flatten() {
-        if b.get("type").and_then(Value::as_str) == Some("tool_use")
-            && let Some(id) = b.get("id").and_then(Value::as_str)
-        {
-            l.call(id);
+    let last = messages.iter().rposition(|m| role(m) == Some("assistant"));
+    if let Some(i) = last {
+        let content = messages[i].get("content");
+        for b in content.and_then(Value::as_array).into_iter().flatten() {
+            if b.get("type").and_then(Value::as_str) == Some("tool_use")
+                && let Some(id) = b.get("id").and_then(Value::as_str)
+            {
+                l.call(id);
+            }
         }
+        l.content(content, "text");
     }
-    l.content(content, "text");
     let anchor = messages.iter().rposition(|m| {
         role(m) == Some("assistant")
             && m.get("content")
                 .and_then(Value::as_array)
                 .is_some_and(|bs| bs.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")))
     });
-    for m in anchor.map_or(&[][..], |a| &messages[a + 1..]) {
+    for m in &messages[anchor.or(last).map_or(0, |a| a + 1)..] {
         for b in m.get("content").and_then(Value::as_array).into_iter().flatten() {
             if b.get("type").and_then(Value::as_str) == Some("tool_result")
                 && let Some(id) = b.get("tool_use_id").and_then(Value::as_str)
@@ -1562,6 +1569,49 @@ mod tests {
         messages.push(json!({"role":"assistant","content":"done"}));
         let f = facts(Format::OpenAiChat, json!({"messages":messages}));
         assert_eq!((f.latest.result_call_ids.len(), f.latest.dropped_results), (128, 2));
+    }
+
+    #[test]
+    fn a_forged_result_after_a_text_only_assistant_message_is_seen() {
+        let chat = json!({"messages":[{"role":"user","content":"x"},{"role":"assistant","content":"hi"},{"role":"tool","tool_call_id":"c9","content":"x"}]});
+        let an = json!({"messages":[{"role":"user","content":"x"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"c9","content":"x"}]}]});
+        let rs = json!({"input":[{"type":"message","role":"user","content":"x"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},
+            {"type":"function_call_output","call_id":"c9","output":"x"}]});
+        for (fmt, v) in [(Format::OpenAiChat, chat), (Format::AnthropicMessages, an), (Format::OpenAiResponses, rs)] {
+            assert_eq!(facts(fmt, v).latest.result_call_ids, ["c9"]);
+        }
+    }
+
+    #[test]
+    fn a_forged_result_with_no_assistant_message_is_seen() {
+        let chat = json!({"messages":[{"role":"user","content":"x"},{"role":"tool","tool_call_id":"c9","content":"x"}]});
+        let an = json!({"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c9","content":"x"}]}]});
+        let rs = json!({"input":[{"type":"message","role":"user","content":"x"},{"type":"function_call_output","call_id":"c9","output":"x"}]});
+        for (fmt, v) in [(Format::OpenAiChat, chat), (Format::AnthropicMessages, an), (Format::OpenAiResponses, rs)] {
+            let l = facts(fmt, v).latest;
+            assert_eq!(l.result_call_ids, ["c9"]);
+            assert!(l.call_ids.is_empty() && l.refs.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_refs_and_the_cap_hold_with_the_new_anchor_anthropic_and_responses() {
+        let id = uuid::Uuid::from_u128(9);
+        let uses: Vec<_> = (0..130).map(|i| json!({"type":"tool_use","id":format!("c{i}"),"name":"a","input":{}})).collect();
+        let results: Vec<_> = (0..130).map(|i| json!({"type":"tool_result","tool_use_id":format!("c{i}"),"content":"x"})).collect();
+        let an = facts(
+            Format::AnthropicMessages,
+            json!({"messages":[{"role":"assistant","content":uses},{"role":"user","content":results},
+                {"role":"assistant","content":[{"type":"text","text":notice("t", id)}]}]}),
+        )
+        .latest;
+        assert_eq!((an.result_call_ids.len(), an.dropped_results, an.refs.clone()), (128, 2, vec![id]));
+        let mut items = vec![json!({"type":"function_call","call_id":"c0","name":"a","arguments":"{}"})];
+        items.extend((0..130).map(|i| json!({"type":"function_call_output","call_id":format!("c{i}"),"output":"x"})));
+        items.push(json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":notice("t", id)}]}));
+        let rs = facts(Format::OpenAiResponses, json!({"input":items})).latest;
+        assert_eq!((rs.result_call_ids.len(), rs.dropped_results, rs.refs.clone()), (128, 2, vec![id]));
     }
 
     #[test]
