@@ -1,0 +1,39 @@
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 300,
+  "tools": [
+    {
+      "name": "create_user",
+      "description": "Create a user.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Name"
+        ]
+      },
+      "input_examples": [
+        {
+          "Name": "Ada"
+        },
+        {
+          "Name": "Grace"
+        }
+      ]
+    }
+  ],
+  "tool_choice": {
+    "type": "tool",
+    "name": "create_user"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Create a user named Linus."
+    }
+  ]
+}

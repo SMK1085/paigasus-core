@@ -16,6 +16,10 @@ Each scenario writes, into `<out>`:
     <scenario>.body.json       a non-stream answer
     <scenario>.response.json   {"status": N, "headers": {...}}, scrubbed (D21)
 
+A `web_fetch` stream holds a third-party document. The script replaces it with a synthetic body of
+the same length (`--synthesize-web-fetch FILE`, also applied on a live run), so no copyrighted
+text is written.
+
 D21 scrub, applied before any file is written: only the headers `content-type`, `request-id`,
 `retry-after` and `x-should-retry` are kept. The `request-id` value and every top-level
 `request_id` body value become `req_paigasus_fixture`. The script exits 1 and writes nothing when
@@ -23,6 +27,7 @@ the text it would write holds the Anthropic key prefix.
 """
 
 import argparse
+import base64
 import concurrent.futures
 import json
 import pathlib
@@ -224,6 +229,47 @@ def scrub_body(raw: bytes) -> str:
     return json.dumps(v, ensure_ascii=False, indent=2) + "\n"
 
 
+FILLER = b"% synthetic filler for the paigasus fixture, not a real document\n"
+
+
+def synthetic_pdf(n_raw: int) -> bytes:
+    """A deterministic non-copyrighted body of exactly `n_raw` bytes: a PDF header, then filler."""
+    head = b"%PDF-1.5\n"
+    body = head + FILLER * (n_raw // len(FILLER) + 1)
+    return body[:n_raw]
+
+
+def synthesize_web_fetch(raw: bytes) -> bytes:
+    """Replaces the fetched document and the model text of a `web_fetch` stream (copyright).
+
+    The `source.data` of a `web_fetch_result` becomes the base64 of `synthetic_pdf` with the same
+    length. Every letter of a `text_delta` becomes `x`. The record structure and every length stay.
+    """
+    lines = raw.decode("utf-8").split("\n")
+    for i, line in enumerate(lines):
+        if not line.startswith("data:"):
+            continue
+        try:
+            v = json.loads(line[5:])
+        except ValueError:
+            continue
+        cb = v.get("content_block") or {}
+        if cb.get("type") == "web_fetch_tool_result":
+            src = ((cb.get("content") or {}).get("content") or {}).get("source") or {}
+            old = src.get("data")
+            if isinstance(old, str):
+                if len(old) % 4:
+                    sys.exit("synthesize: the base64 length is not a multiple of 4")
+                new = base64.b64encode(synthetic_pdf(len(old) // 4 * 3)).decode("ascii")
+                assert len(new) == len(old)
+                lines[i] = line.replace('"data":"' + old + '"', '"data":"' + new + '"', 1)
+        delta = v.get("delta") or {}
+        if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+            masked = re.sub(r"[A-Za-z]", "x", delta["text"])
+            lines[i] = line.replace(json.dumps(delta["text"]), json.dumps(masked), 1)
+    return "\n".join(lines).encode("utf-8")
+
+
 def write(path: pathlib.Path, data) -> None:
     raw = data.encode("utf-8") if isinstance(data, str) else data
     if KEY_PREFIX.encode() in raw:
@@ -271,7 +317,10 @@ def run_scenario(key: str, name: str, spec: dict, out: pathlib.Path) -> dict:
     is_sse = "event-stream" in ctype
     write(out / f"{name}.response.json", json.dumps({"status": status, "headers": scrub_headers(headers)}, indent=2) + "\n")
     if is_sse:
-        write(out / f"{name}.sse", scrub_sse(raw))
+        clean = scrub_sse(raw)
+        if name.startswith("server_tool_web_fetch"):
+            clean = synthesize_web_fetch(clean)
+        write(out / f"{name}.sse", clean)
         end, ends = 0, []
         for t, c in chunks:
             end += len(c)
@@ -330,7 +379,13 @@ def main() -> int:
     p.add_argument("--thinking-model")
     p.add_argument("--only")
     p.add_argument("--out")
+    p.add_argument("--synthesize-web-fetch", metavar="SSE", help="rewrite a web_fetch .sse file in place")
     a = p.parse_args()
+
+    if a.synthesize_web_fetch:
+        f = pathlib.Path(a.synthesize_web_fetch)
+        f.write_bytes(synthesize_web_fetch(f.read_bytes()))
+        return 0
 
     key = None
     if not a.dry_run:

@@ -1,0 +1,11 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 100,
+  "stream": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Say hello in one short sentence."
+    }
+  ]
+}

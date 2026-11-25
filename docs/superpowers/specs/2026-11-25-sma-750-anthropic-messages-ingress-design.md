@@ -510,3 +510,62 @@ Not acted on:
 - "`billing_error` with 429 versus 402": kept at 429, as the Claude apps gateway does, so that the
   status matches the OpenAI routes. The `retry-after` over 60 makes Claude Code stop at once.
 - "Which duplicate key Anthropic reads": D19 refuses duplicates, so the answer does not matter.
+
+## 15. Amendments after the measurements
+
+Task 1 recorded real Anthropic answers on 2026-11-25. No decision row above changes. The files are
+in CORE `tests/fixtures/anthropic/recorded/` (streams, timing) and GW `tests/fixtures/anthropic/`
+(bodies, headers). `README.md` in the first directory lists the models and the beta values.
+
+- Measured 2026-11-25 (D15, record size): the largest `content_block_start` is 2 954 098 bytes. It
+  is a `web_fetch_tool_result` block with a 2.9 MB PDF (a public arXiv paper). The committed
+  fixture holds a synthetic PDF body of the measured size; the real fetch was 2.9 MB. That is 35 % of the
+  default `max_record_bytes` (8 388 608). The default stays. A larger PDF can break it: the
+  operator raises `[messages] max_record_bytes` then.
+- Measured 2026-11-25 (D15, held bytes): the largest stream is 2 957 109 bytes (the same
+  `web_fetch` stream). That is 9 % of the default `max_held_bytes` (33 554 432). The default stays.
+- Measured 2026-11-25 (D15, hold time): the largest `tool_use` input is 54 646 bytes (a `write_file`
+  call, 1400 lines). The block took 114.074 s from `content_block_start` to `content_block_stop`
+  (the whole stream is 1 123 222 bytes). That is 19 % of the default `max_hold_secs` (600). The
+  default stays. A `ping` event arrives in every stream, so the upstream keeps its own timer alive.
+- Measured 2026-11-25 (D18, structured output): Anthropic accepted both forms with status 200
+  on `claude-sonnet-5-5`: `output_format` (with the beta `structured-outputs-2025-11-13`) and
+  `output_config.format` (no beta). Both answers hold the text `{"Name":"Ada","Age":36}`. So
+  D18 covers both paths: `output_format.schema` and `output_config.format.schema`.
+- Measured 2026-11-25 (D18, user-data subtrees): `output_format.schema`,
+  `output_config.format.schema`, `tools[].input_examples` (accepted with the beta
+  `advanced-tool-use-2025-11-20`, status 200 on `claude-sonnet-4-6`), `tools[].input_schema`
+  (already a data key). A `tool_use.input` in a follow-up turn was not recorded. No other
+  user-data subtree was found in these requests. The Claude Code session (Task 14) can add to
+  this list.
+- Measured 2026-11-25 (event, block and delta types, from the recordings of this task): events
+  `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`,
+  `message_delta`, `message_stop`, `ping`. Blocks `text`, `thinking`, `tool_use`,
+  `server_tool_use`, `web_fetch_tool_result`. Deltas `text_delta`, `thinking_delta`,
+  `signature_delta`, `input_json_delta`. CORE `anthropic/stream.rs` knows every one of them. The
+  list from one Claude Code session is pending Task 14.
+- Measured 2026-11-25 (cut call): a `max_tokens` cut inside a `tool_use` block gives no
+  `content_block_stop` for the cut block. `message_delta` with `stop_reason: "max_tokens"` follows
+  the last `input_json_delta`. The interceptor reports `on_failure` `truncated` and decides no call.
+- Measured 2026-11-25 (model limits, new fact): `claude-sonnet-5-5` refuses `tool_choice` of type
+  `any` and `tool` (400 `invalid_request_error`, "not supported for this model"). It also refuses
+  `thinking.type: "enabled"` and asks for `adaptive`. The recordings with those fields use
+  `claude-sonnet-4-6`. The 400 answers are kept as `rejected_5_5_*` files.
+- Measured 2026-11-25 (stream bytes): Anthropic pads many `data:` lines with spaces before
+  the last closing brace (for example `{"type":"message_stop"            }`). The
+  JSON stays valid. A test or a mock that compares bytes must keep this in mind.
+- Measured 2026-11-25 (errors and headers): a `prompt is too long` request gives status 400, type
+  `invalid_request_error`, message `prompt is too long: 6300057 tokens > 1000000 maximum`. The
+  kept response headers of every answer are `content-type` and `request-id` only. No answer had
+  `retry-after` or `x-should-retry`.
+- Measured 2026-11-25 (`count_tokens` and models): `count_tokens` answers `{"input_tokens": N}`.
+  `GET /v1/models?limit=1000` answers `data`, `has_more`, `first_id`, `last_id` with 15 models.
+- Not measured 2026-11-25, 429 with its headers: 200 `count_tokens` calls (8 in parallel) gave no
+  429. The `retry-after` and `x-should-retry` headers of a 429 are not recorded.
+- Not measured 2026-11-25, mid-stream `error` event: no stream held an `event: error` record, and
+  no way to provoke one was found. The D17 shape is not recorded. Task 12 builds its test from the
+  documented shape.
+- Not measured 2026-11-25, `web_search`: `web_fetch` worked, so the `web_search` fallback did not
+  run.
+- Pending Task 14: the Claude Code session recording (event, block and delta types, and the
+  `anthropic-beta` values) and the D9 follow-up-turn check.

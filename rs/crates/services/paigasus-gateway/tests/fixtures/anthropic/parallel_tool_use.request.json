@@ -1,0 +1,54 @@
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 600,
+  "stream": true,
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the weather for a city.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "c",
+              "f"
+            ]
+          }
+        },
+        "required": [
+          "city",
+          "unit"
+        ]
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a file from the workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "any"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Call get_weather for Paris, for Tokyo and for Lima (unit c), and read_file for /workspace/a.txt. Make all four calls now, in one response."
+    }
+  ]
+}

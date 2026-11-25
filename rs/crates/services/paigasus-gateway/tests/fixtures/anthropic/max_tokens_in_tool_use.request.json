@@ -1,0 +1,36 @@
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 60,
+  "stream": true,
+  "tools": [
+    {
+      "name": "write_file",
+      "description": "Write a file to the workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "tool",
+    "name": "write_file"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Call write_file with path /workspace/story.txt and a long story of 2000 words as content."
+    }
+  ]
+}
