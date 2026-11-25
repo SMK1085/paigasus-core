@@ -118,6 +118,7 @@ pub fn router(state: AppState) -> Router {
     let auth_state = AuthState {
         iam: state.iam.clone(),
         dpop_enabled: state.dpop_enabled,
+        accept_x_api_key: false,
     };
     let auth = axum::middleware::from_fn_with_state(auth_state.clone(), require_iam_auth);
     // The body-size limit: an over-limit body fails the handler's `EnvelopeBytes` extractor with
