@@ -496,7 +496,10 @@ async fn the_redis_stream_holds_no_canary() {
     let starter_dir = detector_dir(&starter());
     let allow_cfg = gateway_config(&allow, "enforce", &redis_url, &nats_url);
     allow_cfg.validate().expect("validates");
-    assert!(allow_cfg.tool_policy.detector_settings().enabled, "the detectors are on by default");
+    assert!(
+        allow_cfg.tool_policy.detector_settings(allow_cfg.default_detector_scan_bytes()).enabled,
+        "the detectors are on by default"
+    );
     let starter_cfg = gateway_config(&starter_dir, "enforce", &redis_url, &nats_url);
     let dl = boot(&allow_cfg).await;
     wait_for_redis_writer(&logs).await;

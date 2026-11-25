@@ -56,6 +56,9 @@ pub struct GatewayConfig {
     /// SMA-769: the `POST /v1/responses` route. Off by default (D8).
     #[serde(default)]
     pub responses: ResponsesConfig,
+    /// SMA-750: the `POST /v1/messages` route. Off by default (D3).
+    #[serde(default)]
+    pub messages: MessagesConfig,
     /// SMA-752: tool-call decisions from Cedar policies. Off by default (D8).
     #[serde(default)]
     pub tool_policy: ToolPolicyConfig,
@@ -133,6 +136,128 @@ impl Default for IamTlsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UpstreamConfig {
     pub openai: OpenAiConfig,
+    /// SMA-750: the Anthropic egress target of `POST /v1/messages`. Absent by default. The table
+    /// is required when `[messages] enabled = true`.
+    #[serde(default)]
+    pub anthropic: Option<AnthropicConfig>,
+}
+
+fn default_anthropic_base_url() -> String {
+    "https://api.anthropic.com".to_string()
+}
+
+fn default_anthropic_version() -> String {
+    "2023-06-01".to_string()
+}
+
+const fn default_anthropic_non_stream_timeout_secs() -> u64 {
+    600
+}
+
+/// The longest `messages.max_hold_secs` (24 hours).
+const MAX_MESSAGES_HOLD_SECS: u64 = 86_400;
+
+/// `[upstream.anthropic]` (SMA-750 D3): the Anthropic egress target. Every key has a default
+/// except `api_key`, which has none. A misspelt key fails extraction.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnthropicConfig {
+    #[serde(default = "default_anthropic_base_url")]
+    pub base_url: String,
+    /// Read only from `GATEWAY_UPSTREAM__ANTHROPIC__API_KEY`, never from `gateway.toml`. It is
+    /// never serialized, and `SecretString` redacts it on `Debug`.
+    #[serde(skip_serializing)]
+    pub api_key: SecretString,
+    /// Extra trust anchors, as a path to a PEM bundle. This ADDS to the trust store. The rule is
+    /// the same as `upstream.openai.extra_ca_bundle_path`.
+    #[serde(default)]
+    pub extra_ca_bundle_path: Option<String>,
+    /// The `anthropic-version` value that the gateway sends when the caller sends none.
+    #[serde(default = "default_anthropic_version")]
+    pub default_version: String,
+    /// The time limit of one non-stream upstream call, in seconds.
+    #[serde(default = "default_anthropic_non_stream_timeout_secs")]
+    pub non_stream_timeout_secs: u64,
+}
+
+/// `[messages]` (SMA-750 D3, D15). Off by default: with `enabled = false`, `/v1/messages` returns
+/// 404, and the key is the rollback with no deploy. A misspelt key fails extraction.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MessagesConfig {
+    pub enabled: bool,
+    /// The cap on one request body of the route.
+    pub max_request_bytes: usize,
+    /// One SSE record larger than this is a failure, never skipped.
+    pub max_record_bytes: usize,
+    /// The queued bytes of one stream. Also the cap on one non-stream body.
+    pub max_held_bytes: usize,
+    /// The longest time that one tool call is held.
+    pub max_hold_secs: u64,
+}
+
+impl Default for MessagesConfig {
+    fn default() -> Self {
+        MessagesConfig {
+            enabled: false,
+            max_request_bytes: 33_554_432,
+            max_record_bytes: 8_388_608,
+            max_held_bytes: 33_554_432,
+            max_hold_secs: 600,
+        }
+    }
+}
+
+impl MessagesConfig {
+    /// Every value is at least 1, one record must fit in the held bytes, and `max_hold_secs` is
+    /// at most 86 400. Each message names the key. Checked even when off.
+    pub fn validate(&self) -> Result<(), String> {
+        for (key, v) in [
+            ("messages.max_request_bytes", self.max_request_bytes as u64),
+            ("messages.max_record_bytes", self.max_record_bytes as u64),
+            ("messages.max_held_bytes", self.max_held_bytes as u64),
+            ("messages.max_hold_secs", self.max_hold_secs),
+        ] {
+            if v == 0 {
+                return Err(format!("{key} must be at least 1"));
+            }
+        }
+        if self.max_record_bytes > self.max_held_bytes {
+            return Err(format!(
+                "messages.max_record_bytes ({}) must not exceed messages.max_held_bytes ({})",
+                self.max_record_bytes, self.max_held_bytes
+            ));
+        }
+        if self.max_hold_secs > MAX_MESSAGES_HOLD_SECS {
+            return Err(format!("messages.max_hold_secs must be at most {MAX_MESSAGES_HOLD_SECS}; got {}", self.max_hold_secs));
+        }
+        Ok(())
+    }
+}
+
+impl AnthropicConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.api_key.expose_secret().is_empty() {
+            return Err("upstream.anthropic.api_key must not be empty (set GATEWAY_UPSTREAM__ANTHROPIC__API_KEY)".to_string());
+        }
+        if axum::http::HeaderValue::from_str(&self.default_version).is_err() || self.default_version.trim().is_empty() {
+            return Err(format!("upstream.anthropic.default_version is not a valid header value: {:?}", self.default_version));
+        }
+        if self.non_stream_timeout_secs == 0 {
+            return Err("upstream.anthropic.non_stream_timeout_secs must be at least 1".to_string());
+        }
+        if let Some(path) = self.extra_ca_bundle_path.as_deref() {
+            if path.trim().is_empty() {
+                return Err("upstream.anthropic.extra_ca_bundle_path must not be empty (omit the key entirely to use the default trust store)".to_string());
+            }
+            if path != path.trim() {
+                return Err(format!(
+                    "upstream.anthropic.extra_ca_bundle_path has leading/trailing whitespace, which is never valid config: {path:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The OpenAI egress target (G6 consumes this to build the outbound client).
@@ -661,6 +786,19 @@ impl GatewayConfig {
         Self::figment().extract()
     }
 
+    /// The detector scan budget when `tool_policy.detectors.max_scan_bytes` is unset: the largest
+    /// request cap of the routes in use. `responses.max_request_bytes` always counts, so the
+    /// default does not drop when `[responses]` is off. `messages.max_request_bytes` counts only
+    /// when `[messages]` is on.
+    #[must_use]
+    pub fn default_detector_scan_bytes(&self) -> usize {
+        let mut n = self.max_request_bytes.max(self.responses.max_request_bytes);
+        if self.messages.enabled {
+            n = n.max(self.messages.max_request_bytes);
+        }
+        n
+    }
+
     /// Boot-time validation beyond what serde/figment structurally enforce: every
     /// `*_timeout_secs` is non-zero, `max_request_bytes` is non-zero, the OpenAI API key is
     /// non-empty (an empty key is a misconfiguration — reject at boot rather than fail every
@@ -718,6 +856,13 @@ impl GatewayConfig {
         }
         self.tool_interception.validate()?;
         self.responses.validate()?;
+        self.messages.validate()?;
+        if let Some(anthropic) = &self.upstream.anthropic {
+            anthropic.validate()?;
+        }
+        if self.messages.enabled && self.upstream.anthropic.is_none() {
+            return Err("messages.enabled = true requires the [upstream.anthropic] table (set GATEWAY_UPSTREAM__ANTHROPIC__API_KEY)".to_string());
+        }
         self.tool_policy.validate(&self.tool_interception)?;
         if let Some(tool_history) = &self.tool_history {
             tool_history.validate(&self.tool_interception)?;
@@ -798,10 +943,10 @@ pub struct DetectorsConfig {
     pub enabled: bool,
     /// An upper bound for the webhook and judge stages of one run.
     pub timeout_ms: u64,
-    /// The text that one run scans. The default is `responses.max_request_bytes` (16 MiB), the
-    /// largest request cap of any route (S12), so a request at the default caps is scanned in full.
-    /// There is no upper bound (R10).
-    pub max_scan_bytes: usize,
+    /// The text that one run scans. `None` (the default) uses `GatewayConfig::default_detector_scan_bytes`:
+    /// the largest request cap of any route, so a request at the default caps is scanned in full
+    /// (S12). There is no upper bound (R10).
+    pub max_scan_bytes: Option<usize>,
 }
 
 impl Default for DetectorsConfig {
@@ -809,7 +954,7 @@ impl Default for DetectorsConfig {
         DetectorsConfig {
             enabled: true,
             timeout_ms: 500,
-            max_scan_bytes: 16_777_216,
+            max_scan_bytes: None,
         }
     }
 }
@@ -1101,11 +1246,11 @@ impl ToolPolicyConfig {
 
     /// The runtime view of `[tool_policy.detectors]`. Meaningful only after `validate` returned `Ok`.
     #[must_use]
-    pub fn detector_settings(&self) -> DetectorSettings {
+    pub fn detector_settings(&self, default_scan_bytes: usize) -> DetectorSettings {
         DetectorSettings {
             enabled: self.detectors.enabled,
             timeout: Duration::from_millis(self.detectors.timeout_ms),
-            max_scan_bytes: self.detectors.max_scan_bytes,
+            max_scan_bytes: self.detectors.max_scan_bytes.unwrap_or(default_scan_bytes),
             margin: Duration::from_millis(DETECTOR_MARGIN_MS),
         }
     }
@@ -1148,8 +1293,10 @@ impl DetectorsConfig {
         if self.timeout_ms == 0 {
             return Err("tool_policy.detectors.timeout_ms must be at least 1".to_string());
         }
-        if self.max_scan_bytes < MIN_DETECTOR_SCAN_BYTES {
-            return Err(format!("tool_policy.detectors.max_scan_bytes must be at least {MIN_DETECTOR_SCAN_BYTES}; got {}", self.max_scan_bytes));
+        if let Some(n) = self.max_scan_bytes
+            && n < MIN_DETECTOR_SCAN_BYTES
+        {
+            return Err(format!("tool_policy.detectors.max_scan_bytes must be at least {MIN_DETECTOR_SCAN_BYTES}; got {n}"));
         }
         let decide_ms = ti.decide_timeout_secs.saturating_mul(1000);
         if tool_policy_enabled && self.timeout_ms.saturating_add(DETECTOR_MARGIN_MS) > decide_ms {
@@ -2280,7 +2427,7 @@ mod tests {
     fn detectors_defaults_pass() {
         let cfg = tp_load(&tp_enabled_toml("")).expect("loads");
         assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
-        let s = cfg.tool_policy.detector_settings();
+        let s = cfg.tool_policy.detector_settings(cfg.default_detector_scan_bytes());
         assert!(s.enabled);
         assert_eq!(s.timeout, Duration::from_millis(500));
         assert_eq!(s.max_scan_bytes, 16_777_216);
@@ -2293,7 +2440,7 @@ mod tests {
     fn detectors_disabled_loads_and_validates() {
         let cfg = tp_load(&det_toml(5, "enabled = false")).expect("loads");
         assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
-        assert!(!cfg.tool_policy.detector_settings().enabled);
+        assert!(!cfg.tool_policy.detector_settings(cfg.default_detector_scan_bytes()).enabled);
     }
 
     #[test]
@@ -2351,10 +2498,141 @@ mod tests {
             .map(|l| l.strip_prefix("# ").or_else(|| l.strip_prefix('#')).unwrap_or(l).to_string())
             .collect();
         let cfg = tp_load(&format!("{}\n{}\n", valid_toml(), block.join("\n"))).expect("the uncommented block parses");
-        let s = cfg.tool_policy.detector_settings();
+        let s = cfg.tool_policy.detector_settings(cfg.default_detector_scan_bytes());
         assert!(s.enabled);
         assert_eq!(s.timeout, Duration::from_millis(500));
         assert_eq!(s.max_scan_bytes, 16_777_216);
+    }
+
+    // --- SMA-750 `[upstream.anthropic]` and `[messages]` ----------------------------------------
+
+    fn anthropic_toml(extra: &str) -> String {
+        format!("{}\n[upstream.anthropic]\napi_key = \"sk-ant-test\"\n{extra}\n", valid_toml())
+    }
+
+    #[test]
+    fn anthropic_and_messages_defaults_match_the_spec() {
+        let cfg = tp_load(&anthropic_toml("")).expect("loads");
+        let a = cfg.upstream.anthropic.as_ref().expect("the table is present");
+        assert_eq!(a.base_url, "https://api.anthropic.com");
+        assert_eq!(a.default_version, "2023-06-01");
+        assert_eq!(a.non_stream_timeout_secs, 600);
+        assert!(a.extra_ca_bundle_path.is_none());
+        assert_eq!(
+            cfg.messages,
+            MessagesConfig {
+                enabled: false,
+                max_request_bytes: 33_554_432,
+                max_record_bytes: 8_388_608,
+                max_held_bytes: 33_554_432,
+                max_hold_secs: 600,
+            }
+        );
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let bare = tp_load(valid_toml()).expect("loads");
+        assert!(bare.upstream.anthropic.is_none());
+        assert!(bare.validate().is_ok());
+    }
+
+    #[test]
+    fn the_anthropic_key_loads_from_the_environment_only() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("GATEWAY_UPSTREAM__ANTHROPIC__API_KEY", "sk-ant-env");
+            jail.create_file("gateway.toml", valid_toml())?;
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            let a = cfg.upstream.anthropic.as_ref().expect("the env key makes the table");
+            assert_eq!(a.api_key.expose_secret(), "sk-ant-env");
+            assert_eq!(a.base_url, "https://api.anthropic.com");
+            assert!(cfg.validate().is_ok());
+            let json = serde_json::to_string(&cfg).expect("serializes");
+            assert!(!json.contains("sk-ant-env"), "the key must not be serialized");
+            let v: serde_json::Value = serde_json::from_str(&json).expect("json");
+            assert!(v["upstream"]["anthropic"].get("api_key").is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_empty_anthropic_key_fails() {
+        let cfg = tp_load(&anthropic_toml("").replace("sk-ant-test", "")).expect("loads");
+        let err = cfg.validate().expect_err("empty key");
+        assert!(err.contains("upstream.anthropic.api_key"), "{err}");
+    }
+
+    #[test]
+    fn an_invalid_default_version_fails() {
+        let cfg = tp_load(&anthropic_toml("default_version = \"2023\\n06\"")).expect("loads");
+        let err = cfg.validate().expect_err("bad header value");
+        assert!(err.contains("upstream.anthropic.default_version"), "{err}");
+    }
+
+    #[test]
+    fn messages_without_the_anthropic_upstream_fails() {
+        let cfg = tp_load(&format!("{}\n[messages]\nenabled = true\n", valid_toml())).expect("loads");
+        let err = cfg.validate().expect_err("no upstream");
+        assert!(err.contains("upstream.anthropic"), "{err}");
+        let ok = tp_load(&format!("{}\n[messages]\nenabled = true\n", anthropic_toml(""))).expect("loads");
+        assert!(ok.validate().is_ok(), "{:?}", ok.validate());
+    }
+
+    #[test]
+    fn messages_validation_names_the_key() {
+        for (body, key) in [
+            ("max_request_bytes = 0", "messages.max_request_bytes"),
+            ("max_record_bytes = 0", "messages.max_record_bytes"),
+            ("max_held_bytes = 0", "messages.max_held_bytes"),
+            ("max_hold_secs = 0", "messages.max_hold_secs"),
+            ("max_record_bytes = 9000000\nmax_held_bytes = 8000000", "messages.max_record_bytes"),
+            ("max_hold_secs = 86401", "messages.max_hold_secs"),
+        ] {
+            let cfg = tp_load(&format!("{}\n[messages]\n{body}\n", anthropic_toml(""))).expect("loads");
+            let err = cfg.validate().expect_err(body);
+            assert!(err.contains(key), "{body}: {err}");
+        }
+        let ok = tp_load(&format!("{}\n[messages]\nmax_hold_secs = 86400\n", anthropic_toml(""))).expect("loads");
+        assert!(ok.validate().is_ok());
+        let cfg = tp_load(&anthropic_toml("non_stream_timeout_secs = 0")).expect("loads");
+        let err = cfg.validate().expect_err("zero timeout");
+        assert!(err.contains("upstream.anthropic.non_stream_timeout_secs"), "{err}");
+    }
+
+    #[test]
+    fn the_anthropic_ca_path_follows_the_openai_rule() {
+        for body in ["extra_ca_bundle_path = \"\"", "extra_ca_bundle_path = \"/etc/ca.pem\\n\""] {
+            let cfg = tp_load(&anthropic_toml(body)).expect("loads");
+            let err = cfg.validate().expect_err(body);
+            assert!(err.contains("upstream.anthropic.extra_ca_bundle_path"), "{err}");
+        }
+        let cfg = tp_load(&anthropic_toml("extra_ca_bundle_path = \"/etc/ca.pem\"")).expect("loads");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn an_unknown_messages_key_fails() {
+        let err = tp_load(&format!("{}\n[messages]\nenabeld = true\n", anthropic_toml(""))).expect_err("typo");
+        assert!(err.contains("enabeld"), "{err}");
+        let err = tp_load(&anthropic_toml("bogus = 1")).expect_err("typo");
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn the_detector_default_covers_every_route_cap() {
+        let cfg = tp_load(&tp_enabled_toml("")).expect("loads");
+        assert_eq!(cfg.default_detector_scan_bytes(), 16_777_216);
+        assert_eq!(cfg.tool_policy.detector_settings(cfg.default_detector_scan_bytes()).max_scan_bytes, 16_777_216);
+        let on = tp_load(&format!("{}\n[upstream.anthropic]\napi_key = \"k\"\n[messages]\nenabled = true\n", tp_enabled_toml(""))).expect("loads");
+        assert_eq!(on.default_detector_scan_bytes(), 33_554_432);
+        assert_eq!(on.tool_policy.detector_settings(on.default_detector_scan_bytes()).max_scan_bytes, 33_554_432);
+        // `[messages]` off does not count its cap, even with a larger value.
+        let off = tp_load(&format!("{}\n[messages]\nmax_request_bytes = 67108864\n", tp_enabled_toml(""))).expect("loads");
+        assert_eq!(off.default_detector_scan_bytes(), 16_777_216);
+        // An explicit value wins.
+        let explicit = tp_load(&format!(
+            "{}\n[upstream.anthropic]\napi_key = \"k\"\n[messages]\nenabled = true\n[tool_policy.detectors]\nmax_scan_bytes = 100000\n",
+            tp_enabled_toml("")
+        ))
+        .expect("loads");
+        assert_eq!(explicit.tool_policy.detector_settings(explicit.default_detector_scan_bytes()).max_scan_bytes, 100_000);
     }
 
     // --- SMA-755 `[decision_log]` ---------------------------------------------------------------
