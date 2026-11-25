@@ -27,11 +27,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::AppState;
+use super::duplicates::duplicates;
 use super::error::GatewayError;
 use super::interception::ToolInterception;
-use super::pipeline::{self, Endpoint, RequestFacts};
+use super::pipeline::{self, Endpoint, RequestFacts, Upstream};
 use super::responses_usage::{self, ResponsesUsageScanner};
 use super::usage::StreamUsage;
+use crate::adapters::anthropic::Forward;
 use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ResponsesRequest;
 use crate::adapters::openai::UpstreamRoute;
@@ -51,13 +53,13 @@ pub(crate) async fn create_response(State(state): State<AppState>, caller: Optio
         // Unreachable in practice — the auth middleware always attaches a CallerContext.
         return GatewayError::Internal.into_response();
     };
-    pipeline::proxy(&RESPONSES, state, caller, body).await
+    pipeline::proxy(&RESPONSES, state, caller, Forward::default(), body).await
 }
 
 /// The descriptor of `POST /v1/responses`.
 pub static RESPONSES: Endpoint = Endpoint {
     name: "responses",
-    route: UpstreamRoute::Responses,
+    upstream: Upstream::OpenAi(UpstreamRoute::Responses),
     format: Format::OpenAiResponses,
     parse: parse_responses,
     non_stream_usage: responses_usage::non_stream_usage,
@@ -94,7 +96,7 @@ fn parse_responses(body: &[u8], interception: bool) -> Result<RequestFacts, Gate
     // at any depth is refused, because the turn facts and D3 would read the last value and the
     // upstream may read the first. With interception off the body passes as before.
     let dups = duplicates(body).ok_or(GatewayError::BadRequestBody)?;
-    if dups.background {
+    if dups.top.contains("background") {
         return Err(GatewayError::ResponsesStatefulNotSupported { param: "background" });
     }
     if interception && dups.any {
@@ -148,81 +150,6 @@ fn is_item_reference(item: &Value) -> bool {
     match obj.get("type") {
         Some(Value::String(ty)) => ty == "item_reference",
         _ => !matches!(obj.get("role"), Some(Value::String(_))),
-    }
-}
-
-/// The duplicate keys of one request body.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Duplicates {
-    /// Some object, at any depth, has a key twice.
-    any: bool,
-    /// The top-level object has `background` twice (D4).
-    background: bool,
-}
-
-/// Find the duplicate keys of `body`. serde_json keeps the last of two duplicate keys, and an
-/// upstream may keep the first, so the D3 and D4 checks would read a different value than the
-/// upstream does. Keys compare after JSON unescaping (`"a"` and `"a"` are one key). The walk
-/// holds one key set per open object and no values. `None` when the body is not JSON; the caller
-/// has already parsed it, so that does not occur.
-fn duplicates(body: &[u8]) -> Option<Duplicates> {
-    let mut found = Duplicates::default();
-    let mut de = serde_json::Deserializer::from_slice(body);
-    serde::de::DeserializeSeed::deserialize(Walk { found: &mut found, top: true }, &mut de).ok()?;
-    Some(found)
-}
-
-/// One value of the [`duplicates`] walk. `top` is true for the document's own value only.
-struct Walk<'a> {
-    found: &'a mut Duplicates,
-    top: bool,
-}
-
-impl<'de> serde::de::DeserializeSeed<'de> for Walk<'_> {
-    type Value = ();
-    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
-        d.deserialize_any(self)
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for Walk<'_> {
-    type Value = ();
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a JSON value")
-    }
-    fn visit_bool<E>(self, _: bool) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_i64<E>(self, _: i64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_u64<E>(self, _: u64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_f64<E>(self, _: f64) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_str<E>(self, _: &str) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_unit<E>(self) -> Result<(), E> {
-        Ok(())
-    }
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        while seq.next_element_seed(Walk { found: &mut *self.found, top: false })?.is_some() {}
-        Ok(())
-    }
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        let mut seen = std::collections::HashSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if seen.contains(&key) {
-                self.found.any = true;
-                self.found.background |= self.top && key == "background";
-            }
-            map.next_value_seed(Walk { found: &mut *self.found, top: false })?;
-            seen.insert(key);
-        }
-        Ok(())
     }
 }
 

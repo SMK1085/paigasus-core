@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The generic proxy pipeline for an OpenAI-shaped route (SMA-769 D6, spec § 8.1).
+//! The generic proxy pipeline of a model route (SMA-769 D6, spec § 8.1; SMA-750 § 5).
 //!
 //! One [`Endpoint`] descriptor per route holds every step that is specific to the route: the
-//! request parse, the non-stream usage reader, the stream usage reader, the terminal SSE frame
-//! and the interception limits. [`proxy`] is the flow that is common to all of them. It is the
+//! upstream, the request parse, the non-stream usage reader, the stream usage reader, the
+//! terminal SSE frame and the interception limits. [`proxy`] is the flow that is common to all of them. It is the
 //! `/v1/chat/completions` handler flow, moved here step for step.
 //!
 //! By the time [`proxy`] runs, the [`require_iam_auth`](super::auth::require_iam_auth)
@@ -13,9 +13,14 @@
 //!
 //! - **Egress hygiene (load-bearing):** only the raw body bytes go to the OpenAI client. The
 //!   caller's inbound headers never do. The caller's `Authorization: Bearer <paigasus-key>` must
-//!   never reach OpenAI. The client builds fresh upstream headers from its own real key.
+//!   never reach OpenAI. The client builds fresh upstream headers from its own real key. The
+//!   Anthropic client also gets the [`Forward`] value of the handler: the raw query and the
+//!   `anthropic-*` headers only (SMA-750 I2). The OpenAI routes pass an empty one.
 //! - The upstream response is forwarded verbatim: a full body (non-stream) or an UNBUFFERED SSE
-//!   stream. A non-2xx upstream (OpenAI's own error envelope) passes through unchanged.
+//!   stream. A non-2xx upstream (the provider's own error envelope) passes through unchanged,
+//!   with the upstream `content-type` (`application/json` when the client reports none, which is
+//!   always the case for OpenAI). The D8 headers of [`ResponseHead::apply`] go on every
+//!   forwarded answer; the OpenAI client reports none.
 //! - The mid-stream terminal error and the cancel-on-drop contract are described on
 //!   [`terminal_sse_error_stream`](super::relay::terminal_sse_error_stream).
 
@@ -23,8 +28,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::http::StatusCode;
 use axum::http::header;
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use metrics::{counter, histogram};
 use paigasus_gateway_core::{DecisionContext, Format, Limits, RequestEntry};
@@ -36,8 +41,9 @@ use super::error::GatewayError;
 use super::interception::{self, ToolInterception};
 use super::relay::terminal_sse_error_stream;
 use super::usage::{BodyUsage, StreamUsage};
-use crate::adapters::openai::UpstreamRoute;
-use crate::adapters::upstream::{UpstreamError, UpstreamResponse};
+use crate::adapters::anthropic::{AnthropicClient, AnthropicRoute, Forward};
+use crate::adapters::openai::{OpenAiClient, UpstreamRoute};
+use crate::adapters::upstream::{ResponseHead, UpstreamError, UpstreamResponse};
 use crate::application::tool_policy::OverheadSample;
 use crate::domain::{CallerContext, Credential};
 
@@ -51,13 +57,20 @@ pub struct RequestFacts {
     pub request_estimate: u64,
 }
 
-/// The descriptor of one OpenAI-shaped route.
+/// The upstream of one endpoint: the provider and its route (SMA-750 § 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upstream {
+    OpenAi(UpstreamRoute),
+    Anthropic(AnthropicRoute),
+}
+
+/// The descriptor of one model route.
 pub struct Endpoint {
     /// The endpoint name. `"chat_completions"` for chat. It is the `endpoint` log field and
     /// metric label.
     pub name: &'static str,
-    /// The upstream route this endpoint forwards to.
-    pub route: UpstreamRoute,
+    /// The upstream this endpoint forwards to.
+    pub upstream: Upstream,
     /// The wire format the interceptor reads.
     pub format: Format,
     /// Parse a COPY of the body. The second argument says whether interception is enabled.
@@ -76,7 +89,8 @@ pub struct Endpoint {
 ///
 /// The body arrives as the house [`EnvelopeBytes`] that the handler extracted, and is unwrapped
 /// here. The wrapped bytes are the ORIGINAL request bytes, and they go upstream unchanged (D5).
-pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: CallerContext, body: EnvelopeBytes) -> Response {
+/// `fwd` goes to the Anthropic client only.
+pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: CallerContext, fwd: Forward, body: EnvelopeBytes) -> Response {
     let EnvelopeBytes(body) = body;
     // Parse a COPY only to read the facts; the ORIGINAL `body` bytes flow upstream verbatim.
     // The parse function splits its failures (SMA-588): a body that PARSED but did not match the
@@ -92,6 +106,15 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     if stream && !state.capabilities.chat_stream {
         return GatewayError::StreamingDisabled.into_response();
     }
+
+    // SMA-750 § 5: the client of the endpoint's upstream. An Anthropic endpoint with no Anthropic
+    // client is an internal fault (boot validation makes it unreachable), refused before the
+    // limits so it uses no quota.
+    let client = match (endpoint.upstream, &state.anthropic) {
+        (Upstream::OpenAi(route), _) => Client::OpenAi(Arc::clone(&state.openai), route),
+        (Upstream::Anthropic(route), Some(anthropic)) => Client::Anthropic(Arc::clone(anthropic), route),
+        (Upstream::Anthropic(_), None) => return GatewayError::Internal.into_response(),
+    };
 
     // SMA-749: capture what the decider needs while the request ids still exist (SMA-504 § 4.3:
     // inside the stream they are `None`). `None` when interception and the tool policy are both
@@ -178,10 +201,13 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
 
     let started = Instant::now();
     // EGRESS HYGIENE: only the raw body bytes cross the boundary — never the caller's headers.
-    let result = state.openai.send(endpoint.route, body, stream).await;
+    let result = match &client {
+        Client::OpenAi(openai, route) => openai.send(*route, body, stream).await,
+        Client::Anthropic(anthropic, route) => anthropic.send(*route, Method::POST, body, stream, &fwd).await,
+    };
 
     let (response, status) = match result {
-        Ok(UpstreamResponse::Full { status, body: upstream_body, .. }) => {
+        Ok(UpstreamResponse::Full { status, head, body: upstream_body }) => {
             // Non-stream: the upstream head AND body have both landed, so this is a genuine
             // full-request latency, not just TTFB (see the NOTE on the stream arm below).
             record_upstream_call(status, started, endpoint.name);
@@ -217,8 +243,14 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                 interception::BodyOutcome::Forward { rewritten, report } => {
                     let out = rewritten.unwrap_or(upstream_body);
                     // Forward the upstream status + body VERBATIM (or rewritten by a block),
-                    // including a non-2xx OpenAI error envelope.
-                    let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], out).into_response();
+                    // including a non-2xx provider error envelope with its own content type.
+                    let content_type = if status.is_success() {
+                        HeaderValue::from_static("application/json")
+                    } else {
+                        error_content_type(&head)
+                    };
+                    let mut resp = (status, [(header::CONTENT_TYPE, content_type)], out).into_response();
+                    head.apply(resp.headers_mut());
                     if let Some(r) = report
                         && let Ok(v) = axum::http::HeaderValue::from_str(&r)
                     {
@@ -228,7 +260,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                 }
             }
         }
-        Ok(UpstreamResponse::Stream { status, stream: upstream, .. }) => {
+        Ok(UpstreamResponse::Stream { status, head, stream: upstream }) => {
             // NOTE: for `stream:true` this records TTFB (time-to-first-byte / response head), NOT
             // stream completion — the call is considered "done" for metrics purposes the moment
             // the upstream response head arrives. A mid-stream SSE failure (handled below by the
@@ -266,14 +298,17 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                     )),
                     None => Body::from_stream(terminal_sse_error_stream(upstream, guard.take(), usage, endpoint.terminal)),
                 };
-                (status, [(header::CONTENT_TYPE, "text/event-stream")], out).into_response()
+                let mut resp = (status, [(header::CONTENT_TYPE, "text/event-stream")], out).into_response();
+                head.apply(resp.headers_mut());
+                resp
             } else {
-                // Non-2xx `stream:true` request: OpenAI answers with a JSON error body (NOT SSE), so
-                // forward it as an error passthrough — no SSE terminal-error wrapping applies.
+                // Non-2xx `stream:true` request: the upstream answers with a JSON error body (NOT
+                // SSE), so forward it as an error passthrough — no SSE terminal-error wrapping applies.
                 if let Some(guard) = guard.as_mut() {
                     guard.mark_no_charge();
                 }
-                let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], Body::from_stream(upstream)).into_response();
+                let mut resp = (status, [(header::CONTENT_TYPE, error_content_type(&head))], Body::from_stream(upstream)).into_response();
+                head.apply(resp.headers_mut());
                 add_request_report(&mut resp, &request_entries);
                 resp
             };
@@ -304,6 +339,9 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     // for an API key and a USER for an OIDC token (SMA-635): a principal PRN is an opaque id, not
     // the user's name or e-mail, and it is kept deliberately for attribution and audit. The "never
     // PII" bar is about prompt/message content. `key_id` is logged only for an API key.
+    // SMA-750 § 9: `anthropic_beta` is there only when the caller sent an `anthropic-beta` value
+    // (a `None` field is not written), so the OpenAI lines do not change.
+    let anthropic_beta = fwd.beta_values();
     match &caller.credential {
         Credential::ApiKey { key_id } => tracing::info!(
             model = %model,
@@ -315,6 +353,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             auth = "api_key",
             key_id = %key_id,
             endpoint = endpoint.name,
+            anthropic_beta = anthropic_beta.as_deref(),
             "chat completion proxied"
         ),
         Credential::Oidc => tracing::info!(
@@ -326,6 +365,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             scope = %caller.scope_prn,
             auth = "oidc",
             endpoint = endpoint.name,
+            anthropic_beta = anthropic_beta.as_deref(),
             "chat completion proxied"
         ),
     }
@@ -333,6 +373,18 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     // Preflight F14: a full answer (or a stream with no interceptor) records its sample here.
     drop(overhead);
     response
+}
+
+/// The client of one request's upstream, resolved before the limits.
+enum Client {
+    OpenAi(Arc<OpenAiClient>, UpstreamRoute),
+    Anthropic(Arc<AnthropicClient>, AnthropicRoute),
+}
+
+/// The `content-type` of a forwarded non-2xx answer: the upstream's own, or `application/json`
+/// when the client reports none (the OpenAI client never does, so its routes do not change).
+fn error_content_type(head: &ResponseHead) -> HeaderValue {
+    head.content_type.clone().unwrap_or_else(|| HeaderValue::from_static("application/json"))
 }
 
 /// SMA-752 § 6.5.3: put the request entries into the `paigasus-tool-decisions` header of an
@@ -350,7 +402,7 @@ fn add_request_report(resp: &mut Response, requests: &[RequestEntry]) {
 /// full or streamed) or, on a transport/connect/timeout failure, the GATEWAY status the error
 /// was mapped to (502/504 — see `GatewayError::from<UpstreamError>`), since no upstream status
 /// exists in that case. See the call sites above for the TTFB-vs-stream-vs-full timing note.
-fn record_upstream_call(status: StatusCode, started: Instant, endpoint: &'static str) {
+pub(crate) fn record_upstream_call(status: StatusCode, started: Instant, endpoint: &'static str) {
     let status_class = format!("{}xx", status.as_u16() / 100);
     counter!(names::GATEWAY_UPSTREAM_REQUESTS_TOTAL, "status_class" => status_class, "endpoint" => endpoint).increment(1);
     histogram!(names::GATEWAY_UPSTREAM_REQUEST_DURATION_SECONDS).record(started.elapsed().as_secs_f64());

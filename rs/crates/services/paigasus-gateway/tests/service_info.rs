@@ -163,6 +163,8 @@ fn app_for(fake: FakeIam, stream_enabled: bool) -> Router {
         tool_interception: None,
         tool_policy: None,
         responses: None,
+        anthropic: None,
+        messages: None,
     };
     router(state)
 }

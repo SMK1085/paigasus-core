@@ -208,6 +208,8 @@ fn app_for(scope: &str, base_url: &str, limits: Option<Arc<Limits>>, ti: Option<
             max_record_bytes: 16 * MIB,
             max_held_bytes: 32 * MIB,
         })),
+        anthropic: None,
+        messages: None,
     })
 }
 

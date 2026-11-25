@@ -9,7 +9,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
+use paigasus_gateway::adapters::anthropic::AnthropicClient;
+use paigasus_gateway::adapters::http::{AppState, MessagesSettings, ResponsesSettings, router};
 use paigasus_gateway::adapters::iam::IamClient;
 use paigasus_gateway::adapters::limits::build_limits;
 use paigasus_gateway::adapters::openai::OpenAiClient;
@@ -130,6 +131,24 @@ async fn serve() -> anyhow::Result<()> {
     let tool_interception = runtime::tool_interception(&config, &tool_policy_runtime);
     let tool_policy = tool_policy_runtime.policy;
 
+    // SMA-750 D3, D4: the Anthropic client and the `/v1/messages` group, only with
+    // `[messages] enabled = true`. `validate` refuses that without `[upstream.anthropic]`.
+    let (anthropic, messages) = match (config.messages.enabled, config.upstream.anthropic.as_ref()) {
+        (true, Some(cfg)) => {
+            let client = AnthropicClient::new(cfg, Duration::from_secs(config.connect_timeout_secs), Duration::from_secs(config.stream_idle_timeout_secs))?;
+            tracing::info!("the anthropic messages route is on (SMA-750)");
+            let settings = MessagesSettings {
+                max_request_bytes: config.messages.max_request_bytes,
+                max_record_bytes: config.messages.max_record_bytes,
+                max_held_bytes: config.messages.max_held_bytes,
+                max_hold: Duration::from_secs(config.messages.max_hold_secs),
+            };
+            (Some(Arc::new(client)), Some(Arc::new(settings)))
+        }
+        (true, None) => anyhow::bail!("[messages] enabled = true needs [upstream.anthropic]"),
+        (false, _) => (None, None),
+    };
+
     let state = AppState {
         iam: Arc::new(iam),
         openai: Arc::new(openai),
@@ -147,6 +166,8 @@ async fn serve() -> anyhow::Result<()> {
                 max_held_bytes: config.responses.max_held_bytes,
             })
         }),
+        anthropic,
+        messages,
     };
     if config.dpop.enabled {
         tracing::info!("DPoP is on: the protected routes accept Authorization: DPoP with one DPoP proof header; IAM must have authn.dpop on");

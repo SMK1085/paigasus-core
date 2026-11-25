@@ -155,6 +155,8 @@ impl Rig {
                 max_record_bytes: 16 * MIB,
                 max_held_bytes: 32 * MIB,
             })),
+            anthropic: None,
+            messages: None,
         })
     }
 

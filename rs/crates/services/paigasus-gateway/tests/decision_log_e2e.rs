@@ -206,6 +206,8 @@ fn app(base_url: &str, cfg: &GatewayConfig, recorder: &Arc<paigasus_gateway::app
             max_record_bytes: 16 * MIB,
             max_held_bytes: 32 * MIB,
         })),
+        anthropic: None,
+        messages: None,
     })
 }
 

@@ -17,7 +17,8 @@ use paigasus_gateway_core::Format;
 
 use super::AppState;
 use super::error::GatewayError;
-use super::pipeline::{self, Endpoint, RequestFacts};
+use super::pipeline::{self, Endpoint, RequestFacts, Upstream};
+use crate::adapters::anthropic::Forward;
 use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ChatCompletionRequest;
 use crate::adapters::http::usage::{self, StreamUsage, UsageScanner};
@@ -63,13 +64,13 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
         // Unreachable in practice — the auth middleware always attaches a CallerContext.
         return GatewayError::Internal.into_response();
     };
-    pipeline::proxy(&CHAT, state, caller, body).await
+    pipeline::proxy(&CHAT, state, caller, Forward::default(), body).await
 }
 
 /// The descriptor of `POST /v1/chat/completions`.
 pub static CHAT: Endpoint = Endpoint {
     name: "chat_completions",
-    route: UpstreamRoute::ChatCompletions,
+    upstream: Upstream::OpenAi(UpstreamRoute::ChatCompletions),
     format: Format::OpenAiChat,
     parse: parse_chat,
     non_stream_usage: usage::non_stream_usage,

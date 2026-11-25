@@ -15,8 +15,10 @@ pub mod auth;
 pub(crate) mod bytes;
 pub mod chat;
 pub mod dto;
+pub(crate) mod duplicates;
 pub mod error;
 pub mod interception;
+pub mod messages;
 pub mod pipeline;
 pub(crate) mod relay;
 pub mod responses;
@@ -29,12 +31,14 @@ pub use dto::ChatCompletionRequest;
 pub use error::GatewayError;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, http::StatusCode, routing::get, routing::post};
+use axum::{Json, Router, http::StatusCode, routing::any, routing::get, routing::post};
 use serde_json::json;
 
+use crate::adapters::anthropic::AnthropicClient;
 use crate::adapters::iam::{Iam, IamError};
 use crate::adapters::openai::OpenAiClient;
 use crate::application::limits::Limits;
@@ -77,6 +81,13 @@ pub struct AppState {
     /// SMA-769: the `POST /v1/responses` route, or `None` when `[responses] enabled = false`
     /// (D8). [`router`] mounts the route only when this is `Some`.
     pub responses: Option<Arc<ResponsesSettings>>,
+    /// SMA-750: the Anthropic egress client, or `None` when `[messages] enabled = false`.
+    /// `GatewayConfig::validate` refuses `[messages] enabled = true` without
+    /// `[upstream.anthropic]`, so `messages: Some` comes with `anthropic: Some`.
+    pub anthropic: Option<Arc<AnthropicClient>>,
+    /// SMA-750 D4: the `/v1/messages` route group, or `None` when `[messages] enabled = false`.
+    /// [`router`] mounts the group only when this is `Some`.
+    pub messages: Option<Arc<MessagesSettings>>,
 }
 
 /// SMA-769 D15: the limits of the Responses route, built from `[responses]` when it is on.
@@ -88,6 +99,20 @@ pub struct ResponsesSettings {
     pub max_record_bytes: usize,
     /// The queued bytes of one stream; also the cap on one non-stream body.
     pub max_held_bytes: usize,
+}
+
+/// SMA-750 D3, D15: the limits of the `/v1/messages` route group, built from `[messages]` when
+/// it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessagesSettings {
+    /// The cap on one request body of the group.
+    pub max_request_bytes: usize,
+    /// One SSE record larger than this is a failure.
+    pub max_record_bytes: usize,
+    /// The queued bytes of one stream; also the cap on one non-stream body.
+    pub max_held_bytes: usize,
+    /// The longest time that one tool call is held.
+    pub max_hold: Duration,
 }
 
 /// The gateway's HTTP surface. `/healthz` + `/readyz` are public (no auth, no body limit); the
@@ -104,6 +129,10 @@ pub struct ResponsesSettings {
 /// authorize (a caller who legitimately cannot invoke the model must still be able to learn that
 /// streaming exists). It also needs no [`DefaultBodyLimit`] — it is a GET with no body. Merging
 /// it into `protected` would silently saddle it with both.
+///
+/// SMA-750: `/v1/messages` ([`messages`]) is a FOURTH group, mounted only with `[messages]
+/// enabled = true`. It has its own auth state (`accept_x_api_key: true`), its own body limit, and
+/// the outermost [`anthropic_error::rerender`] layer.
 ///
 /// The shared [`AppState`] is applied ONCE, at the end, over the whole tree so the stateful
 /// `readyz` (it probes IAM), the protected chat handler, and the descriptor handler all read the
@@ -142,6 +171,29 @@ pub fn router(state: AppState) -> Router {
         None => Router::new(),
     };
 
+    // SMA-750 D4, D6, D7: the Anthropic group exists only when `[messages] enabled = true`. Its auth
+    // reads `x-api-key` too (D6), its body limit is `[messages] max_request_bytes`, and every
+    // gateway error in it is re-rendered in the Anthropic envelope. `rerender` is the OUTERMOST
+    // layer, so a 401 from auth and a 413 from the body limit are re-rendered too. The method
+    // fallback answers the Anthropic 405 (after auth, as `route_layer` wraps it). With the group
+    // off, both Messages paths answer the Anthropic 404, with no credential challenge.
+    let messages = match &state.messages {
+        Some(settings) => {
+            let anthropic_auth = AuthState {
+                accept_x_api_key: true,
+                ..auth_state.clone()
+            };
+            Router::new()
+                .route("/v1/messages", post(messages::create_message).fallback(anthropic_error::method_not_allowed))
+                .route_layer(axum::middleware::from_fn_with_state(anthropic_auth, require_iam_auth))
+                .route_layer(DefaultBodyLimit::max(settings.max_request_bytes))
+                .route_layer(axum::middleware::map_response(anthropic_error::rerender))
+        }
+        None => Router::new()
+            .route("/v1/messages", any(anthropic_error::not_found))
+            .route("/v1/messages/count_tokens", any(anthropic_error::not_found)),
+    };
+
     // SMA-505: its own group, because discovery authenticates but does not authorize, and needs
     // no body limit (it is a GET). `route_layer` keeps the middleware off unmatched paths, so a
     // 404 is still a 404 rather than a credential challenge.
@@ -153,6 +205,7 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .merge(protected)
         .merge(responses)
+        .merge(messages)
         .merge(discovery)
         .layer(paigasus_observability::http_metrics_layer("gateway"))
         // SMA-504 D10: mirrors IAM's placement exactly — outermost, so an auth rejection is
@@ -170,7 +223,8 @@ async fn healthz() -> impl IntoResponse {
 /// Readiness probe: `200 {"status":"ready"}` only when the gateway can actually serve. For M0 the
 /// meaningful hard dependency is IAM (every request introspects + authorizes against it), so
 /// readiness turns on IAM reachability; a transient upstream blip must NOT flap readiness, so the
-/// OpenAI upstream is checked by config-presence only (see below), never a per-poll network probe.
+/// OpenAI and Anthropic upstreams are checked by config-presence only (see below), never a
+/// per-poll network probe.
 ///
 /// ## IAM reachability via a sentinel introspect (a dedicated gRPC health RPC is a follow-up)
 /// The M0 [`Iam`] port exposes no health RPC, so reachability is inferred from a cheap sentinel
@@ -186,9 +240,11 @@ async fn healthz() -> impl IntoResponse {
 /// ANY other outcome (an application-level `Status` such as `Unauthenticated`, or even an `Ok`)
 /// proves IAM answered → ready (`200`).
 ///
-/// ## Upstream — config-presence only for M0 (a live probe is a follow-up)
-/// `upstream.openai.{base_url,api_key}` are validated non-empty at boot by
-/// `GatewayConfig::validate`, so there is nothing further to check here without a live network
+/// ## Upstreams — config-presence only for M0 (a live probe is a follow-up)
+/// Both upstreams are checked by config presence only. `upstream.openai.{base_url,api_key}` are
+/// validated non-empty at boot by `GatewayConfig::validate`. `[upstream.anthropic]` is validated
+/// at boot when `[messages] enabled = true` (SMA-750 D3): a missing table or an empty
+/// `api_key` fails the boot. So there is nothing further to check here without a live network
 /// probe on every poll (flaky + rate-costly). A live upstream-reachability probe is a documented
 /// follow-up; deliberately NOT added here.
 async fn readyz(State(state): State<AppState>) -> Response {
@@ -305,6 +361,8 @@ mod tests {
             tool_interception: None,
             tool_policy: None,
             responses: None,
+            anthropic: None,
+            messages: None,
         }
     }
 

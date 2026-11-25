@@ -100,6 +100,8 @@ fn app(base_url: &str, o: Opts) -> Router {
         tool_interception: o.ti,
         tool_policy: None,
         responses: o.responses.map(Arc::new),
+        anthropic: None,
+        messages: None,
     })
 }
 

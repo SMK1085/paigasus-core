@@ -136,6 +136,8 @@ MANIFEST = (
      "the_terminal_sse_frame_carries_a_registered_code", "the terminal SSE error frame"),
     ("rs/crates/services/paigasus-gateway/src/adapters/http/responses.rs", "emits",
      "the_responses_terminal_frame_carries_a_registered_code", "the D13 terminal SSE error frame of /v1/responses"),
+    ("rs/crates/services/paigasus-gateway/src/adapters/http/messages.rs", "emits",
+     "the_messages_terminal_frame_carries_a_registered_code", "the D13 terminal SSE error frame of /v1/messages"),
     ("rs/crates/libs/paigasus-gateway-core/src/report.rs", "emits",
      "every_report_reason_is_declared_in_the_canonical_registry", "decision-report reasons (SMA-752 D10)"),
     ("rs/crates/services/paigasus-iam/src/adapters/grpc/convert.rs", "asserts", None,

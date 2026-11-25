@@ -57,10 +57,39 @@ pub struct ResponsesRequest {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// An Anthropic `POST /v1/messages` request body (SMA-750 § 8), modelled only for the fields the
+/// gateway reads: `model` (the log), `messages` (an array, required) and `stream` (the egress
+/// path; absent or `null` is `false`). Like [`ChatCompletionRequest`], it is never the wire body:
+/// the original bytes go upstream.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessagesRequest {
+    pub model: String,
+    /// The conversation turns, kept as opaque JSON.
+    pub messages: Vec<serde_json::Value>,
+    pub stream: Option<bool>,
+    /// Every other top-level field.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// SMA-750 § 8: `model` and `messages` are required, `stream` is optional, and the other
+    /// fields land in `extra`.
+    #[test]
+    fn a_messages_request_reads_its_three_fields() {
+        let raw = json!({"model":"claude-x","max_tokens":5,"messages":[{"role":"user","content":"hi"}],"stream":null,"system":"s"});
+        let req: MessagesRequest = serde_json::from_value(raw).expect("a valid request parses");
+        assert_eq!((req.model.as_str(), req.messages.len(), req.stream), ("claude-x", 1, None));
+        assert_eq!(req.extra.get("max_tokens"), Some(&json!(5)));
+        assert!(!req.extra.contains_key("model") && !req.extra.contains_key("stream"));
+        for missing in [json!({"messages":[]}), json!({"model":"m"})] {
+            assert!(serde_json::from_value::<MessagesRequest>(missing.clone()).is_err(), "{missing}");
+        }
+    }
 
     #[test]
     fn parses_core_fields_and_captures_unknowns_in_extra() {
