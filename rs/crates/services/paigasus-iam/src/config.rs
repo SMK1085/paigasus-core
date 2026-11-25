@@ -384,6 +384,10 @@ pub struct ToolPoliciesConfig {
     /// It must be above 0 and below the 4 MiB default decode limit of tonic, so that every
     /// `ListTools` page decodes. It also bounds the compile request and the compiled schema.
     pub max_catalog_response_bytes: usize,
+    /// Lets a tool policy set hold a history rule (`count_within`, `sum_within`, `formerly`).
+    /// `false` (the default) refuses such a save as `tool-policy-history-unsupported`. Turn it on
+    /// only when the gateway evaluates history conditions (env `IAM_TOOL_POLICIES__HISTORY_CONDITIONS`).
+    pub history_conditions: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1099,6 +1103,7 @@ struct ToolPoliciesDefaults {
     max_input_schema_bytes: usize,
     max_schema_depth: usize,
     max_catalog_response_bytes: usize,
+    history_conditions: bool,
 }
 
 impl Default for ToolPoliciesDefaults {
@@ -1117,6 +1122,7 @@ impl Default for ToolPoliciesDefaults {
             max_input_schema_bytes: 65_536,
             max_schema_depth: 8,
             max_catalog_response_bytes: 2_097_152,
+            history_conditions: false,
         }
     }
 }
@@ -1140,6 +1146,7 @@ impl Default for ToolPoliciesConfig {
             max_input_schema_bytes: d.max_input_schema_bytes,
             max_schema_depth: d.max_schema_depth,
             max_catalog_response_bytes: d.max_catalog_response_bytes,
+            history_conditions: d.history_conditions,
         }
     }
 }
@@ -4467,6 +4474,25 @@ mod tests {
         let cfg = tool_policies_config("").expect("the config loads");
         assert_eq!(cfg.tool_policies, d);
         cfg.validate().expect("the defaults validate");
+    }
+
+    #[test]
+    fn history_conditions_defaults_to_false() {
+        assert!(!ToolPoliciesConfig::default().history_conditions);
+        let cfg = tool_policies_config("").expect("the config loads");
+        assert!(!cfg.tool_policies.history_conditions);
+    }
+
+    #[test]
+    fn history_conditions_comes_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("IAM_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("IAM_TOOL_POLICIES__HISTORY_CONDITIONS", "true");
+            jail.create_file("iam.toml", &format!("{}\n[api_keys]\npepper = \"{}\"\n", minimal_issuer_toml(), valid_pepper_b64()))?;
+            let cfg = IamConfig::figment().extract::<IamConfig>().expect("the config loads");
+            assert!(cfg.tool_policies.history_conditions);
+            Ok(())
+        });
     }
 
     #[test]

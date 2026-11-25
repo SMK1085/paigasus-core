@@ -15,23 +15,15 @@ use prost::Message;
 use super::rejection::{RejectionReason, ToolPolicyRejection};
 use crate::application::error::TenancyError;
 
-/// SMA-753: set this to `true`, or delete it with `reject_history_until_gateway_supports_it`,
-/// when the gateway evaluates history conditions. Until then IAM stores no set with one (R19).
+/// One rejection per policy id that has a history condition, sorted by policy id. Empty when
+/// `tool_policies.history_conditions` is on (spec P13).
 ///
-/// A live set that PR 1 stored with a history rule is not changed. It does block every later
-/// catalog write for that organization, because the catalog coupling compiles it again and
-/// gets this rejection (re-tagged `tool-catalog-breaks-policy`). The tenant must remove the
-/// temporal block first.
-pub(crate) const HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY: bool = false;
-
-/// One rejection per policy id that has a history condition, sorted by policy id. Empty when the
-/// gateway enforces history conditions.
-pub(crate) fn reject_history_until_gateway_supports_it(out: &CompiledOutput) -> Vec<ToolPolicyRejection> {
-    history_rejections(out, HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY)
-}
-
-fn history_rejections(out: &CompiledOutput, enforced_by_gateway: bool) -> Vec<ToolPolicyRejection> {
-    if enforced_by_gateway {
+/// A live set that PR 1 stored with a history rule is not changed. While the setting is off, it
+/// blocks every later catalog write for that organization, because the catalog coupling compiles
+/// it again and gets this rejection (re-tagged `tool-catalog-breaks-policy`). The tenant must
+/// remove the temporal block first.
+pub(crate) fn history_rejections(out: &CompiledOutput, enabled: bool) -> Vec<ToolPolicyRejection> {
+    if enabled {
         return Vec::new();
     }
     let ids: std::collections::BTreeSet<&str> = out.conditions.iter().map(|c| c.policy_id.as_str()).collect();
@@ -40,7 +32,7 @@ fn history_rejections(out: &CompiledOutput, enforced_by_gateway: bool) -> Vec<To
             let mut rejection = ToolPolicyRejection::new(
                 RejectionReason::HistoryUnsupported,
                 format!(
-                    "policy {id} uses a history rule (formerly, count_within or sum_within). The gateway cannot enforce history rules yet, so this set cannot be saved. Remove the temporal block, or wait for history support."
+                    "policy {id} uses a history rule (formerly, count_within or sum_within). History rules are off in this IAM (tool_policies.history_conditions = false), so this set cannot be saved. Remove the temporal block, or ask the operator to turn history rules on."
                 ),
             );
             rejection.policy_id = Some(id.to_owned());
