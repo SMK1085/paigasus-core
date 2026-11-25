@@ -9,13 +9,15 @@
 //! `trimmed_retention` and `trimmed_cap` count distinct events that this call removed (within one call,
 //! an event cut from two histories counts once).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use paigasus_gateway::domain::tool_history::{
-    AppendRequest, CallEvent, CallLink, EventKind, EventVerdict, ForwardedCall, Histories, LookupRequest, MAX_EVENTS_PER_TOOL, RETENTION_MS, ReserveRequest, ResultEvent, Scope, SessionState,
+    AppendCall, AppendRequest, CallEvent, CallLink, EventKind, EventVerdict, Histories, LookupRequest, MAX_EVENTS_PER_TOOL, RETENTION_MS, ReserveRequest, ResultEvent, Scope, SessionState,
     SessionStore, SettleItem, SettleRequest, StoredEvent, WriteRequest,
 };
+use paigasus_kernel::tool_policy::history::{Digest, Field, FieldPath, Fields, KeyId};
 use uuid::Uuid;
 
 /// How a case reaches one backend.
@@ -25,6 +27,9 @@ pub trait Harness: Send + Sync {
     async fn store(&self) -> Arc<dyn SessionStore>;
     async fn events(&self, org: Uuid, scope: Scope, scope_id: &str, tool: &str) -> Vec<StoredEvent>;
     async fn ttls_ms(&self, org: Uuid, now_ms: u64) -> Vec<Option<u64>>;
+    /// Replace the JSON body of one stored event (a body that another version wrote). The verdict
+    /// and the result guard stay.
+    async fn put_raw_body(&self, org: Uuid, id: Uuid, body: &str);
 }
 
 const NOW: u64 = 1_700_000_000_000;
@@ -128,12 +133,67 @@ impl Ctx {
     }
 }
 
+fn no_fields() -> Fields {
+    Fields::Values(BTreeMap::new())
+}
+
+fn path(text: &str) -> FieldPath {
+    FieldPath::new(text.split('.').map(str::to_string).collect()).expect("a valid path")
+}
+
+/// One field of each stored kind, and a key id. The Long is past 2^53, so a store that reads a
+/// number as a float fails.
+fn sample_fields() -> (Fields, Option<KeyId>) {
+    let mut m = BTreeMap::new();
+    m.insert(path("amount"), Field::Long(-9_007_199_254_740_993));
+    m.insert(path("to"), Field::Digest(Digest::new([0xfb; 16])));
+    m.insert(path("cc"), Field::Absent);
+    m.insert(path("opts.mode"), Field::Mistyped);
+    (Fields::Values(m), Some(KeyId::new([1, 2, 3, 4, 5, 6, 7, 0xff])))
+}
+
 fn call(tool: &str) -> CallEvent {
-    CallEvent { id: fresh_id(), tool: tool.into() }
+    CallEvent {
+        id: fresh_id(),
+        tool: tool.into(),
+        call_id: None,
+        item_id: None,
+        fields: no_fields(),
+        key: None,
+    }
+}
+
+/// A call with its client call id.
+fn call_as(tool: &str, call_id: &str) -> CallEvent {
+    CallEvent {
+        call_id: Some(call_id.into()),
+        ..call(tool)
+    }
 }
 
 fn calls(tool: &str, n: usize) -> Vec<CallEvent> {
-    fresh_ids(n).into_iter().map(|id| CallEvent { id, tool: tool.into() }).collect()
+    fresh_ids(n).into_iter().map(|id| CallEvent { id, ..call(tool) }).collect()
+}
+
+fn append_call(id: Uuid, tool: &str, verdict: EventVerdict, call_id: Option<&str>, item_id: Option<&str>) -> AppendCall {
+    AppendCall {
+        id,
+        tool: tool.into(),
+        verdict,
+        call_id: call_id.map(str::to_string),
+        item_id: item_id.map(str::to_string),
+        fields: no_fields(),
+        key: None,
+    }
+}
+
+fn append_req(ctx: &Ctx, calls: Vec<AppendCall>, now_ms: u64) -> AppendRequest {
+    AppendRequest {
+        histories: ctx.histories(),
+        turn: 1,
+        calls,
+        now_ms,
+    }
 }
 
 fn item(event_id: Uuid, verdict: EventVerdict, tool: &str, call_id: Option<&str>) -> SettleItem {
@@ -405,17 +465,7 @@ pub async fn every_written_key_expires_after_the_retention(h: &impl Harness) {
 pub async fn append_writes_an_allowed_event_and_its_call_link(h: &impl Harness) {
     let (ctx, store) = (Ctx::new(true), h.store().await);
     let id = fresh_id();
-    let req = AppendRequest {
-        histories: ctx.histories(),
-        turn: 1,
-        calls: vec![ForwardedCall {
-            id,
-            tool: "send".into(),
-            call_id: Some("call-1".into()),
-            item_id: None,
-        }],
-        now_ms: NOW,
-    };
+    let req = append_req(&ctx, vec![append_call(id, "send", EventVerdict::Allow, Some("call-1"), None)], NOW);
     let reply = store.append(&req).await.unwrap();
     assert_eq!(reply.written, 1);
     assert_eq!(principal_events(h, &ctx, "send").await[0].verdict, EventVerdict::Allow);
@@ -440,17 +490,7 @@ pub async fn a_local_shell_settle_links_the_item_id_too(h: &impl Harness) {
     // By append.
     let ctx = Ctx::new(true);
     let id = fresh_id();
-    let req = AppendRequest {
-        histories: ctx.histories(),
-        turn: 1,
-        calls: vec![ForwardedCall {
-            id,
-            tool: "shell".into(),
-            call_id: Some("call-2".into()),
-            item_id: Some("item-2".into()),
-        }],
-        now_ms: NOW,
-    };
+    let req = append_req(&ctx, vec![append_call(id, "shell", EventVerdict::Allow, Some("call-2"), Some("item-2"))], NOW);
     store.append(&req).await.unwrap();
     let expected = Some(link(&ctx, "shell", id, false));
     let reply = store.lookup(&ctx.lookup(&[], &["item-2", "call-2"], &[])).await.unwrap();
@@ -514,17 +554,8 @@ pub async fn a_reserve_with_a_lower_turn_does_not_lower_the_turn(h: &impl Harnes
 
 pub async fn an_append_on_a_new_session_writes_its_state(h: &impl Harness) {
     let (ctx, store) = (Ctx::new(true), h.store().await);
-    let req = AppendRequest {
-        histories: ctx.histories(),
-        turn: 6,
-        calls: vec![ForwardedCall {
-            id: fresh_id(),
-            tool: "send".into(),
-            call_id: Some("call-1".into()),
-            item_id: None,
-        }],
-        now_ms: NOW,
-    };
+    let mut req = append_req(&ctx, vec![append_call(fresh_id(), "send", EventVerdict::Allow, Some("call-1"), None)], NOW);
+    req.turn = 6;
     store.append(&req).await.unwrap();
     let reply = store.lookup(&ctx.lookup(&["call-1"], &[], &[])).await.unwrap();
     assert_eq!(
@@ -693,6 +724,187 @@ pub async fn concurrent_reserves_all_land(h: &impl Harness) {
     assert_eq!(h.events(ctx.org, Scope::Session, &ctx.session.to_string(), "send").await.len(), 50);
 }
 
+pub async fn a_reserved_event_keeps_its_fields_and_key_id(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let (fields, key) = sample_fields();
+    let c = CallEvent {
+        fields: fields.clone(),
+        key,
+        ..call("send")
+    };
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let e = &principal_events(h, &ctx, "send").await[0];
+    assert_eq!((e.id, &e.fields, e.key), (c.id, &fields, key));
+    // A settle changes the verdict only.
+    store.settle(&ctx.settle(vec![item(c.id, EventVerdict::Allow, "send", None)], NOW)).await.unwrap();
+    let e = &principal_events(h, &ctx, "send").await[0];
+    assert_eq!((e.verdict, &e.fields, e.key), (EventVerdict::Allow, &fields, key));
+}
+
+pub async fn an_unparsed_call_is_stored_as_unparsed(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = CallEvent {
+        fields: Fields::Unparsed,
+        ..call("send")
+    };
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let e = &principal_events(h, &ctx, "send").await[0];
+    assert_eq!((&e.fields, e.key), (&Fields::Unparsed, None));
+    // An empty field plan is not "unparsed".
+    let plain = call("send");
+    store.reserve(&ctx.reserve(vec![plain.clone()], NOW + 1, None)).await.unwrap();
+    let e = principal_events(h, &ctx, "send").await.into_iter().find(|e| e.id == plain.id).expect("the plain call");
+    assert_eq!(e.fields, no_fields());
+}
+
+pub async fn a_pr1_body_reads_as_no_fields(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let (fields, key) = sample_fields();
+    let c = CallEvent { fields, key, ..call("send") };
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let id = c.id;
+    h.put_raw_body(ctx.org, id, &format!(r#"{{"v":1,"id":"{id}","ts":{NOW},"k":"request","t":"send"}}"#)).await;
+    let e = &principal_events(h, &ctx, "send").await[0];
+    assert_eq!((e.id, e.verdict, &e.fields, e.key), (id, EventVerdict::Pending, &no_fields(), None));
+}
+
+pub async fn a_result_event_copies_the_fields_of_its_call(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let (fields, key) = sample_fields();
+    let parsed = CallEvent {
+        fields: fields.clone(),
+        key,
+        ..call_as("send", "call-1")
+    };
+    let unparsed = CallEvent {
+        fields: Fields::Unparsed,
+        ..call_as("send", "call-2")
+    };
+    let plain = call_as("send", "call-3");
+    store.reserve(&ctx.reserve(vec![parsed.clone(), unparsed.clone(), plain.clone()], NOW, None)).await.unwrap();
+    let settle = vec![
+        item(parsed.id, EventVerdict::Allow, "send", Some("call-1")),
+        item(unparsed.id, EventVerdict::Allow, "send", Some("call-2")),
+        item(plain.id, EventVerdict::Allow, "send", Some("call-3")),
+    ];
+    store.settle(&ctx.settle(settle, NOW)).await.unwrap();
+    // The call of the third result has a PR 1 body: its result has no fields either.
+    let pid = plain.id;
+    h.put_raw_body(ctx.org, pid, &format!(r#"{{"v":1,"id":"{pid}","ts":{NOW},"k":"request","t":"send"}}"#)).await;
+    let result = |call_id: &str, event_id| ResultEvent {
+        id: fresh_id(),
+        call_id: call_id.into(),
+        tool: "send".into(),
+        event_id,
+    };
+    let (r1, r2, r3) = (result("call-1", parsed.id), result("call-2", unparsed.id), result("call-3", plain.id));
+    let reply = store.write(&ctx.write(None, vec![r1.clone(), r2.clone(), r3.clone()], NOW + 1)).await.unwrap();
+    assert_eq!(reply.written, 3);
+    let events = principal_events(h, &ctx, "send").await;
+    let of = |id: Uuid| events.iter().find(|e| e.id == id).expect("the result event");
+    assert_eq!((of(r1.id).kind, &of(r1.id).fields, of(r1.id).key), (EventKind::Result, &fields, key));
+    assert_eq!((&of(r2.id).fields, of(r2.id).key), (&Fields::Unparsed, None));
+    assert_eq!((&of(r3.id).fields, of(r3.id).key), (&no_fields(), None));
+}
+
+pub async fn the_reserve_writes_the_call_links_of_each_call(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let shell = CallEvent {
+        item_id: Some("item-1".into()),
+        ..call_as("shell", "call-1")
+    };
+    let send = call_as("send", "call-2");
+    store.reserve(&ctx.reserve(vec![shell.clone(), send.clone()], NOW, None)).await.unwrap();
+    let reply = store.lookup(&ctx.lookup(&["call-1", "item-1", "call-2"], &["call-2"], &[])).await.unwrap();
+    let shell_link = Some(link(&ctx, "shell", shell.id, false));
+    let send_link = Some(link(&ctx, "send", send.id, false));
+    assert_eq!(reply.calls, vec![shell_link.clone(), shell_link, send_link.clone()]);
+    assert_eq!(reply.results, vec![send_link]);
+    // Every new key has a time to live.
+    assert!(h.ttls_ms(ctx.org, NOW).await.iter().all(Option::is_some));
+}
+
+pub async fn the_reserve_keeps_a_link_of_another_event(h: &impl Harness) {
+    let (first, store) = (Ctx::new(true), h.store().await);
+    let second = first.other_session();
+    let a = call_as("send", "call_0");
+    store.reserve(&first.reserve(vec![a.clone()], NOW, None)).await.unwrap();
+    store.settle(&first.settle(vec![item(a.id, EventVerdict::Allow, "send", Some("call_0"))], NOW)).await.unwrap();
+    // A later turn reuses the call id.
+    let b = call_as("read", "call_0");
+    store.reserve(&second.reserve(vec![b.clone()], NOW + 1, None)).await.unwrap();
+    let reply = store.lookup(&first.lookup(&["call_0"], &[], &[])).await.unwrap();
+    assert_eq!(reply.calls, vec![Some(link(&first, "send", a.id, false))]);
+}
+
+pub async fn a_deny_settle_deletes_only_its_own_link(h: &impl Harness) {
+    let (first, store) = (Ctx::new(true), h.store().await);
+    let second = first.other_session();
+    let a = call_as("send", "call-1");
+    let b = call_as("send", "call-1");
+    store.reserve(&first.reserve(vec![a.clone()], NOW, None)).await.unwrap();
+    store.reserve(&second.reserve(vec![b.clone()], NOW + 1, None)).await.unwrap();
+    // B is denied: the link names A, so it stays.
+    store.settle(&second.settle(vec![item(b.id, EventVerdict::Deny, "send", Some("call-1"))], NOW + 2)).await.unwrap();
+    let reply = store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap();
+    assert_eq!(reply.calls, vec![Some(link(&first, "send", a.id, false))]);
+    // A is denied: the link names A, so it goes.
+    store.settle(&first.settle(vec![item(a.id, EventVerdict::Deny, "send", Some("call-1"))], NOW + 3)).await.unwrap();
+    assert_eq!(store.lookup(&first.lookup(&["call-1"], &[], &[])).await.unwrap().calls, vec![None]);
+}
+
+pub async fn an_allow_settle_relinks_a_reused_call_id(h: &impl Harness) {
+    let (first, store) = (Ctx::new(true), h.store().await);
+    let second = first.other_session();
+    let a = call_as("send", "call_0");
+    let b = call_as("read", "call_0");
+    store.reserve(&first.reserve(vec![a.clone()], NOW, None)).await.unwrap();
+    store.reserve(&second.reserve(vec![b.clone()], NOW + 1, None)).await.unwrap();
+    store.settle(&second.settle(vec![item(b.id, EventVerdict::Allow, "read", Some("call_0"))], NOW + 2)).await.unwrap();
+    let reply = store.lookup(&first.lookup(&["call_0"], &[], &[])).await.unwrap();
+    assert_eq!(reply.calls, vec![Some(link(&second, "read", b.id, false))]);
+}
+
+pub async fn an_appended_denied_call_counts_and_writes_no_link(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let id = fresh_id();
+    let (fields, key) = sample_fields();
+    let denied = AppendCall {
+        fields: fields.clone(),
+        key,
+        ..append_call(id, "send", EventVerdict::Deny, Some("call-1"), Some("item-1"))
+    };
+    let reply = store.append(&append_req(&ctx, vec![denied], NOW)).await.unwrap();
+    assert_eq!(reply.written, 1);
+    let events = principal_events(h, &ctx, "send").await;
+    assert_eq!(events.len(), 1);
+    assert_eq!((events[0].id, events[0].verdict, &events[0].fields, events[0].key), (id, EventVerdict::Deny, &fields, key));
+    let reply = store.lookup(&ctx.lookup(&["call-1", "item-1"], &[], &[])).await.unwrap();
+    assert_eq!(reply.calls, vec![None, None]);
+}
+
+pub async fn an_append_under_a_reserved_id_keeps_one_event(h: &impl Harness) {
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = call_as("send", "call-1");
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let (fields, key) = sample_fields();
+    let late = AppendCall {
+        fields: fields.clone(),
+        key,
+        ..append_call(c.id, "send", EventVerdict::Allow, Some("call-1"), None)
+    };
+    store.append(&append_req(&ctx, vec![late], NOW + 5)).await.unwrap();
+    let session = ctx.session.to_string();
+    for (scope, scope_id) in [(Scope::Session, session.as_str()), (Scope::Principal, ctx.principal.as_str())] {
+        let events = h.events(ctx.org, scope, scope_id, "send").await;
+        assert_eq!(events.len(), 1, "{scope:?}: one event");
+        let e = &events[0];
+        assert_eq!((e.id, e.verdict, e.ts_ms, &e.fields, e.key), (c.id, EventVerdict::Allow, NOW + 5, &fields, key), "{scope:?}");
+    }
+    let reply = store.lookup(&ctx.lookup(&["call-1"], &[], &[])).await.unwrap();
+    assert_eq!(reply.calls, vec![Some(link(&ctx, "send", c.id, false))]);
+}
+
 /// Every case, in table order. The Redis binary calls this once per image.
 pub async fn run_all(h: &impl Harness) {
     a_reserve_appends_one_pending_event_per_history(h).await;
@@ -728,4 +940,14 @@ pub async fn run_all(h: &impl Harness) {
     a_later_allow_settle_of_a_denied_event_writes_no_call_link(h).await;
     a_local_shell_result_under_both_aliases_is_written_once(h).await;
     a_relink_between_lookup_and_write_marks_the_original_event(h).await;
+    a_reserved_event_keeps_its_fields_and_key_id(h).await;
+    an_unparsed_call_is_stored_as_unparsed(h).await;
+    a_pr1_body_reads_as_no_fields(h).await;
+    a_result_event_copies_the_fields_of_its_call(h).await;
+    the_reserve_writes_the_call_links_of_each_call(h).await;
+    the_reserve_keeps_a_link_of_another_event(h).await;
+    a_deny_settle_deletes_only_its_own_link(h).await;
+    an_allow_settle_relinks_a_reused_call_id(h).await;
+    an_appended_denied_call_counts_and_writes_no_link(h).await;
+    an_append_under_a_reserved_id_keeps_one_event(h).await;
 }

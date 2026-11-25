@@ -15,9 +15,24 @@
 //! - `t:<org>:<s|p|k>:<sha256(scope id)>`: the set of tool digests of a history.
 //! - `e:<org>:<event id>`: a hash, `b` = the JSON body, `v` = the verdict, and on a call event
 //!   `r` = the id of its result event once that exists (the result guard).
-//! - `l:<org>:<sha256(principal)>:c:<sha256(call id)>`: a hash, `s`, `t`, `e`.
+//! - `l:<org>:<sha256(principal)>:c:<sha256(call id)>`: a hash, `s`, `t`, `e`. No state field, so a
+//!   PR 1 replica can read it after a rollback.
 //! - `l:<org>:<sha256(principal)>:d:<decision id>`: a string, the session.
 //! - `s:<org>:<session>`: a hash, `last_ms` and `turn`.
+//!
+//! The body `b` (spec P3, `body.rs`) keeps `v: 1` and has these members: `id`, `ts`, `k`, `t`, and
+//! then the stored fields of the call: `f` (path to value) and `kid` (the hex key id), or `b: 1`
+//! (unparsed arguments). A result event gets the `f`, `kid` and `b` of its call: the write script
+//! copies them by text from the call body that the result guard reads (design D5).
+//!
+//! The `c:` links (spec P8, P9):
+//! - The reserve writes the `c:` link of each call next to its `d:` link, under the call id and
+//!   under the item id. It keeps a link that already names another event (a reused call id).
+//! - An allow settle writes the link, and replaces a link of another event (PR 1).
+//! - A deny settle deletes a link only when its `e` is this event and the stored verdict is `deny`.
+//! - An append writes the verdict of the call. Only an allowed call writes (and replaces) links. An
+//!   append under an id that a reserve wrote replaces the body, the verdict and the score of that
+//!   one member: one event (plan decision D-E).
 //!
 //! Every key gets `EXPIRE KEY_TTL_SECS` on each write. A trim never deletes an `e:` body: another
 //! history can still hold the event, and the body expires by its TTL.
@@ -27,11 +42,12 @@
 
 use std::sync::Arc;
 
+use paigasus_kernel::tool_policy::history::{Fields, KeyId};
 use paigasus_observability::names;
 use paigasus_redis::{BreakerMetrics, RedisHandle};
-use serde::Deserialize;
 use uuid::Uuid;
 
+use super::body::{decode_body, decode_error, encode_body};
 use crate::domain::limits::UnavailableKind;
 use crate::domain::tool_history::{
     AppendReply, AppendRequest, CallLink, EventKind, EventVerdict, Histories, HistoryStoreError, KEY_TTL_SECS, LookupReply, LookupRequest, MAX_EVENTS_PER_TOOL, RETENTION_MS, ReserveRequest, Scope,
@@ -44,10 +60,7 @@ pub const KEY_PREFIX: &str = "paigasus:gateway:history:v1:";
 /// The `role` label of the breaker series of this connection.
 pub const HISTORY_BREAKER_ROLE: &str = "tool_history";
 
-/// The version of the event body encoding. A reader ignores unknown fields (rolling upgrade).
-const BODY_VERSION: u64 = 1;
-
-/// The `c:` link rule, shared by `APPEND_SCRIPT` and `SETTLE_SCRIPT`.
+/// The `c:` link rules, shared by `APPEND_SCRIPT` and `SETTLE_SCRIPT`.
 macro_rules! call_link_lua {
     () => {
         r#"
@@ -58,6 +71,12 @@ local function put_call_link(key, session, tool, id, ttl)
   redis.call('HSET', key, 's', session, 't', tool, 'e', id)
   redis.call('EXPIRE', key, ttl)
 end
+-- Delete the c: link only when it still names the event `id` (spec P8).
+local function drop_own_call_link(key, id)
+  if redis.call('HGET', key, 'e') == id then
+    redis.call('DEL', key)
+  end
+end
 "#
     };
 }
@@ -67,13 +86,15 @@ const APPEND_SCRIPT: &str = concat!(
     call_link_lua!(),
     r#"
 -- ARGV: now_ms, retention_ms, cap, ttl_secs, window_from ('' = none), turn ('' = no touch),
---       session, verdict, guard ('0'|'1'), link kind ('-'|'d'|'c'), H, T, N,
+--       session, c-link mode ('keep'|'replace'), guard ('0'|'1'), H, T, N,
 --       then per tool (2 values): tool digest, tool name,
---       then per event (4 values): id, body, tool index (1..T), link count.
+--       then per event (6 values): id, body, tool index (1..T), verdict, d-link count, c-link count.
 -- KEYS: s-key, H t-keys, T * H h-keys (tool t, history i at 1 + H + (t - 1) * H + i),
 --       then per event: e-key, the guard key when guard = '1' (the e: key of the CALL event
---       that the result belongs to), then `link count` link keys (a local shell call has two c:
---       links, F7).
+--       that the result belongs to), then the d: keys, then the c: keys (a local shell call has
+--       two c: links, F7).
+-- c-link mode 'keep' (reserve): a c: link that names another event stays. 'replace' (append): the
+-- link is written.
 -- A history key and a tool go once per distinct tool, not once per event: a reserve of 10,000
 -- events must stay small on the wire.
 local now = tonumber(ARGV[1])
@@ -83,29 +104,44 @@ local ttl = tonumber(ARGV[4])
 local window_from = ARGV[5]
 local turn = ARGV[6]
 local session = ARGV[7]
-local verdict = ARGV[8]
+local cmode = ARGV[8]
 local guard = ARGV[9]
-local link = ARGV[10]
-local H = tonumber(ARGV[11])
-local T = tonumber(ARGV[12])
-local N = tonumber(ARGV[13])
+local H = tonumber(ARGV[10])
+local T = tonumber(ARGV[11])
+local N = tonumber(ARGV[12])
 
 local digests, names, members = {}, {}, {}
 for t = 1, T do
-  digests[t] = ARGV[13 + 2 * t - 1]
-  names[t] = ARGV[13 + 2 * t]
+  digests[t] = ARGV[12 + 2 * t - 1]
+  names[t] = ARGV[12 + 2 * t]
   members[t] = {}
 end
 local function hkey(t, i)
   return KEYS[1 + H + (t - 1) * H + i]
 end
 
+-- The stored fields of a call body are its last members (`,"f":` or `,"b":` up to the closing
+-- brace, see body.rs). Copy them into the result body by text: Lua reads a JSON number as a
+-- double, so a decode and an encode would change a large Long. A call body with neither member
+-- (PR 1) gives none.
+local function copy_fields(body, call_body)
+  if not call_body then
+    return body
+  end
+  local at = string.find(call_body, ',"f":', 1, true) or string.find(call_body, ',"b":', 1, true)
+  if not at then
+    return body
+  end
+  return string.sub(body, 1, -2) .. string.sub(call_body, at, -2) .. '}'
+end
+
 local written = 0
 local seen_guard, guard_sets = {}, {}
-local k, a = 1 + H + T * H, 13 + 2 * T
+local k, a = 1 + H + T * H, 12 + 2 * T
 for j = 1, N do
-  local id, body, t, nlinks = ARGV[a + 1], ARGV[a + 2], tonumber(ARGV[a + 3]), tonumber(ARGV[a + 4])
-  a = a + 4
+  local id, body, t, verdict = ARGV[a + 1], ARGV[a + 2], tonumber(ARGV[a + 3]), ARGV[a + 4]
+  local nd, nc = tonumber(ARGV[a + 5]), tonumber(ARGV[a + 6])
+  a = a + 6
   k = k + 1
   local ekey = KEYS[k]
   local skip = false
@@ -124,17 +160,23 @@ for j = 1, N do
       skip = true
     end
   end
-  local lbase = k
-  k = k + nlinks
+  local dbase = k
+  local cbase = k + nd
+  k = k + nd + nc
   if not skip then
+    if gkey then
+      body = copy_fields(body, redis.call('HGET', gkey, 'b'))
+    end
     redis.call('HSET', ekey, 'b', body, 'v', verdict)
     redis.call('EXPIRE', ekey, ttl)
     table.insert(members[t], id)
-    for l = 1, nlinks do
-      local lkey = KEYS[lbase + l]
-      if link == 'd' then
-        redis.call('SET', lkey, session, 'EX', ttl)
-      elseif link == 'c' then
+    for l = 1, nd do
+      redis.call('SET', KEYS[dbase + l], session, 'EX', ttl)
+    end
+    for l = 1, nc do
+      local lkey = KEYS[cbase + l]
+      local held = cmode == 'keep' and redis.call('HGET', lkey, 'e') or false
+      if not held or held == id then
         put_call_link(lkey, session, names[t], id, ttl)
       end
     end
@@ -289,10 +331,15 @@ for j = 1, N do
       stored = verdict
     end
     redis.call('EXPIRE', ekey, ttl)
-    -- The link follows the STORED verdict: a later allow settle of a denied event writes no link.
+    -- The link follows the STORED verdict: a later allow settle of a denied event writes no link,
+    -- and a later deny settle of an allowed event deletes none.
     if verdict == 'allow' and stored == 'allow' then
       for l = 1, nlinks do
         put_call_link(KEYS[lbase + l], session, tool, id, ttl)
+      end
+    elseif verdict == 'deny' and stored == 'deny' then
+      for l = 1, nlinks do
+        drop_own_call_link(KEYS[lbase + l], id)
       end
     end
   end
@@ -325,49 +372,24 @@ pub fn session_key(org: Uuid, session: Uuid) -> String {
     format!("{KEY_PREFIX}s:{org}:{session}")
 }
 
-fn encode_body(id: Uuid, ts_ms: u64, kind: EventKind, tool: &str) -> String {
-    serde_json::json!({ "v": BODY_VERSION, "id": id.to_string(), "ts": ts_ms, "k": kind.as_str(), "t": tool }).to_string()
-}
-
-/// The JSON body. serde ignores unknown keys, so a body of a later version still decodes.
-#[derive(Deserialize)]
-struct Body {
-    v: u64,
-    id: String,
-    ts: u64,
-    k: String,
-    t: String,
-}
-
-fn decode_error(detail: impl Into<String>) -> HistoryStoreError {
-    HistoryStoreError::Unavailable {
-        kind: UnavailableKind::Decode,
-        detail: detail.into(),
-    }
-}
-
 /// Decode the fields of an `e:` hash (`b` = the JSON body, `v` = the verdict). Unknown fields of
 /// the hash and unknown keys of the body are ignored (rolling upgrade).
+///
+/// # Errors
+///
+/// A hash with no `b` or no `v`, a body that `decode_body` refuses, or an unknown verdict.
 pub fn decode_event(fields: &[(String, String)]) -> Result<StoredEvent, HistoryStoreError> {
     let field = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
-    let raw = field("b").ok_or_else(|| decode_error("event body has no `b` field"))?;
-    let body: Body = serde_json::from_str(raw).map_err(|_| decode_error("event body is not valid JSON"))?;
-    if body.v < BODY_VERSION {
-        return Err(decode_error(format!("event body has version {}", body.v)));
-    }
-    let id = Uuid::try_parse(&body.id).map_err(|_| decode_error("event body id is not a uuid"))?;
-    let kind = match body.k.as_str() {
-        "request" => EventKind::Call,
-        "response" => EventKind::Result,
-        _ => return Err(decode_error("event body has an unknown kind")),
-    };
+    let body = decode_body(field("b").ok_or_else(|| decode_error("event body has no `b` field"))?)?;
     let verdict = parse_verdict(field("v").ok_or_else(|| decode_error("event has no `v` field"))?)?;
     Ok(StoredEvent {
-        id,
-        ts_ms: body.ts,
-        kind,
-        tool: body.t,
+        id: body.id,
+        ts_ms: body.ts_ms,
+        kind: body.kind,
+        tool: body.tool,
         verdict,
+        fields: body.fields,
+        key: body.key,
     })
 }
 
@@ -462,19 +484,20 @@ fn text_of(value: &redis::Value) -> Option<String> {
     }
 }
 
+/// How `APPEND_SCRIPT` writes a `c:` link that already exists.
 #[derive(Clone, Copy)]
-enum LinkKind {
-    None,
-    Decision,
-    Call,
+enum CallLinkMode {
+    /// The reserve: a link that names another event stays (spec P8).
+    Keep,
+    /// The append: the link is written.
+    Replace,
 }
 
-impl LinkKind {
+impl CallLinkMode {
     fn as_arg(self) -> &'static str {
         match self {
-            LinkKind::None => "-",
-            LinkKind::Decision => "d",
-            LinkKind::Call => "c",
+            CallLinkMode::Keep => "keep",
+            CallLinkMode::Replace => "replace",
         }
     }
 }
@@ -483,18 +506,22 @@ impl LinkKind {
 struct NewEvent {
     id: Uuid,
     tool: String,
+    verdict: EventVerdict,
+    /// The stored fields and their key id. `None` for a result event: the script copies them from
+    /// the call body.
+    stored: Option<(Fields, Option<KeyId>)>,
     /// The `e:` key of the call event whose `r` guard decides if the result is written. `write` only.
     guard: Option<String>,
-    link_keys: Vec<String>,
+    decision_keys: Vec<String>,
+    call_keys: Vec<String>,
 }
 
-/// One `APPEND_SCRIPT` call. Every event of a call has the same kind, verdict and link kind.
+/// One `APPEND_SCRIPT` call. Every event of a call has the same kind and the same link mode.
 struct Batch<'a> {
     histories: &'a Histories,
     turn: Option<i64>,
     kind: EventKind,
-    verdict: EventVerdict,
-    link: LinkKind,
+    call_links: CallLinkMode,
     events: Vec<NewEvent>,
     now_ms: u64,
     window_from_ms: Option<u64>,
@@ -562,9 +589,8 @@ impl RedisSessionStore {
             .arg(batch.window_from_ms.map(|w| w.to_string()).unwrap_or_default())
             .arg(batch.turn.map(|t| t.to_string()).unwrap_or_default())
             .arg(h.session.to_string())
-            .arg(batch.verdict.as_str())
+            .arg(batch.call_links.as_arg())
             .arg(if guarded { "1" } else { "0" })
-            .arg(batch.link.as_arg())
             .arg(scopes.len())
             .arg(tools.len())
             .arg(batch.events.len());
@@ -577,11 +603,12 @@ impl RedisSessionStore {
             if let Some(guard) = &e.guard {
                 inv.key(guard);
             }
-            for key in &e.link_keys {
+            for key in e.decision_keys.iter().chain(&e.call_keys) {
                 inv.key(key);
             }
             let index = tools.iter().position(|t| *t == e.tool).map_or(0, |i| i + 1);
-            inv.arg(e.id.to_string()).arg(encode_body(e.id, batch.now_ms, batch.kind, &e.tool)).arg(index).arg(e.link_keys.len());
+            let body = encode_body(e.id, batch.now_ms, batch.kind, &e.tool, e.stored.as_ref().map(|(f, k)| (f, *k)));
+            inv.arg(e.id.to_string()).arg(body).arg(index).arg(e.verdict.as_str()).arg(e.decision_keys.len()).arg(e.call_keys.len());
         }
         let mut con = self.handle.clone();
         let reply: Vec<String> = inv.invoke_async(&mut con).await.map_err(|err| unavailable(&err))?;
@@ -701,16 +728,18 @@ impl SessionStore for RedisSessionStore {
             .map(|r| NewEvent {
                 id: r.id,
                 tool: r.tool.clone(),
+                verdict: EventVerdict::Allow,
+                stored: None,
                 guard: Some(event_key(h.org, r.event_id)),
-                link_keys: Vec::new(),
+                decision_keys: Vec::new(),
+                call_keys: Vec::new(),
             })
             .collect();
         self.run_append(&Batch {
             histories: h,
             turn: req.turn,
             kind: EventKind::Result,
-            verdict: EventVerdict::Allow,
-            link: LinkKind::None,
+            call_links: CallLinkMode::Replace,
             events,
             now_ms: req.now_ms,
             window_from_ms: None,
@@ -726,16 +755,18 @@ impl SessionStore for RedisSessionStore {
             .map(|c| NewEvent {
                 id: c.id,
                 tool: c.tool.clone(),
+                verdict: EventVerdict::Pending,
+                stored: Some((c.fields.clone(), c.key)),
                 guard: None,
-                link_keys: vec![decision_link_key(h.org, &h.principal, c.id)],
+                decision_keys: vec![decision_link_key(h.org, &h.principal, c.id)],
+                call_keys: c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect(),
             })
             .collect();
         self.run_append(&Batch {
             histories: h,
             turn: Some(req.turn),
             kind: EventKind::Call,
-            verdict: EventVerdict::Pending,
-            link: LinkKind::Decision,
+            call_links: CallLinkMode::Keep,
             events,
             now_ms: req.now_ms,
             window_from_ms: req.window_from_ms,
@@ -769,16 +800,23 @@ impl SessionStore for RedisSessionStore {
             .map(|c| NewEvent {
                 id: c.id,
                 tool: c.tool.clone(),
+                verdict: c.verdict,
+                stored: Some((c.fields.clone(), c.key)),
                 guard: None,
-                link_keys: c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect(),
+                decision_keys: Vec::new(),
+                // Only an allowed call is linked: a denied call was not forwarded (spec P9).
+                call_keys: if c.verdict == EventVerdict::Allow {
+                    c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect()
+                } else {
+                    Vec::new()
+                },
             })
             .collect();
         self.run_append(&Batch {
             histories: h,
             turn: Some(req.turn),
             kind: EventKind::Call,
-            verdict: EventVerdict::Allow,
-            link: LinkKind::Call,
+            call_links: CallLinkMode::Replace,
             events,
             now_ms: req.now_ms,
             window_from_ms: None,
@@ -871,12 +909,15 @@ mod tests {
                 ts_ms: 42,
                 kind: EventKind::Result,
                 tool: "send".into(),
-                verdict: EventVerdict::Deny
+                verdict: EventVerdict::Deny,
+                fields: Fields::Values(std::collections::BTreeMap::new()),
+                key: None,
             }
         );
         // The encoder and the decoder agree.
-        let own = encode_body(id, 7, EventKind::Call, "read");
-        assert_eq!(decode_event(&fields(&own, "pending")).expect("decodes").ts_ms, 7);
+        let own = encode_body(id, 7, EventKind::Call, "read", Some((&Fields::Unparsed, None)));
+        let decoded = decode_event(&fields(&own, "pending")).expect("decodes");
+        assert_eq!((decoded.ts_ms, decoded.fields), (7, Fields::Unparsed));
         assert!(decode_event(&fields("not json", "allow")).is_err());
         assert!(decode_event(&fields(&own, "maybe")).is_err());
     }

@@ -748,7 +748,13 @@ fn tool_policy_with_history(dir: &TempDir, store: &Arc<MemorySessionStore>) -> O
     let settings = tp_settings(TenantMode::Enforce);
     let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
     let store: Arc<dyn SessionStore> = store.clone();
-    let history = ToolHistory::new(store, Arc::new(FixedClock(at(NOON))), Arc::new(OsEntropy), Duration::from_secs(1));
+    let history = ToolHistory::new(
+        store,
+        Arc::new(FixedClock(at(NOON))),
+        Arc::new(OsEntropy),
+        Duration::from_secs(1),
+        Arc::new(paigasus_gateway::adapters::history::HmacHistoryDigester::keyless()),
+    );
     Some(Arc::new(
         RequestToolPolicy::new(cache, settings, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing())).with_history(Arc::new(history)),
     ))
@@ -767,6 +773,10 @@ async fn seed_link(store: &MemorySessionStore, session: Uuid) {
     let calls = vec![CallEvent {
         id: event_id,
         tool: "read_file".to_owned(),
+        call_id: None,
+        item_id: None,
+        fields: paigasus_kernel::tool_policy::history::Fields::Values(std::collections::BTreeMap::new()),
+        key: None,
     }];
     store
         .reserve(&ReserveRequest {

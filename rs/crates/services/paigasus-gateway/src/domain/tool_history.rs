@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use paigasus_gateway_core::ToolCall;
+use paigasus_kernel::tool_policy::history::{Fields, KeyId};
 use paigasus_kernel::tool_policy::normalise;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -19,8 +20,8 @@ use crate::domain::limits::UnavailableKind;
 pub const MAX_EVENTS_PER_TOOL: usize = 10_000;
 /// The longest window a policy can ask for: 24 hours.
 pub const MAX_WINDOW_MS: u64 = 86_400_000;
-/// How long an event stays: the longest window plus one hour of margin.
-pub const RETENTION_MS: u64 = MAX_WINDOW_MS + 3_600_000;
+/// How long an event stays: the longest window plus one hour of margin. One value, in the kernel.
+pub use paigasus_kernel::tool_policy::history::RETENTION_MS;
 /// The time to live of a history key, in seconds. It follows `RETENTION_MS`.
 pub const KEY_TTL_SECS: u64 = RETENTION_MS / 1000;
 
@@ -104,6 +105,11 @@ pub struct StoredEvent {
     pub kind: EventKind,
     pub tool: String,
     pub verdict: EventVerdict,
+    /// The stored argument fields (spec P3). A body with no `f` and no `b` (a PR 1 event) reads as
+    /// `Fields::Values` with no path: every path is "not in the event".
+    pub fields: Fields,
+    /// The id of the key that made the digests of `fields`. `None` when no digest was made.
+    pub key: Option<KeyId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,10 +168,16 @@ pub struct WriteRequest {
     pub now_ms: u64,
 }
 
+/// One call of a reserve. `call_id` and `item_id` are the two `c:` links of the call (spec P8):
+/// the reserve writes each one that is `Some`, unless the link already names another event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEvent {
     pub id: Uuid,
     pub tool: String,
+    pub call_id: Option<String>,
+    pub item_id: Option<String>,
+    pub fields: Fields,
+    pub key: Option<KeyId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,21 +189,25 @@ pub struct ReserveRequest {
     pub window_from_ms: Option<u64>,
 }
 
-/// A call that the gateway forwarded with no decision. `call_id` and `item_id` are the two `c:`
-/// links of the call: a local shell call has both (spec D4). Each is written when it is `Some`.
+/// A call that has no reserved event (spec P9): an event with the verdict of the call. `call_id`
+/// and `item_id` are the two `c:` links of the call: a local shell call has both (spec D4). Only an
+/// `Allow` call writes them. An id that a reserve already wrote keeps one event (plan decision D-E).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForwardedCall {
+pub struct AppendCall {
     pub id: Uuid,
     pub tool: String,
+    pub verdict: EventVerdict,
     pub call_id: Option<String>,
     pub item_id: Option<String>,
+    pub fields: Fields,
+    pub key: Option<KeyId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendRequest {
     pub histories: Histories,
     pub turn: i64,
-    pub calls: Vec<ForwardedCall>,
+    pub calls: Vec<AppendCall>,
     pub now_ms: u64,
 }
 
@@ -206,8 +222,9 @@ pub struct AppendReply {
     pub truncated: Vec<(Scope, String)>,
 }
 
-/// `item_id`: the item id of a forwarded local shell call. The `c:` link is written under `call_id`
-/// and also under `item_id`, with the same session, tool and event id (spec D4).
+/// `call_id` and `item_id`: the `c:` links of the call (a local shell call has both, spec D4). An
+/// `Allow` item writes them, with the same session, tool and event id. A `Deny` item deletes each one
+/// that still names this event (spec P8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettleItem {
     pub event_id: Uuid,
@@ -241,11 +258,14 @@ pub trait SessionStore: Send + Sync {
     /// After the admission: touch the session when `turn` is Some, and write each result event once
     /// per linked call event (`ResultEvent::event_id`). A call event that is gone gets no result.
     async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError>;
-    /// Inside the decide future: one pending call event per call in every history, and its `d:` link.
+    /// Inside the decide future: one pending call event per call in every history, its `d:` link,
+    /// and its `c:` links. A `c:` link that names another event is kept (spec P8).
     async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError>;
-    /// At the report site: set each verdict; write the `c:` link of each forwarded call. Idempotent.
+    /// At the report site: set each verdict. An allowed event writes its `c:` links; a denied event
+    /// deletes each `c:` link that still names it. Idempotent.
     async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError>;
-    /// At the report site, for a call forwarded with no decision: an allowed event and its `c:` link.
+    /// At the report site, for a call with no reserved event: an event with the verdict of the call.
+    /// Only an allowed call writes its `c:` links.
     async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError>;
 }
 

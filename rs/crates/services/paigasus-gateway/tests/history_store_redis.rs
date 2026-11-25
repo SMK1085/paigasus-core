@@ -90,6 +90,11 @@ impl Harness for RedisHarness {
             })
             .collect()
     }
+
+    async fn put_raw_body(&self, org: Uuid, id: Uuid, body: &str) {
+        // `HSET` answers 0 when it replaces a field: the event exists.
+        assert_eq!(redis_cli(&self.node, &["HSET", &event_key(org, id), "b", body]).await, "0", "the event exists");
+    }
 }
 
 /// The last line that `redis_cli` adds: the exit status of `redis-cli`.
@@ -180,6 +185,16 @@ contract_cases!(
     a_later_allow_settle_of_a_denied_event_writes_no_call_link,
     a_local_shell_result_under_both_aliases_is_written_once,
     a_relink_between_lookup_and_write_marks_the_original_event,
+    a_reserved_event_keeps_its_fields_and_key_id,
+    an_unparsed_call_is_stored_as_unparsed,
+    a_pr1_body_reads_as_no_fields,
+    a_result_event_copies_the_fields_of_its_call,
+    the_reserve_writes_the_call_links_of_each_call,
+    the_reserve_keeps_a_link_of_another_event,
+    a_deny_settle_deletes_only_its_own_link,
+    an_allow_settle_relinks_a_reused_call_id,
+    an_appended_denied_call_counts_and_writes_no_link,
+    an_append_under_a_reserved_id_keeps_one_event,
 );
 
 #[tokio::test]
@@ -265,7 +280,13 @@ async fn an_unreserved_allowed_call_links_on_redis(fail_reserve: bool) {
     };
     let redis: Arc<dyn SessionStore> = h.store().await;
     let store: Arc<dyn SessionStore> = if fail_reserve { Arc::new(FailReserve(Arc::clone(&redis))) } else { Arc::clone(&redis) };
-    let history = ToolHistory::new(store, Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(2));
+    let history = ToolHistory::new(
+        store,
+        Arc::new(SystemClock),
+        Arc::new(OsEntropy),
+        Duration::from_secs(2),
+        Arc::new(paigasus_gateway::adapters::history::HmacHistoryDigester::keyless()),
+    );
     let first = history.link(SVC_PRINCIPAL, SVC_ORG, None, &results_turn(&[])).await.expect("a session").session;
     if !fail_reserve {
         first.budget.fail();

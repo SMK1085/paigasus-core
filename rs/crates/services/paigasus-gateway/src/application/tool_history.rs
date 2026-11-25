@@ -9,15 +9,17 @@
 //! store error has no policy effect: it is counted and the request continues. No client id (call id,
 //! result id, `ref`) becomes a metric label or a log field.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use metrics::counter;
-use paigasus_gateway_core::decision_log::{FindingRecord, ReportedCall};
+use paigasus_gateway_core::decision_log::{CallFacts, FindingRecord, ReportedCall};
 use paigasus_gateway_core::{DecisionContext, LatestTurn, ReportDecision, SessionContext, StoreBudget, ToolCall, ToolTurn};
 use paigasus_kernel::detect::{DETECTOR_KERNEL, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, Severity};
 use paigasus_kernel::mint_uuid7;
+use paigasus_kernel::tool_policy::history::{Fields, HistoryDigester, KeyId};
 use paigasus_kernel::tool_policy::{Findings, normalise};
 use paigasus_observability::names;
 use tokio::time::Instant;
@@ -28,7 +30,7 @@ use crate::application::tool_policy::decider::count_finding;
 use crate::domain::decision_log::Entropy;
 use crate::domain::limits::{Clock, UnavailableKind};
 use crate::domain::tool_history::{
-    AppendReply, AppendRequest, CallEvent, EventVerdict, ForwardedCall, Histories, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, ResultEvent, SessionStore, SettleItem, SettleRequest,
+    AppendCall, AppendReply, AppendRequest, CallEvent, EventVerdict, Histories, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, ResultEvent, SessionStore, SettleItem, SettleRequest,
     WriteRequest, history_tool, link_session,
 };
 
@@ -54,60 +56,76 @@ pub struct PendingWrite {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlePlan {
     pub settle: Vec<SettleItem>,
-    pub append: Vec<ForwardedCall>,
+    pub append: Vec<AppendCall>,
 }
 
-/// Split the report entries into the settles and the appends. Pure.
+/// Split the report entries into the settles and the appends (spec P9, plan decision D-D). Pure.
 ///
-/// An entry with a decision id that `reserved` holds is a settle: `Allow` when the entry is allowed,
-/// else `Deny`. Only an `Allow` carries the call id and the item id.
+/// The event id of an entry is its decision id, else `claim(call facts)`: the hold intent of a call
+/// that the interceptor decided without the decider (a decide timeout or a decider error).
 ///
-/// An entry with a decision id that `reserved` does not hold has no event to settle: the reserve
-/// failed, or the budget skipped it. An allowed one with call facts is an append under its decision
-/// id, so its result links on the next request. A denied one gives nothing: it was not forwarded,
-/// so it needs no link, and it is not counted (final review, finding 1).
-///
-/// An allowed entry with call facts and no decision id was forwarded with no decision (spec D8): an
-/// append under a new event id. Everything else gives nothing.
-pub fn settle_plan(reported: &[ReportedCall], reserved: &dyn Fn(Uuid) -> bool, mint: &mut dyn FnMut() -> Uuid) -> SettlePlan {
+/// - An id that `reserved` holds is a settle: `Allow` when the entry is allowed, else `Deny`. Both
+///   carry the call id and the item id: an allow writes the `c:` links, a deny deletes its own.
+/// - An id that `reserved` does not hold, or no id, with call facts is an append with the verdict of
+///   the entry (`Allow`, or `Deny` for a block) and the stored fields of `fields`. No id mints one.
+///   The reserve failed, the budget skipped it, or the call was never decided. A denied call is
+///   appended too, so it counts.
+/// - No call facts gives nothing. An unenforceable entry gives nothing.
+pub fn settle_plan(
+    reported: &[ReportedCall],
+    reserved: &dyn Fn(Uuid) -> bool,
+    claim: &mut dyn FnMut(&CallFacts) -> Option<Uuid>,
+    fields: &dyn Fn(&ReportedCall) -> (Fields, Option<KeyId>),
+    mint: &mut dyn FnMut() -> Uuid,
+) -> SettlePlan {
     let mut plan = SettlePlan {
         settle: Vec::new(),
         append: Vec::new(),
     };
     for r in reported {
-        let allow = matches!(r.entry.decision, ReportDecision::Allow);
+        let verdict = match r.entry.decision {
+            ReportDecision::Allow => EventVerdict::Allow,
+            ReportDecision::Block => EventVerdict::Deny,
+            ReportDecision::Unenforceable => continue,
+        };
+        let id = r.decision_id.or_else(|| r.call.as_ref().and_then(&mut *claim));
         // `normalise(&r.entry.name)` equals `history_tool(call)` only because `report.rs` sets `name`
         // from `ToolCall::display_name()`. Keep the two in step.
-        match (r.decision_id, &r.call) {
-            (Some(event_id), call) if reserved(event_id) => {
-                let (call_id, item_id) = match call {
-                    Some(c) if allow => (c.id.clone(), c.item_id.clone()),
-                    _ => (None, None),
-                };
-                plan.settle.push(SettleItem {
-                    event_id,
-                    verdict: if allow { EventVerdict::Allow } else { EventVerdict::Deny },
-                    tool: normalise(&r.entry.name),
+        let tool = normalise(&r.entry.name);
+        let (call_id, item_id) = r.call.as_ref().map_or((None, None), |c| (c.id.clone(), c.item_id.clone()));
+        match id {
+            Some(event_id) if reserved(event_id) => plan.settle.push(SettleItem {
+                event_id,
+                verdict,
+                tool,
+                call_id,
+                item_id,
+            }),
+            _ if r.call.is_some() => {
+                let (stored, key) = fields(r);
+                plan.append.push(AppendCall {
+                    id: id.unwrap_or_else(&mut *mint),
+                    tool,
+                    verdict,
                     call_id,
                     item_id,
+                    fields: stored,
+                    key,
                 });
             }
-            (Some(event_id), Some(c)) if allow => plan.append.push(ForwardedCall {
-                id: event_id,
-                tool: normalise(&r.entry.name),
-                call_id: c.id.clone(),
-                item_id: c.item_id.clone(),
-            }),
-            (None, Some(c)) if allow => plan.append.push(ForwardedCall {
-                id: mint(),
-                tool: normalise(&r.entry.name),
-                call_id: c.id.clone(),
-                item_id: c.item_id.clone(),
-            }),
             _ => {}
         }
     }
     plan
+}
+
+/// The stored fields of a report entry: its extracted values, digested under the current key. An
+/// entry with no field plan stores no fields.
+fn stored_fields(reported: &ReportedCall, org: Uuid, digester: &dyn HistoryDigester) -> (Fields, Option<KeyId>) {
+    match &reported.fields {
+        Some(extracted) => extracted.clone().into_fields(org, digester),
+        None => (Fields::Values(BTreeMap::new()), None),
+    }
 }
 
 /// Prime every series of the three history metrics at 0.
@@ -152,19 +170,29 @@ pub struct ToolHistory {
     clock: Arc<dyn Clock>,
     entropy: Arc<dyn Entropy>,
     deadline: Duration,
+    /// The one digester of the gateway: the policy cache binds its literals with it too (spec P3).
+    digester: Arc<dyn HistoryDigester>,
     tasks: TaskTracker,
 }
 
 impl ToolHistory {
     #[must_use]
-    pub fn new(store: Arc<dyn SessionStore>, clock: Arc<dyn Clock>, entropy: Arc<dyn Entropy>, deadline: Duration) -> Self {
+    pub fn new(store: Arc<dyn SessionStore>, clock: Arc<dyn Clock>, entropy: Arc<dyn Entropy>, deadline: Duration, digester: Arc<dyn HistoryDigester>) -> Self {
         Self {
             store,
             clock,
             entropy,
             deadline,
+            digester,
             tasks: TaskTracker::new(),
         }
+    }
+
+    /// The digester of the stored fields, for the policy cache: the literals and the call values
+    /// must use the same key.
+    #[must_use]
+    pub fn digester(&self) -> Arc<dyn HistoryDigester> {
+        Arc::clone(&self.digester)
     }
 
     /// The settle and append tasks, for the shutdown drain.
@@ -334,7 +362,19 @@ impl ToolHistory {
                 session: session.session_id,
             },
             turn: session.info.turn,
-            calls: calls.iter().zip(ids).map(|(c, id)| CallEvent { id: *id, tool: history_tool(c) }).collect(),
+            // No field plan reaches the reserve yet, so it stores no fields.
+            calls: calls
+                .iter()
+                .zip(ids)
+                .map(|(c, id)| CallEvent {
+                    id: *id,
+                    tool: history_tool(c),
+                    call_id: c.id.clone(),
+                    item_id: c.item_id(),
+                    fields: Fields::Values(BTreeMap::new()),
+                    key: None,
+                })
+                .collect(),
             now_ms: self.now_ms(),
             // PR 1 reads no window (spec D15).
             window_from_ms: None,
@@ -357,7 +397,14 @@ impl ToolHistory {
         if self.tasks.is_closed() {
             return;
         }
-        let plan = settle_plan(reported, &|id| session.is_reserved(id), &mut || self.mint());
+        let org = session.org;
+        let plan = settle_plan(
+            reported,
+            &|id| session.is_reserved(id),
+            &mut |call| session.claim_intent(call),
+            &|r| stored_fields(r, org, self.digester.as_ref()),
+            &mut || self.mint(),
+        );
         if plan.settle.is_empty() && plan.append.is_empty() {
             return;
         }
@@ -419,12 +466,14 @@ mod tests {
     use std::time::Duration;
 
     use metrics_util::debugging::{DebuggingRecorder, Snapshotter};
+    use paigasus_gateway_core::decision_log::CallFacts;
     use paigasus_gateway_core::decision_log::ReportedCall;
     use paigasus_gateway_core::{Basis, BlockCode, DecidedCall, Decision, DecisionContext, Format, ReportDecision, ReportEntry, ToolTurn, TurnFacts, parse_body};
     use paigasus_kernel::tool_policy::Findings;
     use uuid::Uuid;
 
     use super::*;
+    use crate::adapters::history::HmacHistoryDigester;
     use crate::adapters::history::memory::MemorySessionStore;
     use crate::domain::tool_history::{EventKind, EventVerdict, Scope};
     use crate::test_support::{FixedClock, ORG_A, ORG_A_PRN, at, counter};
@@ -534,7 +583,13 @@ mod tests {
 
     fn history(store: &Arc<Fake>, deadline: Duration) -> ToolHistory {
         let store: Arc<dyn SessionStore> = store.clone();
-        ToolHistory::new(store, Arc::new(FixedClock(at("2026-11-22T10:00:00Z"))), Arc::new(CountingEntropy(AtomicU64::new(0))), deadline)
+        ToolHistory::new(
+            store,
+            Arc::new(FixedClock(at("2026-11-22T10:00:00Z"))),
+            Arc::new(CountingEntropy(AtomicU64::new(0))),
+            deadline,
+            Arc::new(HmacHistoryDigester::keyless()),
+        )
     }
 
     fn setup() -> (Arc<Fake>, ToolHistory) {
@@ -637,6 +692,27 @@ mod tests {
 
     fn u(n: u128) -> Uuid {
         Uuid::from_u128(n)
+    }
+
+    fn no_fields() -> Fields {
+        Fields::Values(BTreeMap::new())
+    }
+
+    /// `settle_plan` with no hold intent and no stored fields.
+    fn plan_of(reported: &[ReportedCall], reserved: &dyn Fn(Uuid) -> bool) -> SettlePlan {
+        settle_plan(reported, reserved, &mut |_| None, &|_| (no_fields(), None), &mut counting_mint())
+    }
+
+    fn appended(id: Uuid, tool: &str, verdict: EventVerdict, call_id: &str) -> AppendCall {
+        AppendCall {
+            id,
+            tool: tool.into(),
+            verdict,
+            call_id: Some(call_id.into()),
+            item_id: None,
+            fields: no_fields(),
+            key: None,
+        }
     }
 
     const BLOCK: Decision = Decision::Block { code: BlockCode::Policy };
@@ -826,10 +902,12 @@ mod tests {
         assert_eq!(store.count(), 1);
     }
 
+    /// A deny settle carries the call ids too: it deletes the `c:` links that the reserve wrote
+    /// when they still name its event (spec P8).
     #[test]
-    fn settle_plan_marks_allow_and_deny_and_links_only_forwarded_calls() {
+    fn settle_plan_marks_allow_and_deny_and_both_carry_the_call_ids() {
         let reported = reported_of(&[("c-1", "Read_File"), ("c-2", "rm")], &[(Decision::Allow, Some(u(1))), (BLOCK, Some(u(2)))]);
-        let plan = settle_plan(&reported, &|_| true, &mut counting_mint());
+        let plan = plan_of(&reported, &|_| true);
         assert!(plan.append.is_empty());
         assert_eq!(
             plan.settle,
@@ -845,7 +923,7 @@ mod tests {
                     event_id: u(2),
                     verdict: EventVerdict::Deny,
                     tool: "rm".into(),
-                    call_id: None,
+                    call_id: Some("c-2".into()),
                     item_id: None
                 },
             ]
@@ -855,17 +933,9 @@ mod tests {
     #[test]
     fn settle_plan_appends_a_forwarded_call_without_a_decision() {
         let reported = reported_of(&[("c-1", "Read_File")], &[(Decision::Allow, None)]);
-        let plan = settle_plan(&reported, &|_| true, &mut counting_mint());
+        let plan = plan_of(&reported, &|_| true);
         assert!(plan.settle.is_empty());
-        assert_eq!(
-            plan.append,
-            vec![ForwardedCall {
-                id: u(101),
-                tool: "read_file".into(),
-                call_id: Some("c-1".into()),
-                item_id: None
-            }]
-        );
+        assert_eq!(plan.append, vec![appended(u(101), "read_file", EventVerdict::Allow, "c-1")]);
     }
 
     #[test]
@@ -875,25 +945,148 @@ mod tests {
         ]});
         let parsed = parse_body(Format::OpenAiResponses, body.to_string().as_bytes(), 1 << 20).expect("body");
         let allow = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(u(1))], Basis::Decider, None);
-        let item = settle_plan(&allow, &|_| true, &mut counting_mint()).settle.remove(0);
+        let item = plan_of(&allow, &|_| true).settle.remove(0);
         assert_eq!((item.verdict, item.call_id.as_deref(), item.item_id.as_deref()), (EventVerdict::Allow, Some("call_1"), Some("lsh_1")));
         let deny = parsed.reported(&[DecidedCall::new(BLOCK, None).with_decision_id(u(1))], Basis::Decider, None);
-        let item = settle_plan(&deny, &|_| true, &mut counting_mint()).settle.remove(0);
-        assert_eq!((item.verdict, item.call_id, item.item_id), (EventVerdict::Deny, None, None));
+        let item = plan_of(&deny, &|_| true).settle.remove(0);
+        assert_eq!((item.verdict, item.call_id.as_deref(), item.item_id.as_deref()), (EventVerdict::Deny, Some("call_1"), Some("lsh_1")));
         // No decision: the append carries both links.
         let none = parsed.reported(&[DecidedCall::new(Decision::Allow, None)], Basis::Decider, None);
-        let call = settle_plan(&none, &|_| true, &mut counting_mint()).append.remove(0);
+        let call = plan_of(&none, &|_| true).append.remove(0);
         assert_eq!((call.call_id.as_deref(), call.item_id.as_deref()), (Some("call_1"), Some("lsh_1")));
     }
 
+    /// No call facts gives nothing: no settle, no append, and no claim of a hold intent. An
+    /// unreserved decision id does not change it.
     #[test]
-    fn settle_plan_ignores_a_block_without_a_decision_and_an_unenforceable_entry() {
-        let mut reported = reported_of(&[("c-1", "rm")], &[(BLOCK, None)]);
-        reported.push(ReportedCall::new(entry("web_search", ReportDecision::Unenforceable), None, None));
-        // An allow entry with no call facts and no decision id.
-        reported.push(ReportedCall::new(entry("x", ReportDecision::Allow), None, None));
-        let plan = settle_plan(&reported, &|_| true, &mut counting_mint());
-        assert!(plan.settle.is_empty() && plan.append.is_empty());
+    fn an_entry_without_call_facts_gives_nothing() {
+        let reported = vec![
+            ReportedCall::new(entry("web_search", ReportDecision::Unenforceable), None, None),
+            ReportedCall::new(entry("x", ReportDecision::Allow), None, None),
+            ReportedCall::new(entry("y", ReportDecision::Block), None, None),
+            ReportedCall::new(entry("z", ReportDecision::Allow), None, None).with_decision_id(Some(u(9))),
+        ];
+        let mut claims = 0;
+        let plan = settle_plan(
+            &reported,
+            &|id| id == u(1),
+            &mut |_| {
+                claims += 1;
+                Some(u(1))
+            },
+            &|_| (no_fields(), None),
+            &mut counting_mint(),
+        );
+        assert!(plan.settle.is_empty() && plan.append.is_empty(), "{plan:?}");
+        assert_eq!(claims, 0);
+    }
+
+    /// The fact pair of a hold intent: the call of `items[0]` and the reserved id `u(7)`.
+    fn claim_first(reported: &[ReportedCall]) -> impl FnMut(&CallFacts) -> Option<Uuid> {
+        let facts = reported[0].call.clone().expect("call facts");
+        let mut left = Some(u(7));
+        move |c: &CallFacts| if *c == facts { left.take() } else { None }
+    }
+
+    /// Spec R10 revised: the interceptor forwards a timed-out hold under `on_failure = allow` with no
+    /// decision id. The report site claims the hold intent and settles the reserved event `allow`:
+    /// one event, no append.
+    #[test]
+    fn a_timed_out_hold_under_allow_settles_its_reserved_event_and_does_not_append() {
+        let reported = reported_of(&[("c-1", "Send")], &[(Decision::Allow, None)]);
+        let mut claim = claim_first(&reported);
+        let plan = settle_plan(&reported, &|id| id == u(7), &mut claim, &|_| (no_fields(), None), &mut counting_mint());
+        assert!(plan.append.is_empty(), "{plan:?}");
+        assert_eq!(
+            plan.settle,
+            vec![SettleItem {
+                event_id: u(7),
+                verdict: EventVerdict::Allow,
+                tool: "send".into(),
+                call_id: Some("c-1".into()),
+                item_id: None
+            }]
+        );
+    }
+
+    /// Spec P9: a block that the interceptor makes itself (a decide timeout under `block`, or a
+    /// decider error) settles the reserved event `deny`, with the call id for the link delete.
+    #[test]
+    fn an_interceptor_block_settles_the_reserved_event_with_deny() {
+        let reported = reported_of(&[("c-1", "Send")], &[(Decision::Block { code: BlockCode::DeciderError }, None)]);
+        let mut claim = claim_first(&reported);
+        let plan = settle_plan(&reported, &|id| id == u(7), &mut claim, &|_| (no_fields(), None), &mut counting_mint());
+        assert!(plan.append.is_empty(), "{plan:?}");
+        assert_eq!(plan.settle.len(), 1);
+        let item = &plan.settle[0];
+        assert_eq!((item.event_id, item.verdict, item.call_id.as_deref()), (u(7), EventVerdict::Deny, Some("c-1")));
+    }
+
+    /// Spec P9: a denied call whose event was not reserved is appended as `deny`, with its stored
+    /// fields, under its decision id. So it counts.
+    #[test]
+    fn a_denied_call_with_no_reserved_event_is_appended_as_deny() {
+        let reported = reported_of(&[("c-1", "rm")], &[(BLOCK, Some(u(2)))]);
+        let plan = settle_plan(&reported, &|_| false, &mut |_| None, &|_| (Fields::Unparsed, None), &mut counting_mint());
+        assert!(plan.settle.is_empty());
+        let mut want = appended(u(2), "rm", EventVerdict::Deny, "c-1");
+        want.fields = Fields::Unparsed;
+        assert_eq!(plan.append, vec![want]);
+    }
+
+    /// No decision id and no hold intent: an append under a new id, with the verdict of the entry.
+    #[test]
+    fn a_call_with_no_decision_and_no_intent_is_appended_under_a_new_id() {
+        let reported = reported_of(&[("c-1", "a"), ("c-2", "b")], &[(Decision::Allow, None), (BLOCK, None)]);
+        let plan = settle_plan(&reported, &|_| true, &mut |_| None, &|_| (no_fields(), None), &mut counting_mint());
+        assert!(plan.settle.is_empty());
+        assert_eq!(plan.append, vec![appended(u(101), "a", EventVerdict::Allow, "c-1"), appended(u(102), "b", EventVerdict::Deny, "c-2")]);
+    }
+
+    /// `ToolHistory::settle` claims the hold intent of the session: the reserved event is settled,
+    /// and nothing is appended.
+    #[tokio::test]
+    async fn settle_claims_the_hold_intent_of_a_call_without_a_decision_id() {
+        let (store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let items = [("c-1", "a")];
+        let parsed = calls(&items);
+        session.record_intent(vec![(CallFacts::of(&parsed[0]), u(1))]);
+        h.reserve(&ctx(), &session, &parsed, &[u(1)]).await;
+        h.settle(&ctx().with_session(session.clone()), &reported_of(&items, &[(Decision::Allow, None)]));
+        drain_tasks(&h).await;
+        let events = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "a");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!((events[0].id, events[0].verdict), (u(1), EventVerdict::Allow));
+        assert_eq!(session.claim_intent(&CallFacts::of(&parsed[0])), None, "the intent is claimed");
+    }
+
+    /// The stored fields of an appended call are its extracted values, digested with the digester
+    /// of the history. With no key, a string is stored as `Mistyped` and a Long as itself.
+    #[tokio::test]
+    async fn an_appended_call_stores_its_digested_fields() {
+        use paigasus_kernel::tool_policy::ToolInput;
+        use paigasus_kernel::tool_policy::history::{Field, FieldPath, PathSet, extract_fields};
+
+        let (store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let path = |p: &str| FieldPath::new(vec![p.to_owned()]).expect("a path");
+        let plan: PathSet = [path("n"), path("s")].into_iter().collect();
+        let extracted = extract_fields(&ToolInput::Json(r#"{"n":5,"s":"secret"}"#.to_owned()), &plan);
+        let reported: Vec<ReportedCall> = reported_of(&[("c-1", "a")], &[(Decision::Allow, None)])
+            .into_iter()
+            .map(|r| r.with_fields(Some(extracted.clone())))
+            .collect();
+        h.settle(&ctx().with_session(session.clone()), &reported);
+        drain_tasks(&h).await;
+        let events = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "a");
+        let want: BTreeMap<FieldPath, Field> = [(path("n"), Field::Long(5)), (path("s"), Field::Mistyped)].into_iter().collect();
+        assert_eq!((&events[0].fields, events[0].key), (&Fields::Values(want), None));
+    }
+
+    async fn drain_tasks(h: &ToolHistory) {
+        h.tasks().close();
+        h.tasks().wait().await;
     }
 
     #[tokio::test]
@@ -992,19 +1185,14 @@ mod tests {
             &[("c-1", "Read_File"), ("c-2", "rm"), ("c-3", "x")],
             &[(Decision::Allow, Some(u(1))), (BLOCK, Some(u(2))), (Decision::Allow, Some(u(3)))],
         );
-        let plan = settle_plan(&reported, &|id| id == u(3), &mut counting_mint());
+        let plan = plan_of(&reported, &|id| id == u(3));
         // The reserved call settles. The unreserved allowed call appends under its decision id. The
-        // unreserved denied call gives nothing: it was not forwarded, so it needs no link.
+        // unreserved denied call appends as deny (spec P9): it counts, and it writes no link.
         assert_eq!(plan.settle.len(), 1);
         assert_eq!(plan.settle[0].event_id, u(3));
         assert_eq!(
             plan.append,
-            vec![ForwardedCall {
-                id: u(1),
-                tool: "read_file".into(),
-                call_id: Some("c-1".into()),
-                item_id: None
-            }]
+            vec![appended(u(1), "read_file", EventVerdict::Allow, "c-1"), appended(u(2), "rm", EventVerdict::Deny, "c-2")]
         );
     }
 
@@ -1029,7 +1217,12 @@ mod tests {
         let sid = first.session_id.to_string();
         let a = store.inner.events(ORG_A, Scope::Session, &sid, "a");
         assert_eq!((a.len(), a[0].id, a[0].verdict), (1, u(1), EventVerdict::Allow));
-        assert!(store.inner.events(ORG_A, Scope::Session, &sid, "b").is_empty(), "a denied call with no reserved event is not appended");
+        let b = store.inner.events(ORG_A, Scope::Session, &sid, "b");
+        assert_eq!(
+            b.iter().map(|e| (e.id, e.verdict)).collect::<Vec<_>>(),
+            [(u(2), EventVerdict::Deny)],
+            "a denied call with no reserved event is appended as deny (spec P9)"
+        );
 
         let second = link(&h, &turn(&[], &["c-1"])).await.expect("a session");
         assert!(!second.session.findings.contains("forged_history"), "c-1 has a call link");

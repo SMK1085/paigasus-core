@@ -1097,7 +1097,13 @@ mod tests {
     /// A memory store and a tool history over it.
     fn memory_history() -> (Arc<MemorySessionStore>, Arc<ToolHistory>) {
         let store = Arc::new(MemorySessionStore::new());
-        let h = Arc::new(ToolHistory::new(store.clone(), Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(1)));
+        let h = Arc::new(ToolHistory::new(
+            store.clone(),
+            Arc::new(SystemClock),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+            Arc::new(crate::adapters::history::HmacHistoryDigester::keyless()),
+        ));
         (store, h)
     }
 
@@ -1257,9 +1263,11 @@ mod tests {
     }
 
     /// A block that the interceptor makes itself (`decider-error` under `block`): the reserve left
-    /// a pending event, and nothing settles or appends it.
+    /// a pending event and its `c:` link. No hold intent is recorded yet, so the report site finds
+    /// no reserved id: it appends the blocked call as `deny` (spec P9), and the pending event and
+    /// its link stay (R-new-1). With the hold intent, the report site settles the pending event.
     #[tokio::test]
-    async fn an_interceptor_block_keeps_the_pending_event_and_appends_nothing() {
+    async fn an_interceptor_block_without_a_hold_intent_appends_a_denied_event() {
         let (store, h) = memory_history();
         let ctx = session_ctx(&h).await;
         let limits = Limits {
@@ -1273,9 +1281,13 @@ mod tests {
             .expect("the timeout ends the hold");
         assert!(text.contains(&format!(r#""code":"{}""#, BlockCode::DeciderError.as_kebab())), "{text}");
         drain(&h).await;
-        let verdicts: Vec<_> = session_events(&store, &ctx, "ok").iter().map(|e| e.verdict).collect();
-        assert_eq!(verdicts, [EventVerdict::Pending]);
-        assert_eq!(call_link(&store, "toolu_0").await, None);
+        let events = session_events(&store, &ctx, "ok");
+        let mut verdicts: Vec<_> = events.iter().map(|e| e.verdict.as_str()).collect();
+        verdicts.sort_unstable();
+        assert_eq!(verdicts, ["deny", "pending"]);
+        let pending = events.iter().find(|e| e.verdict == EventVerdict::Pending).expect("the reserved event");
+        let session = ctx.session.as_ref().expect("a session").session_id;
+        assert_eq!(call_link(&store, "toolu_0").await, Some((session, pending.id)), "the denied append writes no link");
     }
 
     /// Ruling F3 on the body path: a decide timeout under `allow` appends an allowed event.

@@ -115,7 +115,13 @@ fn rig() -> Rig {
 
     let store = Arc::new(MemorySessionStore::new());
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(0)));
-    let history = Arc::new(ToolHistory::new(store.clone(), Arc::clone(&clock), Arc::new(OsEntropy), Duration::from_secs(5)));
+    let history = Arc::new(ToolHistory::new(
+        store.clone(),
+        Arc::clone(&clock),
+        Arc::new(OsEntropy),
+        Duration::from_secs(5),
+        Arc::new(paigasus_gateway::adapters::history::HmacHistoryDigester::keyless()),
+    ));
     let records = Arc::new(Records::default());
     let recorder = Arc::new(DecisionRecorder::new(records.clone(), clock, Arc::new(OsEntropy), None));
 

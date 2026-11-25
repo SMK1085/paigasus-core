@@ -28,6 +28,10 @@ impl Harness for MemoryHarness {
     async fn ttls_ms(&self, org: Uuid, now_ms: u64) -> Vec<Option<u64>> {
         self.store.ttls_ms(org, now_ms)
     }
+
+    async fn put_raw_body(&self, org: Uuid, id: Uuid, body: &str) {
+        self.store.put_raw_body(org, id, body).expect("a body that decodes");
+    }
 }
 
 fn harness() -> MemoryHarness {
@@ -199,6 +203,56 @@ async fn a_local_shell_result_under_both_aliases_is_written_once() {
 #[tokio::test]
 async fn a_relink_between_lookup_and_write_marks_the_original_event() {
     contract::a_relink_between_lookup_and_write_marks_the_original_event(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_reserved_event_keeps_its_fields_and_key_id() {
+    contract::a_reserved_event_keeps_its_fields_and_key_id(&harness()).await;
+}
+
+#[tokio::test]
+async fn an_unparsed_call_is_stored_as_unparsed() {
+    contract::an_unparsed_call_is_stored_as_unparsed(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_pr1_body_reads_as_no_fields() {
+    contract::a_pr1_body_reads_as_no_fields(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_result_event_copies_the_fields_of_its_call() {
+    contract::a_result_event_copies_the_fields_of_its_call(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_reserve_writes_the_call_links_of_each_call() {
+    contract::the_reserve_writes_the_call_links_of_each_call(&harness()).await;
+}
+
+#[tokio::test]
+async fn the_reserve_keeps_a_link_of_another_event() {
+    contract::the_reserve_keeps_a_link_of_another_event(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_deny_settle_deletes_only_its_own_link() {
+    contract::a_deny_settle_deletes_only_its_own_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn an_allow_settle_relinks_a_reused_call_id() {
+    contract::an_allow_settle_relinks_a_reused_call_id(&harness()).await;
+}
+
+#[tokio::test]
+async fn an_appended_denied_call_counts_and_writes_no_link() {
+    contract::an_appended_denied_call_counts_and_writes_no_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn an_append_under_a_reserved_id_keeps_one_event() {
+    contract::an_append_under_a_reserved_id_keeps_one_event(&harness()).await;
 }
 
 #[tokio::test]

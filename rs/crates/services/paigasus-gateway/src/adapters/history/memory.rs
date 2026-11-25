@@ -8,6 +8,9 @@
 //! `now_ms + KEY_TTL_SECS * 1000`, and every write resets it. A read ignores an entry whose expiry
 //! is before the clock.
 //!
+//! The `c:` link rules and the stored fields follow the Redis adapter (`redis.rs` module doc). A
+//! body keeps the fields as values, not as JSON; `put_raw_body` decodes a JSON body for a test.
+//!
 //! The store keeps a clock: the highest `now_ms` of any write it has seen. A lookup reads at the
 //! higher of that clock and `LookupRequest::now_ms` (ruling T7-e), and does not move the clock. So a
 //! test with a fixed time never reads at wall time.
@@ -18,8 +21,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use paigasus_kernel::tool_policy::history::{Fields, KeyId};
 use uuid::Uuid;
 
+use super::body::decode_body;
 use crate::domain::tool_history::{
     AppendReply, AppendRequest, CallLink, EventKind, EventVerdict, Histories, HistoryStoreError, KEY_TTL_SECS, LookupReply, LookupRequest, MAX_EVENTS_PER_TOOL, RETENTION_MS, ReserveRequest, Scope,
     SessionState, SessionStore, SettleRequest, StoredEvent, WriteRequest, link_digest,
@@ -62,6 +67,8 @@ struct Body {
     kind: EventKind,
     tool: String,
     verdict: EventVerdict,
+    fields: Fields,
+    key: Option<KeyId>,
     /// The result guard of a call event: true once its result event is written. It lives on the
     /// event, not on the `c:` link, so both aliases of a local shell call share it.
     result_written: bool,
@@ -89,6 +96,8 @@ struct NewEvent {
     tool: String,
     kind: EventKind,
     verdict: EventVerdict,
+    fields: Fields,
+    key: Option<KeyId>,
 }
 
 fn hkey(org: Uuid, scope: Scope, scope_id: String) -> HistoryKey {
@@ -138,10 +147,16 @@ impl State {
             trimmed_cap: 0,
             truncated: Vec::new(),
         };
+        // The ids that had a live body: a rewrite moves their list entry, as `ZADD` moves the
+        // score of a member (plan decision D-E).
+        let mut rewritten: HashSet<Uuid> = HashSet::new();
         for e in events {
             // A rewrite of a live body keeps its result guard (as `HSET` keeps the `r` field).
             let clock = self.clock_ms;
             let live = self.bodies.get(&(h.org, e.id)).filter(|b| b.alive(clock));
+            if live.is_some() {
+                rewritten.insert(e.id);
+            }
             let result_written = live.is_some_and(|b| b.value.result_written);
             // A write with an older `now_ms` never shortens a live expiry.
             let live_exp = live.map_or(0, |b| b.exp_ms);
@@ -150,6 +165,8 @@ impl State {
                     kind: e.kind,
                     tool: e.tool.clone(),
                     verdict: e.verdict,
+                    fields: e.fields.clone(),
+                    key: e.key,
                     result_written,
                 },
                 now_ms,
@@ -182,6 +199,9 @@ impl State {
                 }
                 let list = self.lists.entry(lkey).or_insert_with(|| Exp::new(Vec::new(), now_ms));
                 list.exp_ms = list.exp_ms.max(now_ms.saturating_add(TTL_MS));
+                if rewritten.contains(&e.id) {
+                    list.value.retain(|(_, id)| *id != e.id);
+                }
                 let entry = (now_ms, e.id);
                 if let Err(at) = list.value.binary_search(&entry) {
                     list.value.insert(at, entry);
@@ -221,6 +241,27 @@ impl State {
     /// keeps the written guard (ruling T7-f). The stored `result_written` is not read.
     fn put_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, link: CallLink, now_ms: u64) {
         self.calls.insert((org, principal.to_string(), link_digest(client_id)), Exp::new(link, now_ms));
+    }
+
+    /// The reserve rule (spec P8): write the link unless a live link names another event.
+    fn keep_or_put_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, link: CallLink, now_ms: u64) {
+        let clock = self.clock_ms;
+        let held = self
+            .calls
+            .get(&(org, principal.to_string(), link_digest(client_id)))
+            .filter(|e| e.alive(clock))
+            .map(|e| e.value.event_id);
+        if held.is_none_or(|id| id == link.event_id) {
+            self.put_call_link(org, principal, client_id, link, now_ms);
+        }
+    }
+
+    /// The deny rule (spec P8): delete the link only when it names `event_id`.
+    fn drop_own_call_link(&mut self, org: Uuid, principal: &str, client_id: &str, event_id: Uuid) {
+        let key = (org, principal.to_string(), link_digest(client_id));
+        if self.calls.get(&key).is_some_and(|e| e.value.event_id == event_id) {
+            self.calls.remove(&key);
+        }
     }
 
     /// The live `c:` link under one client id, with `result_written` read from its event.
@@ -264,9 +305,42 @@ impl MemorySessionStore {
                     kind: body.value.kind,
                     tool: body.value.tool.clone(),
                     verdict: body.value.verdict,
+                    fields: body.value.fields.clone(),
+                    key: body.value.key,
                 })
             })
             .collect()
+    }
+
+    /// For the test harness: replace the body of one event with a JSON body (one that another
+    /// version wrote). The verdict, the result guard and the expiry stay. An unknown event gets a
+    /// pending body.
+    ///
+    /// # Errors
+    ///
+    /// A body that `decode_body` refuses.
+    pub fn put_raw_body(&self, org: Uuid, id: Uuid, raw: &str) -> Result<(), HistoryStoreError> {
+        let decoded = decode_body(raw)?;
+        let mut st = self.lock();
+        let clock = st.clock_ms;
+        let entry = st.bodies.entry((org, id)).or_insert_with(|| {
+            Exp::new(
+                Body {
+                    kind: decoded.kind,
+                    tool: decoded.tool.clone(),
+                    verdict: EventVerdict::Pending,
+                    fields: Fields::Unparsed,
+                    key: None,
+                    result_written: false,
+                },
+                clock,
+            )
+        });
+        entry.value.kind = decoded.kind;
+        entry.value.tool = decoded.tool;
+        entry.value.fields = decoded.fields;
+        entry.value.key = decoded.key;
+        Ok(())
     }
 
     /// For the test harness: the time to live in ms of every stored key of the org.
@@ -328,11 +402,14 @@ impl SessionStore for MemorySessionStore {
             }
             call.value.result_written = true;
             call.exp_ms = req.now_ms.saturating_add(TTL_MS).max(call.exp_ms);
+            // A result event gets the stored fields of its call (spec P3, design D5).
             events.push(NewEvent {
                 id: r.id,
                 tool: r.tool.clone(),
                 kind: EventKind::Result,
                 verdict: EventVerdict::Allow,
+                fields: call.value.fields.clone(),
+                key: call.value.key,
             });
         }
         let reply = if events.is_empty() {
@@ -363,6 +440,8 @@ impl SessionStore for MemorySessionStore {
                 tool: c.tool.clone(),
                 kind: EventKind::Call,
                 verdict: EventVerdict::Pending,
+                fields: c.fields.clone(),
+                key: c.key,
             })
             .collect();
         let reply = st.add_events(h, &events, req.now_ms, req.window_from_ms);
@@ -373,6 +452,15 @@ impl SessionStore for MemorySessionStore {
             let mut link = Exp::new(h.session, req.now_ms);
             link.exp_ms = link.exp_ms.max(live_exp);
             st.decisions.insert(key, link);
+            let call_link = CallLink {
+                session: h.session,
+                tool: c.tool.clone(),
+                event_id: c.id,
+                result_written: false,
+            };
+            for id in c.call_id.iter().chain(c.item_id.iter()) {
+                st.keep_or_put_call_link(h.org, &h.principal, id, call_link.clone(), req.now_ms);
+            }
         }
         st.touch_session(h.org, h.session, req.turn, req.now_ms);
         Ok(reply)
@@ -391,8 +479,16 @@ impl SessionStore for MemorySessionStore {
             }
             body.exp_ms = req.now_ms.saturating_add(TTL_MS).max(body.exp_ms);
             // The first settle wins the verdict (T7-c), so the link follows the STORED verdict: a
-            // later allow settle of a denied event writes no link.
-            if item.verdict != EventVerdict::Allow || body.value.verdict != EventVerdict::Allow {
+            // later allow settle of a denied event writes no link, and a later deny settle of an
+            // allowed event deletes none.
+            let stored = body.value.verdict;
+            if item.verdict == EventVerdict::Deny && stored == EventVerdict::Deny {
+                for id in item.call_id.iter().chain(item.item_id.iter()) {
+                    st.drop_own_call_link(req.org, &req.principal, id, item.event_id);
+                }
+                continue;
+            }
+            if item.verdict != EventVerdict::Allow || stored != EventVerdict::Allow {
                 continue;
             }
             let link = CallLink {
@@ -419,11 +515,14 @@ impl SessionStore for MemorySessionStore {
                 id: c.id,
                 tool: c.tool.clone(),
                 kind: EventKind::Call,
-                verdict: EventVerdict::Allow,
+                verdict: c.verdict,
+                fields: c.fields.clone(),
+                key: c.key,
             })
             .collect();
         let reply = st.add_events(h, &events, req.now_ms, None);
-        for c in &req.calls {
+        // Only an allowed call is linked: a denied call was not forwarded (spec P9).
+        for c in req.calls.iter().filter(|c| c.verdict == EventVerdict::Allow) {
             let link = CallLink {
                 session: h.session,
                 tool: c.tool.clone(),
@@ -442,7 +541,9 @@ impl SessionStore for MemorySessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tool_history::{CallEvent, ForwardedCall};
+    use std::collections::BTreeMap;
+
+    use crate::domain::tool_history::{AppendCall, CallEvent};
 
     fn histories(org: u128) -> Histories {
         Histories {
@@ -457,11 +558,14 @@ mod tests {
         AppendRequest {
             histories: histories(org),
             turn: 1,
-            calls: vec![ForwardedCall {
+            calls: vec![AppendCall {
                 id: Uuid::from_u128(3),
                 tool: "send".into(),
+                verdict: EventVerdict::Allow,
                 call_id: Some("c1".into()),
                 item_id: None,
+                fields: Fields::Values(BTreeMap::new()),
+                key: None,
             }],
             now_ms,
         }
@@ -490,14 +594,22 @@ mod tests {
         assert!(gone.sessions.is_empty());
     }
 
+    fn call_event(id: u128) -> CallEvent {
+        CallEvent {
+            id: Uuid::from_u128(id),
+            tool: "send".into(),
+            call_id: None,
+            item_id: None,
+            fields: Fields::Values(BTreeMap::new()),
+            key: None,
+        }
+    }
+
     fn reserve_at(now_ms: u64, id: u128) -> ReserveRequest {
         ReserveRequest {
             histories: histories(1),
             turn: 1,
-            calls: vec![CallEvent {
-                id: Uuid::from_u128(id),
-                tool: "send".into(),
-            }],
+            calls: vec![call_event(id)],
             now_ms,
             window_from_ms: None,
         }
@@ -543,10 +655,7 @@ mod tests {
             .reserve(&ReserveRequest {
                 histories: histories(9),
                 turn: 1,
-                calls: vec![CallEvent {
-                    id: Uuid::from_u128(4),
-                    tool: "send".into(),
-                }],
+                calls: vec![call_event(4)],
                 now_ms: later,
                 window_from_ms: None,
             })

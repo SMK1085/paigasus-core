@@ -1780,7 +1780,13 @@ mod tests {
 
     fn with_store(policy: RequestToolPolicy, store: &Arc<MemorySessionStore>) -> RequestToolPolicy {
         let store: Arc<dyn SessionStore> = store.clone();
-        policy.with_history(Arc::new(ToolHistory::new(store, Arc::new(FixedClock(at(NOW))), Arc::new(OsEntropy), Duration::from_secs(1))))
+        policy.with_history(Arc::new(ToolHistory::new(
+            store,
+            Arc::new(FixedClock(at(NOW))),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+            Arc::new(crate::adapters::history::HmacHistoryDigester::keyless()),
+        )))
     }
 
     /// The `c:` link of call `c1` of tool `tool` in a session, as an earlier response leaves it.
@@ -1792,7 +1798,14 @@ mod tests {
             session,
         };
         let event_id = Uuid::from_u128(0x77);
-        let calls = vec![crate::domain::tool_history::CallEvent { id: event_id, tool: tool.to_owned() }];
+        let calls = vec![crate::domain::tool_history::CallEvent {
+            id: event_id,
+            tool: tool.to_owned(),
+            call_id: None,
+            item_id: None,
+            fields: paigasus_kernel::tool_policy::history::Fields::Values(std::collections::BTreeMap::new()),
+            key: None,
+        }];
         store
             .reserve(&ReserveRequest {
                 histories,
@@ -1889,6 +1902,7 @@ mod tests {
             Arc::new(FixedClock(at(NOW))),
             Arc::new(OsEntropy),
             Duration::from_secs(1),
+            Arc::new(crate::adapters::history::HmacHistoryDigester::keyless()),
         )));
         let out = run(&policy, Bytes::from(LINKED)).await.expect("forwarded");
         let before = out.snapshot.overhead();

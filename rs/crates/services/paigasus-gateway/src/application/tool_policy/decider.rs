@@ -980,7 +980,13 @@ mod tests {
     }
 
     fn history_over(store: Arc<dyn SessionStore>) -> Arc<ToolHistory> {
-        Arc::new(ToolHistory::new(store, Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(1)))
+        Arc::new(ToolHistory::new(
+            store,
+            Arc::new(SystemClock),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+            Arc::new(crate::adapters::history::HmacHistoryDigester::keyless()),
+        ))
     }
 
     fn session(findings: Findings) -> Arc<SessionContext> {
