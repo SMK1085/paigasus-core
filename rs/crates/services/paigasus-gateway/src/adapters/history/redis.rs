@@ -323,8 +323,9 @@ if turn ~= '' then
 end
 
 -- The window read (spec P4), after every write. A set past a read limit and every later set come
--- back truncated with no event and no mark. An entry is {truncated, mark ('' = none), then 4 values
--- per event: id, score, body, verdict}. A member whose e: body is gone is skipped and counted.
+-- back truncated with no event and no mark. An entry is {set index (1..R), truncated, mark ('' =
+-- none), then 4 values per event: id, score, body, verdict}. The adapter checks the index against
+-- the request order. A member whose e: body is gone is skipped and counted.
 local window, missing = {}, 0
 if window_from ~= '' then
   local R = tonumber(ARGV[a + 1])
@@ -335,7 +336,7 @@ if window_from ~= '' then
     if r > max_sets or (kind ~= 't' and kind ~= 'e') then
       stopped = true
     end
-    local entry = {'1', ''}
+    local entry = {tostring(r), '1', ''}
     if not stopped then
       local hkeys, mark = {}, redis.call('GET', k2)
       mark = mark and tonumber(mark) or nil
@@ -358,7 +359,7 @@ if window_from ~= '' then
         stopped = true
       else
         read_events = read_events + count
-        entry = {'0', mark and string.format('%.0f', mark) or ''}
+        entry = {tostring(r), '0', mark and string.format('%.0f', mark) or ''}
         for _, h in ipairs(hkeys) do
           local m = redis.call('ZRANGEBYSCORE', h, window_from, '+inf', 'WITHSCORES')
           for p = 1, #m, 2 do
@@ -785,15 +786,19 @@ impl RedisSessionStore {
     }
 }
 
-/// Map the window part of the script reply: per set, the truncated flag, the mark, then 4 values
-/// per event (id, score, body, verdict). The events are sorted by (`ts_ms`, id); the score is the
-/// time. The reply must hold one entry per requested set, in order (`check_window`).
+/// Map the window part of the script reply: per set, the 1-based index of the requested set that
+/// the script read, the truncated flag, the mark, then 4 values per event (id, score, body,
+/// verdict). The events are sorted by (`ts_ms`, id); the score is the time. The reply must hold one
+/// entry per requested set, in order: the echoed index of each entry must be its position.
 fn window_reply(req: &ReadRequest, raw: &[Vec<String>]) -> Result<Vec<SetWindow>, HistoryStoreError> {
     let mut window = Vec::with_capacity(raw.len());
-    for (entry, (scope, tool)) in raw.iter().zip(&req.sets) {
-        let [truncated, mark, events @ ..] = entry.as_slice() else {
-            return Err(decode_error("a window entry has no truncated flag or mark"));
+    for (position, (entry, (scope, tool))) in raw.iter().zip(&req.sets).enumerate() {
+        let [index, truncated, mark, events @ ..] = entry.as_slice() else {
+            return Err(decode_error("a window entry has no set index, truncated flag or mark"));
         };
+        if index.parse::<usize>().ok() != Some(position + 1) {
+            return Err(decode_error("a window entry is not the set of its position in the request"));
+        }
         if events.len() % 4 != 0 {
             return Err(decode_error("a window entry has an incomplete event"));
         }
@@ -1056,14 +1061,16 @@ mod tests {
             from_ms: 0,
             sets: vec![(Scope::Session, SetTool::Tool("a".into())), (Scope::Session, SetTool::Every)],
         };
-        let entry = || vec!["0".to_string(), String::new()];
-        assert_eq!(window_reply(&req, &[entry(), entry()]).expect("a full reply").len(), 2);
-        let short = window_reply(&req, &[entry()]).unwrap_err();
+        let entry = |i: usize| vec![i.to_string(), "0".to_string(), String::new()];
+        assert_eq!(window_reply(&req, &[entry(1), entry(2)]).expect("a full reply").len(), 2);
+        let short = window_reply(&req, &[entry(1)]).unwrap_err();
         assert!(matches!(short, HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }), "{short:?}");
-        assert!(window_reply(&req, &[entry(), entry(), entry()]).is_err(), "a long reply");
-        assert!(window_reply(&req, &[entry(), vec!["0".into()]]).is_err(), "an entry with no mark");
-        assert!(window_reply(&req, &[entry(), vec!["0".into(), String::new(), "x".into()]]).is_err(), "an incomplete event");
-        assert!(window_reply(&req, &[entry(), vec!["2".into(), String::new()]]).is_err(), "a bad flag");
+        assert!(window_reply(&req, &[entry(1), entry(2), entry(3)]).is_err(), "a long reply");
+        assert!(window_reply(&req, &[entry(2), entry(1)]).is_err(), "entries out of the request order");
+        assert!(window_reply(&req, &[entry(1), entry(1)]).is_err(), "one set twice");
+        assert!(window_reply(&req, &[entry(1), vec!["2".into(), "0".into()]]).is_err(), "an entry with no mark");
+        assert!(window_reply(&req, &[entry(1), vec!["2".into(), "0".into(), String::new(), "x".into()]]).is_err(), "an incomplete event");
+        assert!(window_reply(&req, &[entry(1), vec!["2".into(), "2".into(), String::new()]]).is_err(), "a bad flag");
     }
 
     #[test]

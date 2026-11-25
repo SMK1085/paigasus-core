@@ -1502,6 +1502,93 @@ mod tests {
         assert_eq!(read.sets, vec![(Scope::Session, SetTool::Tool("a".into()))]);
     }
 
+    /// The fixed time of `history`: the clock of every reserve in these tests.
+    fn fixed_now_ms() -> u64 {
+        u64::try_from(at("2026-11-22T10:00:00Z").duration_since(std::time::UNIX_EPOCH).expect("after the epoch").as_millis()).expect("ms fit")
+    }
+
+    /// The mark of a cap trim reaches the kernel window, so a flood of `a` makes a condition on
+    /// `a` missing (`Truncated`), also on a reserve that calls only `b` (spec P4, fail closed).
+    #[tokio::test]
+    async fn a_flood_of_one_tool_gives_its_window_set_the_mark_and_the_slot_is_missing() {
+        use paigasus_kernel::tool_policy::history::{Missing, MissingReason};
+
+        use crate::domain::tool_history::MAX_EVENTS_PER_TOOL;
+
+        let (store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let flooded_at = fixed_now_ms() - 1_000;
+        let flood: Vec<CallEvent> = (0..=MAX_EVENTS_PER_TOOL as u128)
+            .map(|i| CallEvent {
+                id: u(10_000 + i),
+                tool: "a".into(),
+                call_id: None,
+                item_id: None,
+                fields: no_fields(),
+                key: None,
+            })
+            .collect();
+        let histories = Histories {
+            org: ORG_A,
+            principal: PRINCIPAL.into(),
+            key: Some(KEY.into()),
+            session: session.session_id,
+        };
+        let reply = store
+            .inner
+            .reserve(&ReserveRequest {
+                histories,
+                turn: 1,
+                calls: flood,
+                now_ms: flooded_at,
+                read: None,
+            })
+            .await
+            .expect("the flood");
+        assert_eq!(reply.trimmed_cap, 1);
+        let policy = policy_of(&[count_of(KernelScope::Session, "a")]);
+        let out = h.reserve(&ctx(), &session, &calls(&[("c-1", "b")]), &[u(1)], Some(&policy)).await;
+        let kept: Vec<Event> = store.inner.events(ORG_A, Scope::Session, &session.session_id.to_string(), "a").iter().map(kernel_event).collect();
+        assert_eq!(kept.len(), MAX_EVENTS_PER_TOOL);
+        let window = Window::new(vec![WindowSet::new(KernelScope::Session, SetTool::Tool("a".into()), kept, Some(flooded_at), false)]);
+        assert_eq!(out.window, WindowRead::Read(window.clone()), "the set of `a` carries the mark of the trim");
+        let e = evaluate(policy.conditions(), &window, &out.hold, 0, out.now_ms, policy.catalog());
+        assert_eq!(e.slots.get("c_a"), None);
+        assert_eq!(e.missing, vec![Missing::new("c_a", Part::Tenant, MissingReason::Truncated)]);
+    }
+
+    /// A read plan of more than 64 sets: each set past 64 comes back truncated in the kernel
+    /// window, and its condition is missing (`Truncated`). A set before the limit is evaluated.
+    #[tokio::test]
+    async fn a_set_past_the_read_set_limit_is_truncated_and_its_slot_is_missing() {
+        use paigasus_kernel::tool_policy::history::{Missing, MissingReason};
+
+        use crate::domain::tool_history::MAX_READ_SETS;
+
+        let (_store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let conditions: Vec<Condition> = (0..=MAX_READ_SETS).map(|i| count_of(KernelScope::Session, &format!("t{i}"))).collect();
+        let policy = policy_of(&conditions);
+        let plan = policy.read().expect("a read plan");
+        assert_eq!(plan.sets.len(), MAX_READ_SETS + 1);
+        let out = h.reserve(&ctx(), &session, &calls(&[("c-1", "z")]), &[u(1)], Some(&policy)).await;
+        let want: Vec<WindowSet> = plan
+            .sets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| WindowSet::new(s.scope, s.tool.clone(), vec![], None, i >= MAX_READ_SETS))
+            .collect();
+        let window = Window::new(want);
+        assert_eq!(out.window, WindowRead::Read(window.clone()));
+        let slot_of = |i: usize| match &plan.sets[i].tool {
+            SetTool::Tool(name) => format!("c_{name}"),
+            other => panic!("a named set, not {other:?}"),
+        };
+        let e = evaluate(policy.conditions(), &window, &out.hold, 0, out.now_ms, policy.catalog());
+        assert_eq!(e.missing, vec![Missing::new(slot_of(MAX_READ_SETS), Part::Tenant, MissingReason::Truncated)]);
+        assert_eq!(e.slots.get(&slot_of(0)), Some(false), "a set before the limit is read");
+    }
+
     /// F14: with no API key, a `Key` condition reads the principal set. One store set serves the
     /// `Principal` and the `Key` condition, and the window holds both kernel sets.
     #[tokio::test]
