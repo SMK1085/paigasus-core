@@ -40,6 +40,10 @@ pub struct DecodedBody {
 
 /// The body of an event. `stored` is `None` for a body whose fields the store copies from another
 /// body (a result event in Redis): then the body ends after `t`.
+///
+/// Keep `f`/`b` and then `kid` the LAST members: `copy_fields` in `APPEND_SCRIPT` (`redis.rs`)
+/// copies everything from `,"f":` or `,"b":` up to the closing brace into the result body. A
+/// member added after them would be copied too; `the_stored_fields_are_the_last_members` reds.
 pub fn encode_body(id: Uuid, ts_ms: u64, kind: EventKind, tool: &str, stored: Option<(&Fields, Option<KeyId>)>) -> String {
     let mut out = format!(r#"{{"v":{BODY_VERSION},"id":"{id}","ts":{ts_ms},"k":"{}","t":{}"#, kind.as_str(), Value::String(tool.to_owned()));
     if let Some((fields, key)) = stored {
@@ -203,6 +207,38 @@ mod tests {
         let body = encode_body(Uuid::from_u128(9), 7, EventKind::Call, r#"x","f":{"y":1}"#, Some((&Fields::Unparsed, None)));
         assert!(!body.contains(r#","f":"#), "{body}");
         assert_eq!(body.find(r#","b":"#), Some(body.len() - r#","b":1}"#.len()));
+    }
+
+    /// The Rust form of `copy_fields` in `redis.rs`: the text from the first `,"f":` (else `,"b":`)
+    /// up to the closing brace.
+    fn fragment(body: &str) -> &str {
+        let at = body.find(r#","f":"#).or_else(|| body.find(r#","b":"#)).expect("a fields member");
+        &body[at..body.len() - 1]
+    }
+
+    /// `copy_fields` relies on this: the stored fields, then `kid`, end the body. A member added
+    /// after them changes the fragment.
+    #[test]
+    fn the_stored_fields_are_the_last_members() {
+        let id = Uuid::from_u128(9);
+        let key = KeyId::new([0xab; 8]);
+        let tool = r#"x","f":{"amount":1}"#;
+        let f_json = r#"{"a.b":-9223372036854775808,"d":"_____________________w","n":null,"x":{"x":1}}"#;
+        let cases = [
+            (sample(), Some(key), format!(r#","f":{f_json},"kid":"abababababababab""#)),
+            (sample(), None, format!(r#","f":{f_json}"#)),
+            (Fields::Unparsed, Some(key), r#","b":1,"kid":"abababababababab""#.to_owned()),
+            (Fields::Unparsed, None, r#","b":1"#.to_owned()),
+        ];
+        for (fields, key, want) in cases {
+            let call = encode_body(id, 7, EventKind::Call, tool, Some((&fields, key)));
+            assert_eq!(fragment(&call), want);
+            // The result: its head, the fragment, and the closing brace. It decodes to the same fields.
+            let head = encode_body(Uuid::from_u128(10), 8, EventKind::Result, tool, None);
+            let result = format!("{}{}}}", &head[..head.len() - 1], fragment(&call));
+            let decoded = decode_body(&result).expect("decodes");
+            assert_eq!((decoded.tool.as_str(), decoded.fields, decoded.key), (tool, fields, key));
+        }
     }
 
     #[test]

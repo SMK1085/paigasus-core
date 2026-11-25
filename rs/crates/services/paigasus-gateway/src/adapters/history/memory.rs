@@ -521,7 +521,14 @@ impl SessionStore for MemorySessionStore {
             })
             .collect();
         let reply = st.add_events(h, &events, req.now_ms, None);
-        // Only an allowed call is linked: a denied call was not forwarded (spec P9).
+        // Only an allowed call is linked: a denied call was not forwarded (spec P9). A denied call
+        // deletes each link that still names its event: a reserve that returned too late for the
+        // report site wrote them (spec P8).
+        for c in req.calls.iter().filter(|c| c.verdict == EventVerdict::Deny) {
+            for id in c.call_id.iter().chain(c.item_id.iter()) {
+                st.drop_own_call_link(h.org, &h.principal, id, c.id);
+            }
+        }
         for c in req.calls.iter().filter(|c| c.verdict == EventVerdict::Allow) {
             let link = CallLink {
                 session: h.session,

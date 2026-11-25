@@ -256,6 +256,16 @@ async fn an_append_under_a_reserved_id_keeps_one_event() {
 }
 
 #[tokio::test]
+async fn a_denied_append_under_a_reserved_id_deletes_its_own_link() {
+    contract::a_denied_append_under_a_reserved_id_deletes_its_own_link(&harness()).await;
+}
+
+#[tokio::test]
+async fn a_result_copies_the_exact_fields_of_an_adversarial_call() {
+    contract::a_result_copies_the_exact_fields_of_an_adversarial_call(&harness()).await;
+}
+
+#[tokio::test]
 async fn run_all_passes_on_one_shared_store() {
     contract::run_all(&harness()).await;
 }

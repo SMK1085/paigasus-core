@@ -884,25 +884,88 @@ pub async fn an_appended_denied_call_counts_and_writes_no_link(h: &impl Harness)
 }
 
 pub async fn an_append_under_a_reserved_id_keeps_one_event(h: &impl Harness) {
+    for verdict in [EventVerdict::Allow, EventVerdict::Deny] {
+        let (ctx, store) = (Ctx::new(true), h.store().await);
+        let c = call_as("send", "call-1");
+        store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+        let (fields, key) = sample_fields();
+        let late = AppendCall {
+            fields: fields.clone(),
+            key,
+            ..append_call(c.id, "send", verdict, Some("call-1"), None)
+        };
+        store.append(&append_req(&ctx, vec![late], NOW + 5)).await.unwrap();
+        let session = ctx.session.to_string();
+        let api_key = ctx.key.clone().expect("a key caller");
+        for (scope, scope_id) in [(Scope::Session, session.as_str()), (Scope::Principal, ctx.principal.as_str()), (Scope::Key, api_key.as_str())] {
+            let events = h.events(ctx.org, scope, scope_id, "send").await;
+            assert_eq!(events.len(), 1, "{verdict:?} {scope:?}: one event");
+            let e = &events[0];
+            assert_eq!((e.id, e.verdict, e.ts_ms, &e.fields, e.key), (c.id, verdict, NOW + 5, &fields, key), "{verdict:?} {scope:?}");
+        }
+        let reply = store.lookup(&ctx.lookup(&["call-1"], &[], &[])).await.unwrap();
+        let want = (verdict == EventVerdict::Allow).then(|| link(&ctx, "send", c.id, false));
+        assert_eq!(reply.calls, vec![want], "{verdict:?}");
+    }
+}
+
+/// A reserve that returned too late for `mark_reserved` wrote its `c:` links, and the report site
+/// then appends the blocked call under the same id. The denied append deletes each link that still
+/// names its event, so a result for the blocked call is not linked (spec P8). A link of another
+/// event stays.
+pub async fn a_denied_append_under_a_reserved_id_deletes_its_own_link(h: &impl Harness) {
+    let (first, store) = (Ctx::new(true), h.store().await);
+    let second = first.other_session();
+    let other = call_as("read", "item-1");
+    store.reserve(&first.reserve(vec![other.clone()], NOW, None)).await.unwrap();
+    let blocked = CallEvent {
+        item_id: Some("item-1".into()),
+        ..call_as("send", "call-1")
+    };
+    store.reserve(&second.reserve(vec![blocked.clone()], NOW + 1, None)).await.unwrap();
+    let before = store.lookup(&second.lookup(&["call-1", "item-1"], &[], &[])).await.unwrap();
+    assert_eq!(before.calls, vec![Some(link(&second, "send", blocked.id, false)), Some(link(&first, "read", other.id, false))]);
+
+    let denied = append_call(blocked.id, "send", EventVerdict::Deny, Some("call-1"), Some("item-1"));
+    store.append(&append_req(&second, vec![denied], NOW + 2)).await.unwrap();
+    let after = store.lookup(&second.lookup(&["call-1", "item-1"], &["call-1"], &[])).await.unwrap();
+    assert_eq!(after.calls, vec![None, Some(link(&first, "read", other.id, false))]);
+    assert_eq!(after.results, vec![None], "a result for the blocked call is forged");
+}
+
+/// The Redis write script copies the stored fields of a call into its result by text. A tool name
+/// that holds the text of a fields member, and an unparsed body with a key id, still give the
+/// result exactly the fields of its call.
+pub async fn a_result_copies_the_exact_fields_of_an_adversarial_call(h: &impl Harness) {
     let (ctx, store) = (Ctx::new(true), h.store().await);
-    let c = call_as("send", "call-1");
-    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let tool = r#"x","f":{"amount":1}"#;
     let (fields, key) = sample_fields();
-    let late = AppendCall {
+    let parsed = CallEvent {
         fields: fields.clone(),
         key,
-        ..append_call(c.id, "send", EventVerdict::Allow, Some("call-1"), None)
+        ..call_as(tool, "call-1")
     };
-    store.append(&append_req(&ctx, vec![late], NOW + 5)).await.unwrap();
-    let session = ctx.session.to_string();
-    for (scope, scope_id) in [(Scope::Session, session.as_str()), (Scope::Principal, ctx.principal.as_str())] {
-        let events = h.events(ctx.org, scope, scope_id, "send").await;
-        assert_eq!(events.len(), 1, "{scope:?}: one event");
-        let e = &events[0];
-        assert_eq!((e.id, e.verdict, e.ts_ms, &e.fields, e.key), (c.id, EventVerdict::Allow, NOW + 5, &fields, key), "{scope:?}");
-    }
-    let reply = store.lookup(&ctx.lookup(&["call-1"], &[], &[])).await.unwrap();
-    assert_eq!(reply.calls, vec![Some(link(&ctx, "send", c.id, false))]);
+    let unparsed_key = Some(KeyId::new([9; 8]));
+    let unparsed = CallEvent {
+        fields: Fields::Unparsed,
+        key: unparsed_key,
+        ..call_as(tool, "call-2")
+    };
+    store.reserve(&ctx.reserve(vec![parsed.clone(), unparsed.clone()], NOW, None)).await.unwrap();
+    let settle = vec![item(parsed.id, EventVerdict::Allow, tool, Some("call-1")), item(unparsed.id, EventVerdict::Allow, tool, Some("call-2"))];
+    store.settle(&ctx.settle(settle, NOW)).await.unwrap();
+    let result = |call_id: &str, event_id| ResultEvent {
+        id: fresh_id(),
+        call_id: call_id.into(),
+        tool: tool.into(),
+        event_id,
+    };
+    let (r1, r2) = (result("call-1", parsed.id), result("call-2", unparsed.id));
+    assert_eq!(store.write(&ctx.write(None, vec![r1.clone(), r2.clone()], NOW + 1)).await.unwrap().written, 2);
+    let events = principal_events(h, &ctx, tool).await;
+    let of = |id: Uuid| events.iter().find(|e| e.id == id).expect("the result event");
+    assert_eq!((of(r1.id).tool.as_str(), &of(r1.id).fields, of(r1.id).key), (tool, &fields, key));
+    assert_eq!((of(r2.id).tool.as_str(), &of(r2.id).fields, of(r2.id).key), (tool, &Fields::Unparsed, unparsed_key));
 }
 
 /// Every case, in table order. The Redis binary calls this once per image.
@@ -950,4 +1013,6 @@ pub async fn run_all(h: &impl Harness) {
     an_allow_settle_relinks_a_reused_call_id(h).await;
     an_appended_denied_call_counts_and_writes_no_link(h).await;
     an_append_under_a_reserved_id_keeps_one_event(h).await;
+    a_denied_append_under_a_reserved_id_deletes_its_own_link(h).await;
+    a_result_copies_the_exact_fields_of_an_adversarial_call(h).await;
 }

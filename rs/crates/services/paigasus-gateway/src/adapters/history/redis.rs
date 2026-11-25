@@ -30,7 +30,8 @@
 //!   under the item id. It keeps a link that already names another event (a reused call id).
 //! - An allow settle writes the link, and replaces a link of another event (PR 1).
 //! - A deny settle deletes a link only when its `e` is this event and the stored verdict is `deny`.
-//! - An append writes the verdict of the call. Only an allowed call writes (and replaces) links. An
+//! - An append writes the verdict of the call. Only an allowed call writes (and replaces) links. A
+//!   denied call deletes each link that still names its event (a late reserve wrote it). An
 //!   append under an id that a reserve wrote replaces the body, the verdict and the score of that
 //!   one member: one event (plan decision D-E).
 //!
@@ -94,7 +95,8 @@ const APPEND_SCRIPT: &str = concat!(
 --       that the result belongs to), then the d: keys, then the c: keys (a local shell call has
 --       two c: links, F7).
 -- c-link mode 'keep' (reserve): a c: link that names another event stays. 'replace' (append): the
--- link is written.
+-- link is written. An event with the verdict 'deny' (an append) writes no c: link: it deletes each
+-- one that still names it.
 -- A history key and a tool go once per distinct tool, not once per event: a reserve of 10,000
 -- events must stay small on the wire.
 local now = tonumber(ARGV[1])
@@ -175,9 +177,15 @@ for j = 1, N do
     end
     for l = 1, nc do
       local lkey = KEYS[cbase + l]
-      local held = cmode == 'keep' and redis.call('HGET', lkey, 'e') or false
-      if not held or held == id then
-        put_call_link(lkey, session, names[t], id, ttl)
+      if verdict == 'deny' then
+        -- A denied call was not forwarded: it deletes the links that still name it (a reserve
+        -- that returned too late for the report site wrote them), and writes none.
+        drop_own_call_link(lkey, id)
+      else
+        local held = cmode == 'keep' and redis.call('HGET', lkey, 'e') or false
+        if not held or held == id then
+          put_call_link(lkey, session, names[t], id, ttl)
+        end
       end
     end
     if gkey then
@@ -804,12 +812,9 @@ impl SessionStore for RedisSessionStore {
                 stored: Some((c.fields.clone(), c.key)),
                 guard: None,
                 decision_keys: Vec::new(),
-                // Only an allowed call is linked: a denied call was not forwarded (spec P9).
-                call_keys: if c.verdict == EventVerdict::Allow {
-                    c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect()
-                } else {
-                    Vec::new()
-                },
+                // The script links an allowed call, and deletes the own links of a denied call (spec
+                // P8, P9).
+                call_keys: c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect(),
             })
             .collect();
         self.run_append(&Batch {

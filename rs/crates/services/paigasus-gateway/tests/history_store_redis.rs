@@ -195,6 +195,8 @@ contract_cases!(
     an_allow_settle_relinks_a_reused_call_id,
     an_appended_denied_call_counts_and_writes_no_link,
     an_append_under_a_reserved_id_keeps_one_event,
+    a_denied_append_under_a_reserved_id_deletes_its_own_link,
+    a_result_copies_the_exact_fields_of_an_adversarial_call,
 );
 
 #[tokio::test]
