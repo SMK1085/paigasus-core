@@ -36,7 +36,7 @@ use paigasus_observability::names;
 
 use crate::adapters::http::relay::{feed_scan, finish_scan};
 use crate::adapters::http::usage::StreamUsage;
-use crate::adapters::openai::OpenAiByteStream;
+use crate::adapters::upstream::UpstreamByteStream;
 use crate::application::charge_guard::ChargeGuard;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::tool_history::ToolHistory;
@@ -183,7 +183,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
 /// client disconnect drops all three (D25), exactly as the plain relay drops the first two.
 struct Relay {
     /// `None` once the upstream has ended, failed, or been drained.
-    inner: Option<OpenAiByteStream>,
+    inner: Option<UpstreamByteStream>,
     scan: StreamUsage,
     guard: Option<ChargeGuard>,
     icpt: Interceptor,
@@ -305,7 +305,7 @@ impl Relay {
 pub(crate) fn intercepted_stream(
     format: Format,
     limits: Limits,
-    inner: OpenAiByteStream,
+    inner: UpstreamByteStream,
     guard: Option<ChargeGuard>,
     usage: StreamUsage,
     ti: Arc<ToolInterception>,
@@ -325,7 +325,7 @@ pub(crate) fn intercepted_stream(
 fn relay(
     format: Format,
     limits: Limits,
-    inner: OpenAiByteStream,
+    inner: UpstreamByteStream,
     guard: Option<ChargeGuard>,
     usage: StreamUsage,
     ti: Arc<ToolInterception>,
@@ -443,12 +443,12 @@ mod tests {
 
     /// Two complete `tool_use` blocks: two holds, `Block(0)` and `Block(1)`, completed in order,
     /// with `gap` between the first block's end and the second block's start.
-    fn two_tool_blocks(first: &str, second: &str, gap: Duration) -> OpenAiByteStream {
+    fn two_tool_blocks(first: &str, second: &str, gap: Duration) -> UpstreamByteStream {
         tool_blocks(&[first, second], gap)
     }
 
     /// One complete `tool_use` block per name, with `gap` before the second one starts.
-    fn tool_blocks(names: &[&str], gap: Duration) -> OpenAiByteStream {
+    fn tool_blocks(names: &[&str], gap: Duration) -> UpstreamByteStream {
         let ev = |name: &str, data: String| Ok(Bytes::from(format!("event: {name}\ndata: {data}\n\n")));
         let block = |i: u32, name: &str| {
             vec![
@@ -489,7 +489,7 @@ mod tests {
             .boxed()
     }
 
-    async fn run(decider: Arc<dyn ToolCallDecider>, limits: Limits, upstream: OpenAiByteStream) -> String {
+    async fn run(decider: Arc<dyn ToolCallDecider>, limits: Limits, upstream: UpstreamByteStream) -> String {
         let ti = Arc::new(ToolInterception {
             limits,
             decider,
@@ -500,7 +500,7 @@ mod tests {
         run_ctx(ti, ctx, upstream).await
     }
 
-    async fn run_ctx(ti: Arc<ToolInterception>, ctx: Arc<DecisionContext>, upstream: OpenAiByteStream) -> String {
+    async fn run_ctx(ti: Arc<ToolInterception>, ctx: Arc<DecisionContext>, upstream: UpstreamByteStream) -> String {
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
         let out: Vec<Bytes> = relay(
             Format::AnthropicMessages,

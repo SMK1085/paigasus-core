@@ -36,7 +36,8 @@ use super::error::GatewayError;
 use super::interception::{self, ToolInterception};
 use super::relay::terminal_sse_error_stream;
 use super::usage::{BodyUsage, StreamUsage};
-use crate::adapters::openai::{ChatResponse, OpenAiError, UpstreamRoute};
+use crate::adapters::openai::UpstreamRoute;
+use crate::adapters::upstream::{UpstreamError, UpstreamResponse};
 use crate::application::tool_policy::OverheadSample;
 use crate::domain::{CallerContext, Credential};
 
@@ -180,7 +181,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
     let result = state.openai.send(endpoint.route, body, stream).await;
 
     let (response, status) = match result {
-        Ok(ChatResponse::Full { status, body: upstream_body }) => {
+        Ok(UpstreamResponse::Full { status, body: upstream_body }) => {
             // Non-stream: the upstream head AND body have both landed, so this is a genuine
             // full-request latency, not just TTFB (see the NOTE on the stream arm below).
             record_upstream_call(status, started, endpoint.name);
@@ -227,7 +228,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
                 }
             }
         }
-        Ok(ChatResponse::Stream { status, stream: upstream }) => {
+        Ok(UpstreamResponse::Stream { status, stream: upstream }) => {
             // NOTE: for `stream:true` this records TTFB (time-to-first-byte / response head), NOT
             // stream completion — the call is considered "done" for metrics purposes the moment
             // the upstream response head arrives. A mid-stream SSE failure (handled below by the
@@ -285,7 +286,7 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             // constraints — never a free-form error string).
             // A4: a connect failure never reached the upstream; any other failure after the send
             // (timeout, transport) keeps the request estimate.
-            if matches!(err, OpenAiError::Connect(_))
+            if matches!(err, UpstreamError::Connect { .. })
                 && let Some(guard) = guard.as_mut()
             {
                 guard.mark_no_charge();
@@ -347,7 +348,7 @@ fn add_request_report(resp: &mut Response, requests: &[RequestEntry]) {
 /// Record `gateway_upstream_requests_total{status_class, endpoint}` + `gateway_upstream_request_duration_seconds`
 /// for one upstream call. `status` is either the upstream's OWN status (a completed response,
 /// full or streamed) or, on a transport/connect/timeout failure, the GATEWAY status the error
-/// was mapped to (502/504 — see `GatewayError::from<OpenAiError>`), since no upstream status
+/// was mapped to (502/504 — see `GatewayError::from<UpstreamError>`), since no upstream status
 /// exists in that case. See the call sites above for the TTFB-vs-stream-vs-full timing note.
 fn record_upstream_call(status: StatusCode, started: Instant, endpoint: &'static str) {
     let status_class = format!("{}xx", status.as_u16() / 100);

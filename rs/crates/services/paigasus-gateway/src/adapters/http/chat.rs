@@ -109,10 +109,10 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::adapters::http::relay::terminal_sse_error_stream;
-    use crate::adapters::openai::OpenAiByteStream;
+    use crate::adapters::upstream::UpstreamByteStream;
 
     /// The plain relay as the pipeline builds it for chat (no interception).
-    fn plain_relay(inner: OpenAiByteStream, guard: Option<ChargeGuard>) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
+    fn plain_relay(inner: UpstreamByteStream, guard: Option<ChargeGuard>) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
         terminal_sse_error_stream(inner, guard, StreamUsage::Chat(UsageScanner::new()), TERMINAL_SSE_ERROR)
     }
 

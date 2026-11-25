@@ -15,3 +15,4 @@ pub mod limits;
 pub mod nats;
 pub mod openai;
 pub mod policy_source;
+pub mod upstream;

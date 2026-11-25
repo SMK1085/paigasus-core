@@ -21,7 +21,7 @@ use paigasus_observability::Retryable;
 use paigasus_observability::correlation::RETRYABLE_HEADER;
 use serde::Serialize;
 
-use crate::adapters::openai::OpenAiError;
+use crate::adapters::upstream::UpstreamError;
 use crate::domain::limits::{BudgetPeriod, LimitRefusal};
 
 /// D8: the OpenAI SDKs retry a 429 twice unless this header says `false`, and they ignore
@@ -163,17 +163,19 @@ impl From<LimitRefusal> for GatewayError {
     }
 }
 
-/// Map an [`OpenAiError`] (egress send/connect/timeout/build/CA-bundle failure) to its
+/// Map an [`UpstreamError`] (egress send/connect/timeout/build/CA-bundle failure) to its
 /// client-facing [`GatewayError`]: a fired timeout is a `504`; every other transport/connect/
 /// build/CA-bundle failure is a `502` (upstream unreachable/misbuilt — a bad
 /// `upstream.openai.extra_ca_bundle_path` prevents the client from ever being built, same as a
-/// `Build` failure). A non-2xx upstream is NOT an `OpenAiError` (G6 returns it as a
-/// `ChatResponse::Full` for verbatim passthrough), so it never reaches this mapping.
-impl From<OpenAiError> for GatewayError {
-    fn from(err: OpenAiError) -> Self {
+/// `Build` failure). A non-2xx upstream is NOT an `UpstreamError` (G6 returns it as a
+/// `UpstreamResponse::Full` for verbatim passthrough), so it never reaches this mapping.
+impl From<UpstreamError> for GatewayError {
+    fn from(err: UpstreamError) -> Self {
         match err {
-            OpenAiError::Timeout(_) => GatewayError::UpstreamTimeout,
-            OpenAiError::Connect(_) | OpenAiError::Transport(_) | OpenAiError::Build(_) | OpenAiError::CaBundle { .. } => GatewayError::UpstreamUnavailable,
+            UpstreamError::Timeout { .. } => GatewayError::UpstreamTimeout,
+            UpstreamError::Connect { .. } | UpstreamError::Transport { .. } | UpstreamError::Build { .. } | UpstreamError::Redirect { .. } | UpstreamError::CaBundle { .. } => {
+                GatewayError::UpstreamUnavailable
+            }
         }
     }
 }
@@ -383,6 +385,7 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    use crate::adapters::upstream::Provider;
     use crate::domain::limits::{BudgetPeriod, LimitRefusal, RefusalReason};
 
     /// 2026-11-01T00:00:00Z.
@@ -552,14 +555,50 @@ mod tests {
         // A real `reqwest::Error` has no public constructor; wrap a genuine one (fresh per variant,
         // since `reqwest::Error` is not `Clone`) and assert the mapping. The request-time
         // classification INTO these variants is G6's concern.
-        assert_eq!(GatewayError::from(OpenAiError::Timeout(dead_port_error().await)), GatewayError::UpstreamTimeout);
-        assert_eq!(GatewayError::from(OpenAiError::Connect(dead_port_error().await)), GatewayError::UpstreamUnavailable);
-        assert_eq!(GatewayError::from(OpenAiError::Transport(dead_port_error().await)), GatewayError::UpstreamUnavailable);
-        assert_eq!(GatewayError::from(OpenAiError::Build(dead_port_error().await)), GatewayError::UpstreamUnavailable);
         assert_eq!(
-            GatewayError::from(OpenAiError::CaBundle {
+            GatewayError::from(UpstreamError::Timeout {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamTimeout
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::Connect {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamUnavailable
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::Transport {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamUnavailable
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::Build {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamUnavailable
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::CaBundle {
+                provider: Provider::OpenAi,
                 path: "/x".to_string(),
                 source: "boom".into()
+            }),
+            GatewayError::UpstreamUnavailable
+        );
+    }
+
+    #[test]
+    fn a_redirect_maps_to_502() {
+        assert_eq!(
+            GatewayError::from(UpstreamError::Redirect {
+                provider: Provider::Anthropic,
+                status: StatusCode::TEMPORARY_REDIRECT
             }),
             GatewayError::UpstreamUnavailable
         );

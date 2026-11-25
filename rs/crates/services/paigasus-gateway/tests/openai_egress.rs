@@ -14,7 +14,8 @@ use futures::StreamExt;
 use secrecy::SecretString;
 use support::MockOpenAi;
 
-use paigasus_gateway::adapters::openai::{ChatResponse, OpenAiClient};
+use paigasus_gateway::adapters::openai::OpenAiClient;
+use paigasus_gateway::adapters::upstream::UpstreamResponse;
 use paigasus_gateway::config::OpenAiConfig;
 
 const REAL_KEY: &str = "sk-real-secret-server-key-9f8e7d";
@@ -43,17 +44,17 @@ async fn non_stream_returns_upstream_status_and_body_verbatim() {
     let resp = client.chat_completion(sample_body(), false).await.expect("egress succeeds");
 
     match resp {
-        ChatResponse::Full { status, body } => {
+        UpstreamResponse::Full { status, body } => {
             assert_eq!(status.as_u16(), 200);
             assert_eq!(body, Bytes::from(canned), "the upstream body is forwarded verbatim");
         }
-        ChatResponse::Stream { .. } => panic!("expected a Full (non-stream) response"),
+        UpstreamResponse::Stream { .. } => panic!("expected a Full (non-stream) response"),
     }
 }
 
 #[tokio::test]
 async fn non_2xx_upstream_is_returned_verbatim_not_an_error() {
-    // A non-2xx upstream (e.g. OpenAI's own 429 rate-limit envelope) is NOT an `OpenAiError` — it
+    // A non-2xx upstream (e.g. OpenAI's own 429 rate-limit envelope) is NOT an `UpstreamError` — it
     // comes back as `Full` with the upstream status + body so G7 forwards it verbatim.
     let envelope = r#"{"error":{"message":"Rate limit reached","type":"rate_limit_error"}}"#;
     let mock = MockOpenAi::spawn_json(axum::http::StatusCode::TOO_MANY_REQUESTS, envelope).await;
@@ -62,11 +63,11 @@ async fn non_2xx_upstream_is_returned_verbatim_not_an_error() {
     let resp = client.chat_completion(sample_body(), false).await.expect("a non-2xx upstream is not a send error");
 
     match resp {
-        ChatResponse::Full { status, body } => {
+        UpstreamResponse::Full { status, body } => {
             assert_eq!(status.as_u16(), 429);
             assert_eq!(body, Bytes::from(envelope));
         }
-        ChatResponse::Stream { .. } => panic!("expected a Full response"),
+        UpstreamResponse::Stream { .. } => panic!("expected a Full response"),
     }
 }
 
@@ -79,11 +80,11 @@ async fn stream_yields_chunks_in_order_unbuffered() {
     let resp = client.chat_completion(sample_body(), true).await.expect("egress succeeds");
 
     let mut stream = match resp {
-        ChatResponse::Stream { status, stream } => {
+        UpstreamResponse::Stream { status, stream } => {
             assert_eq!(status.as_u16(), 200);
             stream
         }
-        ChatResponse::Full { .. } => panic!("expected a Stream response"),
+        UpstreamResponse::Full { .. } => panic!("expected a Stream response"),
     };
 
     // Consume the UNBUFFERED stream chunk by chunk, concatenating as chunks arrive. Concatenation
@@ -138,7 +139,7 @@ async fn stream_path_advertises_event_stream_accept() {
 
     let resp = client.chat_completion(sample_body(), true).await.expect("egress succeeds");
     // Drain the stream so the request completes and the header is recorded.
-    if let ChatResponse::Stream { mut stream, .. } = resp {
+    if let UpstreamResponse::Stream { mut stream, .. } = resp {
         while stream.next().await.is_some() {}
     }
 
