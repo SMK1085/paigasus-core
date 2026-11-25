@@ -3,12 +3,15 @@
 
 mod support;
 
-use paigasus_gateway_core::{Format, Metric, OnFailure, ToolCall, ToolCallKind};
+use paigasus_gateway_core::{Decision, Format, Metric, OnFailure, ToolCall, ToolCallKind};
 use proptest::prelude::*;
 use support::driver::{DECIDERS, Outcome, allow_all, block_named, cut, drive, limits};
 use support::oracle::{Run, check_i1, runners};
 use support::responses_oracle::{run_node, run_python_stream};
-use support::streams::{AQuirk, Quirk, RKind, RQUIRKS, RQuirk, anthropic_scenario, every_kind_scenario, openai_scenario, render_anthropic, render_openai, render_responses, responses_scenario};
+use support::streams::{
+    AQuirk, AnthropicScenario, Block, Quirk, RKind, RQUIRKS, RQuirk, anthropic_scenario, anthropic_scenario_with_quirks, every_kind_scenario, openai_scenario, render_anthropic, render_openai,
+    render_responses, responses_scenario,
+};
 
 fn show(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -91,6 +94,44 @@ proptest! {
                     let r = run(&o.out);
                     prop_assert!(r.error.is_none() || o.core_failed() || run(&bytes).error.is_some(), "{model} failed in observe mode: {:?}\n{}", r.error, show(&o.out));
                 }
+            }
+        }
+    }
+
+    /// SMA-758: observe mode over the wide Anthropic generator with two or three quirks. It ends,
+    /// stays bounded, never forwards a blocked call's arguments, and keeps the order of the
+    /// upstream data payloads it forwards.
+    #[test]
+    fn anthropic_observe_mode_holds_for_many_quirks(a in anthropic_scenario_with_quirks(2..4)) {
+        let bytes = render_anthropic(&a);
+        let l = limits(OnFailure::Allow);
+        let o = drive(Format::AnthropicMessages, l, &cut(&bytes, &a.cuts), &block_named);
+        prop_assert!(o.finished, "observe mode never ended:\n{}", show(&o.out));
+        prop_assert!(o.max_queued <= l.max_held_bytes + l.max_record_bytes, "queue {} over the bound", o.max_queued);
+        let out = show(&o.out);
+        // A malformed record switches the stream to pass-through, which releases the hold and
+        // forwards unclassified bytes (§ 5.3, ruling D9 (a)), so the check holds without it only.
+        let passed_through = out.contains("paigasus-interception pass-through");
+        for (call, d) in o.decided.iter().filter(|_| !passed_through) {
+            if matches!(d, Decision::Block { .. }) && !call.arguments.is_empty() {
+                let escaped = serde_json::to_string(&call.arguments).expect("a string serialises");
+                prop_assert!(!out.contains(&call.arguments), "blocked arguments forwarded:\n{out}");
+                prop_assert!(!out.contains(&escaped[1..escaped.len() - 1]), "blocked arguments forwarded (escaped):\n{out}");
+            }
+        }
+        let payloads = |b: &str| b.lines().filter_map(|l| l.strip_prefix("data: ").map(str::to_owned)).collect::<Vec<_>>();
+        let input = payloads(&show(&bytes));
+        // Each forwarded payload maps to the first input index after the previous one. A record
+        // the interceptor dropped can leave an identical later record, so the first unused index
+        // would map it too early.
+        let mut next = 0;
+        for p in payloads(&out) {
+            if !input.contains(&p) {
+                continue;
+            }
+            match input[next..].iter().position(|i| *i == p) {
+                Some(k) => next += k + 1,
+                None => prop_assert!(false, "payload {p} out of order:\n{out}"),
             }
         }
     }
@@ -184,6 +225,30 @@ proptest! {
             }
         }
     }
+}
+
+/// SMA-758: the P1 oracle sees a pass-through that forwards the hidden call.
+#[test]
+fn a_pass_through_interceptor_fails_anthropic_p1() {
+    let s = AnthropicScenario {
+        blocks: vec![Block::Tool {
+            name: "blocked_rm",
+            args: "{\"v\":\"CANARY-x\",\"n\":10.5}".to_owned(),
+            pieces: 2,
+        }],
+        quirks: vec![],
+        cuts: vec![],
+    };
+    let input = render_anthropic(&s);
+    let o = Outcome {
+        out: input.clone(),
+        decided: vec![],
+        max_queued: 0,
+        finished: true,
+        metrics: vec![],
+        aborted: false,
+    };
+    assert!(check_p1(Format::AnthropicMessages, &input, &o).is_err());
 }
 
 /// What the core does with a stream that has one quirk (allow-all, `on_failure = block`).
