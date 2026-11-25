@@ -10,6 +10,7 @@
 //! but never authorizes, and carries no body limit.
 
 pub mod anthropic_error;
+pub mod anthropic_usage;
 pub mod auth;
 pub(crate) mod bytes;
 pub mod chat;
