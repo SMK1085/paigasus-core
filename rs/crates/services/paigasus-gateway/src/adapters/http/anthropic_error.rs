@@ -306,6 +306,25 @@ mod tests {
         assert!(other.headers().get("x-should-retry").is_none());
     }
 
+    /// The body's `request_id` is the `paigasus-request-id` of the scope the request runs in.
+    #[tokio::test]
+    async fn the_request_id_is_the_one_of_the_request_scope() {
+        use paigasus_observability::RequestIds;
+        use paigasus_observability::correlation::scope_for_test;
+
+        let ids = RequestIds {
+            request_id: uuid::Uuid::parse_str("0198f2c1-3333-7000-8000-000000000042").unwrap(),
+            correlation_id: uuid::Uuid::parse_str("0198f2c1-4444-7000-8000-000000000042").unwrap(),
+        };
+        let want = ids.request_id.to_string();
+        let resp = scope_for_test(ids, rerendered(GatewayError::MissingBearer)).await;
+        assert_eq!(json(&body_of(resp).await)["request_id"], want.as_str());
+        let resp = scope_for_test(ids, not_found()).await;
+        assert_eq!(json(&body_of(resp).await)["request_id"], want.as_str());
+        let resp = scope_for_test(ids, method_not_allowed()).await;
+        assert_eq!(json(&body_of(resp).await)["request_id"], want.as_str());
+    }
+
     #[tokio::test]
     async fn the_fallbacks_have_no_code() {
         let resp = not_found().await;
