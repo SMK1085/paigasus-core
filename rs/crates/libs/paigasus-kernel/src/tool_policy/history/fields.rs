@@ -263,18 +263,20 @@ impl ExtractedFields {
     }
 }
 
-/// The decimal text of the walk (`-12.5`, one to four fraction digits) times 10,000.
-fn scale_decimal(text: &str) -> Option<i64> {
+/// A Cedar decimal literal times 10,000: an optional `-`, ASCII digits, `.`, then 1 to 4 fraction
+/// digits. The scaled value must fit `i64`. This is the one scaling path of both sides of an
+/// equality test: the literal of a condition and the value of a call argument (spec P3).
+pub fn scale_decimal(text: &str) -> Option<i64> {
     let (negative, rest) = match text.strip_prefix('-') {
         Some(r) => (true, r),
         None => (false, text),
     };
-    let (int_part, frac_part) = rest.split_once('.').unwrap_or((rest, ""));
-    if frac_part.len() > 4 {
+    let (int_part, frac_part) = rest.split_once('.')?;
+    let digits_only = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits_only(int_part) || !digits_only(frac_part) || frac_part.len() > 4 {
         return None;
     }
-    let digits = format!("{int_part}{frac_part:0<4}");
-    let magnitude: i128 = digits.parse().ok()?;
+    let magnitude: i128 = format!("{int_part}{frac_part:0<4}").parse().ok()?;
     i64::try_from(if negative { -magnitude } else { magnitude }).ok()
 }
 
@@ -347,6 +349,46 @@ mod tests {
 
     fn paths(list: &[&[&str]]) -> PathSet {
         list.iter().map(|s| p(s)).collect()
+    }
+
+    #[test]
+    fn scale_decimal_follows_the_cedar_grammar() {
+        for bad in [
+            "1.23456",
+            "1",
+            "1.",
+            ".5",
+            "922337203685477.5808",
+            "1e2",
+            "",
+            "-",
+            "-.5",
+            "+1.5",
+            "1.5 ",
+            "-922337203685477.5809",
+            "\u{661}.\u{665}",
+        ] {
+            assert_eq!(scale_decimal(bad), None, "text {bad:?}");
+        }
+        for (text, scaled) in [
+            ("0.0", 0),
+            ("1.0", 10_000),
+            ("-1.25", -12_500),
+            ("922337203685477.5807", i64::MAX),
+            ("-922337203685477.5808", i64::MIN),
+            ("007.5", 75_000),
+        ] {
+            assert_eq!(scale_decimal(text), Some(scaled), "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_literal_and_an_argument_value_of_one_decimal_scale_equally() {
+        let e = extract_fields(&ToolInput::Json(r#"{"d":1.5}"#.into()), &paths(&[&["d"]]));
+        let Some(Extracted::Scalar(from_argument)) = e.get(&p(&["d"])) else {
+            panic!("a decimal argument is a scalar")
+        };
+        assert_eq!(from_argument, &Scalar::Decimal(scale_decimal("1.5000").unwrap()));
     }
 
     #[test]

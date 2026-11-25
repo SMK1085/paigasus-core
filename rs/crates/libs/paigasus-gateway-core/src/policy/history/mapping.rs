@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use paigasus_kernel::tool_policy::history::{CmpOp, Condition, EventKind, FieldPath, FieldTest, Literal, Part, Predicate, Scalar, Scope, Shape, ToolMatch};
+use paigasus_kernel::tool_policy::history::{CmpOp, Condition, EventKind, FieldPath, FieldTest, Literal, Part, Predicate, Scalar, Scope, Shape, ToolMatch, scale_decimal};
 use paigasus_kernel::tool_policy::{RESERVED_CONTEXT_NAMES, normalise};
 use paigasus_proto::paigasus::iam::v1 as pb;
 use pb::{history_condition, history_predicate, literal_value};
@@ -138,7 +138,7 @@ fn map_field(field: &pb::FieldComparison) -> Result<FieldTest, &'static str> {
         literal_value::Value::LongValue(n) => Literal::Long(*n),
         literal_value::Value::StringValue(s) => Literal::Unbound(Scalar::Str(s.clone())),
         literal_value::Value::BoolValue(b) => Literal::Unbound(Scalar::Bool(*b)),
-        literal_value::Value::DecimalValue(d) => Literal::Unbound(Scalar::Decimal(parse_decimal(d).ok_or("decimal")?)),
+        literal_value::Value::DecimalValue(d) => Literal::Unbound(Scalar::Decimal(scale_decimal(d).ok_or("decimal")?)),
     };
     if !matches!(literal, Literal::Long(_)) && op != CmpOp::Eq {
         return Err("op_not_eq");
@@ -160,22 +160,6 @@ fn map_op(op: i32) -> Result<CmpOp, &'static str> {
         Ok(pb::ComparisonOp::Ne) => Ok(CmpOp::Ne),
         Ok(pb::ComparisonOp::Unspecified) | Err(_) => Err("enum_unknown"),
     }
-}
-
-/// A Cedar decimal literal times 10,000: an optional `-`, digits, `.`, then 1 to 4 digits. The
-/// scaled value must fit `i64`.
-fn parse_decimal(text: &str) -> Option<i64> {
-    let (negative, rest) = match text.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, text),
-    };
-    let (int_part, frac_part) = rest.split_once('.')?;
-    let digits_only = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if !digits_only(int_part) || !digits_only(frac_part) || frac_part.len() > 4 {
-        return None;
-    }
-    let magnitude: i128 = format!("{int_part}{frac_part:0<4}").parse().ok()?;
-    i64::try_from(if negative { -magnitude } else { magnitude }).ok()
 }
 
 #[cfg(test)]
@@ -381,10 +365,31 @@ mod tests {
             })),
             ..ok()
         };
+        let count_with = |predicate: Option<pb::HistoryPredicate>| pb::HistoryCondition {
+            shape: Some(history_condition::Shape::CountWithin(pb::CountWithinShape {
+                predicate,
+                op: pb::ComparisonOp::Gt as i32,
+                threshold: 1,
+            })),
+            ..ok()
+        };
+        let sum_with = |predicate: Option<pb::HistoryPredicate>, field_path: Vec<String>, op: i32| pb::HistoryCondition {
+            shape: Some(history_condition::Shape::SumWithin(pb::SumWithinShape {
+                predicate,
+                field_path,
+                op,
+                threshold: 1,
+            })),
+            ..ok()
+        };
         let long = || Some(literal_value::Value::LongValue(1));
-        vec![
+        let mut cases = vec![
             ("shape_unset", pb::HistoryCondition { shape: None, ..ok() }),
             ("node_unset", with_predicate(pb::HistoryPredicate { node: None })),
+            ("node_unset", with_predicate(negation(pb::HistoryPredicate { node: None }))),
+            ("node_unset", count_with(None)),
+            ("node_unset", sum_with(None, vec!["a".into()], pb::ComparisonOp::Gt as i32)),
+            ("enum_unknown", sum_with(Some(tool("t", false)), vec!["a".into()], 77)),
             (
                 "node_unset",
                 pb::HistoryCondition {
@@ -457,8 +462,6 @@ mod tests {
             ("slot_name", pb::HistoryCondition { slot: "1abc".into(), ..ok() }),
             ("slot_name", pb::HistoryCondition { slot: "a-b".into(), ..ok() }),
             ("slot_name", pb::HistoryCondition { slot: "a b".into(), ..ok() }),
-            ("slot_name", pb::HistoryCondition { slot: "input".into(), ..ok() }),
-            ("slot_name", pb::HistoryCondition { slot: "session".into(), ..ok() }),
             ("slot_clash", pb::HistoryCondition { slot: "floor_slot".into(), ..ok() }),
             ("depth", with_predicate(nested(MAX_PREDICATE_DEPTH + 1))),
             (
@@ -468,7 +471,11 @@ mod tests {
             ("op_not_eq", with_predicate(field(&["a"], pb::ComparisonOp::Lt, Some(literal_value::Value::StringValue("x".into()))))),
             ("op_not_eq", with_predicate(field(&["a"], pb::ComparisonOp::Ne, Some(literal_value::Value::BoolValue(true))))),
             ("op_not_eq", with_predicate(field(&["a"], pb::ComparisonOp::Gt, Some(literal_value::Value::DecimalValue("1.5".into()))))),
-        ]
+        ];
+        for name in RESERVED_CONTEXT_NAMES {
+            cases.push(("slot_name", pb::HistoryCondition { slot: name.into(), ..ok() }));
+        }
+        cases
     }
 
     #[test]
@@ -531,20 +538,6 @@ mod tests {
         ] {
             let c = formerly("s1", field(&["a"], pb::ComparisonOp::Eq, Some(literal_value::Value::DecimalValue(bad.into()))));
             assert_eq!(map_one(c).unwrap_err().reason, "decimal", "literal {bad:?}");
-        }
-    }
-
-    #[test]
-    fn a_decimal_at_the_limits_maps_to_the_scaled_value() {
-        for (text, scaled) in [
-            ("0.0", 0),
-            ("1.0", 10_000),
-            ("-1.25", -12_500),
-            ("922337203685477.5807", i64::MAX),
-            ("-922337203685477.5808", i64::MIN),
-            ("007.5", 75_000),
-        ] {
-            assert_eq!(parse_decimal(text), Some(scaled), "literal {text:?}");
         }
     }
 
