@@ -2,10 +2,12 @@
 
 //! Session history store adapters (SMA-753).
 
+pub mod digest;
 pub mod memory;
 pub mod redis;
 
 pub use self::redis::RedisSessionStore;
+pub use digest::{HistoryKey, HmacHistoryDigester};
 pub use memory::MemorySessionStore;
 
 use std::sync::Arc;
