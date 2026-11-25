@@ -70,6 +70,11 @@ async fn the_operator_key_and_only_anthropic_headers_go_upstream() {
         assert!(rec.headers.get(gone).is_none(), "{gone} must not go upstream");
     }
     assert_ne!(rec.header("user-agent"), Some("u"));
+    // `header()` reads the first value only, so pin the counts: nothing is added to these.
+    for name in ["x-api-key", "content-type", "accept"] {
+        assert_eq!(rec.headers.get_all(name).iter().count(), 1, "{name} must arrive exactly once");
+    }
+    assert!(rec.headers.get_all("x-api-key").iter().all(|v| v != "caller"), "the caller's x-api-key must never arrive");
 }
 
 #[tokio::test]
