@@ -77,6 +77,9 @@ render_one "iam-dpop" --set zones.gateway.enabled=false \
   --set zones.iam.backend.dpop.enabled=true \
   --set 'zones.iam.backend.dpop.forwardedBaseUrls[0]=https://gw.example.test' \
   --set 'zones.iam.backend.dpop.forwardedBaseUrls[1]=https://edge.example.test/api'
+# SMA-753. A byte pin of the history-conditions projection: the env entry and its comment.
+render_one "iam-history-conditions" --set zones.gateway.enabled=false \
+  --set zones.iam.backend.toolPolicies.historyConditions=true
 
 if [ "$ec" -eq 0 ]; then echo "== chart render OK =="; fi
 exit "$ec"

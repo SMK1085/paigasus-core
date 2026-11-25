@@ -14,7 +14,7 @@ the result depend on the order, and server-side apply refuses a duplicate merge 
 list equal to the IAM env entries in backend-deployment.yaml.
 */}}
 {{- define "paigasus.iamReservedEnv" -}}
-IAM_HTTP_ADDR IAM_GRPC_ADDR IAM_MIGRATION__LOCK_WAIT_SECS IAM_DATABASE_URL IAM_AUTHN__ISSUERS IAM_API_KEYS__PEPPER IAM_AUTHN__EXTRA_CA_BUNDLE_PATH IAM_AUTHZ__BOOTSTRAP_ADMINS IAM_AUTHN__DPOP__ENABLED IAM_AUTHN__DPOP__FORWARDED_BASE_URLS
+IAM_HTTP_ADDR IAM_GRPC_ADDR IAM_MIGRATION__LOCK_WAIT_SECS IAM_DATABASE_URL IAM_AUTHN__ISSUERS IAM_API_KEYS__PEPPER IAM_AUTHN__EXTRA_CA_BUNDLE_PATH IAM_AUTHZ__BOOTSTRAP_ADMINS IAM_AUTHN__DPOP__ENABLED IAM_AUTHN__DPOP__FORWARDED_BASE_URLS IAM_TOOL_POLICIES__HISTORY_CONDITIONS
 {{- end -}}
 
 {{/*
@@ -41,7 +41,8 @@ trim a subject, and the match is exact.
 paigasus.validateIamBackend: the refusals for the two values, for oidc.idTokenMarkerClaims and
 oidc.accessTokenRequiredClaims (SMA-703, SMA-731: paigasus.validateClaimNameList and
 paigasus.validateClaimListOverlap below), and for zones.iam.backend.dpop (SMA-700,
-paigasus.validateIamDpop below). paigasus.validate calls it.
+paigasus.validateIamDpop below), and for zones.iam.backend.toolPolicies (SMA-753,
+paigasus.validateIamToolPolicies below). paigasus.validate calls it.
 
 bootstrapAdmins mirrors IamConfig::validate (config.rs, the bootstrap_admins loop): an https
 issuer and a subject that is not empty. It adds one rule that IAM does not have: the issuer must
@@ -107,6 +108,7 @@ Issuer::parse trims.
 {{- include "paigasus.validateClaimNameList" (dict "root" . "key" "accessTokenRequiredClaims" "path" "oidc.accessTokenRequiredClaims" "example" "[\"jti\"]" "reserved" "every token that IAM accepts carries this claim, so the name has no effect") -}}
 {{- include "paigasus.validateClaimListOverlap" . -}}
 {{- include "paigasus.validateIamDpop" . -}}
+{{- include "paigasus.validateIamToolPolicies" . -}}
 {{- end -}}
 
 {{/*
@@ -334,5 +336,39 @@ so the chart is stricter, never looser. A nil value counts as absent.
 {{- if not (or (eq $p.scheme "https") (and (eq $p.scheme "http") $loopback)) -}}
 {{- fail (printf "zones.iam.backend.dpop.forwardedBaseUrls[%d] is %q: use https, or http on localhost, 127.x.x.x or [::1]. IamConfig::validate refuses it, and IAM does not boot" $i $u) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+paigasus.iamHistoryConditions: "true" when zones.iam.backend.toolPolicies.historyConditions is true,
+else "" (SMA-753). The key can be absent or nil under `helm upgrade --reuse-values` from a release
+made before it; then history conditions are off. paigasus.validateIamToolPolicies has already
+refused a value that is not a map or a bool.
+*/}}
+{{- define "paigasus.iamHistoryConditions" -}}
+{{- $tp := dig "toolPolicies" dict .Values.zones.iam.backend -}}
+{{- if and (kindIs "map" $tp) (eq (toString (dig "historyConditions" false $tp)) "true") -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+paigasus.validateIamToolPolicies: the refusals for zones.iam.backend.toolPolicies (SMA-753 P13).
+A value that is not a map, and a historyConditions that is not a bool. A nil value counts as absent.
+*/}}
+{{- define "paigasus.validateIamToolPolicies" -}}
+{{- $tp := dig "toolPolicies" dict .Values.zones.iam.backend -}}
+{{- if kindIs "invalid" $tp -}}
+{{- $tp = dict -}}
+{{- end -}}
+{{- if not (kindIs "map" $tp) -}}
+{{- fail "zones.iam.backend.toolPolicies must be a map with the key historyConditions" -}}
+{{- end -}}
+{{- $hc := dig "historyConditions" false $tp -}}
+{{- if kindIs "invalid" $hc -}}
+{{- $hc = false -}}
+{{- end -}}
+{{- if not (kindIs "bool" $hc) -}}
+{{- fail "zones.iam.backend.toolPolicies.historyConditions must be true or false" -}}
 {{- end -}}
 {{- end -}}

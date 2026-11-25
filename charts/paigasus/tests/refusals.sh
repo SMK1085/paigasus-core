@@ -405,6 +405,17 @@ expect_render "dpop IPv6 loopback http" \
   --set "$DPOP.enabled=true" --set "$DPOP.forwardedBaseUrls[0]=http://[::1]:8088"
 expect_render "dpop reuse-values-no-key" --set "$DPOP=null"
 
+# SMA-753 (spec P13). zones.iam.backend.toolPolicies.historyConditions.
+TP=zones.iam.backend.toolPolicies
+expect_fail "extraEnv sets the history switch" "the chart sets IAM_TOOL_POLICIES__HISTORY_CONDITIONS itself" \
+  --set 'zones.iam.backend.extraEnv[0].name=IAM_TOOL_POLICIES__HISTORY_CONDITIONS' --set 'zones.iam.backend.extraEnv[0].value=x'
+expect_fail "toolPolicies not a map" "zones.iam.backend.toolPolicies must be a map with the key historyConditions" \
+  --set-string "$TP=x"
+expect_fail "historyConditions not a bool" "zones.iam.backend.toolPolicies.historyConditions must be true or false" \
+  --set-string "$TP.historyConditions=yes"
+expect_render "history conditions on" --set "$TP.historyConditions=true"
+expect_render "history conditions reuse-values-no-key" --set "$TP=null"
+
 expect_render "iam only" --set zones.gateway.enabled=false
 expect_render "iam and gateway" --set zones.gateway.enabled=true \
   --set zones.gateway.backend.url=http://gw.example.test:8088
