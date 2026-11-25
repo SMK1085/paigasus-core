@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::json::{Malformed, ResponsesDoc, opt_obj, opt_str, parse_strict, parse_strict_responses};
+use crate::json::{Malformed, ResponsesDoc, opt_obj, opt_str, parse_strict, parse_strict_anthropic_request, parse_strict_responses};
 use crate::report::notice_ref;
 use crate::responses::assembly::tool_call;
 use crate::responses::classify::{ItemClass, item_class};
@@ -222,7 +222,8 @@ pub fn parse_request(format: Format, body: &[u8]) -> ToolTurn {
 pub(crate) fn parse_value(format: Format, body: &[u8]) -> Result<Value, Malformed> {
     match format {
         Format::OpenAiResponses => parse_strict_responses(body, ResponsesDoc::Request),
-        Format::OpenAiChat | Format::AnthropicMessages => parse_strict(body),
+        Format::AnthropicMessages => parse_strict_anthropic_request(body),
+        Format::OpenAiChat => parse_strict(body),
     }
 }
 
@@ -980,6 +981,21 @@ mod tests {
             assert!(!f.definitions.is_empty());
             assert!(f.definitions.iter().all(|d| d.namespace.is_none()));
         }
+    }
+
+    #[test]
+    fn an_anthropic_request_with_user_data_keys_parses() {
+        let props = json!({"properties":{"Name":{},"ID":{}}});
+        for body in [
+            json!({"model":"m","messages":[{"role":"user","content":"hi"}],
+                   "tools":[{"name":"read","input_schema":props,"input_examples":[{"Name":1,"constructor":2}]}]}),
+            json!({"model":"m","messages":[{"role":"user","content":"hi"}],"output_format":{"type":"json_schema","schema":props}}),
+            json!({"model":"m","messages":[{"role":"user","content":"hi"}],"output_config":{"format":{"type":"json_schema","schema":props}}}),
+        ] {
+            assert!(matches!(parse_request(Format::AnthropicMessages, body.to_string().as_bytes()), ToolTurn::Parsed(_)), "{body}");
+        }
+        let bad = json!({"model":"m","messages":[],"Type":"x"});
+        assert!(matches!(parse_request(Format::AnthropicMessages, bad.to_string().as_bytes()), ToolTurn::Unavailable("malformed")));
     }
 
     #[test]

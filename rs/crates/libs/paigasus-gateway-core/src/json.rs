@@ -96,6 +96,15 @@ pub(crate) fn parse_strict(bytes: &[u8]) -> Result<Value, Malformed> {
     parse_with(bytes, Mode::Envelope)
 }
 
+/// Parse an Anthropic Messages request strictly (spec D18). The envelope key rules hold, except
+/// below the user-data subtrees that spec section 15 lists as measured on 2026-11-25
+/// ("Measured 2026-11-25 (D18, user-data subtrees)"): `output_format`, `output_config.format`
+/// and `tools[].input_examples`. `tools[].input_schema` and `input` are data keys already.
+/// Response records and bodies keep `parse_strict`.
+pub(crate) fn parse_strict_anthropic_request(bytes: &[u8]) -> Result<Value, Malformed> {
+    parse_with(bytes, Mode::AnthropicTop)
+}
+
 /// Parse tool argument data strictly (spec D5): JSON validity, no non-finite number, no duplicate
 /// key and no `__proto__` key, at every depth. The envelope key rules (case-folded classifier keys,
 /// `constructor`, `prototype`) do not apply: the classifiers never read inside argument data, and
@@ -126,6 +135,12 @@ enum Mode {
     ResponsesResponse,
     /// Any other object of a Responses document: the Responses key list, no data keys.
     ResponsesEnvelope,
+    /// The top-level object of an Anthropic request (spec D18).
+    AnthropicTop,
+    /// The `output_config` object of an Anthropic request: `format` is data.
+    AnthropicOutputConfig,
+    /// A `tools[]` element of an Anthropic request: `input_examples` is data.
+    AnthropicTool,
 }
 
 /// Which Responses document is parsed. It decides where the data subtrees are (spec § 7.1).
@@ -228,6 +243,16 @@ impl<'de> Visitor<'de> for StrictVisitor {
                 Mode::Envelope => {
                     check_key(&k).map_err(de::Error::custom)?;
                     if DATA_KEYS.contains(&k.as_str()) { Mode::Data } else { Mode::Envelope }
+                }
+                Mode::AnthropicTop | Mode::AnthropicOutputConfig | Mode::AnthropicTool => {
+                    check_key(&k).map_err(de::Error::custom)?;
+                    match (self.0, k.as_str()) {
+                        (Mode::AnthropicTop, "output_format") | (Mode::AnthropicOutputConfig, "format") | (Mode::AnthropicTool, "input_examples") => Mode::Data,
+                        (Mode::AnthropicTop, "output_config") => Mode::AnthropicOutputConfig,
+                        (Mode::AnthropicTop, "tools") => Mode::AnthropicTool,
+                        _ if DATA_KEYS.contains(&k.as_str()) => Mode::Data,
+                        _ => Mode::Envelope,
+                    }
                 }
                 Mode::Data if k == "__proto__" => return Err(de::Error::custom("prototype_key")),
                 Mode::Data => Mode::Data,
@@ -531,5 +556,29 @@ mod tests {
         assert!(check_numbers_responses(&ev_ok, ResponsesDoc::Event).is_ok());
         let req = parse_strict_responses(br#"{"input":[{"x":1e300}],"max_output_tokens":1e300}"#, ResponsesDoc::Request).unwrap();
         assert!(check_numbers_responses(&req, ResponsesDoc::Request).is_err());
+    }
+
+    #[test]
+    fn anthropic_request_data_subtrees_relax_the_key_rules() {
+        let ok = |b: &str| parse_strict_anthropic_request(b.as_bytes()).map(|_| ());
+        assert_eq!(ok(r#"{"tools":[{"name":"t","input_schema":{},"input_examples":[{"Name":1,"constructor":2}]}]}"#), Ok(()));
+        let props = r#"{"properties":{"Name":{},"ID":{}}}"#;
+        assert_eq!(ok(&format!(r#"{{"output_format":{{"type":"json_schema","schema":{props}}}}}"#)), Ok(()));
+        assert_eq!(ok(&format!(r#"{{"output_config":{{"format":{{"type":"json_schema","schema":{props}}}}}}}"#)), Ok(()));
+        assert!(ok(r#"{"Type":"x"}"#).is_err());
+        assert!(ok(r#"{"tools":[{"input_examples":[{"__proto__":1}]}]}"#).is_err());
+        assert!(ok(r#"{"output_format":{"schema":{"__proto__":1}}}"#).is_err());
+        assert!(ok(r#"{"output_config":{"format":{"schema":{"a":1,"a":2}}}}"#).is_err());
+        // Outside the data subtrees the envelope rules hold.
+        assert!(ok(r#"{"output_config":{"Type":"x"}}"#).is_err());
+        assert!(ok(r#"{"tools":[{"Name":"t"}]}"#).is_err());
+        assert!(ok(r#"{"messages":[{"content":[{"type":"tool_use","input":{"Name":1}}]}]}"#).is_ok());
+    }
+
+    /// Measured on the code before D18: the chat parse refuses `Name` below `input_examples`.
+    #[test]
+    fn the_chat_key_rules_do_not_change() {
+        assert_eq!(parse_strict(br#"{"tools":[{"input_examples":[{"Name":1}]}]}"#), Err(Malformed("json")));
+        assert!(parse_strict(br#"{"output_format":{"schema":{"Name":1}}}"#).is_err());
     }
 }

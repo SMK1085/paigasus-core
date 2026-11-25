@@ -166,6 +166,12 @@ impl AnthropicStream {
 }
 
 impl Protocol for AnthropicStream {
+    fn keep_alive(&self) -> &'static [u8] {
+        crate::sse::ANTHROPIC_PING
+    }
+    fn upstream_error_is_terminal(&self) -> bool {
+        true
+    }
     fn step(&mut self, rec: Record, verdicts: &Verdicts) -> Result<Step, StepError> {
         let value = parse_strict(&rec.data)?;
         let ty = value.get("type").and_then(Value::as_str).ok_or(Malformed("type"))?;

@@ -1075,7 +1075,7 @@ mod tests {
         assert!(has_error(&records[1]), "the absolute deadline cut the second hold: {:?}", records[1]);
         assert!(text.contains(r#""name":"fetch_b","input":{}"#), "the second call is allowed and forwarded: {text}");
         assert!(!text.contains(r#""basis":"on_failure""#), "{text}");
-        assert!(text.matches(": keep-alive\n\n").count() >= 2, "keep-alives while the holds wait: {text}");
+        assert!(text.matches("event: ping\ndata: {\"type\":\"ping\"}\n\n").count() >= 2, "ping keep-alives while the holds wait: {text}");
         let on_failure = snapshotter
             .snapshot()
             .into_vec()

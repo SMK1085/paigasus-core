@@ -161,6 +161,11 @@ impl Interceptor {
 
     /// The upstream failed (D17): drop the queue, emit the terminal frame, and end.
     pub fn abort(&mut self) -> Vec<Action> {
+        self.abort_with(self.terminal.clone())
+    }
+
+    /// `abort` with `terminal` as the last frame (D17).
+    fn abort_with(&mut self, terminal: Bytes) -> Vec<Action> {
         if self.ended {
             return Vec::new();
         }
@@ -169,7 +174,7 @@ impl Interceptor {
         self.ended = true;
         let mut out = std::mem::take(&mut self.out);
         out.extend(self.proto.closing_on_abort(&self.verdicts).into_iter().map(Action::Emit));
-        out.push(Action::Emit(self.terminal.clone()));
+        out.push(Action::Emit(terminal));
         out
     }
 
@@ -205,7 +210,7 @@ impl Interceptor {
             }
         }
         if self.holding() && now.saturating_duration_since(self.last_emit) >= self.limits.keepalive {
-            self.emit(Bytes::from_static(sse::KEEP_ALIVE), now);
+            self.emit(Bytes::from_static(self.proto.keep_alive()), now);
         }
         self.settle(now)
     }
@@ -286,7 +291,11 @@ impl Interceptor {
             Err(StepError::AfterEnd) => self.count(Metric::RecordDropped("after_done")),
             Ok(Step::UpstreamError(frame)) => {
                 if !self.queue.is_empty() || self.any_open() {
-                    let acts = self.abort();
+                    let acts = if self.proto.upstream_error_is_terminal() {
+                        self.abort_with(reframe_error(&frame))
+                    } else {
+                        self.abort()
+                    };
                     self.out.extend(acts);
                 } else {
                     self.enqueue(frame, now);
@@ -604,6 +613,19 @@ impl Interceptor {
     fn any_deciding(&self) -> bool {
         self.holds.values().any(|t| matches!(t, Track::Deciding { .. }))
     }
+}
+
+/// The upstream `error` record as one SSE frame: `event: error`, then one `data:` line per line
+/// of the payload (D17). The payload bytes are not changed.
+fn reframe_error(frame: &Frame) -> Bytes {
+    let mut b = b"event: error\n".to_vec();
+    for line in frame.payload.split(|c| *c == b'\n') {
+        b.extend_from_slice(b"data: ");
+        b.extend_from_slice(line);
+        b.push(b'\n');
+    }
+    b.push(b'\n');
+    Bytes::from(b)
 }
 
 #[cfg(test)]
@@ -1449,5 +1471,75 @@ mod tests {
         let wrong = |_: &[ToolCall]| Some(Ok(vec![DecidedCall::new(Decision::Allow, None).with_decision_id(Uuid::from_u128(7)); 2]));
         let acts = run_actions(Format::OpenAiChat, limits(), &chat, &wrong);
         assert!(reported(&acts).iter().all(|r| r.decision_id.is_none()));
+    }
+
+    const ANTHROPIC_ERROR: &str = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+
+    #[test]
+    fn an_anthropic_hold_keeps_alive_with_a_ping_event() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::AnthropicMessages, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(tool_start(0, "read").as_bytes(), t0);
+        let ping = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
+        let acts = i.tick(t0 + Duration::from_secs(10));
+        let emits: Vec<&Action> = acts.iter().filter(|a| matches!(a, Action::Emit(_))).collect();
+        assert_eq!(emits, vec![&Action::Emit(ping.clone())]);
+        let acts = i.tick(t0 + Duration::from_secs(11));
+        assert!(!acts.contains(&Action::Emit(ping)), "one per interval");
+    }
+
+    #[test]
+    fn the_chat_keep_alive_is_still_a_comment() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(call(0, 0, "read", "{").as_bytes(), t0);
+        let acts = i.tick(t0 + Duration::from_secs(10));
+        assert!(acts.contains(&Action::Emit(Bytes::from_static(b": keep-alive\n\n"))));
+        let acts = i.tick(t0 + Duration::from_secs(11));
+        assert!(!acts.contains(&Action::Emit(Bytes::from_static(b": keep-alive\n\n"))), "one per interval");
+    }
+
+    #[test]
+    fn an_anthropic_upstream_error_mid_hold_is_the_terminal_frame() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::AnthropicMessages, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(tool_start(0, "read").as_bytes(), t0);
+        let acts = i.push(ANTHROPIC_ERROR.as_bytes(), t0);
+        assert_eq!(acts.last(), Some(&Action::Emit(Bytes::from_static(ANTHROPIC_ERROR.as_bytes()))), "{acts:?}");
+        let out = emitted(&acts);
+        assert!(!out.contains("terminal"), "the configured terminal frame is not emitted: {out}");
+        assert_eq!(out.matches("event: error").count(), 1, "{out}");
+        assert!(i.is_finished());
+    }
+
+    #[test]
+    fn an_anthropic_upstream_error_payload_lines_become_data_lines() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::AnthropicMessages, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(tool_start(0, "read").as_bytes(), t0);
+        let acts = i.push(b"event: error\ndata: {\"type\":\"error\",\ndata: \"error\":{\"message\":\"x\"}}\n\n", t0);
+        assert_eq!(
+            acts.last(),
+            Some(&Action::Emit(Bytes::from_static(b"event: error\ndata: {\"type\":\"error\",\ndata: \"error\":{\"message\":\"x\"}}\n\n")))
+        );
+    }
+
+    #[test]
+    fn a_transport_failure_still_emits_the_terminal_frame() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::AnthropicMessages, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(tool_start(0, "read").as_bytes(), t0);
+        let acts = i.abort();
+        assert_eq!(acts.last(), Some(&Action::Emit(Bytes::from_static(TERMINAL))), "{acts:?}");
+    }
+
+    #[test]
+    fn the_chat_upstream_error_still_aborts() {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0);
+        i.push(call(0, 0, "read", "{").as_bytes(), t0);
+        let acts = i.push(data(json!({"error":{"message":"boom"}})).as_bytes(), t0);
+        assert_eq!(acts.last(), Some(&Action::Emit(Bytes::from_static(TERMINAL))), "{acts:?}");
+        assert!(!emitted(&acts).contains("boom"));
     }
 }
