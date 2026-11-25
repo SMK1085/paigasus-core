@@ -21,6 +21,9 @@ sha2 = "0.11"
 # The kernel's tool-policy types (SMA-752 Task 7).
 paigasus-kernel = { workspace = true, features = ["tool-policy"] }
 thiserror = { workspace = true }
+# The history conditions of a compiled set arrive in their proto form (SMA-753). The decision-report
+# reasons are also checked against the canonical error registry (SMA-752 D10).
+paigasus-proto = { workspace = true }
 # The decision record's ids and org (SMA-755). No clock and no entropy: the caller passes both in.
 uuid = { workspace = true }
 
@@ -28,8 +31,6 @@ uuid = { workspace = true }
 # The differential oracle's hostile-stream generators (spec § 8.1). `bytes` and `serde_json` are
 # already normal dependencies, which integration tests can use.
 proptest = { workspace = true }
-# The decision-report reasons are checked against the canonical error registry (SMA-752 D10).
-paigasus-proto = { workspace = true }
 
 [lints]
 workspace = true
