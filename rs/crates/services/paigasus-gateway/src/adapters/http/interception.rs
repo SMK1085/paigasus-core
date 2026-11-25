@@ -165,7 +165,8 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
         record(Metric::Decision { decision, basis: basis.as_str() });
     }
     // One record per report entry, at the same place as the header (SMA-755 P-1).
-    let reported = calls.reported(&decisions, basis);
+    let plan = ctx.policy.as_ref().and_then(|p| p.history.as_ref()).map(|h| Arc::clone(h.fields()));
+    let reported = calls.reported(&decisions, basis, plan.as_deref());
     if let Some(recorder) = &ti.recorder {
         for r in &reported {
             recorder.record_response(&ctx, r);
@@ -335,7 +336,8 @@ fn relay(
     prelude: Vec<Chunk>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     let now = Instant::now();
-    let icpt = Interceptor::new(format, limits, Bytes::from_static(terminal), now);
+    let plan = ctx.policy.as_ref().and_then(|p| p.history.as_ref()).map(|h| Arc::clone(h.fields()));
+    let icpt = Interceptor::new(format, limits, Bytes::from_static(terminal), now).with_field_plan(plan);
     let sleep = Box::pin(tokio::time::sleep(limits.keepalive));
     let start = Relay {
         inner: Some(inner),

@@ -611,7 +611,7 @@ mod tests {
                 }
             })
             .collect();
-        chat_body(items).reported(&decided, Basis::Decider)
+        chat_body(items).reported(&decided, Basis::Decider, None)
     }
 
     fn entry(name: &str, decision: ReportDecision) -> ReportEntry {
@@ -874,14 +874,14 @@ mod tests {
             {"type": "local_shell_call", "id": "lsh_1", "call_id": "call_1", "action": {"type": "exec", "command": ["ls"]}, "status": "completed"}
         ]});
         let parsed = parse_body(Format::OpenAiResponses, body.to_string().as_bytes(), 1 << 20).expect("body");
-        let allow = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(u(1))], Basis::Decider);
+        let allow = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(u(1))], Basis::Decider, None);
         let item = settle_plan(&allow, &|_| true, &mut counting_mint()).settle.remove(0);
         assert_eq!((item.verdict, item.call_id.as_deref(), item.item_id.as_deref()), (EventVerdict::Allow, Some("call_1"), Some("lsh_1")));
-        let deny = parsed.reported(&[DecidedCall::new(BLOCK, None).with_decision_id(u(1))], Basis::Decider);
+        let deny = parsed.reported(&[DecidedCall::new(BLOCK, None).with_decision_id(u(1))], Basis::Decider, None);
         let item = settle_plan(&deny, &|_| true, &mut counting_mint()).settle.remove(0);
         assert_eq!((item.verdict, item.call_id, item.item_id), (EventVerdict::Deny, None, None));
         // No decision: the append carries both links.
-        let none = parsed.reported(&[DecidedCall::new(Decision::Allow, None)], Basis::Decider);
+        let none = parsed.reported(&[DecidedCall::new(Decision::Allow, None)], Basis::Decider, None);
         let call = settle_plan(&none, &|_| true, &mut counting_mint()).append.remove(0);
         assert_eq!((call.call_id.as_deref(), call.item_id.as_deref()), (Some("call_1"), Some("lsh_1")));
     }

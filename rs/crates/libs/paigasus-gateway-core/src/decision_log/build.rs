@@ -518,6 +518,20 @@ mod tests {
     }
 
     #[test]
+    fn the_record_holds_no_field() {
+        use paigasus_kernel::tool_policy::history::extract_fields;
+        let plan = crate::policy::test_plan("send", "amount");
+        let paths = plan.paths_for("send");
+        let fields = extract_fields(&paigasus_kernel::tool_policy::ToolInput::Json(r#"{"amount":"TOPSECRETVALUE"}"#.to_owned()), &paths);
+        let plain = ReportedCall::new(entry(ReportDecision::Allow, Some(Basis::Decider), None), Some(call(ToolCallKind::Function)), None);
+        let with = plain.clone().with_fields(Some(fields));
+        let (a, b) = (build_response(header(None), &ctx(), &plain), build_response(header(None), &ctx(), &with));
+        assert_eq!(a, b, "the builder ignores the fields");
+        assert!(!format!("{b:?}").contains("TOPSECRETVALUE"));
+        assert!(!format!("{with:?}").contains("TOPSECRETVALUE"), "Debug of the reported call prints no value");
+    }
+
+    #[test]
     fn a_record_has_no_arguments_text() {
         let r = ReportedCall::new(entry(ReportDecision::Allow, Some(Basis::Decider), None), Some(call(ToolCallKind::Function)), None);
         let rec = build_response(header(None), &ctx(), &r);

@@ -278,7 +278,7 @@ async fn an_unreserved_allowed_call_links_on_redis(fail_reserve: bool) {
     let ctx = DecisionContext::new(SVC_PRINCIPAL, SVC_ORG_PRN, None).with_request(None, "chat", "m");
     history.reserve(&ctx, &first, &parsed.calls, &[decision_id]).await;
     assert!(!first.is_reserved(decision_id));
-    let reported = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(decision_id)], Basis::Decider);
+    let reported = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(decision_id)], Basis::Decider, None);
     history.settle(&ctx.clone().with_session(first.clone()), &reported);
     history.tasks().close();
     history.tasks().wait().await;

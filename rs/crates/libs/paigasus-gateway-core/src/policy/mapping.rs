@@ -5,9 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use paigasus_kernel::detect::{DETECTOR_KERNEL, Finding, Severity};
+use paigasus_kernel::tool_policy::history::{ExtractedFields, extract_fields};
 use paigasus_kernel::tool_policy::{Declared, NAME_COLLISION, ToolInput, ToolInvocation, normalise};
 use serde_json::Value;
 
+use crate::policy::history::FieldPlan;
 use crate::turn::{ToolDefinition, ToolTurn};
 use crate::types::{Format, ToolCall, ToolCallKind};
 
@@ -52,6 +54,15 @@ pub(crate) fn input_for(kind: ToolCallKind, arguments: &str) -> ToolInput {
         | ToolCallKind::ToolSearch
         | ToolCallKind::McpApprovalRequest => ToolInput::Json(arguments.to_owned()),
     }
+}
+
+/// The stored fields of one call under a field plan (SMA-753 P3). `None` when no plan applies.
+/// The values stay in memory until the report site digests them; no record holds them.
+#[must_use]
+pub(crate) fn call_fields(call: &ToolCall, plan: Option<&FieldPlan>) -> Option<ExtractedFields> {
+    let plan = plan?;
+    let paths = plan.paths_for(&normalise(&call.display_name()));
+    Some(extract_fields(&input_for(call.kind, &call.arguments), &paths))
 }
 
 /// Whether a call of this kind carries JSON arguments that a definition's JSON schema describes.
@@ -112,6 +123,18 @@ pub fn call_findings(call: &ToolCall, collisions: &BTreeSet<String>) -> Vec<Find
     } else {
         Vec::new()
     }
+}
+
+/// A field plan that stores `path` for the tool `tool`, for the tests of the report sites.
+#[cfg(test)]
+pub(crate) fn test_plan(tool: &str, path: &str) -> FieldPlan {
+    use paigasus_kernel::tool_policy::history::{Catalog, CmpOp, Condition, FieldPath, FieldTest, Literal, Part, Predicate, Scope, Shape, ToolMatch};
+    let path = FieldPath::new(path.split('.').map(str::to_owned).collect()).expect("path");
+    let predicate = Predicate::AllOf(
+        Box::new(Predicate::Tool(ToolMatch::NameKey(tool.to_owned()))),
+        Box::new(Predicate::Field(FieldTest::new(path, CmpOp::Gt, Literal::Long(1)))),
+    );
+    FieldPlan::of(&[Condition::new("s", Part::Tenant, Scope::Session, 1000, Shape::Formerly { predicate })], &Catalog::unknown())
 }
 
 #[cfg(test)]

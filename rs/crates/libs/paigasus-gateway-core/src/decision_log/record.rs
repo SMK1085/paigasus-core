@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use paigasus_kernel::CedarUid;
 use paigasus_kernel::detect::{Finding, Severity};
+use paigasus_kernel::tool_policy::history::ExtractedFields;
 use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, FORGED_HISTORY, HISTORY_TRUNCATED, MIXED_SESSIONS, NAME_COLLISION, PolicyRef, SessionInfo, UNPARSED_ARGUMENTS, Verdict};
 use uuid::Uuid;
 
@@ -302,6 +303,10 @@ pub struct ReportedCall {
     /// The id that the decider gave the decision of this call. `None` when the decision vector
     /// is not aligned with the calls, or when the decider gave no id.
     pub decision_id: Option<Uuid>,
+    /// The values at the planned paths of this call (SMA-753 P3). `None` when no field plan
+    /// applies. The report site digests them for the history append. A decision record never
+    /// holds them (ADR-0027 (i)), and `Debug` prints no value.
+    pub fields: Option<ExtractedFields>,
 }
 
 impl ReportedCall {
@@ -312,7 +317,15 @@ impl ReportedCall {
             call,
             detail,
             decision_id: None,
+            fields: None,
         }
+    }
+
+    /// Set the stored fields of the call.
+    #[must_use]
+    pub fn with_fields(mut self, fields: Option<ExtractedFields>) -> Self {
+        self.fields = fields;
+        self
     }
 
     /// Set the decision id of the call.
