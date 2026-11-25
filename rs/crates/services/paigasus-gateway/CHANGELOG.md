@@ -18,6 +18,11 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   turn them on: `[upstream.anthropic]` and `[messages]`. With `[messages] enabled = false`, the
   default, the routes answer 404. See `docs/ops/RUNBOOK-anthropic-messages.md` (SMA-750).
 
+### Changed
+
+- The OpenAI upstream client no longer follows redirects. An upstream 3xx answer now gives a 502
+  `UpstreamUnavailable` (SMA-750).
+
 ## [0.3.0] - 2026-11-20
 
 ### Added

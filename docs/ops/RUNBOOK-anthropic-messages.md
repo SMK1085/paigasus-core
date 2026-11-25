@@ -10,7 +10,7 @@ The gateway does not translate the request to the OpenAI format.
 
 ## 1. Configuration
 
-The routes are off by default. With `[messages] enabled = false`, the three routes answer 404.
+The routes are off by default. With `[messages] enabled = false`, the three routes answer 404. The 404 body is not the same on each route (section 1.3).
 
 ### 1.1 Table `[upstream.anthropic]`
 
@@ -32,12 +32,17 @@ The routes are off by default. With `[messages] enabled = false`, the three rout
 | `max_held_bytes` | `33554432` | The largest total of held bytes of one stream. |
 | `max_hold_secs` | `600` | The longest hold of one tool call. The maximum is `86400`. |
 
-`[upstream.openai]` stays required. `/readyz` reports both upstreams.
+`[upstream.openai]` stays required. `/readyz` checks IAM only. It does not check either upstream.
 
 ### 1.3 Roll back
 
 Set `[messages] enabled = false` (or `GATEWAY_MESSAGES__ENABLED=false`) and restart the gateway.
-The three routes then answer 404 in the Anthropic error format. The OpenAI routes do not change.
+Then the routes answer 404, but the body differs:
+
+- `POST /v1/messages` and `POST /v1/messages/count_tokens` answer the Anthropic 404 error format.
+- `GET /v1/models` is not mounted. It answers the plain unknown-path 404.
+
+The OpenAI routes do not change.
 
 ## 2. Connect Claude Code
 
@@ -67,6 +72,11 @@ Other settings:
   `GET /v1/models`.
 
 `GET /v1/models` lists every model of the operator account. It does not filter by tenant.
+
+`GET /v1/models` needs the `anthropic-version` header, also when `[messages]` is on. Claude Code
+sends it. If a caller sends no `anthropic-version`, the gateway answers the OpenAI-envelope 404.
+It sends no credential challenge. A 404 from `/v1/models` with a working setup is the first
+thing to check.
 
 ## 3. Known gaps
 
