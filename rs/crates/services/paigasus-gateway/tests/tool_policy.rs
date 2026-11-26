@@ -1858,7 +1858,7 @@ mod detectors {
     // The two-hold case of § 7.4 (D35, S3) is `two_holds_with_a_slow_detector_use_the_absolute_deadline`
     // in `src/adapters/http/interception.rs`. An OpenAI chat stream carries tool calls in choice 0
     // only, and a Responses stream has one hold, so no route of the router has two holds. Only an
-    // Anthropic stream has, and the gateway has no Anthropic route yet (SMA-750).
+    // Anthropic stream has, and `tests/messages_interception.rs` covers it through `/v1/messages`.
 
     // --- § 7.4 errors and panics -----------------------------------------------------------------
 

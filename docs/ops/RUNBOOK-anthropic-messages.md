@@ -114,10 +114,12 @@ not only `/v1/messages`.
 
 Do these steps when the alert fires:
 
-1. Find the route. Look at the gateway log lines of the time of the alert. Check the `endpoint`
-   field. If the route is `messages`, continue with step 2.
-2. Check the `anthropic-beta` values and the Claude Code version in the log. A new Claude Code
-   version or a new beta can send a block or event type that the gateway does not know.
+1. Find the time window of the alert. No log line names the route of a dropped record, and the
+   counter has no `endpoint` label. Look at the `chat completion proxied` log lines of that
+   window. If some of them have `endpoint="messages"`, the cause can be the Anthropic route.
+2. Read the `anthropic_beta` field of those lines. The gateway does not log the Claude Code
+   version. A new beta value, or a Claude Code update in your team at that time, can send a block
+   or event type that the gateway does not know.
 3. Check if the user sees a lost tool call or a stopped stream. A dropped record is not
    forwarded to the caller.
 4. If the cause is a new Anthropic type, report it to the gateway team. The fix is a code change.

@@ -556,8 +556,9 @@ in CORE `tests/fixtures/anthropic/recorded/` (streams, timing) and GW `tests/fix
   JSON stays valid. A test or a mock that compares bytes must keep this in mind.
 - Measured 2026-11-25 (errors and headers): a `prompt is too long` request gives status 400, type
   `invalid_request_error`, message `prompt is too long: 6300057 tokens > 1000000 maximum`. The
-  kept response headers of every answer are `content-type` and `request-id` only. No answer had
-  `retry-after` or `x-should-retry`.
+  kept response headers of every answer are `content-type` and `request-id`, and the seven
+  recorded 400 answers (`prompt_too_long` and the six `rejected_5_5_*` files) also have
+  `x-should-retry: false`. No answer had `retry-after`.
 - Measured 2026-11-25 (`count_tokens` and models): `count_tokens` answers `{"input_tokens": N}`.
   `GET /v1/models?limit=1000` answers `data`, `has_more`, `first_id`, `last_id` with 15 models.
 - Not measured 2026-11-25, 429 with its headers: 200 `count_tokens` calls (8 in parallel) gave no
@@ -578,6 +579,19 @@ budget. A test decider blocked `Bash` calls that run `rm`. The test fake IAM aut
 caller, because no local real IAM exists (no IdP for the admin bootstrap). The real IAM path is
 covered by the route tests with the same fake. A local recording proxy captured the raw Anthropic
 traffic. The harness was not committed.
+
+The request-side `[tool_policy]` did not run in Task 14. The harness used a test decider for the
+interception, and `tool_policy` was `None`. So the 9 sessions did not measure the policy rewrite
+of D9 or the refusal of a request. D18 on real Claude Code request bodies was measured after the
+sessions, by replay (next paragraph).
+
+D18 replay (2026-11-26): the 16 recorded `POST /v1/messages` request bodies of the 9 sessions went
+through `parse_request(Format::AnthropicMessages, ..)` of `paigasus-gateway-core`. All 16 gave
+`ToolTurn::Parsed`, and none gave `Unavailable`. No subtree was refused. The bodies were 88 bytes
+(one probe) and 87 808 to 139 889 bytes (15 turns). They had 12 or 14 tool definitions, 0 to 3
+prior tool calls, and no server tool. The bodies are the parsed JSON values of the recording, not
+the raw bytes, so a duplicate key in a raw body is not covered. The replay was a throwaway test and
+is not committed, because the bodies hold a real session.
 
 Results (9 sessions):
 
