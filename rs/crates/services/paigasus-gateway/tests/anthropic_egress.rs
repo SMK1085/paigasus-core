@@ -208,3 +208,19 @@ async fn debug_never_leaks_the_anthropic_key() {
     let rendered = format!("{client:?}");
     assert!(!rendered.contains(KEY), "{rendered}");
 }
+
+#[test]
+fn a_key_or_version_that_is_not_a_header_value_is_an_error_not_an_empty_header() {
+    for (key, version, setting) in [("bad-key-body\n", "2023-06-01", "api_key"), (KEY, "2023\n06", "default_version")] {
+        let cfg = AnthropicConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: SecretString::from(key.to_string()),
+            extra_ca_bundle_path: None,
+            default_version: version.to_string(),
+            non_stream_timeout_secs: 600,
+        };
+        let err = AnthropicClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(300)).expect_err("must refuse");
+        assert!(matches!(err, UpstreamError::InvalidHeaderValue { setting: s, .. } if s == setting), "{err:?}");
+        assert!(!err.to_string().contains("bad-key-body"), "{err}");
+    }
+}

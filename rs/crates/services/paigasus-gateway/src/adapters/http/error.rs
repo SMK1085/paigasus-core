@@ -192,9 +192,12 @@ impl From<UpstreamError> for GatewayError {
     fn from(err: UpstreamError) -> Self {
         match err {
             UpstreamError::Timeout { .. } => GatewayError::UpstreamTimeout,
-            UpstreamError::Connect { .. } | UpstreamError::Transport { .. } | UpstreamError::Build { .. } | UpstreamError::Redirect { .. } | UpstreamError::CaBundle { .. } => {
-                GatewayError::UpstreamUnavailable
-            }
+            UpstreamError::Connect { .. }
+            | UpstreamError::Transport { .. }
+            | UpstreamError::Build { .. }
+            | UpstreamError::Redirect { .. }
+            | UpstreamError::CaBundle { .. }
+            | UpstreamError::InvalidHeaderValue { .. } => GatewayError::UpstreamUnavailable,
         }
     }
 }

@@ -13,7 +13,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, StatusCode};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 
 use crate::adapters::upstream::{Provider, ResponseHead, UpstreamError, UpstreamResponse, build_client, classify};
 use crate::config::AnthropicConfig;
@@ -57,7 +57,8 @@ impl Forward {
 pub struct AnthropicClient {
     http: reqwest::Client,
     base_url: String,
-    api_key: SecretString,
+    /// The `x-api-key` value, checked in `new` and marked sensitive.
+    api_key: HeaderValue,
     default_version: HeaderValue,
     non_stream_timeout: Duration,
 }
@@ -68,12 +69,21 @@ impl AnthropicClient {
     pub fn new(cfg: &AnthropicConfig, connect_timeout: Duration, stream_idle_timeout: Duration) -> Result<Self, UpstreamError> {
         let non_stream_timeout = Duration::from_secs(cfg.non_stream_timeout_secs);
         let http = build_client(Provider::Anthropic, cfg.extra_ca_bundle_path.as_deref(), connect_timeout, stream_idle_timeout.max(non_stream_timeout))?;
-        // `AnthropicConfig::validate` has checked the value; the fallback only guards a direct caller.
-        let default_version = HeaderValue::from_str(&cfg.default_version).unwrap_or_else(|_| HeaderValue::from_static("2023-06-01"));
+        // `AnthropicConfig::validate` checks both values at boot. A direct caller gets an error too.
+        let default_version = HeaderValue::from_str(&cfg.default_version).map_err(|_| UpstreamError::InvalidHeaderValue {
+            provider: Provider::Anthropic,
+            setting: "default_version",
+        })?;
+        // The real key is exposed only to build this header value.
+        let mut api_key = HeaderValue::from_str(cfg.api_key.expose_secret()).map_err(|_| UpstreamError::InvalidHeaderValue {
+            provider: Provider::Anthropic,
+            setting: "api_key",
+        })?;
+        api_key.set_sensitive(true);
         Ok(Self {
             http,
             base_url: cfg.base_url.trim_end_matches('/').to_owned(),
-            api_key: cfg.api_key.clone(),
+            api_key,
             default_version,
             non_stream_timeout,
         })
@@ -108,10 +118,7 @@ impl AnthropicClient {
         let is_get = method == Method::GET;
         let accept = if stream { "text/event-stream" } else { "application/json" };
 
-        // The real key is exposed only to build this header value.
-        let mut key = HeaderValue::from_str(self.api_key.expose_secret()).unwrap_or_else(|_| HeaderValue::from_static(""));
-        key.set_sensitive(true);
-        let mut request = self.http.request(method, url).header("x-api-key", key).header(ACCEPT, accept);
+        let mut request = self.http.request(method, url).header("x-api-key", self.api_key.clone()).header(ACCEPT, accept);
         if !is_get {
             request = request.header(CONTENT_TYPE, "application/json").body(body);
         }

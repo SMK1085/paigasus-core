@@ -240,6 +240,12 @@ impl AnthropicConfig {
         if self.api_key.expose_secret().is_empty() {
             return Err("upstream.anthropic.api_key must not be empty (set GATEWAY_UPSTREAM__ANTHROPIC__API_KEY)".to_string());
         }
+        // The key becomes the `x-api-key` header value. A value that is not a valid header value
+        // (for example a trailing newline) would fail on every request. The key is not trimmed
+        // and never appears in the message.
+        if axum::http::HeaderValue::from_str(self.api_key.expose_secret()).is_err() {
+            return Err("upstream.anthropic.api_key has an invalid character (a header value cannot hold a newline or a control character; remove it from the secret)".to_string());
+        }
         if axum::http::HeaderValue::from_str(&self.default_version).is_err() || self.default_version.trim().is_empty() {
             return Err(format!("upstream.anthropic.default_version is not a valid header value: {:?}", self.default_version));
         }
@@ -2557,6 +2563,19 @@ mod tests {
         let cfg = tp_load(&anthropic_toml("").replace("sk-ant-test", "")).expect("loads");
         let err = cfg.validate().expect_err("empty key");
         assert!(err.contains("upstream.anthropic.api_key"), "{err}");
+    }
+
+    #[test]
+    fn an_anthropic_key_that_is_not_a_header_value_fails_without_printing_it() {
+        // A trailing newline (a Kubernetes secret made from a file) is the usual cause. The key
+        // is not trimmed: trimming would hide a fault in the secret store.
+        for bad in ["sk-ant-secret-body\\n", "sk-ant-secret-body\\r", "sk-ant-\\u0001-secret-body"] {
+            let cfg = tp_load(&anthropic_toml("").replace("sk-ant-test", bad)).expect("loads");
+            let err = cfg.validate().expect_err("invalid header value");
+            assert!(err.contains("upstream.anthropic.api_key"), "{err}");
+            assert!(err.contains("invalid character"), "{err}");
+            assert!(!err.contains("secret-body"), "the key must not appear in the error: {err}");
+        }
     }
 
     #[test]

@@ -128,6 +128,9 @@ pub enum UpstreamError {
     /// empty or unparseable platform trust store is a reachable cause (SMA-558 D1).
     #[error("failed to build the {provider} HTTP client — this can also mean the platform trust store contains no parseable certificates")]
     Build { provider: Provider, source: reqwest::Error },
+    /// A configured header value is not valid for an HTTP header. The message never holds the value.
+    #[error("the {provider} {setting} is not a valid HTTP header value")]
+    InvalidHeaderValue { provider: Provider, setting: &'static str },
     /// Failed to establish the connection to the upstream (DNS / TCP / TLS handshake).
     #[error("failed to connect to the {provider} upstream")]
     Connect { provider: Provider, source: reqwest::Error },
