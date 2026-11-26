@@ -45,7 +45,7 @@ pub struct DecodedBody {
 /// copies everything from `,"f":` or `,"b":` up to the closing brace into the result body. A
 /// member added after them would be copied too; `the_stored_fields_are_the_last_members` reds.
 pub fn encode_body(id: Uuid, ts_ms: u64, kind: EventKind, tool: &str, stored: Option<(&Fields, Option<KeyId>)>) -> String {
-    let mut out = format!(r#"{{"v":{BODY_VERSION},"id":"{id}","ts":{ts_ms},"k":"{}","t":{}"#, kind.as_str(), Value::String(tool.to_owned()));
+    let mut out = format!(r#"{}{id}","ts":{ts_ms},"k":"{}","t":{}"#, id_prefix(), kind.as_str(), Value::String(tool.to_owned()));
     if let Some((fields, key)) = stored {
         match fields {
             Fields::Values(map) => {
@@ -62,6 +62,17 @@ pub fn encode_body(id: Uuid, ts_ms: u64, kind: EventKind, tool: &str, stored: Op
     }
     out.push('}');
     out
+}
+
+/// The text of every body before its id: `{"v":1,"id":"`.
+fn id_prefix() -> String {
+    format!(r#"{{"v":{BODY_VERSION},"id":""#)
+}
+
+/// The byte offset of the id in every body that `encode_body` writes. The id is the 36-character
+/// hyphenated text of the uuid. The Redis window read compares these 36 bytes with the member.
+pub fn id_offset() -> usize {
+    id_prefix().len()
 }
 
 fn encode_field(field: &Field) -> Value {
@@ -179,6 +190,18 @@ mod tests {
         assert!(unparsed.ends_with(r#""t":"send","b":1}"#), "{unparsed}");
         let head = encode_body(id, 42, EventKind::Result, "send", None);
         assert!(head.ends_with(r#""t":"send"}"#), "{head}");
+    }
+
+    /// The Redis window read checks the member against these bytes of the body.
+    #[test]
+    fn the_id_is_at_the_id_offset_of_every_body() {
+        let id = Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0000_0042);
+        let at = id_offset();
+        assert_eq!(at, r#"{"v":1,"id":""#.len());
+        for stored in [Some((&sample(), Some(KeyId::new([1; 8])))), Some((&Fields::Unparsed, None)), None] {
+            let body = encode_body(id, 7, EventKind::Call, r#"x","id":"y"#, stored);
+            assert_eq!(&body[at..at + 36], id.to_string(), "{body}");
+        }
     }
 
     #[test]

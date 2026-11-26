@@ -31,7 +31,11 @@
 //! The window read (spec P4) runs at the end of a reserve, after its writes, so the reply holds the
 //! pending events of the reserve. It reads at most `MAX_READ_SETS` sets and `MAX_READ_EVENTS`
 //! events: the set that passes a limit and every later set come back truncated, with no event. A
-//! member whose `e:` body is gone is skipped and counted (spec P10).
+//! member whose `e:` body is gone is skipped and counted (spec P10). The reply carries the body and
+//! the verdict of each event, not the member or the score: the adapter takes the id and the time
+//! from the body. The script checks the body id against the member, and the read fails closed on a
+//! body that names another id. The body time is trusted as the score, as the `v` and `f` fields of
+//! the `e:` hash are trusted: every write puts one `now_ms` into both.
 //!
 //! The body `b` (spec P3, `body.rs`) keeps `v: 1` and has these members: `id`, `ts`, `k`, `t`, and
 //! then the stored fields of the call: `f` (path to value) and `kid` (the hex key id), or `b: 1`
@@ -54,7 +58,6 @@
 //! The connection is `paigasus_redis::connect` with the SMA-476 breaker; its series carry the
 //! gateway's names and `role="tool_history"`.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use paigasus_kernel::tool_policy::history::{Fields, KeyId, SetTool};
@@ -62,7 +65,7 @@ use paigasus_observability::names;
 use paigasus_redis::{BreakerMetrics, RedisHandle};
 use uuid::Uuid;
 
-use super::body::{decode_body, decode_error, encode_body};
+use super::body::{decode_body, decode_error, encode_body, id_offset};
 use crate::domain::limits::UnavailableKind;
 use crate::domain::tool_history::{
     AppendReply, AppendRequest, CallLink, EventKind, EventVerdict, Histories, HistoryStoreError, KEY_TTL_SECS, LookupReply, LookupRequest, MAX_EVENTS_PER_TOOL, MAX_INDEXED_TOOLS, MAX_READ_EVENTS,
@@ -102,7 +105,8 @@ const APPEND_SCRIPT: &str = concat!(
     r#"
 -- ARGV: now_ms, retention_ms, cap, ttl_secs, window_from ('' = none), turn ('' = no touch),
 --       session, c-link mode ('keep'|'replace'), guard ('0'|'1'), H, T, N,
---       max indexed tools, max read sets, max read events, the e: key prefix,
+--       max indexed tools, max read sets, max read events, the e: key prefix, the byte offset of
+--       the id in a body (`id_offset` in body.rs),
 --       then per tool (2 values): tool digest, tool name,
 --       then per event (6 values): id, body, tool index (1..T), verdict, d-link count, c-link count,
 --       then R (the number of read sets; only read when window_from is set),
@@ -137,7 +141,8 @@ local max_tools = tonumber(ARGV[13])
 local max_sets = tonumber(ARGV[14])
 local max_events = tonumber(ARGV[15])
 local eprefix = ARGV[16]
-local A0 = 16
+local idat = tonumber(ARGV[17])
+local A0 = 17
 
 local digests, names, members = {}, {}, {}
 for t = 1, T do
@@ -327,9 +332,11 @@ end
 -- back truncated with no event and no mark. An entry is {set index (1..R), truncated, mark ('' =
 -- none), then 2 values per event: body, verdict}. The member and the score are not sent: every
 -- write puts the member into the body `id` and the score into the body `ts`, so the adapter takes
--- both from the body (Task 19b: 20 % less server time, 32 % less reply). The adapter checks the
--- index against the request order. A member whose e: body is gone is skipped and counted.
-local window, missing = {}, 0
+-- both from the body. The script checks the body id (36 bytes at `idat`) against the member, and
+-- counts a body that names another id as corrupt; the adapter fails the read on a corrupt body.
+-- The adapter checks the index against the request order. A member whose e: body is gone is
+-- skipped and counted.
+local window, missing, corrupt = {}, 0, 0
 if window_from ~= '' then
   local R = tonumber(ARGV[a + 1])
   local read_events, stopped = 0, false
@@ -367,11 +374,13 @@ if window_from ~= '' then
           local m = redis.call('ZRANGEBYSCORE', h, window_from, '+inf')
           for p = 1, #m do
             local f = redis.call('HMGET', eprefix .. m[p], 'b', 'v')
-            if f[1] and f[2] then
+            if not (f[1] and f[2]) then
+              missing = missing + 1
+            elseif string.sub(f[1], idat + 1, idat + 36) ~= m[p] then
+              corrupt = corrupt + 1
+            else
               entry[#entry + 1] = f[1]
               entry[#entry + 1] = f[2]
-            else
-              missing = missing + 1
             end
           end
         end
@@ -381,7 +390,7 @@ if window_from ~= '' then
   end
 end
 
-local out = {tostring(written), tostring(trimmed_retention), tostring(trimmed_cap), tostring(missing)}
+local out = {tostring(written), tostring(trimmed_retention), tostring(trimmed_cap), tostring(missing), tostring(corrupt)}
 for _, v in ipairs(flagged) do
   table.insert(out, v)
 end
@@ -737,7 +746,8 @@ impl RedisSessionStore {
             .arg(MAX_INDEXED_TOOLS)
             .arg(MAX_READ_SETS)
             .arg(MAX_READ_EVENTS)
-            .arg(format!("{KEY_PREFIX}e:{}:", h.org));
+            .arg(format!("{KEY_PREFIX}e:{}:", h.org))
+            .arg(id_offset());
         for tool in &tools {
             inv.arg(link_digest(tool)).arg(*tool);
         }
@@ -779,7 +789,11 @@ impl RedisSessionStore {
         }
         let mut con = self.handle.clone();
         let (counts, window): (Vec<String>, Vec<Vec<String>>) = inv.invoke_async(&mut con).await.map_err(|err| unavailable(&err))?;
-        let mut reply = append_reply(&counts, &scopes, &tools)?;
+        let (mut reply, corrupt) = append_reply(&counts, &scopes, &tools)?;
+        // A window body whose id is not its member: the read fails closed.
+        if corrupt > 0 {
+            return Err(decode_error(format!("{corrupt} window bodies name another id than their member")));
+        }
         if let Some(read) = batch.read {
             reply.window = window_reply(read, &window)?;
         }
@@ -794,9 +808,9 @@ impl RedisSessionStore {
 /// sorted by (`ts_ms`, id). The reply must hold one entry per requested set, in order: the echoed
 /// index of each entry must be its position.
 ///
-/// The script read only members with a score of at least `from_ms`, and the members of a set are
-/// distinct. So a body whose `ts` is before `from_ms`, or a body id twice in one set, disagrees
-/// with its member or score: a decode error, as a member that is not the id of its body was.
+/// The script read only members with a score of at least `from_ms`, so a body whose `ts` is before
+/// `from_ms` disagrees with its score: a decode error. The script itself checks the body id against
+/// the member (`run_append` fails the read on a corrupt count).
 fn window_reply(req: &ReadRequest, raw: &[Vec<String>]) -> Result<Vec<SetWindow>, HistoryStoreError> {
     let mut window = Vec::with_capacity(raw.len());
     for (position, (entry, (scope, tool))) in raw.iter().zip(&req.sets).enumerate() {
@@ -816,10 +830,6 @@ fn window_reply(req: &ReadRequest, raw: &[Vec<String>]) -> Result<Vec<SetWindow>
                 return Err(decode_error("a window body has a time before the window"));
             }
             stored.push(event);
-        }
-        let mut ids = HashSet::with_capacity(stored.len());
-        if !stored.iter().all(|e| ids.insert(e.id)) {
-            return Err(decode_error("a window body id is in one set twice"));
         }
         stored.sort_by_key(|e| (e.ts_ms, e.id));
         window.push(SetWindow {
@@ -845,11 +855,12 @@ fn window_reply(req: &ReadRequest, raw: &[Vec<String>]) -> Result<Vec<SetWindow>
     Ok(window)
 }
 
-/// Map the script reply: four counts (the last one is the missing bodies), then (history index,
+/// Map the script reply: five counts (the fourth is the missing bodies, the fifth the window bodies
+/// whose id is not their member, returned beside the reply), then (history index,
 /// tool index) pairs. The key names use the tool digest; the tool index maps back to the tool NAME
 /// of the request (F6).
-fn append_reply(reply: &[String], scopes: &[(Scope, String)], tools: &[&str]) -> Result<AppendReply, HistoryStoreError> {
-    let [written, retention, cap, missing, flagged @ ..] = reply else {
+fn append_reply(reply: &[String], scopes: &[(Scope, String)], tools: &[&str]) -> Result<(AppendReply, u64), HistoryStoreError> {
+    let [written, retention, cap, missing, corrupt, flagged @ ..] = reply else {
         return Err(decode_error(format!("the append script returned {} values", reply.len())));
     };
     let count = |raw: &String| raw.parse::<u64>().map_err(|_| decode_error("the append script returned a count that is not an integer"));
@@ -866,14 +877,15 @@ fn append_reply(reply: &[String], scopes: &[(Scope, String)], tools: &[&str]) ->
             truncated.push(flag);
         }
     }
-    Ok(AppendReply {
+    let reply = AppendReply {
         written: usize::try_from(count(written)?).map_err(|_| decode_error("the written count is too large"))?,
         trimmed_retention: count(retention)?,
         trimmed_cap: count(cap)?,
         truncated,
         window: Vec::new(),
         missing_bodies: count(missing)?,
-    })
+    };
+    Ok((reply, count(corrupt)?))
 }
 
 /// One `c:` link from `HMGET s t e r`. All of `s`, `t`, `e` absent is no link; some absent is a
@@ -1105,7 +1117,7 @@ mod tests {
         encode_body(Uuid::from_u128(id), ts_ms, EventKind::Call, "send", Some((&Fields::Unparsed, None)))
     }
 
-    /// Task 19b: the reply holds no member and no score. Every write puts the same `now_ms` into
+    /// The reply holds no member and no score. Every write puts the same `now_ms` into
     /// the score and into the body `ts`, and the member is the body `id`, so the event takes both
     /// from its body. The events are sorted by (`ts_ms`, id).
     #[test]
@@ -1132,13 +1144,15 @@ mod tests {
         assert!(matches!(err, HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }), "{err:?}");
     }
 
-    /// The members of one set are distinct, and each body names its own member. Two bodies with
-    /// one id in a set disagree with their members: a decode error.
+    /// The fifth count of the script reply is the window bodies whose id is not their member.
+    /// `run_append` fails the read when it is above zero; the flag pairs follow it.
     #[test]
-    fn a_window_body_id_twice_in_one_set_is_a_decode_error() {
-        let entry = send_entry(&[(call_body(1, 10), "allow"), (call_body(1, 11), "allow")]);
-        let err = window_reply(&send_read(10), &[entry]).unwrap_err();
-        assert!(matches!(err, HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }), "{err:?}");
+    fn the_append_reply_returns_the_corrupt_body_count() {
+        let scopes = [(Scope::Session, "s".to_string())];
+        let reply: Vec<String> = ["1", "0", "0", "2", "3", "1", "1"].map(String::from).to_vec();
+        let (mapped, corrupt) = append_reply(&reply, &scopes, &["send"]).expect("decodes");
+        assert_eq!((mapped.missing_bodies, corrupt, mapped.truncated), (2, 3, vec![(Scope::Session, "send".to_string())]));
+        assert!(append_reply(&reply[..4], &scopes, &["send"]).is_err(), "a reply with four counts");
     }
 
     #[test]

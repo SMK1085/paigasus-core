@@ -214,10 +214,11 @@ contract_cases!(
     a_missing_body_is_skipped_and_counted,
 );
 
-/// Task 19b: the window reply carries no member and no score, so the adapter takes both from the
-/// body. A body whose `ts` is before the window (its score is inside it), or a body that names
-/// another member of the same set, disagrees with the sorted set: the read fails closed with a
-/// decode error, and a decider then treats every history slot as missing (reason `store`).
+/// The window reply carries no score, so the adapter takes the time from the body. A body whose
+/// `ts` is before the window (its score is inside it), or a body whose id is not its member (another
+/// member of the set, or an id in no read set), disagrees with the sorted set: the read fails
+/// closed with a decode error, and a decider then treats every history slot as missing (reason
+/// `store`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_body_that_disagrees_with_its_member_or_score_fails_the_window_read_on_redis() {
     let Some(h) = harness("7.4-alpine", "history_store_redis body disagrees with its member").await else {
@@ -262,9 +263,14 @@ async fn a_body_that_disagrees_with_its_member_or_score_fails_the_window_read_on
     h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{aid}","ts":{},"k":"request","t":"send","b":1}}"#, NOW - 1_000))
         .await;
     assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body time before the window");
-    // The body of `a` names the member `b`.
+    // The body of `a` names the other member `b` of the same set.
     h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{bid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
-    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body that names another member");
+    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body that names another member of the set");
+    // The body of `a` names an id that is in no read set. A reader that drops the own events of a
+    // hold by id would drop such an event silently, so the read must fail closed.
+    let cid = call(3).id;
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{cid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
+    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body that names an id in no read set");
     // The right body reads again.
     h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{aid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
     assert_eq!(store.reserve(&reserve(Vec::new(), Some(read()))).await.expect("a clean read").window[0].events.len(), 2);
