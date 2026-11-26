@@ -33,6 +33,7 @@ use paigasus_gateway_core::{
     CallScan, DecisionContext, Format, Limits as CoreLimits, OnUnavailable, PolicySet, TenantMode, ToolCall, ToolCallDecider, call_schema, decide_calls, invocation, parse_body, parse_request,
 };
 use paigasus_observability::names;
+use paigasus_proto::paigasus::iam::v1 as pb;
 use serde_json::{Value, json};
 use support::MockOpenAi;
 use support::limits::{ORG_A, ORG_A_PRN, PRINCIPAL_1, ScopedIam, app_with_tool_policy, send};
@@ -702,4 +703,404 @@ async fn margin_work_on_a_4_mib_hold() {
         "D35: the largest p99 on a 4 MiB hold = {margin_p99:.3} ms; 2 x p99 = {:.3} ms; DETECTOR_MARGIN_MS = {DETECTOR_MARGIN_MS}",
         2.0 * margin_p99
     );
+}
+
+// --- SMA-753 PR 2, spec P15: the history conditions on a real Redis store ----------------------
+
+/// The 24 hour window of every condition below.
+const DAY_MS: u64 = 86_400_000;
+const HISTORY_REQUESTS: usize = 1000;
+const READ_LIMIT_REQUESTS: usize = 200;
+/// Calls per `append` of the seed. A smaller batch keeps one Lua call short.
+const SEED_BATCH: usize = 200;
+
+mod history_rig {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    use paigasus_gateway::adapters::history::{HistoryKey, HmacHistoryDigester, RedisSessionStore};
+    use paigasus_gateway::application::tool_history::ToolHistory;
+    use paigasus_gateway::domain::limits::{Clock, SystemClock};
+    use paigasus_gateway::domain::tool_history::{
+        AppendCall, AppendReply, AppendRequest, EventVerdict, Histories, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, SessionStore, SettleRequest, WriteRequest,
+    };
+    use paigasus_gateway::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies};
+    use paigasus_kernel::tool_policy::history::{Field, FieldPath, Fields};
+    use paigasus_proto::paigasus::iam::v1 as pb;
+    use secrecy::SecretString;
+    use uuid::Uuid;
+
+    use super::{DAY_MS, ORG_A, PRINCIPAL_1, SEED_BATCH};
+
+    /// A seed event id never repeats in one process.
+    static NEXT_SEED_ID: AtomicU64 = AtomicU64::new(1);
+
+    /// The Redis store, with the time of each `reserve` counted. Nothing else changes.
+    pub struct TimedStore {
+        inner: Arc<RedisSessionStore>,
+        reserve_nanos: AtomicU64,
+        reserves: AtomicU64,
+    }
+
+    impl TimedStore {
+        /// The mean time of one reserve (one hold), and the number of reserves.
+        pub fn mean_reserve(&self) -> (Duration, u64) {
+            let n = self.reserves.load(Ordering::Relaxed);
+            let total = self.reserve_nanos.load(Ordering::Relaxed);
+            (Duration::from_nanos(total.checked_div(n).unwrap_or(0)), n)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for TimedStore {
+        async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            self.inner.lookup(req).await
+        }
+        async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.inner.write(req).await
+        }
+        async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            let started = std::time::Instant::now();
+            let reply = self.inner.reserve(req).await;
+            self.reserve_nanos.fetch_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+            self.reserves.fetch_add(1, Ordering::Relaxed);
+            reply
+        }
+        async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+            self.inner.settle(req).await
+        }
+        async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.inner.append(req).await
+        }
+    }
+
+    /// The history of one gateway on the Redis at `url`: the store, and the `ToolHistory` on it.
+    pub async fn history(url: &str) -> (Arc<TimedStore>, Arc<ToolHistory>) {
+        let inner = Arc::new(RedisSessionStore::connect(url).await.expect("connect to the test Redis"));
+        let store = Arc::new(TimedStore {
+            inner,
+            reserve_nanos: AtomicU64::new(0),
+            reserves: AtomicU64::new(0),
+        });
+        let key = HistoryKey::new(SecretString::from("history-perf-test-key-of-32-bytes".to_owned())).expect("a 32-byte key");
+        let digester = HmacHistoryDigester::new(Some(key), None).expect("a digester");
+        let history = Arc::new(ToolHistory::new(
+            Arc::clone(&store) as Arc<dyn SessionStore>,
+            Arc::new(SystemClock),
+            Arc::new(super::OsEntropy),
+            Duration::from_secs(10),
+            Arc::new(digester),
+        ));
+        (store, history)
+    }
+
+    /// The conditions and the one tenant policy of a case, for every org. An empty floor.
+    pub struct Source {
+        pub text: String,
+        pub catalog: Vec<String>,
+        pub conditions: Vec<pb::HistoryCondition>,
+    }
+
+    #[async_trait::async_trait]
+    impl PolicySource for Source {
+        async fn floor(&self) -> Result<PolicyText, SourceError> {
+            Ok(PolicyText {
+                text: String::new(),
+                version: "f1".to_owned(),
+                conditions: Vec::new(),
+                max_window_ms: DAY_MS,
+            })
+        }
+
+        async fn tenant(&self, _org: Uuid) -> Result<TenantPolicies, SourceError> {
+            Ok(TenantPolicies {
+                text: self.text.clone(),
+                catalog: self.catalog.clone(),
+                version: "t1".to_owned(),
+                settings: None,
+                conditions: self.conditions.clone(),
+                max_window_ms: DAY_MS,
+            })
+        }
+    }
+
+    /// Writes `count` allowed events of `tool` into the principal history, `amount` in each when
+    /// it is `Some`. `append` is the store API, so the seed uses the production event format.
+    pub async fn seed(store: &dyn SessionStore, tool: &str, count: usize, amount: Option<i64>) {
+        let org = Uuid::try_parse(ORG_A).expect("org uuid");
+        let now_ms = u64::try_from(SystemClock.now().duration_since(SystemTime::UNIX_EPOCH).expect("after the epoch").as_millis()).expect("ms fit u64");
+        let mut done = 0;
+        let mut batch = 0u64;
+        while done < count {
+            let n = SEED_BATCH.min(count - done);
+            let calls = (0..n)
+                .map(|_| {
+                    let mut values = BTreeMap::new();
+                    if let Some(a) = amount {
+                        values.insert(FieldPath::new(vec!["amount".to_owned()]).expect("a path"), Field::Long(a));
+                    }
+                    AppendCall {
+                        id: Uuid::from_u128(0x5eed_0000_0000_0000_0000 + u128::from(NEXT_SEED_ID.fetch_add(1, Ordering::Relaxed))),
+                        tool: tool.to_owned(),
+                        verdict: EventVerdict::Allow,
+                        call_id: None,
+                        item_id: None,
+                        fields: Fields::Values(values),
+                        key: None,
+                    }
+                })
+                .collect();
+            let req = AppendRequest {
+                histories: Histories {
+                    org,
+                    principal: PRINCIPAL_1.to_owned(),
+                    key: None,
+                    session: Uuid::from_u128(1),
+                },
+                turn: 0,
+                calls,
+                now_ms: now_ms - batch,
+            };
+            let reply = store.append(&req).await.expect("seed append");
+            assert_eq!(reply.written, n, "the seed writes every event");
+            done += n;
+            batch += 1;
+        }
+    }
+}
+
+/// A chat completion that makes the calls `(tool, arguments)`, in order.
+fn call_answer(calls: &[(&str, &str)]) -> String {
+    let calls: Vec<Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, (name, args))| json!({"id": format!("call_{i}"), "type": "function", "function": {"name": name, "arguments": args}}))
+        .collect();
+    json!({"id":"chatcmpl-1","object":"chat.completion","created":1790942400,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":calls},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}).to_string()
+}
+
+/// A chat request that defines `tools`.
+fn tools_request(tools: &[&str]) -> String {
+    let defs: Vec<Value> = tools.iter().map(|n| json!({"type":"function","function":{"name":n,"parameters":{}}})).collect();
+    json!({"model":"gpt-4o-mini","stream":false,"messages":[{"role":"user","content":"go"}],"tools":defs}).to_string()
+}
+
+/// A history condition on the principal history.
+fn history_condition(slot: &str, policy_id: &str, shape: pb::history_condition::Shape) -> pb::HistoryCondition {
+    pb::HistoryCondition {
+        slot: slot.to_owned(),
+        policy_id: policy_id.to_owned(),
+        scope: pb::HistoryScope::Principal as i32,
+        window_ms: DAY_MS,
+        shape: Some(shape),
+    }
+}
+
+/// The predicate for one tool, or, with `None`, for every catalog tool.
+fn tool_predicate(name: Option<&str>) -> pb::HistoryPredicate {
+    pb::HistoryPredicate {
+        node: Some(pb::history_predicate::Node::Tool(pb::ToolMatch {
+            name_key: name.unwrap_or_default().to_owned(),
+            any_catalog_tool: name.is_none(),
+        })),
+    }
+}
+
+/// What a run through the HTTP path gave.
+struct HistoryRun {
+    samples: Vec<f64>,
+    wall: Duration,
+    reserve_mean: Duration,
+    reserves: u64,
+    /// The status of the first answer, and the tool calls that it kept.
+    first: (StatusCode, usize),
+    /// The counters of `gateway_tool_history_*` above zero, with their labels.
+    counters: Vec<String>,
+}
+
+/// Builds the gateway on the history, runs `requests` requests through it, and gives the overhead
+/// samples and the Redis time of the reserve. A first request runs alone: it warms the policy
+/// cache, and shows what the decision was.
+async fn run_history_case(
+    snapshotter: &Snapshotter,
+    store: &history_rig::TimedStore,
+    history: Arc<paigasus_gateway::application::tool_history::ToolHistory>,
+    source: history_rig::Source,
+    request: String,
+    answer: String,
+    requests: usize,
+) -> HistoryRun {
+    let settings = settings();
+    let recorder = Arc::new(DecisionRecorder::tracing());
+    let cache = PolicyCache::new(Arc::new(source), CacheSettings::from_settings(&settings));
+    let tp = Some(Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder)).with_history(Arc::clone(&history))));
+    let ti = Some(Arc::new(ToolInterception {
+        limits: CoreLimits::defaults(),
+        decider: Arc::new(CedarDecider::new(Arc::clone(&recorder)).with_history(Arc::clone(&history))),
+        recorder: None,
+        history: Some(history),
+    }));
+    let mock = MockOpenAi::spawn_json(StatusCode::OK, answer).await;
+    let app = app_with_tool_policy(ScopedIam::arc(PRINCIPAL_1, ORG_A_PRN), &mock.base_url, ti, tp);
+    let body = Arc::new(request);
+
+    let sent = send(&app, &body).await;
+    let kept = sent.json()["choices"][0]["message"]["tool_calls"].as_array().map_or(0, Vec::len);
+    let first = (sent.status, kept);
+    let first_counters = take_counters(snapshotter);
+    let _warm = take_overhead(snapshotter);
+    let before = store.mean_reserve().1;
+
+    let gate = Arc::new(tokio::sync::Semaphore::new(CONCURRENCY));
+    let mut set = tokio::task::JoinSet::new();
+    let started = Instant::now();
+    for _ in 0..requests {
+        let permit = Arc::clone(&gate).acquire_owned().await.expect("semaphore");
+        let (app, body) = (app.clone(), Arc::clone(&body));
+        set.spawn(async move {
+            let sent = send(&app, &body).await;
+            drop(permit);
+            sent.status
+        });
+    }
+    while let Some(status) = set.join_next().await {
+        assert_eq!(status.expect("task"), StatusCode::OK);
+    }
+    let wall = started.elapsed();
+    let mut samples = take_overhead(snapshotter);
+    samples.sort_by(f64::total_cmp);
+    let (reserve_mean, total) = store.mean_reserve();
+    let mut counters = first_counters;
+    counters.extend(take_counters(snapshotter));
+    HistoryRun {
+        samples,
+        wall,
+        reserve_mean,
+        reserves: total - before,
+        first,
+        counters,
+    }
+}
+
+/// The `gateway_tool_history_*` counters above zero, as `name{labels} = value`.
+fn take_counters(snapshotter: &Snapshotter) -> Vec<String> {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(k, _, _, v)| match v {
+            DebugValue::Counter(n) if n > 0 && k.key().name().starts_with("gateway_tool_history_") => {
+                let labels: Vec<String> = k.key().labels().map(|l| format!("{}={}", l.key(), l.value())).collect();
+                Some(format!("{}{{{}}} = {n}", k.key().name(), labels.join(",")))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn print_history_run(title: &str, run: &HistoryRun, requests: usize) {
+    println!(
+        "{title}: p50 = {:.3} ms, p99 = {:.3} ms, max = {:.3} ms over {} samples; mean Redis time per hold (the reserve) = {:.3} ms over {} reserves; {:.1} s wall, {}, profile {}",
+        percentile(&run.samples, 0.5) * 1e3,
+        percentile(&run.samples, 0.99) * 1e3,
+        run.samples[run.samples.len() - 1] * 1e3,
+        run.samples.len(),
+        run.reserve_mean.as_secs_f64() * 1e3,
+        run.reserves,
+        run.wall.as_secs_f64(),
+        std::env::consts::ARCH,
+        profile(),
+    );
+    println!("{title}: first answer status {}, tool calls kept {} (requests {requests})", run.first.0, run.first.1);
+    println!("{title}: history counters above zero (first request included): {:?}", run.counters);
+}
+
+/// SMA-753 P15: a principal history of 1,000 events of `send` and `search`, a hold of three calls,
+/// one `sum_within` and one `formerly` condition, on a real Redis store. The history grows by 3,000
+/// events during the run (about 4,000 in all, under the cap of 10,000 for each tool).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement in release mode"]
+async fn p99_policy_overhead_with_history_conditions() {
+    use pb::history_condition::Shape;
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    recorder.install().expect("the one global recorder");
+    let Some((_node, url)) = paigasus_test_docker::start_redis_image_or_skip("7.4-alpine", "perf history conditions").await else {
+        return;
+    };
+    let (store, history) = history_rig::history(&url).await;
+    history_rig::seed(store.as_ref(), "send", 500, Some(10)).await;
+    history_rig::seed(store.as_ref(), "search", 500, None).await;
+
+    let sum = history_condition(
+        "p_sum",
+        "hist",
+        Shape::SumWithin(pb::SumWithinShape {
+            predicate: Some(tool_predicate(Some("send"))),
+            field_path: vec!["amount".to_owned()],
+            op: pb::ComparisonOp::Le as i32,
+            threshold: 1_000_000_000,
+        }),
+    );
+    let seen = history_condition(
+        "p_seen",
+        "hist",
+        Shape::Formerly(pb::FormerlyShape {
+            predicate: Some(tool_predicate(Some("search"))),
+        }),
+    );
+    let source = history_rig::Source {
+        text: r#"@id("hist") permit(principal, action, resource) when { context.p_sum && context.p_seen };"#.to_owned(),
+        catalog: vec!["send".to_owned(), "search".to_owned()],
+        conditions: vec![sum, seen],
+    };
+    let answer = call_answer(&[("send", r#"{"amount":5}"#), ("search", r#"{"q":"x"}"#), ("send", r#"{"amount":7}"#)]);
+    let run = run_history_case(&snapshotter, &store, history, source, tools_request(&["send", "search"]), answer, HISTORY_REQUESTS).await;
+
+    assert_eq!(run.samples.len(), HISTORY_REQUESTS, "one overhead sample per request");
+    assert_eq!(run.first, (StatusCode::OK, 3), "the three calls of the hold are allowed");
+    print_history_run("history conditions, 1,000 events", &run, HISTORY_REQUESTS);
+    let p99 = percentile(&run.samples, 0.99);
+    assert!(p99 < 0.015, "p99 {p99}");
+}
+
+/// SMA-753 P15: 10,000 events in each of three tools and an `Every` read. The read passes
+/// `MAX_READ_EVENTS` (20,000), so it comes back truncated and the slot is missing. That is the
+/// expected result. The test prints it and asserts nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement in release mode"]
+async fn history_read_at_the_read_limits() {
+    use pb::history_condition::Shape;
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    recorder.install().expect("the one global recorder");
+    let Some((_node, url)) = paigasus_test_docker::start_redis_image_or_skip("7.4-alpine", "perf history read limits").await else {
+        return;
+    };
+    let (store, history) = history_rig::history(&url).await;
+    let started = Instant::now();
+    for tool in ["tool_a", "tool_b", "tool_c"] {
+        history_rig::seed(store.as_ref(), tool, 10_000, None).await;
+    }
+    println!("seed of 3 x 10,000 events: {:.1} s", started.elapsed().as_secs_f64());
+
+    let all = history_condition(
+        "p_all",
+        "all",
+        Shape::CountWithin(pb::CountWithinShape {
+            predicate: Some(tool_predicate(None)),
+            op: pb::ComparisonOp::Le as i32,
+            threshold: 1_000_000,
+        }),
+    );
+    let source = history_rig::Source {
+        text: r#"@id("all") permit(principal, action, resource) when { context.p_all };"#.to_owned(),
+        catalog: vec!["tool_a".to_owned(), "tool_b".to_owned(), "tool_c".to_owned()],
+        conditions: vec![all],
+    };
+    let answer = call_answer(&[("tool_a", "{}")]);
+    let run = run_history_case(&snapshotter, &store, history, source, tools_request(&["tool_a", "tool_b", "tool_c"]), answer, READ_LIMIT_REQUESTS).await;
+    print_history_run("history read at the limits, 3 x 10,000 events", &run, READ_LIMIT_REQUESTS);
 }
