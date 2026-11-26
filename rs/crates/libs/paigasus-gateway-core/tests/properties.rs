@@ -119,6 +119,14 @@ proptest! {
                 prop_assert!(!out.contains(&escaped[1..escaped.len() - 1]), "blocked arguments forwarded (escaped):\n{out}");
             }
         }
+        // The substring checks above miss a call split over two or more `input_json_delta`
+        // records. Rebuild the calls the client derives from the output and compare them with the
+        // decisions (I1). Pass-through is excepted for the same reason as above.
+        // The `on_failure = allow` path (a dropped record, a truncated stream) releases held bytes
+        // with no decision by design, so a failed core is excepted too.
+        if !passed_through && !o.core_failed() {
+            check_i1(Format::AnthropicMessages, &bytes, &o.out, &o.decided, o.core_failed()).map_err(TestCaseError::fail)?;
+        }
         let payloads = |b: &str| b.lines().filter_map(|l| l.strip_prefix("data: ").map(str::to_owned)).collect::<Vec<_>>();
         let input = payloads(&show(&bytes));
         // Each forwarded payload maps to the first input index after the previous one. A record
@@ -249,6 +257,42 @@ fn a_pass_through_interceptor_fails_anthropic_p1() {
         aborted: false,
     };
     assert!(check_p1(Format::AnthropicMessages, &input, &o).is_err());
+}
+
+/// SMA-758: the observe-mode leak check sees a blocked call split over several
+/// `input_json_delta` records, which a contiguous substring check does not.
+#[test]
+fn the_observe_leak_check_rejects_a_blocked_call_split_across_records() {
+    let s = AnthropicScenario {
+        blocks: vec![Block::Tool {
+            name: "blocked_rm",
+            args: "{\"v\":\"CANARY-x\",\"n\":10.5}".to_owned(),
+            pieces: 3,
+        }],
+        quirks: vec![],
+        cuts: vec![],
+    };
+    let input = render_anthropic(&s);
+    let decided = drive(Format::AnthropicMessages, limits(OnFailure::Allow), &[&input], &allow_all).decided;
+    assert_eq!(decided.len(), 1, "the call is decided");
+    let args = decided[0].0.arguments.clone();
+    assert!(!show(&input).contains(&args), "the call is split, so the substring check sees nothing");
+    let blocked: Vec<(ToolCall, Decision)> = decided
+        .into_iter()
+        .map(|(c, _)| {
+            (
+                c,
+                Decision::Block {
+                    code: paigasus_gateway_core::BlockCode::Policy,
+                },
+            )
+        })
+        .collect();
+    // An output that leaks the whole call, split across records: the decision says Block.
+    assert!(check_i1(Format::AnthropicMessages, &input, &input, &blocked, false).is_err());
+    // The same output is fine when the call was allowed.
+    let allowed: Vec<(ToolCall, Decision)> = blocked.into_iter().map(|(c, _)| (c, Decision::Allow)).collect();
+    check_i1(Format::AnthropicMessages, &input, &input, &allowed, false).expect("an allowed call may reach the client");
 }
 
 /// What the core does with a stream that has one quirk (allow-all, `on_failure = block`).

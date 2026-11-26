@@ -263,10 +263,15 @@ def synthesize_web_fetch(raw: bytes) -> bytes:
                 new = base64.b64encode(synthetic_pdf(len(old) // 4 * 3)).decode("ascii")
                 assert len(new) == len(old)
                 lines[i] = line.replace('"data":"' + old + '"', '"data":"' + new + '"', 1)
+                if json.loads(lines[i][5:])["content_block"]["content"]["content"]["source"]["data"] == old:
+                    sys.exit("synthesize: a web_fetch source data was not replaced (line format differs)")
         delta = v.get("delta") or {}
         if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
             masked = re.sub(r"[A-Za-z]", "x", delta["text"])
             lines[i] = line.replace(json.dumps(delta["text"]), json.dumps(masked), 1)
+            after = json.loads(lines[i][5:])["delta"]["text"]
+            if re.search(r"[A-Za-z]", after.replace("x", "")):
+                sys.exit("synthesize: a text_delta still holds letters (line format differs)")
     return "\n".join(lines).encode("utf-8")
 
 
@@ -320,6 +325,8 @@ def run_scenario(key: str, name: str, spec: dict, out: pathlib.Path) -> dict:
         clean = scrub_sse(raw)
         if name.startswith("server_tool_web_fetch"):
             clean = synthesize_web_fetch(clean)
+        if len(clean) != len(raw):
+            sys.exit(f"{name}: the scrubbed stream length differs from the raw length; the timing offsets would be wrong")
         write(out / f"{name}.sse", clean)
         end, ends = 0, []
         for t, c in chunks:
@@ -327,7 +334,7 @@ def run_scenario(key: str, name: str, spec: dict, out: pathlib.Path) -> dict:
             ends.append({"t": t, "end": end})
         write(out / f"{name}.timing.json", json.dumps({"chunks": ends}, indent=1) + "\n")
         if b"event: error" in raw:
-            write(out / f"mid_stream_error_{name}.sse", scrub_sse(raw))
+            write(out / f"mid_stream_error_{name}.sse", clean)
     else:
         write(out / f"{name}.body.json", scrub_body(raw))
     return {"scenario": name, "status": status, "bytes": len(raw), "sse": is_sse}

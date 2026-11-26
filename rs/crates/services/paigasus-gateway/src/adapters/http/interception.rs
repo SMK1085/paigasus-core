@@ -69,6 +69,17 @@ impl ToolInterception {
     }
 }
 
+/// The `reason` values of `Metric::RecordDropped` (core `interceptor.rs`).
+pub(crate) const RECORD_DROP_REASONS: [&str; 4] = ["after_done", "oversized", "malformed", "late_fragment"];
+
+/// Register the record-dropped counter at zero for every reason, so that `increase()` sees the
+/// first drop.
+pub(crate) fn prime_interception_metrics() {
+    for reason in RECORD_DROP_REASONS {
+        counter!(names::GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL, "reason" => reason).increment(0);
+    }
+}
+
 /// Map one core metric to the registered names (P-9).
 pub(crate) fn record(m: Metric) {
     match m {
@@ -437,6 +448,19 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn prime_primes_every_reason_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        prime_interception_metrics();
+        for reason in RECORD_DROP_REASONS {
+            let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL, &[("reason", reason)]);
+            assert_eq!(v, Some(0), "{reason} is primed at 0");
+        }
+        assert_eq!(snapshotter.snapshot().into_vec().len(), RECORD_DROP_REASONS.len());
     }
 
     const TERMINAL: &[u8] = b"\n\ndata: {\"error\":\"terminal\"}\n\n";

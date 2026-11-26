@@ -246,6 +246,17 @@ impl AnthropicConfig {
         if axum::http::HeaderValue::from_str(self.api_key.expose_secret()).is_err() {
             return Err("upstream.anthropic.api_key has an invalid character (a header value cannot hold a newline or a control character; remove it from the secret)".to_string());
         }
+        // The client builds every URL as `base_url + route path`: it needs an absolute URL with a
+        // scheme and a host. Without one, every request fails at run time.
+        match reqwest::Url::parse(&self.base_url) {
+            Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {}
+            _ => {
+                return Err(format!(
+                    "upstream.anthropic.base_url must be an absolute http or https URL with a host (for example https://api.anthropic.com); got {:?}",
+                    self.base_url
+                ));
+            }
+        }
         if axum::http::HeaderValue::from_str(&self.default_version).is_err() || self.default_version.trim().is_empty() {
             return Err(format!("upstream.anthropic.default_version is not a valid header value: {:?}", self.default_version));
         }
@@ -2575,6 +2586,19 @@ mod tests {
             assert!(err.contains("upstream.anthropic.api_key"), "{err}");
             assert!(err.contains("invalid character"), "{err}");
             assert!(!err.contains("secret-body"), "the key must not appear in the error: {err}");
+        }
+    }
+
+    #[test]
+    fn an_anthropic_base_url_must_be_absolute_with_a_host() {
+        for bad in ["api.anthropic.com", "/v1", "", "https://", "ftp://api.anthropic.com", "http:"] {
+            let cfg = tp_load(&anthropic_toml(&format!("base_url = \"{bad}\""))).expect("loads");
+            let err = cfg.validate().expect_err(bad);
+            assert!(err.contains("upstream.anthropic.base_url"), "{bad}: {err}");
+        }
+        for good in ["https://api.anthropic.com", "http://127.0.0.1:8080", "https://proxy.internal/anthropic"] {
+            let cfg = tp_load(&anthropic_toml(&format!("base_url = \"{good}\""))).expect("loads");
+            cfg.validate().unwrap_or_else(|e| panic!("{good}: {e}"));
         }
     }
 

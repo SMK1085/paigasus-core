@@ -326,7 +326,8 @@ pub(crate) async fn proxy(endpoint: &'static Endpoint, state: AppState, caller: 
             // constraints — never a free-form error string).
             // A4: a connect failure never reached the upstream; any other failure after the send
             // (timeout, transport) keeps the request estimate.
-            if matches!(err, UpstreamError::Connect { .. })
+            // A `3xx` is a non-2xx answer with no usable body (D16): no tokens either.
+            if matches!(err, UpstreamError::Connect { .. } | UpstreamError::Redirect { .. })
                 && let Some(guard) = guard.as_mut()
             {
                 guard.mark_no_charge();

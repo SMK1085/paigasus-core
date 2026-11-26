@@ -86,9 +86,11 @@ impl ResponseHead {
 /// Dropping it cancels the upstream request (cancel-on-drop).
 pub type UpstreamByteStream = futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>;
 
-/// The upstream response. A NON-2xx upstream is NOT an error: it arrives as
-/// [`UpstreamResponse::Full`] with the upstream status and body, so the caller forwards the
-/// provider's own error envelope verbatim. A `3xx` is the exception (D16): see [`UpstreamError`].
+/// The upstream response. A NON-2xx upstream is NOT an error: it arrives with the upstream status
+/// and body, so the caller forwards the provider's own error envelope verbatim. For a non-stream
+/// request it is [`UpstreamResponse::Full`]. For a `stream:true` request it is
+/// [`UpstreamResponse::Stream`], also for a `4xx`/`5xx`. A caller must check the status in
+/// either variant. A `3xx` is the exception (D16): see [`UpstreamError`].
 pub enum UpstreamResponse {
     /// Non-stream: the upstream status and the fully-buffered response body.
     Full {

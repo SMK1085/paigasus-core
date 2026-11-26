@@ -289,6 +289,7 @@ pub struct ToolPolicyRuntime {
 pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Option<Arc<ToolInterception>> {
     config.tool_interception.enabled.then(|| {
         tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
+        crate::adapters::http::interception::prime_interception_metrics();
         // SMA-752: the Cedar decider only with the tool policy on (`build_tool_policy`).
         Arc::new(ToolInterception {
             limits: config.tool_interception.limits(),

@@ -742,6 +742,18 @@ async fn an_upstream_redirect_is_a_502_and_the_target_sees_nothing() {
     assert_eq!(target.request_count(), 0, "the redirect target sees nothing");
 }
 
+/// A4 and D16: an upstream redirect is a non-2xx answer, so it charges no tokens.
+#[tokio::test]
+async fn an_upstream_redirect_charges_nothing() {
+    let target = MockOpenAi::spawn_json(StatusCode::OK, OK_BODY).await;
+    let mock = MockOpenAi::spawn_redirect(StatusCode::TEMPORARY_REDIRECT, format!("{}/v1/messages", target.base_url)).await;
+    for body in [NON_STREAM, STREAM] {
+        let (charged, sent) = charges(&mock.base_url, body).await;
+        assert_eq!(sent.status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(charged, Vec::<u64>::new(), "a redirect charges nothing ({body})");
+    }
+}
+
 /// § 5: a non-stream answer whose head arrives after the stream idle timeout is not cut.
 #[tokio::test]
 async fn a_slow_non_stream_head_is_not_cut_by_the_idle_timeout() {
