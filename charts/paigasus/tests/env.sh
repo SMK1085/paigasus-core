@@ -93,6 +93,7 @@
 #                   renders no key — the same as an absent value, not a refusal.
 # A fourth row counter reds the script when an O row call line is deleted.
 #   D rows (SMA-700): zones.iam.backend.dpop; see the block above the end of the file.
+#   H rows (SMA-753): zones.iam.backend.toolPolicies.historyConditions; the block after the D rows.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART="$(cd "$HERE/.." && pwd)"
@@ -627,7 +628,7 @@ print("|".join(problems) if problems else "OK")' "$TMP/boot.yaml" 2>&1)"; then
 }
 
 # check_boot_reserved <label>: the chart's own names, with every optional entry on (the CA bundle,
-# one admin, and DPoP since SMA-700), equal the
+# one admin, DPoP since SMA-700, and history conditions since SMA-753), equal the
 # paigasus.iamReservedEnv list. The list is read from the template file, not copied here.
 check_boot_reserved() {
   local label="$1" reserved
@@ -639,7 +640,8 @@ check_boot_reserved() {
   BOOT_ROWS=$((BOOT_ROWS - 1))
   check_boot "$label" "[{issuer=\"$ISS\",subject=\"s\"}]" - "$reserved" \
     --set oidc.caBundle.existingConfigMap=idp-ca --set "$ADMIN0.issuer=$ISS" --set "$ADMIN0.subject=s" \
-    --set zones.iam.backend.dpop.enabled=true --set 'zones.iam.backend.dpop.forwardedBaseUrls[0]=https://gw.example.test'
+    --set zones.iam.backend.dpop.enabled=true --set 'zones.iam.backend.dpop.forwardedBaseUrls[0]=https://gw.example.test' \
+    --set zones.iam.backend.toolPolicies.historyConditions=true
 }
 
 # check_boot_restart <label> [helm args...]: the args change the IAM pod template only.
@@ -993,6 +995,54 @@ check_dpop_restart "D5 restart-scope"
 
 if [ "$DPOP_ROWS" -lt "$DPOP_ROWS_WANT" ]; then
   echo "FAIL [dpop rows]: $DPOP_ROWS dpop row(s) ran, want $DPOP_ROWS_WANT"; ec=1
+fi
+
+# zones.iam.backend.toolPolicies.historyConditions (SMA-753 P13). One row per property:
+#   H1 default      No IAM_TOOL_POLICIES__HISTORY_CONDITIONS entry renders.
+#   H2 on           The entry is "true".
+#   H3 reuse-values-no-key
+#                   `--set zones.iam.backend.toolPolicies=null`. No entry renders.
+# A row counter reds the script when an H row call line is deleted.
+HIST_ROWS=0
+HIST_ROWS_WANT=3
+HIST=zones.iam.backend.toolPolicies
+
+# check_hist <label> <want "true" or -> [helm args...]
+check_hist() {
+  local label="$1" want="$2" out; shift 2
+  HIST_ROWS=$((HIST_ROWS + 1))
+  if ! helm template paigasus "$CHART" "${BASE[@]+"${BASE[@]}"}" "$@" >"$TMP/hist.yaml" 2>"$TMP/hist.err"; then
+    echo "FAIL [$label]: render failed"; cat "$TMP/hist.err"; ec=1; return 0
+  fi
+  if ! out="$(WANT="$want" python3 -c '
+import os, sys, yaml
+with open(sys.argv[1]) as fh:
+    docs = [d for d in yaml.safe_load_all(fh) if d]
+problems = []
+deps = [d for d in docs if d.get("kind") == "Deployment"
+        and d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") == "iam-backend"]
+if len(deps) != 1:
+    problems.append(str(len(deps)) + " iam-backend Deployment(s), want 1")
+else:
+    env = {e.get("name"): e.get("value") for e in deps[0]["spec"]["template"]["spec"]["containers"][0].get("env") or []}
+    name = "IAM_TOOL_POLICIES__HISTORY_CONDITIONS"
+    if os.environ["WANT"] == "-":
+        if name in env:
+            problems.append(name + " renders; want it absent")
+    elif env.get(name) != "true":
+        problems.append(name + " is " + repr(env.get(name)) + ", want \"true\"")
+print("|".join(problems) if problems else "OK")' "$TMP/hist.yaml" 2>&1)"; then
+    echo "FAIL [$label]: the checker failed"; printf '%s\n' "$out"; ec=1; return 0
+  fi
+  if [ "$out" = "OK" ]; then echo "  ok [$label]"; else echo "FAIL [$label]: $out"; ec=1; fi
+}
+
+check_hist "H1 default"             -
+check_hist "H2 on"                  true --set "$HIST.historyConditions=true"
+check_hist "H3 reuse-values-no-key" -    --set "$HIST=null"
+
+if [ "$HIST_ROWS" -lt "$HIST_ROWS_WANT" ]; then
+  echo "FAIL [history rows]: $HIST_ROWS history row(s) ran, want $HIST_ROWS_WANT"; ec=1
 fi
 
 if [ "$ec" -eq 0 ]; then echo "== chart env OK =="; fi

@@ -128,6 +128,12 @@ filter = 'package(=paigasus-gateway) and binary(docker_preflight)'
 retries = 1
 
 [[profile.default.overrides]]
+# SMA-753 PR 2: the cap test and the p99 test. No retry: a retry can hide a race (design § 9).
+filter = 'package(=paigasus-gateway) and (binary(history_cap_redis) or binary(perf))'
+retries = 0
+test-group = 'docker-containers'
+
+[[profile.default.overrides]]
 # SMA-677 D22: the gateway's Redis-backed binaries, named one by one so the crate's pure unit
 # tests keep retries = 0. Same retry budget and container cap as paigasus-iam's suites. SMA-752
 # Task 18 adds the NATS-backed `tool_policy_nats`. SMA-753 adds the history store binary

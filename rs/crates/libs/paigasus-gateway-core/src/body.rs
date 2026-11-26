@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::decider::DecidedCall;
 use crate::decision_log::{CallFacts, ReportedCall};
 use crate::json::{Malformed, ResponsesDoc, check_numbers, check_numbers_responses, parse_strict, parse_strict_responses};
+use crate::policy::{FieldPlan, call_fields};
 use crate::report::{Blocked, ReportDecision, ReportEntry, RequestEntry, report_entry, report_header};
 use crate::types::{Basis, BlockCode, Decision, Format, ToolCall};
 use crate::{anthropic, openai, responses};
@@ -133,7 +134,7 @@ impl BodyCalls {
     /// call in order, then the unenforceable entries with `call: None` (P-2). A decision vector of
     /// the wrong length has no detail, because the details do not belong to these calls.
     #[must_use]
-    pub fn reported(&self, decided: &[DecidedCall], basis: Basis) -> Vec<ReportedCall> {
+    pub fn reported(&self, decided: &[DecidedCall], basis: Basis, plan: Option<&FieldPlan>) -> Vec<ReportedCall> {
         let aligned = decided.len() == self.calls.len();
         let mut out: Vec<ReportedCall> = self
             .calls
@@ -151,7 +152,7 @@ impl BodyCalls {
                 let detail = if aligned && !forced { decided[i].detail.clone() } else { None };
                 // The decider's id stays for a forced call too: the settle marks that event `deny`.
                 let decision_id = if aligned { decided[i].decision_id } else { None };
-                ReportedCall::new(entry, Some(CallFacts::of(c)), detail).with_decision_id(decision_id)
+                ReportedCall::new(entry, Some(CallFacts::of(c)), detail).with_decision_id(decision_id).with_fields(call_fields(c, plan))
             })
             .collect();
         out.extend(self.unenforceable.iter().cloned().map(|e| ReportedCall::new(e, None, None)));
@@ -162,7 +163,7 @@ impl BodyCalls {
     /// It is built from the same entries as [`BodyCalls::reported`].
     #[must_use]
     pub fn report(&self, decided: &[DecidedCall], basis: Basis, requests: &[RequestEntry]) -> String {
-        let entries: Vec<ReportEntry> = self.reported(decided, basis).into_iter().map(|r| r.entry).collect();
+        let entries: Vec<ReportEntry> = self.reported(decided, basis, None).into_iter().map(|r| r.entry).collect();
         report_header(&entries, requests)
     }
 }
@@ -541,7 +542,7 @@ mod tests {
         ]));
         let decided = vec![DecidedCall::new(Decision::Allow, None).with_decision_id(id), DecidedCall::new(block(), None).with_decision_id(id2)];
         let b = parse_body(Format::OpenAiResponses, &cut, MAX).unwrap();
-        let reported = b.reported(&decided, Basis::Decider);
+        let reported = b.reported(&decided, Basis::Decider, None);
         assert_eq!(reported.iter().map(|r| r.decision_id).collect::<Vec<_>>(), [Some(id), Some(id2)]);
         assert_eq!(reported[0].entry.code, Some(BlockCode::Truncated));
         let v: Value = serde_json::from_slice(&b.apply(&decided).unwrap()).unwrap();
@@ -549,7 +550,7 @@ mod tests {
         assert_eq!(v["output"][1]["content"][0]["text"], format!("[paigasus] tool call \"ls\" was blocked (policy). ref={id2}"));
         // A decision vector of the wrong length has no ids.
         let b = parse_body(Format::OpenAiResponses, &cut, MAX).unwrap();
-        assert!(b.reported(&decided[..1], Basis::Decider).iter().all(|r| r.decision_id.is_none()));
+        assert!(b.reported(&decided[..1], Basis::Decider, None).iter().all(|r| r.decision_id.is_none()));
     }
 
     #[test]
@@ -598,7 +599,7 @@ mod tests {
         assert!(b.is_truncated(), "the first call has a forced Truncated");
         let detail = Arc::new(DecisionDetail::new(RecordBasis::Policy, None, None));
         let decided = vec![DecidedCall::new(Decision::Allow, Some(Arc::clone(&detail))), DecidedCall::new(Decision::Allow, None)];
-        let reported = b.reported(&decided, Basis::Decider);
+        let reported = b.reported(&decided, Basis::Decider, None);
         // The call entries in order, then the unenforceable entry without call facts.
         assert_eq!(reported.len(), 3);
         assert_eq!(reported[0].entry.code, Some(BlockCode::Truncated));
@@ -620,11 +621,40 @@ mod tests {
         }
     }
 
+    fn amount_path() -> paigasus_kernel::tool_policy::history::FieldPath {
+        paigasus_kernel::tool_policy::history::FieldPath::new(vec!["amount".to_owned()]).unwrap()
+    }
+
+    fn one_call_body(name: &str, args: &str) -> Vec<u8> {
+        openai(json!({"tool_calls":[{"id":"c","type":"function","function":{"name":name,"arguments":args}}]}), "tool_calls")
+    }
+
+    #[test]
+    fn a_body_report_carries_the_fields_of_its_plan() {
+        use paigasus_kernel::tool_policy::history::Extracted;
+        let plan = crate::policy::test_plan("send", "amount");
+        let b = parse_body(Format::OpenAiChat, &one_call_body("send", r#"{"amount":5}"#), MAX).unwrap();
+        let reported = b.reported(&[DecidedCall::from(Decision::Allow)], Basis::Decider, Some(&plan));
+        let fields = reported[0].fields.as_ref().expect("a plan gives fields");
+        assert!(matches!(fields.get(&amount_path()), Some(Extracted::Long(5))));
+        // A tool the plan does not name has no planned path.
+        let b = parse_body(Format::OpenAiChat, &one_call_body("other", r#"{"amount":5}"#), MAX).unwrap();
+        let reported = b.reported(&[DecidedCall::from(Decision::Allow)], Basis::Decider, Some(&plan));
+        assert!(reported[0].fields.as_ref().is_some_and(|f| f.get(&amount_path()).is_none()));
+    }
+
+    #[test]
+    fn no_plan_gives_no_fields() {
+        let b = parse_body(Format::OpenAiChat, &one_call_body("send", r#"{"amount":5}"#), MAX).unwrap();
+        let reported = b.reported(&[DecidedCall::from(Decision::Allow)], Basis::Decider, None);
+        assert!(reported.iter().all(|r| r.fields.is_none()));
+    }
+
     #[test]
     fn a_wrong_length_decision_vector_gives_no_detail() {
         let b = parse_body(Format::OpenAiChat, &two_calls(), MAX).unwrap();
         let detail = Arc::new(DecisionDetail::new(RecordBasis::Policy, None, None));
-        let reported = b.reported(&[DecidedCall::new(Decision::Allow, Some(detail))], Basis::OnFailure);
+        let reported = b.reported(&[DecidedCall::new(Decision::Allow, Some(detail))], Basis::OnFailure, None);
         assert_eq!(reported.len(), 2);
         assert!(reported.iter().all(|r| r.detail.is_none() && r.entry.code == Some(BlockCode::DeciderError)));
     }

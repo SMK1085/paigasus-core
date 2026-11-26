@@ -3380,6 +3380,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "figment",
@@ -3427,6 +3428,7 @@ name = "paigasus-gateway-core"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "paigasus-iam-core",
  "paigasus-kernel",
  "paigasus-proto",
  "proptest",
@@ -3569,6 +3571,7 @@ dependencies = [
  "chrono",
  "hmac",
  "paigasus-kernel",
+ "paigasus-proto",
  "proptest",
  "serde",
  "serde_json",

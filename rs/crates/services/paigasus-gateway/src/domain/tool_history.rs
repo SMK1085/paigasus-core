@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use paigasus_gateway_core::ToolCall;
+use paigasus_kernel::tool_policy::history::{Fields, KeyId, SetTool};
 use paigasus_kernel::tool_policy::normalise;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -19,13 +20,22 @@ use crate::domain::limits::UnavailableKind;
 pub const MAX_EVENTS_PER_TOOL: usize = 10_000;
 /// The longest window a policy can ask for: 24 hours.
 pub const MAX_WINDOW_MS: u64 = 86_400_000;
-/// How long an event stays: the longest window plus one hour of margin.
-pub const RETENTION_MS: u64 = MAX_WINDOW_MS + 3_600_000;
+/// How long an event stays: the longest window plus one hour of margin. One value, in the kernel.
+pub use paigasus_kernel::tool_policy::history::RETENTION_MS;
 /// The time to live of a history key, in seconds. It follows `RETENTION_MS`.
 pub const KEY_TTL_SECS: u64 = RETENTION_MS / 1000;
+/// The most sets that one reserve reads (spec P4). A set is one entry of `ReadRequest::sets`, so
+/// an every-tool set counts once. One value, in the kernel: a `catalog` tool set past it reads the
+/// every-tool set.
+pub use paigasus_kernel::tool_policy::history::MAX_READ_SETS;
+/// The most events that one reserve reads, over all its sets (spec P4).
+pub const MAX_READ_EVENTS: usize = 20_000;
+/// The most tools in the tool index of one history (spec P4). A later tool still gets its own
+/// set, but not an index entry, and the history gets the every-tool truncation mark.
+pub const MAX_INDEXED_TOOLS: usize = 256;
 
 /// Which history an event belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scope {
     Session,
     Principal,
@@ -95,6 +105,16 @@ impl Histories {
         }
         scopes
     }
+
+    /// The id of the history of `scope`. With no API key the key history is the principal
+    /// history (D5), so a `Key` read reads the principal history (F14).
+    pub fn scope_id(&self, scope: Scope) -> String {
+        match (scope, &self.key) {
+            (Scope::Session, _) => self.session.to_string(),
+            (Scope::Key, Some(key)) => key.clone(),
+            (Scope::Principal | Scope::Key, _) => self.principal.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +124,11 @@ pub struct StoredEvent {
     pub kind: EventKind,
     pub tool: String,
     pub verdict: EventVerdict,
+    /// The stored argument fields (spec P3). A body with no `f` and no `b` (a PR 1 event) reads as
+    /// `Fields::Values` with no path: every path is "not in the event".
+    pub fields: Fields,
+    /// The id of the key that made the digests of `fields`. `None` when no digest was made.
+    pub key: Option<KeyId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,10 +187,41 @@ pub struct WriteRequest {
     pub now_ms: u64,
 }
 
+/// One call of a reserve. `call_id` and `item_id` are the two `c:` links of the call (spec P8):
+/// the reserve writes each one that is `Some`, unless the link already names another event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEvent {
     pub id: Uuid,
     pub tool: String,
+    pub call_id: Option<String>,
+    pub item_id: Option<String>,
+    pub fields: Fields,
+    pub key: Option<KeyId>,
+}
+
+/// The sets that a reserve reads after its writes (spec P4). `Tool(t)` is the set of one tool;
+/// `Every` is every tool of the tool index of the history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadRequest {
+    /// The window start: an event with an earlier time is not read. A cap trim of an event at or
+    /// after it flags the history in `AppendReply::truncated`.
+    pub from_ms: u64,
+    pub sets: Vec<(Scope, SetTool)>,
+}
+
+/// One entry of the window reply, for one requested set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetWindow {
+    pub scope: Scope,
+    pub tool: SetTool,
+    /// Sorted by (`ts_ms`, id), from `from_ms` on. Future events and the pending events of this
+    /// reserve are included. A member whose body is gone is left out (`missing_bodies`).
+    pub events: Vec<StoredEvent>,
+    /// The truncation mark of the set: the largest score that a cap trim removed. For `Every`, the
+    /// largest of the index mark and the marks of the sets that it read.
+    pub mark_ms: Option<u64>,
+    /// The read stopped at a read limit before this set: it holds no event, and no mark.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,24 +230,29 @@ pub struct ReserveRequest {
     pub turn: i64,
     pub calls: Vec<CallEvent>,
     pub now_ms: u64,
-    pub window_from_ms: Option<u64>,
+    /// `None`: the reserve reads no set and flags no truncation (PR 1).
+    pub read: Option<ReadRequest>,
 }
 
-/// A call that the gateway forwarded with no decision. `call_id` and `item_id` are the two `c:`
-/// links of the call: a local shell call has both (spec D4). Each is written when it is `Some`.
+/// A call that has no reserved event (spec P9): an event with the verdict of the call. `call_id`
+/// and `item_id` are the two `c:` links of the call: a local shell call has both (spec D4). Only an
+/// `Allow` call writes them. An id that a reserve already wrote keeps one event (plan decision D-E).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForwardedCall {
+pub struct AppendCall {
     pub id: Uuid,
     pub tool: String,
+    pub verdict: EventVerdict,
     pub call_id: Option<String>,
     pub item_id: Option<String>,
+    pub fields: Fields,
+    pub key: Option<KeyId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendRequest {
     pub histories: Histories,
     pub turn: i64,
-    pub calls: Vec<ForwardedCall>,
+    pub calls: Vec<AppendCall>,
     pub now_ms: u64,
 }
 
@@ -204,10 +265,30 @@ pub struct AppendReply {
     /// `name_key`), not a digest. A store adapter that keys by digest maps the digest back to the
     /// name from the calls of the request.
     pub truncated: Vec<(Scope, String)>,
+    /// One entry per set of `ReserveRequest::read`, in its order. Empty for any other call.
+    pub window: Vec<SetWindow>,
+    /// The members that the window read skipped because their body was gone (spec P10). A member
+    /// counts once for each set that read it.
+    pub missing_bodies: u64,
 }
 
-/// `item_id`: the item id of a forwarded local shell call. The `c:` link is written under `call_id`
-/// and also under `item_id`, with the same session, tool and event id (spec D4).
+impl AppendReply {
+    /// A reply that wrote, trimmed and read nothing.
+    pub fn empty() -> Self {
+        AppendReply {
+            written: 0,
+            trimmed_retention: 0,
+            trimmed_cap: 0,
+            truncated: Vec::new(),
+            window: Vec::new(),
+            missing_bodies: 0,
+        }
+    }
+}
+
+/// `call_id` and `item_id`: the `c:` links of the call (a local shell call has both, spec D4). An
+/// `Allow` item writes them, with the same session, tool and event id. A `Deny` item deletes each one
+/// that still names this event (spec P8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettleItem {
     pub event_id: Uuid,
@@ -241,11 +322,17 @@ pub trait SessionStore: Send + Sync {
     /// After the admission: touch the session when `turn` is Some, and write each result event once
     /// per linked call event (`ResultEvent::event_id`). A call event that is gone gets no result.
     async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError>;
-    /// Inside the decide future: one pending call event per call in every history, and its `d:` link.
+    /// Inside the decide future: one pending call event per call in every history, its `d:` link,
+    /// and its `c:` links. A `c:` link that names another event is kept (spec P8). Then, in the same
+    /// atomic step, it reads the sets of `read` into `AppendReply::window` (spec P4): at most
+    /// `MAX_READ_SETS` sets and `MAX_READ_EVENTS` events; the set that passes a limit and every
+    /// later set come back `truncated`. A limit is not a store error.
     async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError>;
-    /// At the report site: set each verdict; write the `c:` link of each forwarded call. Idempotent.
+    /// At the report site: set each verdict. An allowed event writes its `c:` links; a denied event
+    /// deletes each `c:` link that still names it. Idempotent.
     async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError>;
-    /// At the report site, for a call forwarded with no decision: an allowed event and its `c:` link.
+    /// At the report site, for a call with no reserved event: an event with the verdict of the call.
+    /// Only an allowed call writes its `c:` links.
     async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError>;
 }
 
@@ -326,6 +413,19 @@ pub fn link_session(req: &LookupRequest, reply: &LookupReply, new_session: Uuid)
         mixed_sessions: candidates.len() > 1,
         forged_results,
         results,
+    })
+}
+
+/// The window reply must hold one entry per requested set, in the order of the request (spec P4).
+/// A missing, extra or moved entry is a decode error, never an empty set.
+pub fn check_window(req: &ReadRequest, reply: &[SetWindow]) -> Result<(), HistoryStoreError> {
+    check_len("window sets", req.sets.len(), reply.len())?;
+    if req.sets.iter().zip(reply).all(|((scope, tool), w)| *scope == w.scope && *tool == w.tool) {
+        return Ok(());
+    }
+    Err(HistoryStoreError::Unavailable {
+        kind: UnavailableKind::Decode,
+        detail: "the window reply does not follow the order of the request".into(),
     })
 }
 
@@ -585,6 +685,59 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert_eq!(s[2], (Scope::Key, "k1".into()));
         assert_eq!((Scope::Session.as_str(), Scope::Principal.as_str(), Scope::Key.as_str()), ("s", "p", "k"));
+    }
+
+    fn set_window(scope: Scope, tool: SetTool) -> SetWindow {
+        SetWindow {
+            scope,
+            tool,
+            events: Vec::new(),
+            mark_ms: None,
+            truncated: false,
+        }
+    }
+
+    /// A set that the reply leaves out is a decode error, never an empty set (spec P4).
+    #[test]
+    fn a_reply_with_a_missing_entry_is_a_decode_error() {
+        let a = (Scope::Session, SetTool::Tool("a".into()));
+        let every = (Scope::Principal, SetTool::Every);
+        let req = ReadRequest {
+            from_ms: 0,
+            sets: vec![a.clone(), every.clone()],
+        };
+        let full = vec![set_window(a.0, a.1.clone()), set_window(every.0, every.1.clone())];
+        assert_eq!(check_window(&req, &full), Ok(()));
+        assert!(is_decode(check_window(&req, &full[..1]).unwrap_err()), "a short reply");
+        let mut long = full.clone();
+        long.push(set_window(Scope::Key, SetTool::Every));
+        assert!(is_decode(check_window(&req, &long).unwrap_err()), "a long reply");
+        let swapped = vec![full[1].clone(), full[0].clone()];
+        assert!(is_decode(check_window(&req, &swapped).unwrap_err()), "the order of the request");
+        let other_scope = vec![set_window(Scope::Key, a.1.clone()), full[1].clone()];
+        assert!(is_decode(check_window(&req, &other_scope).unwrap_err()), "another scope");
+    }
+
+    #[test]
+    fn the_read_limits_are_the_spec_values() {
+        assert_eq!([MAX_READ_SETS, MAX_READ_EVENTS, MAX_INDEXED_TOOLS], [64, 20_000, 256]);
+    }
+
+    /// With no API key the key history is the principal history (D5, F14).
+    #[test]
+    fn a_key_scope_without_a_key_names_the_principal_history() {
+        let mut h = Histories {
+            org: u(1),
+            principal: "prn:p".into(),
+            key: None,
+            session: u(2),
+        };
+        assert_eq!(
+            (h.scope_id(Scope::Session), h.scope_id(Scope::Principal), h.scope_id(Scope::Key)),
+            (u(2).to_string(), "prn:p".into(), "prn:p".into())
+        );
+        h.key = Some("k1".into());
+        assert_eq!(h.scope_id(Scope::Key), "k1");
     }
 
     #[test]

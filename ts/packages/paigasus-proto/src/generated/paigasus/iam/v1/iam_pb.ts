@@ -3088,8 +3088,9 @@ export const BulkReplayDeadLettersResponseSchema: GenMessage<BulkReplayDeadLette
  *
  * Evaluation rules the gateway MUST follow (see HistoryCondition for the per-condition rules):
  *  - A missing slot, an unknown shape, or an unknown enum value fails closed.
- *  - The gateway must keep history for at least max_window_ms. If its retention is shorter, it
- *    fails closed for this set.
+ *  - The gateway checks the retention for each condition. When the retention is shorter than the
+ *    window_ms of a condition, only the slots of that condition are missing. The other policies
+ *    of the set still decide.
  *  - Merging with the floor: the gateway builds one merged Cedar policy set from the floor and
  *    the tenant set. It prefixes the policy ids with "floor/" and "tenant/" internally. Cedar's
  *    rule that a forbid wins over any permit means that a tenant cannot loosen the floor. The
@@ -3183,6 +3184,7 @@ export const CompiledToolPolicySetSchema: GenMessage<CompiledToolPolicySet> = /*
  *
  * Evaluation rules:
  *  - The window is closed: [now - window_ms, now]. Only the gateway clock sets event times.
+ *  - An event with a time after now is inside every window.
  *  - The event being decided is recorded before evaluation. It counts toward count_within and
  *    sum_within. A denied call is still recorded, so it counts too.
  *  - formerly sees the event being decided: Dogwood's semantics, as the decision corpus
@@ -3190,9 +3192,28 @@ export const CompiledToolPolicySetSchema: GenMessage<CompiledToolPolicySet> = /*
  *    the current event is true when that event matches the predicate.
  *  - Tool matching uses the name_key of the catalog (the case-folded match key), not the
  *    display name.
- *  - sum_within: an event with no value at field_path adds 0. A negative value adds 0. This
- *    differs from Dogwood, because the arguments come from the model, and a negative amount
- *    must not lower a budget. The sum saturates at the 64-bit signed limits.
+ *  - sum_within: an event whose predicate is true and that has no value at field_path adds 0. A
+ *    negative value adds 0. This differs from Dogwood, because the arguments come from the
+ *    model, and a negative amount must not lower a budget. The sum saturates at the 64-bit
+ *    signed limits. On an event whose predicate is unknown, the slot is missing, whatever the
+ *    stored value is. On an event whose predicate is true, a stored value other than a Long or
+ *    an absent value (a digest, or a value of the wrong type), or unparsed arguments, makes the
+ *    slot missing.
+ *  - A field test gives true, false or unknown. AND, OR and NOT use Kleene logic. An unknown
+ *    event makes a slot missing where it can change the result: formerly is true when one event
+ *    is true, else unknown when one event is unknown, else false. count_within gives a value
+ *    only when the comparison has the same result for every count from the true events to the
+ *    true events plus the unknown events. Else the slot is missing.
+ *  - A field test is unknown when the stored value has a different type than the literal (a
+ *    string or digest against a Long literal, or the reverse). The slot is then missing. It is
+ *    not false. A value that is an object, an array or a text number, unparsed arguments, and a
+ *    digest under an unknown key id are unknown too. An absent value, or a path that the event
+ *    does not hold, is false.
+ *  - The decided call: a decided call with unparsed arguments, or with a non-Long value at a
+ *    sum_within path, makes that slot missing. The rule applies only when the predicate of the
+ *    decided call is true or unknown.
+ *  - A string, bool or decimal value is compared as a keyed digest. Only EQ exists for these
+ *    types.
  *  - scope KEY: a caller with no API key uses its principal as the key.
  *  - A missing slot, an unknown shape, or an unknown enum value fails closed.
  *

@@ -396,6 +396,14 @@ pub struct ToolHistoryConfig {
     /// The time limit of one store call: `"<n>ms"` or `"<n>s"`. It must be shorter than
     /// `tool_interception.decide_timeout_secs`.
     pub deadline: String,
+    /// The key of the field digests (SMA-753 P3), at least 32 bytes. With no key the history
+    /// stores no string, bool or decimal value. Set it through `GATEWAY_TOOL_HISTORY__DIGEST_KEY`.
+    #[serde(skip_serializing)]
+    pub digest_key: Option<SecretString>,
+    /// The key that the current key replaced. A literal in a policy gets a digest under both keys.
+    /// It needs `digest_key`. Set it through `GATEWAY_TOOL_HISTORY__PREVIOUS_DIGEST_KEY`.
+    #[serde(skip_serializing)]
+    pub previous_digest_key: Option<SecretString>,
 }
 
 impl Default for ToolHistoryConfig {
@@ -404,6 +412,8 @@ impl Default for ToolHistoryConfig {
             backend: HistoryBackend::default(),
             redis_url: None,
             deadline: "1s".to_string(),
+            digest_key: None,
+            previous_digest_key: None,
         }
     }
 }
@@ -441,6 +451,7 @@ impl ToolHistoryConfig {
                 self.deadline, ti.decide_timeout_secs
             ));
         }
+        crate::adapters::history::HmacHistoryDigester::from_config(self)?;
         match self.backend {
             HistoryBackend::Redis if is_blank(&self.redis_url) => Err("tool_history.backend = \"redis\" requires tool_history.redis_url (set GATEWAY_TOOL_HISTORY__REDIS_URL)".to_string()),
             HistoryBackend::Memory if self.redis_url.is_some() => {
@@ -1936,6 +1947,46 @@ mod tests {
             assert_eq!(th.redis_url.as_ref().map(|u| u.expose_secret().to_owned()), Some("redis://:hunter2@127.0.0.1:6379/3".to_owned()));
             Ok(())
         });
+    }
+
+    #[test]
+    fn the_history_keys_come_from_the_environment() {
+        const K1: &str = "0123456789abcdef0123456789abcdef-one";
+        const K2: &str = "0123456789abcdef0123456789abcdef-two";
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("gateway.toml", valid_toml())?;
+            jail.set_env("GATEWAY_TOOL_HISTORY__DIGEST_KEY", K1);
+            jail.set_env("GATEWAY_TOOL_HISTORY__PREVIOUS_DIGEST_KEY", K2);
+            let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+            assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+            let th = cfg.tool_history.as_ref().expect("the env vars create the table");
+            assert_eq!(th.digest_key.as_ref().map(|k| k.expose_secret().to_owned()), Some(K1.to_owned()));
+            assert_eq!(th.previous_digest_key.as_ref().map(|k| k.expose_secret().to_owned()), Some(K2.to_owned()));
+            let json = serde_json::to_string(th).expect("serializes");
+            assert!(!json.contains(K1) && !json.contains(K2) && !json.contains("digest_key"), "{json}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_pr1_config_with_no_key_still_validates() {
+        let ti = ToolInterceptionConfig::default();
+        assert!(ToolHistoryConfig::default().validate(&ti).is_ok());
+    }
+
+    #[test]
+    fn a_bad_history_key_names_its_config_key() {
+        let ti = ToolInterceptionConfig::default();
+        let short = ToolHistoryConfig {
+            digest_key: Some(SecretString::from("short".to_owned())),
+            ..ToolHistoryConfig::default()
+        };
+        assert!(short.validate(&ti).unwrap_err().starts_with("tool_history.digest_key: "));
+        let orphan = ToolHistoryConfig {
+            previous_digest_key: Some(SecretString::from("0123456789abcdef0123456789abcdef".to_owned())),
+            ..ToolHistoryConfig::default()
+        };
+        assert!(orphan.validate(&ti).unwrap_err().starts_with("tool_history.previous_digest_key: "));
     }
 
     #[test]

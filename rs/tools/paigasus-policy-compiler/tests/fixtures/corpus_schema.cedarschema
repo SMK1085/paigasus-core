@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+// The action schema of the SMA-753 PR 2 decision corpus cases (tests/corpus.rs). Test-only.
+// Every input attribute is optional, so a call with a missing field or with free text conforms.
+
+namespace Pgs::Iam {
+  entity Principal;
+  entity Organization;
+}
+
+namespace Pgs::Gateway {
+  action "InvokeTool";
+
+  action "search" in ["InvokeTool"] appliesTo {
+    principal: [Pgs::Iam::Principal],
+    resource: [Pgs::Iam::Organization],
+    context: { input: { q?: String, n?: Long } }
+  };
+
+  action "send" in ["InvokeTool"] appliesTo {
+    principal: [Pgs::Iam::Principal],
+    resource: [Pgs::Iam::Organization],
+    context: { input: { to?: String, amount?: Long } }
+  };
+
+  action "pay" in ["InvokeTool"] appliesTo {
+    principal: [Pgs::Iam::Principal],
+    resource: [Pgs::Iam::Organization],
+    context: {
+      input: {
+        memo?: String,
+        urgent?: Bool,
+        price?: decimal,
+        meta?: { region?: String, limit?: { max?: Long } }
+      }
+    }
+  };
+
+  // One tool for each comparison of the `ops_long` case. Each has no input.
+  action "op_lt" in ["InvokeTool"] appliesTo { principal: [Pgs::Iam::Principal], resource: [Pgs::Iam::Organization], context: { input: {} } };
+  action "op_le" in ["InvokeTool"] appliesTo { principal: [Pgs::Iam::Principal], resource: [Pgs::Iam::Organization], context: { input: {} } };
+  action "op_eq" in ["InvokeTool"] appliesTo { principal: [Pgs::Iam::Principal], resource: [Pgs::Iam::Organization], context: { input: {} } };
+  action "op_ge" in ["InvokeTool"] appliesTo { principal: [Pgs::Iam::Principal], resource: [Pgs::Iam::Organization], context: { input: {} } };
+  action "op_gt" in ["InvokeTool"] appliesTo { principal: [Pgs::Iam::Principal], resource: [Pgs::Iam::Organization], context: { input: {} } };
+  action "op_ne" in ["InvokeTool"] appliesTo { principal: [Pgs::Iam::Principal], resource: [Pgs::Iam::Organization], context: { input: {} } };
+}

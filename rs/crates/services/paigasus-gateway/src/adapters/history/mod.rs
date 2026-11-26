@@ -2,14 +2,18 @@
 
 //! Session history store adapters (SMA-753).
 
+pub mod body;
+pub mod digest;
 pub mod memory;
 pub mod redis;
 
 pub use self::redis::RedisSessionStore;
+pub use digest::{HistoryKey, HmacHistoryDigester};
 pub use memory::MemorySessionStore;
 
 use std::sync::Arc;
 
+use paigasus_kernel::tool_policy::history::HistoryDigester;
 use secrecy::ExposeSecret;
 use tokio_util::task::TaskTracker;
 
@@ -73,10 +77,13 @@ pub fn history_config_in_use(tool_policy_enabled: bool, config: Option<&ToolHist
 /// - `redis`: `RedisSessionStore::connect`, eager. A Redis that is down fails the boot. Then the
 ///   eviction check: `Evicts(p)` fails the boot and names `p`; `Unknown` logs one warning.
 ///
+/// `digester` is the one digester of the gateway (`runtime::history_digester`). The history keeps
+/// it, and `runtime::build_tool_policy` gives the same one to the policy cache (spec P3).
+///
 /// # Errors
 ///
 /// A Redis that does not connect, or a `maxmemory-policy` that can evict a history key.
-pub async fn build_tool_history(config: Option<&ToolHistoryConfig>, clock: Arc<dyn Clock>, entropy: Arc<dyn Entropy>) -> anyhow::Result<HistoryWiring> {
+pub async fn build_tool_history(config: Option<&ToolHistoryConfig>, clock: Arc<dyn Clock>, entropy: Arc<dyn Entropy>, digester: Arc<dyn HistoryDigester>) -> anyhow::Result<HistoryWiring> {
     let Some(config) = config else {
         return Ok(HistoryWiring::default());
     };
@@ -96,7 +103,7 @@ pub async fn build_tool_history(config: Option<&ToolHistoryConfig>, clock: Arc<d
             Arc::new(store)
         }
     };
-    let history = Arc::new(ToolHistory::new(store, clock, entropy, config.deadline()));
+    let history = Arc::new(ToolHistory::new(store, clock, entropy, config.deadline(), digester));
     let tasks = history.tasks();
     tracing::info!(backend = ?config.backend, deadline_ms = u64::try_from(config.deadline().as_millis()).unwrap_or(u64::MAX), "tool history enabled");
     Ok(HistoryWiring {
@@ -113,7 +120,7 @@ mod tests {
     use secrecy::SecretString;
 
     async fn build(config: Option<&ToolHistoryConfig>) -> anyhow::Result<HistoryWiring> {
-        build_tool_history(config, Arc::new(SystemClock), Arc::new(OsEntropy)).await
+        build_tool_history(config, Arc::new(SystemClock), Arc::new(OsEntropy), Arc::new(HmacHistoryDigester::keyless())).await
     }
 
     #[tokio::test]

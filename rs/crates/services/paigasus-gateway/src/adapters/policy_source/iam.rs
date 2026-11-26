@@ -115,25 +115,17 @@ fn check_kind(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<()
     Ok(())
 }
 
-// SMA-753 D16, the rollback target (Sven, 2026-11-22). A set with history conditions loads as a
-// set with no conditions: the text and the catalog are used, and the conditions are ignored. This
-// build fills no history slot. The kernel builds each Cedar request with no schema, so a policy
-// that reads `context.<slot>` errors. An errored forbid denies and an errored permit does not
-// allow (SMA-752 D26). So only the history policies fail closed, and the other policies of the
-// set still decide. A floor forbid that reads a slot denies in every mode (D33). This makes this
-// build a safe rollback target for PR 2, after tenants save conditions. The kind check and the
-// org check still apply to a set with conditions. Before D16, rule R5 refused such a set.
-
-/// The checks of a set with no settings (the floor). A floor with history conditions loads, and
-/// its slots stay empty (D16, see above).
+/// The checks of a set with no settings (the floor). SMA-753 spec P6: the conditions are copied
+/// as they are; the cache maps and validates them at load. A malformed condition makes the set
+/// unavailable there, not here.
 fn check_set(set: &CompiledToolPolicySet, kind: ToolPolicySetKind) -> Result<(), SourceError> {
     check_kind(set, kind)
 }
 
 /// The tenant part of a `GetCompiledToolPolicies` answer. Version 0 is a valid empty set.
 ///
-/// A tenant set with history conditions loads, and its slots stay empty (D16, see above). This
-/// source never sets `refused`.
+/// The history conditions and the window limit are copied from the set (SMA-753 spec P6). They
+/// change only with the set version, so the version token covers them.
 pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse) -> Result<TenantPolicies, SourceError> {
     let set = r.set.ok_or_else(|| malformed("the answer has no set"))?;
     let settings = r.settings.ok_or_else(|| malformed("the answer has no settings"))?;
@@ -161,7 +153,8 @@ pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse
         catalog: set.catalog_names,
         version,
         settings,
-        refused: false,
+        conditions: set.conditions,
+        max_window_ms: set.max_window_ms,
     })
 }
 
@@ -172,6 +165,8 @@ pub(crate) fn floor_from_response(r: GetCompiledFloorPoliciesResponse) -> Result
     Ok(PolicyText {
         text: set.cedar_policies,
         version: format!("f{}", set.version),
+        conditions: set.conditions,
+        max_window_ms: set.max_window_ms,
     })
 }
 
@@ -264,7 +259,7 @@ mod tests {
 
     #[test]
     fn a_set_with_a_history_condition_loads_with_its_text_catalog_and_settings() {
-        // D16: the set loads as a set with no conditions, in every mode. It is never refused.
+        // The set loads in every mode, with its text, its catalog and its settings.
         for (mode, fail, token) in [
             (ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, "t2:log_only:closed"),
             (ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, "t2:enforce:open"),
@@ -273,7 +268,6 @@ mod tests {
             let mut s = set(2);
             s.conditions.push(condition());
             let t = tenant_from_response(org(), response(s, settings(mode, fail))).expect("loads");
-            assert!(!t.refused, "{token}");
             assert_eq!(
                 (t.text.as_str(), t.catalog.as_slice(), t.version.as_str()),
                 ("permit(principal, action, resource);", ["read_file".to_owned()].as_slice(), token)
@@ -289,6 +283,28 @@ mod tests {
         floor_kind.conditions.push(condition());
         floor_kind.kind = ToolPolicySetKind::Floor as i32;
         assert!(is_malformed(tenant_from_response(org(), response(floor_kind, settings(ToolPolicyMode::Off, ToolPolicyFailMode::Open)))));
+    }
+
+    #[test]
+    fn the_iam_source_copies_the_conditions_and_the_window() {
+        let mut tenant = set(2);
+        tenant.conditions.push(condition());
+        tenant.max_window_ms = 86_400_000;
+        let t = tenant_from_response(org(), response(tenant, settings(ToolPolicyMode::Enforce, ToolPolicyFailMode::Closed))).expect("loads");
+        assert_eq!((t.conditions.len(), t.max_window_ms), (1, 86_400_000));
+        assert_eq!(t.conditions[0], condition());
+        let floor = GetCompiledFloorPoliciesResponse {
+            set: Some(CompiledToolPolicySet {
+                kind: ToolPolicySetKind::Floor as i32,
+                version: 4,
+                conditions: vec![condition()],
+                max_window_ms: 86_400_000,
+                ..Default::default()
+            }),
+        };
+        let f = floor_from_response(floor).expect("loads");
+        assert_eq!((f.conditions.len(), f.max_window_ms), (1, 86_400_000));
+        assert_eq!(f.conditions[0], condition());
     }
 
     #[test]
@@ -344,7 +360,7 @@ mod tests {
         let ok = floor_from_response(floor(4, vec![])).expect("valid");
         assert_eq!((ok.text.as_str(), ok.version.as_str()), ("forbid(principal, action, resource);", "f4"));
         assert_eq!(floor_from_response(floor(0, vec![])).expect("empty floor").version, "f0");
-        // D16: a floor with a condition loads with its text. Its slots stay empty.
+        // A floor with a condition loads with its text.
         let with = floor_from_response(floor(4, vec![condition()])).expect("loads");
         assert_eq!((with.text.as_str(), with.version.as_str()), ("forbid(principal, action, resource);", "f4"));
         assert!(is_malformed(floor_from_response(GetCompiledFloorPoliciesResponse::default())));

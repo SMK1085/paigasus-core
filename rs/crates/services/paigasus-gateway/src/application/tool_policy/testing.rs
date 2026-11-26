@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use metrics_util::debugging::{DebugValue, Snapshotter};
 use paigasus_gateway_core::{OnUnavailable, TenantMode};
+use paigasus_proto::paigasus::iam::v1 as pb;
+use pb::{history_condition, history_predicate, literal_value};
 use uuid::Uuid;
 
 use super::{CacheSettings, PolicyCache, RequestToolPolicy};
@@ -22,6 +24,7 @@ use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorErro
 use crate::domain::limits::SystemClock;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 use paigasus_kernel::detect::Finding;
+use paigasus_kernel::tool_policy::history::{Digest, FieldPath, HistoryDigester, KeyId, Scalar};
 
 pub(crate) const ORG_A: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
 pub(crate) const ORG_A_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
@@ -34,46 +37,161 @@ pub(crate) const PRINCIPAL: &str = "prn:pgs:iam:::principal/0190a1e5-0000-7000-8
 pub(crate) const FLOOR: &str = r#"@id("floor-rm") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
 pub(crate) const PERMIT_ALL: &str = r#"@id("p") permit(principal, action, resource);"#;
 
+/// The floor answer of [`FakeSource`]: its text, its conditions and a revision of the conditions.
+#[derive(Clone)]
+struct FloorFixture {
+    text: String,
+    conditions: Vec<pb::HistoryCondition>,
+    revision: u64,
+}
+
+/// The tenant answer of [`FakeSource`], with its version. One lock holds all of it.
+#[derive(Clone)]
+struct TenantFixture {
+    text: String,
+    version: u64,
+    /// The tenant catalog.
+    catalog: Vec<String>,
+    /// The history conditions of the tenant set (SMA-753).
+    conditions: Vec<pb::HistoryCondition>,
+    /// The settings that the source returns with the tenant set. `None`: a source with no settings.
+    settings: Option<TenantSettings>,
+}
+
 /// An in-memory policy source. The tenant text applies to every org.
 pub(crate) struct FakeSource {
-    floor: Mutex<String>,
-    tenant: Mutex<(String, u64)>,
+    floor: Mutex<FloorFixture>,
+    tenant: Mutex<TenantFixture>,
     tenant_delay: Mutex<Duration>,
     floor_delay: Mutex<Duration>,
     tenant_calls: AtomicUsize,
-    /// The settings that the source returns with the tenant set. `None`: a source with no settings.
-    tenant_settings: Mutex<Option<TenantSettings>>,
     /// When set, only the tenant load fails (preflight F10).
     fail_tenant: AtomicBool,
     /// When set, the floor load fails.
     fail_floor: AtomicBool,
 }
 
+/// A history digester with no key, as the gateway has with no `digest_key`: it makes no digest.
+struct KeylessDigester;
+
+impl HistoryDigester for KeylessDigester {
+    fn current(&self, _org: Uuid, _path: &FieldPath, _value: &Scalar) -> Option<(KeyId, Digest)> {
+        None
+    }
+
+    fn all(&self, _org: Uuid, _path: &FieldPath, _value: &Scalar) -> Vec<(KeyId, Digest)> {
+        Vec::new()
+    }
+}
+
+/// The keyless digester as the port that [`PolicyCache::new`] takes.
+pub(crate) fn keyless() -> Arc<dyn HistoryDigester> {
+    Arc::new(KeylessDigester)
+}
+
+/// The window limit that the fake source reports with every set.
+pub(crate) const MAX_WINDOW_MS: u64 = 86_400_000;
+
+/// A valid `formerly` condition: a call of `tool` with the Long argument `path` equal to 1, in the
+/// session, within one minute.
+pub(crate) fn formerly(slot: &str, tool: &str, path: &str) -> pb::HistoryCondition {
+    let node = |n| Some(Box::new(pb::HistoryPredicate { node: Some(n) }));
+    let tool = history_predicate::Node::Tool(pb::ToolMatch {
+        name_key: tool.to_owned(),
+        any_catalog_tool: false,
+    });
+    let field = history_predicate::Node::Field(pb::FieldComparison {
+        path: vec![path.to_owned()],
+        op: pb::ComparisonOp::Eq as i32,
+        value: Some(pb::LiteralValue {
+            value: Some(literal_value::Value::LongValue(1)),
+        }),
+    });
+    let predicate = pb::HistoryPredicate {
+        node: Some(history_predicate::Node::AllOf(Box::new(pb::PredicatePair { left: node(tool), right: node(field) }))),
+    };
+    pb::HistoryCondition {
+        slot: slot.to_owned(),
+        policy_id: "p".to_owned(),
+        scope: pb::HistoryScope::Session as i32,
+        window_ms: 60_000,
+        shape: Some(history_condition::Shape::Formerly(pb::FormerlyShape { predicate: Some(predicate) })),
+    }
+}
+
+/// A `sum_within` condition: the sum of the Long argument `path` over the calls of `tool` in the
+/// session, within one minute, is at most `max`.
+pub(crate) fn sum_within(slot: &str, tool: &str, path: &str, max: i64) -> pb::HistoryCondition {
+    let predicate = pb::HistoryPredicate {
+        node: Some(history_predicate::Node::Tool(pb::ToolMatch {
+            name_key: tool.to_owned(),
+            any_catalog_tool: false,
+        })),
+    };
+    pb::HistoryCondition {
+        shape: Some(history_condition::Shape::SumWithin(pb::SumWithinShape {
+            predicate: Some(predicate),
+            field_path: vec![path.to_owned()],
+            op: pb::ComparisonOp::Le as i32,
+            threshold: max,
+        })),
+        ..formerly(slot, tool, path)
+    }
+}
+
 impl FakeSource {
     pub(crate) fn new(floor: &str, tenant: &str) -> Arc<Self> {
         Arc::new(FakeSource {
-            floor: Mutex::new(floor.to_owned()),
-            tenant: Mutex::new((tenant.to_owned(), 1)),
+            floor: Mutex::new(FloorFixture {
+                text: floor.to_owned(),
+                conditions: Vec::new(),
+                revision: 1,
+            }),
+            tenant: Mutex::new(TenantFixture {
+                text: tenant.to_owned(),
+                version: 1,
+                catalog: Vec::new(),
+                conditions: Vec::new(),
+                settings: None,
+            }),
             tenant_delay: Mutex::new(Duration::ZERO),
             floor_delay: Mutex::new(Duration::ZERO),
             tenant_calls: AtomicUsize::new(0),
-            tenant_settings: Mutex::new(None),
             fail_tenant: AtomicBool::new(false),
             fail_floor: AtomicBool::new(false),
         })
     }
 
+    /// Replace the floor conditions. The floor revision changes when the conditions change, so
+    /// the next load reloads. The same conditions keep the revision.
+    pub(crate) fn set_floor_conditions(&self, conditions: Vec<pb::HistoryCondition>) {
+        let mut f = self.floor.lock().unwrap();
+        if f.conditions != conditions {
+            f.conditions = conditions;
+            f.revision += 1;
+        }
+    }
+
+    /// Replace the tenant conditions and the catalog; the version changes.
+    pub(crate) fn set_tenant_conditions(&self, conditions: Vec<pb::HistoryCondition>, catalog: &[&str]) {
+        let mut t = self.tenant.lock().unwrap();
+        t.conditions = conditions;
+        t.catalog = catalog.iter().map(|s| (*s).to_owned()).collect();
+        t.version += 1;
+    }
+
     /// Replace the tenant text; the version changes.
     pub(crate) fn set_tenant(&self, text: &str) {
         let mut t = self.tenant.lock().unwrap();
-        *t = (text.to_owned(), t.1 + 1);
+        t.text = text.to_owned();
+        t.version += 1;
     }
 
     /// Replace the settings of the tenant; the version changes (the IAM token covers the settings).
     pub(crate) fn set_settings(&self, settings: Option<TenantSettings>) {
-        *self.tenant_settings.lock().unwrap() = settings;
         let mut t = self.tenant.lock().unwrap();
-        t.1 += 1;
+        t.settings = settings;
+        t.version += 1;
     }
 
     /// Fail only the tenant load. The floor load still works.
@@ -105,14 +223,17 @@ impl PolicySource for FakeSource {
         if self.fail_floor.load(Ordering::SeqCst) {
             return Err(SourceError::Io("floor down".to_owned()));
         }
-        let text = self.floor.lock().unwrap().clone();
+        // The answer is taken under one lock before the wait, so it holds one version.
+        let f = self.floor.lock().unwrap().clone();
         let delay = *self.floor_delay.lock().unwrap();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
         Ok(PolicyText {
-            version: format!("{}", text.len()),
-            text,
+            version: format!("{}:{}", f.text.len(), f.revision),
+            text: f.text,
+            conditions: f.conditions,
+            max_window_ms: MAX_WINDOW_MS,
         })
     }
 
@@ -121,17 +242,20 @@ impl PolicySource for FakeSource {
         if self.fail_tenant.load(Ordering::SeqCst) {
             return Err(SourceError::Io("tenant down".to_owned()));
         }
-        let (text, version) = self.tenant.lock().unwrap().clone();
+        // The payload and its version are taken under one lock before the wait: a fixture change
+        // during the wait reaches the next load, not this answer.
+        let t = self.tenant.lock().unwrap().clone();
         let delay = *self.tenant_delay.lock().unwrap();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
         Ok(TenantPolicies {
-            text,
-            catalog: Vec::new(),
-            version: version.to_string(),
-            settings: *self.tenant_settings.lock().unwrap(),
-            refused: false,
+            text: t.text,
+            catalog: t.catalog,
+            version: t.version.to_string(),
+            settings: t.settings,
+            conditions: t.conditions,
+            max_window_ms: MAX_WINDOW_MS,
         })
     }
 }
@@ -181,6 +305,7 @@ pub(crate) fn policy_with(source: &Arc<FakeSource>, settings: ToolPolicySettings
             idle_evict: settings.idle_evict,
             load_timeout: settings.load_timeout,
         },
+        keyless(),
     );
     RequestToolPolicy::new(cache, settings, recorder)
 }
@@ -322,5 +447,42 @@ pub(crate) struct PanicStage(pub(crate) &'static str);
 impl BuiltInStage for PanicStage {
     fn run(&self, _batch: &DetectBatch) -> PipelineOutput {
         std::panic::panic_any(self.0.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_floor_version_changes_with_the_condition_payload_not_its_count() {
+        let source = FakeSource::new(FLOOR, PERMIT_ALL);
+        source.set_floor_conditions(vec![formerly("a", "send", "amount")]);
+        let first = source.floor().await.expect("floor").version;
+        // The same answer keeps its version.
+        source.set_floor_conditions(vec![formerly("a", "send", "amount")]);
+        assert_eq!(source.floor().await.expect("floor").version, first);
+        // One condition for another, with the same count: a new version.
+        source.set_floor_conditions(vec![formerly("a", "send", "limit")]);
+        assert_ne!(source.floor().await.expect("floor").version, first);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_delayed_tenant_load_returns_the_payload_of_its_version() {
+        let source = FakeSource::new(FLOOR, PERMIT_ALL);
+        source.set_tenant_delay(Duration::from_secs(1));
+        let load = {
+            let source = Arc::clone(&source);
+            tokio::spawn(async move { source.tenant(ORG_A).await.expect("tenant") })
+        };
+        // Let the load take its snapshot, then change the fixture while it waits.
+        tokio::task::yield_now().await;
+        source.set_tenant_conditions(vec![formerly("a", "send", "amount")], &["send"]);
+        let answer = load.await.expect("join");
+        assert_eq!((answer.version.as_str(), answer.conditions.len(), answer.catalog.len()), ("1", 0, 0));
+        // The next load sees the update under the new version.
+        source.set_tenant_delay(Duration::ZERO);
+        let next = source.tenant(ORG_A).await.expect("tenant");
+        assert_eq!((next.version.as_str(), next.conditions.len(), next.catalog.len()), ("2", 1, 1));
     }
 }

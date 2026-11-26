@@ -16,6 +16,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use paigasus_gateway::adapters::history::HmacHistoryDigester;
 use paigasus_gateway::adapters::history::memory::MemorySessionStore;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
@@ -26,7 +27,8 @@ use paigasus_gateway::application::tool_policy::{CacheSettings, CedarDecider, Po
 use paigasus_gateway::config::ToolPolicySettings;
 use paigasus_gateway::domain::decision_log::{DecisionLog, OsEntropy};
 use paigasus_gateway::domain::limits::Clock;
-use paigasus_gateway::domain::tool_history::{EventKind, EventVerdict, Scope, StoredEvent};
+use paigasus_gateway::domain::tool_history::{EventKind, EventVerdict, Scope, SessionStore, StoredEvent};
+use paigasus_gateway::domain::tool_policy::PolicySource;
 use paigasus_gateway::service_info::Capabilities;
 use paigasus_gateway_core::decision_log::{DecisionRecord, Side};
 use paigasus_gateway_core::{Limits as CoreLimits, OnUnavailable, TenantMode};
@@ -104,7 +106,38 @@ fn settings() -> ToolPolicySettings {
     }
 }
 
+/// A store over the memory store of a rig.
+type StoreOver = fn(Arc<MemorySessionStore>) -> Arc<dyn SessionStore>;
+
+/// What a rig can change (SMA-753 PR 2). The default is the PR 1 rig.
+struct Options {
+    /// The policy source. `None`: the file source with `FLOOR` and `TENANT`.
+    source: Option<Arc<dyn PolicySource>>,
+    /// The store that the history uses, over the memory store of the rig. `None`: the memory store.
+    store: Option<StoreOver>,
+    mode: TenantMode,
+    limits: CoreLimits,
+    /// The decider waits past the decide timeout after the reserve.
+    slow_after_reserve: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            source: None,
+            store: None,
+            mode: TenantMode::Enforce,
+            limits: CoreLimits::defaults(),
+            slow_after_reserve: false,
+        }
+    }
+}
+
 fn rig() -> Rig {
+    rig_with(Options::default())
+}
+
+fn rig_with(o: Options) -> Rig {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("floor.cedar"), FLOOR).expect("floor");
     let tenant = dir.path().join("tenants").join(ORG_A);
@@ -112,18 +145,32 @@ fn rig() -> Rig {
     std::fs::write(tenant.join("policies.cedar"), TENANT).expect("tenant");
 
     let store = Arc::new(MemorySessionStore::new());
+    let used: Arc<dyn SessionStore> = match o.store {
+        Some(wrap) => wrap(Arc::clone(&store)),
+        None => store.clone(),
+    };
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(0)));
-    let history = Arc::new(ToolHistory::new(store.clone(), Arc::clone(&clock), Arc::new(OsEntropy), Duration::from_secs(5)));
+    let history = Arc::new(ToolHistory::new(
+        used,
+        Arc::clone(&clock),
+        Arc::new(OsEntropy),
+        Duration::from_secs(5),
+        Arc::new(paigasus_gateway::adapters::history::HmacHistoryDigester::keyless()),
+    ));
     let records = Arc::new(Records::default());
     let recorder = Arc::new(DecisionRecorder::new(records.clone(), clock, Arc::new(OsEntropy), None));
 
-    let s = settings();
-    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&s));
+    let s = ToolPolicySettings { default_mode: o.mode, ..settings() };
+    let source = o.source.unwrap_or_else(|| Arc::new(FilePolicySource::new(dir.path())));
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&s), Arc::new(HmacHistoryDigester::keyless()));
     let tp = Arc::new(RequestToolPolicy::new(cache, s, Arc::clone(&recorder)).with_history(Arc::clone(&history)));
-    let decider = Arc::new(CedarDecider::new(Arc::clone(&recorder)).with_history(Arc::clone(&history)));
+    let mut decider = CedarDecider::new(Arc::clone(&recorder)).with_history(Arc::clone(&history));
+    if o.slow_after_reserve {
+        decider = slow_pipeline(decider);
+    }
     let ti = Arc::new(ToolInterception {
-        limits: CoreLimits::defaults(),
-        decider,
+        limits: o.limits,
+        decider: Arc::new(decider),
         recorder: Some(Arc::clone(&recorder)),
         history: Some(Arc::clone(&history)),
     });
@@ -641,4 +688,216 @@ async fn the_anthropic_route_records_history() {
     let two = rig.send_messages(PRINCIPAL_1, &second, messages_answer("d")).await;
     assert_eq!(two.status, StatusCode::OK, "{}", two.text());
     assert_one_session(&rig, "read_file");
+}
+
+// --- SMA-753 PR 2: the history conditions --------------------------------------------------------
+
+use paigasus_gateway::adapters::detectors::BuiltInDetector;
+use paigasus_gateway::application::detectors::DetectorPipeline;
+use paigasus_gateway::config::{DETECTOR_MARGIN_MS, DetectorSettings};
+use paigasus_gateway::domain::detectors::{DetectBatch, Detector, DetectorError};
+use paigasus_gateway::domain::limits::UnavailableKind;
+use paigasus_gateway::domain::tool_history::{AppendReply, AppendRequest, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, SettleRequest, WriteRequest};
+use paigasus_gateway::domain::tool_policy::{PolicyText, SourceError, TenantPolicies};
+use paigasus_gateway_core::OnFailure;
+use paigasus_kernel::detect::Finding;
+use paigasus_proto::paigasus::iam::v1 as pb;
+
+/// The test floor, and a floor forbid of `send` when the floor slot `fcap` is false or missing.
+const CAP_FLOOR: &str = r#"@id("floor-rm") forbid(principal, action == Pgs::Gateway::Action::"rm", resource); @id("floor-cap") forbid(principal, action == Pgs::Gateway::Action::"send", resource) when { !context.fcap };"#;
+
+/// `fcap`: the sum of the Long argument `amount` over the calls of `send` in the session, within
+/// one minute, is at most 5000.
+fn fcap() -> pb::HistoryCondition {
+    use pb::{history_condition, history_predicate};
+    let predicate = pb::HistoryPredicate {
+        node: Some(history_predicate::Node::Tool(pb::ToolMatch {
+            name_key: "send".to_owned(),
+            any_catalog_tool: false,
+        })),
+    };
+    pb::HistoryCondition {
+        slot: "fcap".to_owned(),
+        policy_id: "floor-cap".to_owned(),
+        scope: pb::HistoryScope::Session as i32,
+        window_ms: 60_000,
+        shape: Some(history_condition::Shape::SumWithin(pb::SumWithinShape {
+            predicate: Some(predicate),
+            field_path: vec!["amount".to_owned()],
+            op: pb::ComparisonOp::Le as i32,
+            threshold: 5000,
+        })),
+    }
+}
+
+/// A source whose floor holds `CAP_FLOOR` with the condition `fcap`. The tenant set is `TENANT`.
+struct FloorCapSource;
+
+#[async_trait::async_trait]
+impl PolicySource for FloorCapSource {
+    async fn floor(&self) -> Result<PolicyText, SourceError> {
+        Ok(PolicyText {
+            text: CAP_FLOOR.to_owned(),
+            version: "f1".to_owned(),
+            conditions: vec![fcap()],
+            max_window_ms: 86_400_000,
+        })
+    }
+
+    async fn tenant(&self, _org: Uuid) -> Result<TenantPolicies, SourceError> {
+        Ok(TenantPolicies {
+            text: TENANT.to_owned(),
+            catalog: vec!["send".to_owned()],
+            version: "t1".to_owned(),
+            settings: None,
+            conditions: Vec::new(),
+            max_window_ms: 86_400_000,
+        })
+    }
+}
+
+/// The memory store, with a lookup that always fails.
+struct LookupDown(Arc<MemorySessionStore>);
+
+#[async_trait::async_trait]
+impl SessionStore for LookupDown {
+    async fn lookup(&self, _: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+        Err(HistoryStoreError::Unavailable {
+            kind: UnavailableKind::Io,
+            detail: "down".into(),
+        })
+    }
+    async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+        self.0.write(req).await
+    }
+    async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+        self.0.reserve(req).await
+    }
+    async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+        self.0.settle(req).await
+    }
+    async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+        self.0.append(req).await
+    }
+}
+
+/// A webhook that sleeps 5 s, then gives no findings.
+struct SlowHook;
+
+#[async_trait::async_trait]
+impl Detector for SlowHook {
+    fn name(&self) -> &str {
+        "hook_slow"
+    }
+    async fn detect(&self, batch: Arc<DetectBatch>) -> Result<Vec<Vec<Finding>>, DetectorError> {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Ok(vec![Vec::new(); batch.subjects.len()])
+    }
+}
+
+/// `decider` with a pipeline that waits 5 s after the reserve, past the decide timeout of the hold.
+fn slow_pipeline(decider: CedarDecider) -> CedarDecider {
+    let settings = DetectorSettings {
+        enabled: true,
+        timeout: Duration::from_secs(10),
+        max_scan_bytes: 16 << 20,
+        margin: Duration::from_millis(DETECTOR_MARGIN_MS),
+    };
+    let pipeline = Arc::new(DetectorPipeline::new(
+        Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
+        vec![Arc::new(SlowHook)],
+        None,
+        settings.timeout,
+    ));
+    decider.with_detectors(pipeline, Duration::from_secs(20), settings)
+}
+
+/// The value of `gateway_tool_history_slots_missing_total{part, reason}`.
+fn slots_missing(snapshotter: &Snapshotter, part: &str, reason: &str) -> u64 {
+    counter_value(snapshotter, names::GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL, &[("part", part), ("reason", reason)])
+}
+
+/// The chat answer holds a block notice.
+fn is_blocked(sent: &Sent) -> bool {
+    sent.text().contains("was blocked")
+}
+
+#[tokio::test]
+async fn mode_off_with_a_floor_condition_links_and_counts() {
+    let rig = rig_with(Options {
+        source: Some(Arc::new(FloorCapSource)),
+        mode: TenantMode::Off,
+        ..Options::default()
+    });
+    let first = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["send"], false), chat_json("c", &[("send", r#"{"amount":3000}"#)])).await;
+    assert_eq!(first.status, StatusCode::OK);
+    // Without a link the request has no session, and the floor slot is missing: a block.
+    assert!(!is_blocked(&first), "the request is linked, so the floor slot is true: {}", first.text());
+    assert_eq!(chat_calls(&first).len(), 1, "{}", first.text());
+    let second = rig
+        .send(PRINCIPAL_1, CHAT, &chat_second(&chat_calls(&first), &["send"]), chat_json("d", &[("send", r#"{"amount":3000}"#)]))
+        .await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert!(is_blocked(&second), "3000 + 3000 is over the floor cap: {}", second.text());
+    let seen = sessions_of(&rig, "send");
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[1].0, seen[0].0, "both requests are in one session: {seen:?}");
+    let calls: Vec<_> = rig.events(&seen[0].0, "send").into_iter().filter(|e| e.kind == EventKind::Call).map(|e| e.verdict).collect();
+    assert_eq!(calls, [EventVerdict::Allow, EventVerdict::Deny], "both calls count");
+}
+
+#[tokio::test]
+async fn a_lookup_error_gives_no_session_and_misses_the_floor_slot() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let rig = rig_with(Options {
+        source: Some(Arc::new(FloorCapSource)),
+        store: Some(|m| Arc::new(LookupDown(m))),
+        ..Options::default()
+    });
+    let sent = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["send"], false), chat_json("c", &[("send", r#"{"amount":1}"#)])).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert!(is_blocked(&sent), "the floor slot is missing, so the floor forbid denies: {}", sent.text());
+    assert_eq!(slots_missing(&snapshotter, "floor", "no_session"), 1);
+    assert_eq!(slots_missing(&snapshotter, "floor", "store"), 0);
+    assert!(rig.store.events(org(), Scope::Principal, PRINCIPAL_1, "send").is_empty(), "no session, so no event");
+}
+
+/// One hold of `send`, decided after the decide timeout of 200 ms, under `on_failure`. The events
+/// of `send` in the session of the response record.
+async fn timed_out_send(on_failure: OnFailure) -> (Sent, Vec<StoredEvent>) {
+    let rig = rig_with(Options {
+        limits: CoreLimits {
+            on_failure,
+            decide_timeout: Duration::from_millis(200),
+            ..CoreLimits::defaults()
+        },
+        slow_after_reserve: true,
+        ..Options::default()
+    });
+    let sent = rig.send(PRINCIPAL_1, CHAT, &chat_first(&["send"], false), chat_json("c", &[("send", "{}")])).await;
+    assert_eq!(sent.status, StatusCode::OK);
+    let seen = sessions_of(&rig, "send");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let events = rig.events(&seen[0].0, "send");
+    (sent, events)
+}
+
+#[tokio::test]
+async fn a_decide_timeout_under_allow_counts_the_call_once() {
+    let (sent, events) = timed_out_send(OnFailure::Allow).await;
+    assert!(!is_blocked(&sent), "allowed on failure: {}", sent.text());
+    assert_eq!(
+        events.iter().map(|e| e.verdict).collect::<Vec<_>>(),
+        [EventVerdict::Allow],
+        "the reserved event is settled, not appended again: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_interceptor_block_after_the_reserve_settles_deny() {
+    let (sent, events) = timed_out_send(OnFailure::Block).await;
+    assert!(is_blocked(&sent), "{}", sent.text());
+    assert_eq!(events.iter().map(|e| e.verdict).collect::<Vec<_>>(), [EventVerdict::Deny], "one event, settled deny: {events:?}");
 }

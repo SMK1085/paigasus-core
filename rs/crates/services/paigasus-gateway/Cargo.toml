@@ -108,6 +108,8 @@ sha2 = "0.11"
 # SMA-755: the keyed (HMAC-SHA256) digest of the tool-call arguments in a decision record, and the
 # OS entropy of a decision id.
 hmac = "0.13"
+# SMA-753 P3: a field digest in a history event body is base64url with no padding.
+base64 = { workspace = true }
 rand = { workspace = true }
 # SMA-752 § 6.3.5: the core NATS subscription on `iam.policy.>` that invalidates the tool-policy
 # cache. The workspace line selects the ring provider (no aws-lc-rs). The `kv` feature is for the generation

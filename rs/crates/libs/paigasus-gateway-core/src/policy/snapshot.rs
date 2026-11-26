@@ -11,6 +11,8 @@ use std::time::Duration;
 use paigasus_kernel::detect::HostSet;
 use paigasus_kernel::tool_policy::{Facts, ToolPolicies};
 
+use super::history::HistoryPolicy;
+
 /// The tenant mode (§ 6.4). It applies only to a deny that tenant policies decided: a floor deny
 /// is always enforced (D33).
 #[non_exhaustive]
@@ -65,8 +67,15 @@ pub enum TenantPart {
 #[derive(Debug, Clone)]
 pub enum PolicySet {
     /// The floor is available. With a `tenant` other than `Evaluated`, `policies` must be the
-    /// floor alone, `ToolPolicies::compile(floor, "", &[])` (P-4).
-    Available { policies: Arc<ToolPolicies>, tenant: TenantPart, facts: Facts },
+    /// floor alone, `ToolPolicies::compile(floor, "", &[])` (P-4). `floor_only` is always that
+    /// floor-only set (the `Arc` of the cache's `FloorEntry::floor_only`, SMA-753 spec P6), so a
+    /// hold whose tenant part is unavailable is decided without a new compile.
+    Available {
+        policies: Arc<ToolPolicies>,
+        floor_only: Arc<ToolPolicies>,
+        tenant: TenantPart,
+        facts: Facts,
+    },
     /// The floor is unavailable, or a PRN of the request does not parse (P-6).
     Unavailable,
 }
@@ -94,6 +103,9 @@ pub struct PolicySnapshot {
     /// The seen hosts of the request screen. `None` when no screen ran (§ 6.8.0), so
     /// `unseen_host` does not run.
     pub seen_hosts: Option<SeenHosts>,
+    /// The history conditions of the org, bound and planned at load (SMA-753 spec P6). `None` when
+    /// no history applies to the request.
+    pub history: Option<Arc<HistoryPolicy>>,
     /// The decider time of this request, summed over every decide call. The gateway records one
     /// overhead sample per request from [`PolicySnapshot::overhead`] (preflight F14).
     decide_elapsed: Nanos,
@@ -132,6 +144,7 @@ impl PolicySnapshot {
             on_unavailable,
             request_elapsed: Duration::ZERO,
             seen_hosts: None,
+            history: None,
             decide_elapsed: Nanos::default(),
             later_request_elapsed: Nanos::default(),
         }
@@ -174,6 +187,28 @@ impl PolicySnapshot {
         self
     }
 
+    /// Set the history policy of the org (SMA-753 spec P6).
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<HistoryPolicy>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// A copy of the snapshot whose tenant part is unavailable (SMA-753 spec P7): an available set
+    /// gets `policies = floor_only` and `TenantPart::Unavailable`; an unavailable set stays.
+    ///
+    /// The copy holds a copy of the time sums. Add decide time to the original snapshot, not to
+    /// the copy, or the overhead sample of the request loses it.
+    #[must_use]
+    pub fn with_tenant_unavailable(&self) -> PolicySnapshot {
+        let mut copy = self.clone();
+        if let PolicySet::Available { policies, floor_only, tenant, .. } = &mut copy.set {
+            *policies = Arc::clone(floor_only);
+            *tenant = TenantPart::Unavailable;
+        }
+        copy
+    }
+
     /// Set the request-side elapsed time (preflight F14).
     #[must_use]
     pub fn with_request_elapsed(mut self, elapsed: Duration) -> Self {
@@ -184,7 +219,31 @@ impl PolicySnapshot {
 
 #[cfg(test)]
 mod tests {
+    use paigasus_kernel::tool_policy::history::{Catalog, Digest, FieldPath, KeyId, Scalar};
+
     use super::*;
+
+    struct NoKey;
+
+    impl paigasus_kernel::tool_policy::history::HistoryDigester for NoKey {
+        fn current(&self, _: uuid::Uuid, _: &FieldPath, _: &Scalar) -> Option<(KeyId, Digest)> {
+            None
+        }
+        fn all(&self, _: uuid::Uuid, _: &FieldPath, _: &Scalar) -> Vec<(KeyId, Digest)> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn with_history_sets_the_snapshot_history_and_keeps_the_rest() {
+        let s = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::LogOnly, OnUnavailable::Closed).with_request_elapsed(Duration::from_millis(3));
+        assert!(s.history.is_none(), "a new snapshot has no history");
+        let history = Arc::new(HistoryPolicy::build(&[], &[], uuid::Uuid::nil(), Catalog::unknown(), None, &NoKey));
+        let s = s.with_history(Arc::clone(&history));
+        assert!(Arc::ptr_eq(s.history.as_ref().expect("history"), &history));
+        assert_eq!((s.mode, s.on_unavailable, s.request_elapsed), (TenantMode::LogOnly, OnUnavailable::Closed, Duration::from_millis(3)));
+        assert!(matches!(s.set, PolicySet::Unavailable));
+    }
 
     #[test]
     fn tenant_mode_spellings() {

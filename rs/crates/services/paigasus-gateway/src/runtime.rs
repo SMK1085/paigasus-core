@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use metrics::counter;
 use paigasus_gateway_core::{AllowAll, ToolCallDecider};
+use paigasus_kernel::tool_policy::history::HistoryDigester;
 use paigasus_observability::names;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
@@ -24,6 +25,7 @@ use tokio_util::task::TaskTracker;
 use crate::adapters::decision_log::jetstream;
 use crate::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, prime_decision_log_metrics, run_relay, run_writer};
 use crate::adapters::detectors::BuiltInDetector;
+use crate::adapters::history::HmacHistoryDigester;
 use crate::adapters::http::interception::ToolInterception;
 use crate::adapters::iam::client::build_channel;
 use crate::adapters::nats::PolicyEvents;
@@ -33,7 +35,7 @@ use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::ToolHistory;
 use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
-use crate::config::{GatewayConfig, PolicySourceConfig};
+use crate::config::{GatewayConfig, PolicySourceConfig, ToolHistoryConfig};
 use crate::domain::decision_log::{Entropy, TracingDecisionLog};
 use crate::domain::limits::{ChargeDropReason, Clock};
 use crate::domain::tool_policy::PolicySource;
@@ -335,7 +337,13 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
         }
         None => anyhow::bail!("tool_policy.enabled = true requires tool_policy.source"),
     };
-    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
+    // The history's digester when there is a history: one digester for the literals and the stored
+    // values (spec P3), and one no-key warning at boot.
+    let digester = match &history {
+        Some(h) => h.digester(),
+        None => history_digester(config.tool_history.as_ref())?,
+    };
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings), digester);
     if settings.settings_from_source {
         // The source holds the mode of each org, so `default_mode` applies to no org (final review M-2).
         tracing::info!(
@@ -374,6 +382,24 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
         detectors,
         history,
     })
+}
+
+/// The history digester of the gateway (SMA-753 spec P3), built once from `[tool_history]`. With no
+/// table there is no history, so no key is needed and nothing is logged. A table with no
+/// `digest_key` logs one boot warning: a condition on a string, bool or decimal value then has a
+/// missing slot (reason `no_key`).
+///
+/// # Errors
+///
+/// A key that `GatewayConfig::validate` refuses (a config that skipped `validate`).
+pub fn history_digester(config: Option<&ToolHistoryConfig>) -> anyhow::Result<Arc<dyn HistoryDigester>> {
+    let Some(config) = config else {
+        return Ok(Arc::new(HmacHistoryDigester::keyless()));
+    };
+    if config.digest_key.is_none() {
+        tracing::warn!("[tool_history] has no digest_key: conditions on string, bool or decimal values have no value (missing slot, reason no_key)");
+    }
+    Ok(Arc::new(HmacHistoryDigester::from_config(config).map_err(anyhow::Error::msg)?))
 }
 
 /// The one detector pipeline of the gateway (SMA-855 § 6.6.4): the built-in stage only, no webhook
@@ -699,6 +725,7 @@ mod tool_policy_tests {
             Arc::new(SystemClock),
             Arc::new(OsEntropy),
             Duration::from_secs(1),
+            Arc::new(crate::adapters::history::HmacHistoryDigester::keyless()),
         ));
         let cfg = enabled_config();
         let rt = build_tool_policy(&cfg, rec(), Some(Arc::clone(&history))).expect("builds");
@@ -707,6 +734,59 @@ mod tool_policy_tests {
         assert!(Arc::ptr_eq(rt.cedar.as_ref().expect("cedar").history().expect("decider history"), &history), "the decider");
         let ti = tool_interception(&cfg, &rt).expect("interception is on");
         assert!(Arc::ptr_eq(ti.history.as_ref().expect("report site history"), &history), "the report site");
+    }
+
+    const NO_KEY_WARNING: &str = "[tool_history] has no digest_key: conditions on string, bool or decimal values have no value (missing slot, reason no_key)";
+
+    /// SMA-753 spec P3: a `[tool_history]` table with no `digest_key` logs one boot warning. A
+    /// table with a key, or no table, logs none.
+    #[test]
+    fn a_history_table_with_no_digest_key_warns_once_at_boot() {
+        let with_table = |extra: &str| {
+            config(
+                &format!(
+                    "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n[tool_history]\n{extra}"
+                ),
+                true,
+            )
+        };
+        let warnings = |cfg: &GatewayConfig| {
+            let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+            build_tool_policy(cfg, rec(), None).expect("builds");
+            logs.text().matches(NO_KEY_WARNING).count()
+        };
+        assert_eq!(warnings(&with_table("")), 1, "no key: one warning");
+        assert_eq!(warnings(&with_table("digest_key = \"0123456789abcdef0123456789abcdef-one\"\n")), 0, "a key: no warning");
+        assert_eq!(warnings(&enabled_config()), 0, "no table: no history and no warning");
+    }
+
+    /// SMA-753 spec P3: the boot builds ONE digester (`history_digester`, one warning). The history
+    /// keeps it, and `build_tool_policy` uses the history's digester: it builds no second one, so it
+    /// logs no second warning.
+    #[test]
+    fn the_history_digester_is_built_once_and_reaches_the_policy() {
+        use crate::adapters::history::MemorySessionStore;
+        use crate::domain::decision_log::OsEntropy;
+        use crate::domain::limits::SystemClock;
+
+        let cfg = config(
+            &format!(
+                "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n[tool_history]\n"
+            ),
+            true,
+        );
+        let (logs, _guard) = paigasus_logging::test_support::capture_logs_at(tracing::Level::WARN);
+        let digester = history_digester(cfg.tool_history.as_ref()).expect("a digester");
+        let history = Arc::new(ToolHistory::new(
+            Arc::new(MemorySessionStore::new()),
+            Arc::new(SystemClock),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+            Arc::clone(&digester),
+        ));
+        assert!(Arc::ptr_eq(&history.digester(), &digester), "the history keeps the one digester");
+        build_tool_policy(&cfg, rec(), Some(history)).expect("builds");
+        assert_eq!(logs.text().matches(NO_KEY_WARNING).count(), 1, "{}", logs.text());
     }
 
     /// With the tool policy off the history is not used.
@@ -721,6 +801,7 @@ mod tool_policy_tests {
             Arc::new(SystemClock),
             Arc::new(OsEntropy),
             Duration::from_secs(1),
+            Arc::new(crate::adapters::history::HmacHistoryDigester::keyless()),
         ));
         let cfg = config(&format!("{BASE}[tool_interception]\nenabled = true\n"), true);
         let rt = build_tool_policy(&cfg, rec(), Some(history)).expect("builds");

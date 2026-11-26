@@ -32,6 +32,9 @@ serde = { version = "1", features = ["derive"] }
 [dev-dependencies]
 # The golden-output pin hash (spec section 6.2), as `EXPECTED_GOLDEN_HASH` in `tests/golden.rs`.
 blake3 = "1"
+# `raw_value` lets the corpus test read the number token of each argument as written. The
+# feature adds no crate, so the lockfile does not change.
+serde_json = { version = "1", features = ["raw_value"] }
 
 [lints.rust]
 warnings = "deny"

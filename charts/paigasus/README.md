@@ -331,6 +331,27 @@ reserved env list includes the two names. `tests/refusals.sh` holds one row for 
 four valid renders. `tests/golden/iam-dpop.yaml` pins the projection. See
 `docs/ops/RUNBOOK-chart.md` § 6.
 
+## Tool-policy history conditions (`zones.iam.backend.toolPolicies.historyConditions`)
+
+IAM can evaluate the history conditions of a tool policy (SMA-753). The chart renders the value into
+`IAM_TOOL_POLICIES__HISTORY_CONDITIONS` in `templates/backend-deployment.yaml`, only when it is `true`.
+
+- **Off (the default).** The chart adds nothing. The render is byte-identical to a chart without
+  the value. Under `helm upgrade --reuse-values` from an older release, the key is absent, and
+  history conditions stay off. The template reads the value with `dig` and a default.
+- **On.** One entry renders, `IAM_TOOL_POLICIES__HISTORY_CONDITIONS: "true"`, with one YAML comment
+  above it. The comment is inside the `if`, so the default render does not change.
+- **Order of change.** Turn history on in the gateway first, then in IAM. Turn it off in IAM first,
+  then in the gateway. The chart does not deploy the gateway.
+- **Refusals.** `paigasus.validateIamToolPolicies` refuses a `toolPolicies` that is not a map and a
+  `historyConditions` that is not a boolean. `extraEnv` with the name
+  `IAM_TOOL_POLICIES__HISTORY_CONDITIONS` is refused, as the name is in `paigasus.iamReservedEnv`.
+
+`tests/env.sh` holds the rows `H1 default`, `H2 on` and `H3 reuse-values-no-key`, with a row
+counter. Row `B6 reserved` turns the value on, so the reserved env list includes the name.
+`tests/refusals.sh` holds one row for each refusal and two valid renders.
+`tests/golden/iam-history-conditions.yaml` pins the projection.
+
 ## The console authorization request (`oidc.scopes`, `oidc.authorizationAudience`)
 
 Two values change what both consoles request from the IdP (SMA-692). Both values are empty by
@@ -399,8 +420,9 @@ re-baselined the files to Helm 4. Helm 4 writes one more blank line before each 
 unrelated rendering details (indentation, key order) and would need a deliberate re-baseline, not
 a silent regeneration.
 `tests/golden/iam-dpop.yaml` pins the DPoP projection of SMA-700 (DPoP on with two URLs).
+`tests/golden/iam-history-conditions.yaml` pins the history-conditions projection of SMA-753.
 
-`tests/render.sh --update` re-baselines all four files from the current chart. This is a deliberate
+`tests/render.sh --update` re-baselines all five files from the current chart. This is a deliberate
 act, done by a human reviewing the resulting diff, never a mechanical step to clear a red. A
 golden-file change is the reviewable artifact of a chart change: read the diff before committing
 it.

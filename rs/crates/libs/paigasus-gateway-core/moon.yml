@@ -7,6 +7,9 @@ language: 'rust'
 # SMA-752: a `{ workspace = true }` dev-dependency, so this edge is hand-written. The decision
 # report's reasons are checked against paigasus-proto's error registry.
 dependsOn:
+  # SMA-753: a `{ workspace = true }` dev-dependency. The parity replay maps the corpus conditions
+  # with iam-core's `condition_to_pb`.
+  - 'paigasus-iam-core-rs'
   - 'paigasus-kernel-rs'
   - 'paigasus-proto-rs'
 
@@ -15,6 +18,8 @@ dependsOn:
 # repo:affected-smoke's A6.
 fileGroups:
   upstreams:
+    - '/rs/crates/libs/paigasus-iam-core/src/**/*'
+    - '/rs/crates/libs/paigasus-iam-core/Cargo.toml'
     - '/rs/crates/libs/paigasus-kernel/src/**/*'
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
     - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
@@ -30,3 +35,5 @@ tasks:
     # SMA-755: the encoder test writes and checks the trace fixtures of the policy compiler.
     inputs:
       - '/rs/tools/paigasus-policy-compiler/tests/fixtures/decision-trace*'
+      # SMA-753 P15: `tests/history_parity.rs` replays every case of the decision corpus.
+      - '/rs/tools/paigasus-policy-compiler/corpus/**/*'

@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use async_nats::jetstream;
 use axum::http::StatusCode;
+use paigasus_gateway::adapters::history::HmacHistoryDigester;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::nats::{PolicyEvents, connect};
 use paigasus_gateway::adapters::policy_source::file::FilePolicySource;
@@ -226,7 +227,11 @@ async fn nats_down_never_blocks_a_request() {
         orgs: std::collections::HashMap::new(),
         settings_from_source: false,
     };
-    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(
+        Arc::new(FilePolicySource::new(dir.path())),
+        CacheSettings::from_settings(&settings),
+        Arc::new(HmacHistoryDigester::keyless()),
+    );
 
     let events = tokio::time::timeout(Duration::from_secs(5), connect(&cfg(&format!("nats://127.0.0.1:{closed}")), Arc::clone(&cache) as Arc<dyn Invalidate>))
         .await

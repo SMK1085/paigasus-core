@@ -142,7 +142,8 @@
       "input": {
         "q": "hello",
         "n": 1
-      }
+      },
+      "arguments": "{\"q\": \"hello\", \"n\": 1}"
     },
     {
       "ts": 100,
@@ -153,7 +154,8 @@
       "input": {
         "q": "unlock",
         "n": 1
-      }
+      },
+      "arguments": "{\"q\": \"unlock\", \"n\": 1}"
     },
     {
       "ts": 200,
@@ -164,7 +166,8 @@
       "input": {
         "q": "hello",
         "n": 1
-      }
+      },
+      "arguments": "{\"q\": \"hello\", \"n\": 1}"
     },
     {
       "ts": 700,
@@ -175,7 +178,8 @@
       "input": {
         "q": "hello",
         "n": 1
-      }
+      },
+      "arguments": "{\"q\": \"hello\", \"n\": 1}"
     },
     {
       "ts": 701,
@@ -186,7 +190,8 @@
       "input": {
         "q": "hello",
         "n": 1
-      }
+      },
+      "arguments": "{\"q\": \"hello\", \"n\": 1}"
     }
   ],
   "decisions": [

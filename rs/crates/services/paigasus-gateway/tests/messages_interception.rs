@@ -463,7 +463,11 @@ fn tool_policy(dir: &TempDir) -> Option<Arc<RequestToolPolicy>> {
         orgs: HashMap::new(),
         settings_from_source: false,
     };
-    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(
+        Arc::new(FilePolicySource::new(dir.path())),
+        CacheSettings::from_settings(&settings),
+        Arc::new(paigasus_gateway::adapters::history::HmacHistoryDigester::keyless()),
+    );
     Some(Arc::new(RequestToolPolicy::new(
         cache,
         settings,

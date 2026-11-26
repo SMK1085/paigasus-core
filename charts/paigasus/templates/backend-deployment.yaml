@@ -170,6 +170,13 @@ spec:
             - name: IAM_AUTHN__DPOP__FORWARDED_BASE_URLS
               value: {{ include "paigasus.iamDpopForwardedBaseUrls" $root | quote }}
 {{- end }}
+{{- if include "paigasus.iamHistoryConditions" $root }}
+            # zones.iam.backend.toolPolicies (SMA-753): tool_policies.history_conditions. IAM
+            # accepts tool-policy saves that hold history conditions. The gateway evaluates them.
+            # Turn it on in the gateway first.
+            - name: IAM_TOOL_POLICIES__HISTORY_CONDITIONS
+              value: "true"
+{{- end }}
 {{- with dig "extraEnv" list $z.backend }}
             # zones.iam.backend.extraEnv (SMA-697), appended after the chart's own entries.
 {{ toYaml . | indent 12 }}

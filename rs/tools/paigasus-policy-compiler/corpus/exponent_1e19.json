@@ -1,0 +1,405 @@
+{
+  "shape": "sum_within",
+  "schema": "tests/fixtures/corpus_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-1e19\")\npermit (principal, action == Pgs::Gateway::Action::\"send\", resource)\nwhen temporal { sum_within(a, 1h, Pgs::Gateway::Action::\"send\"::request{ input.amount: a }) <= 100 };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-1e19\")\npermit(principal, action == Pgs::Gateway::Action::\"send\", resource) when { context.p_corpus_h1e19_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "op_eq": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ge": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_gt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_le": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_lt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ne": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "pay": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "memo": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      },
+                      "meta": {
+                        "type": "Record",
+                        "attributes": {
+                          "limit": {
+                            "type": "Record",
+                            "attributes": {
+                              "max": {
+                                "type": "EntityOrCommon",
+                                "name": "Long",
+                                "required": false
+                              }
+                            },
+                            "required": false
+                          },
+                          "region": {
+                            "type": "EntityOrCommon",
+                            "name": "String",
+                            "required": false
+                          }
+                        },
+                        "required": false
+                      },
+                      "price": {
+                        "type": "EntityOrCommon",
+                        "name": "decimal",
+                        "required": false
+                      },
+                      "urgent": {
+                        "type": "EntityOrCommon",
+                        "name": "Bool",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  },
+                  "p_corpus_h1e19_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_h1e19_0__temporal_0",
+        "policy_id": "corpus-1e19",
+        "scope": "session",
+        "window_ms": 3600000,
+        "shape": {
+          "type": "sum_within",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "event_kind",
+              "kind": "request"
+            },
+            "right": {
+              "type": "tool",
+              "name_key": "send"
+            }
+          },
+          "field_path": [
+            "amount"
+          ],
+          "op": "le",
+          "threshold": 100
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 60
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 60}"
+    },
+    {
+      "ts": 10,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": "1e19"
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 1e19}"
+    },
+    {
+      "ts": 20,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 30
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 30}"
+    },
+    {
+      "ts": 3620,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 30
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 30}"
+    }
+  ],
+  "decisions": [
+    "allow",
+    "deny",
+    "allow",
+    "allow"
+  ],
+  "notes": [
+    "call 1: Dogwood gets `1e19` as a string, refuses it as nonconforming, denies it and does not record it",
+    "call 2: Dogwood sums 60 + 30 = 90",
+    "call 3 at 3620 s: the window [20, 3620] holds calls 2 and 3 only"
+  ],
+  "paigasus_differs": [
+    {
+      "event": 2,
+      "dogwood": "allow",
+      "paigasus": "deny",
+      "rule": "spec P1: the kernel reads `1e19` as a Text number, which is stored as Mistyped; a Mistyped value at the sum_within path of an event whose predicate is true makes the slot missing, so Paigasus denies"
+    }
+  ]
+}

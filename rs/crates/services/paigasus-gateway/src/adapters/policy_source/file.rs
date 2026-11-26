@@ -50,7 +50,8 @@ impl FilePolicySource {
                         catalog: Vec::new(),
                         version: version_of(&[b"", b""]),
                         settings: None,
-                        refused: false,
+                        conditions: Vec::new(),
+                        max_window_ms: 0,
                     });
                 }
                 Err(err) => return Err(io_error("tenant directory", &err)),
@@ -89,7 +90,8 @@ fn parse_tenant(policies: String, catalog_raw: String) -> Result<TenantPolicies,
         catalog,
         version,
         settings: None,
-        refused: false,
+        conditions: Vec::new(),
+        max_window_ms: 0,
     })
 }
 
@@ -109,7 +111,12 @@ impl PolicySource for FilePolicySource {
         match tokio::fs::read_to_string(&path).await {
             Ok(text) => {
                 let version = version_of(&[text.as_bytes()]);
-                Ok(PolicyText { text, version })
+                Ok(PolicyText {
+                    text,
+                    version,
+                    conditions: Vec::new(),
+                    max_window_ms: 0,
+                })
             }
             Err(err) if err.kind() == ErrorKind::NotFound => Err(SourceError::NotFound("floor file".to_owned())),
             Err(err) => Err(io_error("floor file", &err)),

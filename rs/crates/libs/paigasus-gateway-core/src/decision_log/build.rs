@@ -247,6 +247,7 @@ mod tests {
         let policies = Arc::new(ToolPolicies::compile(Arc::new(ToolPolicies::compile_floor("").unwrap()), "", &[]).unwrap());
         let snap = PolicySnapshot::new(
             PolicySet::Available {
+                floor_only: Arc::clone(&policies),
                 policies,
                 tenant: TenantPart::Evaluated,
                 facts,
@@ -514,6 +515,20 @@ mod tests {
     #[test]
     fn a_short_field_is_not_cut() {
         assert_eq!(cap("abc"), ("abc".to_owned(), false));
+    }
+
+    #[test]
+    fn the_record_holds_no_field() {
+        use paigasus_kernel::tool_policy::history::extract_fields;
+        let plan = crate::policy::test_plan("send", "amount");
+        let paths = plan.paths_for("send");
+        let fields = extract_fields(&paigasus_kernel::tool_policy::ToolInput::Json(r#"{"amount":"TOPSECRETVALUE"}"#.to_owned()), &paths);
+        let plain = ReportedCall::new(entry(ReportDecision::Allow, Some(Basis::Decider), None), Some(call(ToolCallKind::Function)), None);
+        let with = plain.clone().with_fields(Some(fields));
+        let (a, b) = (build_response(header(None), &ctx(), &plain), build_response(header(None), &ctx(), &with));
+        assert_eq!(a, b, "the builder ignores the fields");
+        assert!(!format!("{b:?}").contains("TOPSECRETVALUE"));
+        assert!(!format!("{with:?}").contains("TOPSECRETVALUE"), "Debug of the reported call prints no value");
     }
 
     #[test]

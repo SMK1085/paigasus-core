@@ -552,7 +552,8 @@ mod tests {
             ""
         };
         let set = PolicySet::Available {
-            policies: Arc::new(ToolPolicies::compile(floor, text, &[]).expect("compile")),
+            policies: Arc::new(ToolPolicies::compile(Arc::clone(&floor), text, &[]).expect("compile")),
+            floor_only: Arc::new(ToolPolicies::compile(floor, "", &[]).expect("floor only")),
             tenant,
             facts: facts(),
         };

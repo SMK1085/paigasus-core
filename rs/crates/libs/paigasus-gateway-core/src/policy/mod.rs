@@ -4,6 +4,7 @@
 //! decisions. No I/O.
 
 mod calls;
+mod history;
 mod mapping;
 mod plan;
 mod raw;
@@ -11,7 +12,11 @@ mod rewrite;
 mod snapshot;
 
 pub use calls::{CallOutcome, CallScan, PolicyBasis, decide_calls, decide_calls_with};
-pub use mapping::{call_findings, call_schema, ingress, invocation, name_collisions};
+pub use history::{FieldPlan, HistoryPolicy, MAX_PREDICATE_DEPTH, MalformedCondition, ReadPlan, ReadSet, map_conditions};
+
+#[cfg(test)]
+pub(crate) use mapping::test_plan;
+pub use mapping::{call_fields, call_findings, call_schema, ingress, invocation, name_collisions};
 pub use plan::{ChoiceRewrite, PlanItem, RefusalCause, RequestPlan, ResultTarget, ScreenRecord, plan_request};
 pub use rewrite::{result_notice, rewrite_request};
 pub use snapshot::{OnUnavailable, PolicySet, PolicySnapshot, SeenHosts, TenantMode, TenantPart};
