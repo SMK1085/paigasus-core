@@ -133,7 +133,8 @@
       "input": {
         "to": "x",
         "amount": 60
-      }
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 60}"
     },
     {
       "ts": 10,
@@ -144,7 +145,8 @@
       "input": {
         "to": "x",
         "amount": 50
-      }
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 50}"
     },
     {
       "ts": 20,
@@ -155,7 +157,8 @@
       "input": {
         "to": "x",
         "amount": -30
-      }
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": -30}"
     },
     {
       "ts": 3611,
@@ -166,7 +169,8 @@
       "input": {
         "to": "x",
         "amount": 10
-      }
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 10}"
     }
   ],
   "decisions": [

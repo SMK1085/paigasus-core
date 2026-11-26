@@ -1,0 +1,758 @@
+{
+  "shape": "formerly",
+  "schema": "tests/fixtures/corpus_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-op-lt\")\npermit (principal, action == Pgs::Gateway::Action::\"op_lt\", resource)\nwhen temporal { formerly within 1m (exists (v: Long). (Pgs::Gateway::Action::\"search\"::request{ input.n: v } && v < 5)) };\n@id(\"corpus-op-le\")\npermit (principal, action == Pgs::Gateway::Action::\"op_le\", resource)\nwhen temporal { formerly within 1m (exists (v: Long). (Pgs::Gateway::Action::\"search\"::request{ input.n: v } && v <= 5)) };\n@id(\"corpus-op-eq\")\npermit (principal, action == Pgs::Gateway::Action::\"op_eq\", resource)\nwhen temporal { formerly within 1m (exists (v: Long). (Pgs::Gateway::Action::\"search\"::request{ input.n: v } && v == 5)) };\n@id(\"corpus-op-ge\")\npermit (principal, action == Pgs::Gateway::Action::\"op_ge\", resource)\nwhen temporal { formerly within 1m (exists (v: Long). (Pgs::Gateway::Action::\"search\"::request{ input.n: v } && v >= 5)) };\n@id(\"corpus-op-gt\")\npermit (principal, action == Pgs::Gateway::Action::\"op_gt\", resource)\nwhen temporal { formerly within 1m (exists (v: Long). (Pgs::Gateway::Action::\"search\"::request{ input.n: v } && v > 5)) };\n@id(\"corpus-op-ne\")\npermit (principal, action == Pgs::Gateway::Action::\"op_ne\", resource)\nwhen temporal { formerly within 1m (exists (v: Long). (Pgs::Gateway::Action::\"search\"::request{ input.n: v } && v != 5)) };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-op-lt\")\npermit(principal, action == Pgs::Gateway::Action::\"op_lt\", resource) when { context.p_corpus_hop_hlt_0__temporal_0 };\n@id(\"corpus-op-le\")\npermit(principal, action == Pgs::Gateway::Action::\"op_le\", resource) when { context.p_corpus_hop_hle_0__temporal_0 };\n@id(\"corpus-op-eq\")\npermit(principal, action == Pgs::Gateway::Action::\"op_eq\", resource) when { context.p_corpus_hop_heq_0__temporal_0 };\n@id(\"corpus-op-ge\")\npermit(principal, action == Pgs::Gateway::Action::\"op_ge\", resource) when { context.p_corpus_hop_hge_0__temporal_0 };\n@id(\"corpus-op-gt\")\npermit(principal, action == Pgs::Gateway::Action::\"op_gt\", resource) when { context.p_corpus_hop_hgt_0__temporal_0 };\n@id(\"corpus-op-ne\")\npermit(principal, action == Pgs::Gateway::Action::\"op_ne\", resource) when { context.p_corpus_hop_hne_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "op_eq": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hop_heq_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ge": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hop_hge_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_gt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hop_hgt_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_le": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hop_hle_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_lt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hop_hlt_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ne": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hop_hne_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "pay": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "memo": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      },
+                      "meta": {
+                        "type": "Record",
+                        "attributes": {
+                          "limit": {
+                            "type": "Record",
+                            "attributes": {
+                              "max": {
+                                "type": "EntityOrCommon",
+                                "name": "Long",
+                                "required": false
+                              }
+                            },
+                            "required": false
+                          },
+                          "region": {
+                            "type": "EntityOrCommon",
+                            "name": "String",
+                            "required": false
+                          }
+                        },
+                        "required": false
+                      },
+                      "price": {
+                        "type": "EntityOrCommon",
+                        "name": "decimal",
+                        "required": false
+                      },
+                      "urgent": {
+                        "type": "EntityOrCommon",
+                        "name": "Bool",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hop_heq_0__temporal_0",
+        "policy_id": "corpus-op-eq",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "n"
+              ],
+              "op": "eq",
+              "value": {
+                "type": "long",
+                "value": 5
+              }
+            }
+          }
+        }
+      },
+      {
+        "slot": "p_corpus_hop_hge_0__temporal_0",
+        "policy_id": "corpus-op-ge",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "n"
+              ],
+              "op": "ge",
+              "value": {
+                "type": "long",
+                "value": 5
+              }
+            }
+          }
+        }
+      },
+      {
+        "slot": "p_corpus_hop_hgt_0__temporal_0",
+        "policy_id": "corpus-op-gt",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "n"
+              ],
+              "op": "gt",
+              "value": {
+                "type": "long",
+                "value": 5
+              }
+            }
+          }
+        }
+      },
+      {
+        "slot": "p_corpus_hop_hle_0__temporal_0",
+        "policy_id": "corpus-op-le",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "n"
+              ],
+              "op": "le",
+              "value": {
+                "type": "long",
+                "value": 5
+              }
+            }
+          }
+        }
+      },
+      {
+        "slot": "p_corpus_hop_hlt_0__temporal_0",
+        "policy_id": "corpus-op-lt",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "n"
+              ],
+              "op": "lt",
+              "value": {
+                "type": "long",
+                "value": 5
+              }
+            }
+          }
+        }
+      },
+      {
+        "slot": "p_corpus_hop_hne_0__temporal_0",
+        "policy_id": "corpus-op-ne",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "search"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "n"
+              ],
+              "op": "ne",
+              "value": {
+                "type": "long",
+                "value": 5
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "a",
+        "n": 5
+      },
+      "arguments": "{\"q\": \"a\", \"n\": 5}"
+    },
+    {
+      "ts": 1,
+      "kind": "request",
+      "tool": "op_lt",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 2,
+      "kind": "request",
+      "tool": "op_le",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 3,
+      "kind": "request",
+      "tool": "op_eq",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 4,
+      "kind": "request",
+      "tool": "op_ge",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 5,
+      "kind": "request",
+      "tool": "op_gt",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 6,
+      "kind": "request",
+      "tool": "op_ne",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 100,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "a",
+        "n": 4
+      },
+      "arguments": "{\"q\": \"a\", \"n\": 4}"
+    },
+    {
+      "ts": 101,
+      "kind": "request",
+      "tool": "op_lt",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 102,
+      "kind": "request",
+      "tool": "op_le",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 103,
+      "kind": "request",
+      "tool": "op_eq",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 104,
+      "kind": "request",
+      "tool": "op_ge",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 105,
+      "kind": "request",
+      "tool": "op_gt",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 106,
+      "kind": "request",
+      "tool": "op_ne",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 200,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "a",
+        "n": 6
+      },
+      "arguments": "{\"q\": \"a\", \"n\": 6}"
+    },
+    {
+      "ts": 201,
+      "kind": "request",
+      "tool": "op_lt",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 202,
+      "kind": "request",
+      "tool": "op_le",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 203,
+      "kind": "request",
+      "tool": "op_eq",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 204,
+      "kind": "request",
+      "tool": "op_ge",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 205,
+      "kind": "request",
+      "tool": "op_gt",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    },
+    {
+      "ts": 206,
+      "kind": "request",
+      "tool": "op_ne",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {},
+      "arguments": "{}"
+    }
+  ],
+  "decisions": [
+    "deny",
+    "deny",
+    "allow",
+    "allow",
+    "allow",
+    "deny",
+    "deny",
+    "deny",
+    "allow",
+    "allow",
+    "deny",
+    "deny",
+    "deny",
+    "allow",
+    "deny",
+    "deny",
+    "deny",
+    "deny",
+    "allow",
+    "allow",
+    "allow"
+  ],
+  "notes": [
+    "one policy for each op: the tool `op_<op>` is allowed when a `search` call in the last minute has `n <op> 5`",
+    "three rounds, 100 s apart: n = 5, n = 4, n = 6; each round is one `search` call (denied: no policy permits it) and one call of each `op_` tool"
+  ],
+  "paigasus_differs": []
+}

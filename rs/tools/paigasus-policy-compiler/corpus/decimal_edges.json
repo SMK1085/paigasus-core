@@ -1,0 +1,496 @@
+{
+  "shape": "formerly",
+  "schema": "tests/fixtures/corpus_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-decimal-5\")\npermit (principal, action == Pgs::Gateway::Action::\"pay\", resource)\nwhen temporal { formerly within 10s Pgs::Gateway::Action::\"pay\"::request{ input.price: decimal(\"5.0\") } };\n@id(\"corpus-decimal-0\")\npermit (principal, action == Pgs::Gateway::Action::\"pay\", resource)\nwhen temporal { formerly within 10s Pgs::Gateway::Action::\"pay\"::request{ input.price: decimal(\"0.0\") } };\n@id(\"corpus-decimal-1-5\")\npermit (principal, action == Pgs::Gateway::Action::\"pay\", resource)\nwhen temporal { formerly within 10s Pgs::Gateway::Action::\"pay\"::request{ input.price: decimal(\"1.5\") } };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-decimal-5\")\npermit(principal, action == Pgs::Gateway::Action::\"pay\", resource) when { context.p_corpus_hdecimal_h5_0__temporal_0 };\n@id(\"corpus-decimal-0\")\npermit(principal, action == Pgs::Gateway::Action::\"pay\", resource) when { context.p_corpus_hdecimal_h0_0__temporal_0 };\n@id(\"corpus-decimal-1-5\")\npermit(principal, action == Pgs::Gateway::Action::\"pay\", resource) when { context.p_corpus_hdecimal_h1_h5_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "op_eq": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ge": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_gt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_le": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_lt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ne": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "pay": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "memo": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      },
+                      "meta": {
+                        "type": "Record",
+                        "attributes": {
+                          "limit": {
+                            "type": "Record",
+                            "attributes": {
+                              "max": {
+                                "type": "EntityOrCommon",
+                                "name": "Long",
+                                "required": false
+                              }
+                            },
+                            "required": false
+                          },
+                          "region": {
+                            "type": "EntityOrCommon",
+                            "name": "String",
+                            "required": false
+                          }
+                        },
+                        "required": false
+                      },
+                      "price": {
+                        "type": "EntityOrCommon",
+                        "name": "decimal",
+                        "required": false
+                      },
+                      "urgent": {
+                        "type": "EntityOrCommon",
+                        "name": "Bool",
+                        "required": false
+                      }
+                    }
+                  },
+                  "p_corpus_hdecimal_h0_0__temporal_0": {
+                    "type": "Boolean"
+                  },
+                  "p_corpus_hdecimal_h1_h5_0__temporal_0": {
+                    "type": "Boolean"
+                  },
+                  "p_corpus_hdecimal_h5_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hdecimal_h0_0__temporal_0",
+        "policy_id": "corpus-decimal-0",
+        "scope": "session",
+        "window_ms": 10000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "pay"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "price"
+              ],
+              "op": "eq",
+              "value": {
+                "type": "decimal",
+                "value": "0.0"
+              }
+            }
+          }
+        }
+      },
+      {
+        "slot": "p_corpus_hdecimal_h1_h5_0__temporal_0",
+        "policy_id": "corpus-decimal-1-5",
+        "scope": "session",
+        "window_ms": 10000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "pay"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "price"
+              ],
+              "op": "eq",
+              "value": {
+                "type": "decimal",
+                "value": "1.5"
+              }
+            }
+          }
+        }
+      },
+      {
+        "slot": "p_corpus_hdecimal_h5_0__temporal_0",
+        "policy_id": "corpus-decimal-5",
+        "scope": "session",
+        "window_ms": 10000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "pay"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "price"
+              ],
+              "op": "eq",
+              "value": {
+                "type": "decimal",
+                "value": "5.0"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "pay",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "price": {
+          "__decimal": "5.0"
+        }
+      },
+      "arguments": "{\"price\": 5.0}"
+    },
+    {
+      "ts": 100,
+      "kind": "request",
+      "tool": "pay",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "price": {
+          "__decimal": "-0.0"
+        }
+      },
+      "arguments": "{\"price\": -0.0}"
+    },
+    {
+      "ts": 200,
+      "kind": "request",
+      "tool": "pay",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "price": {
+          "__decimal": "1.5000"
+        }
+      },
+      "arguments": "{\"price\": 1.5000}"
+    },
+    {
+      "ts": 300,
+      "kind": "request",
+      "tool": "pay",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "price": 5
+      },
+      "arguments": "{\"price\": 5}"
+    }
+  ],
+  "decisions": [
+    "allow",
+    "allow",
+    "allow",
+    "deny"
+  ],
+  "notes": [
+    "three policies, with the literals decimal(\"5.0\"), decimal(\"0.0\") and decimal(\"1.5\"); each call sees only itself",
+    "Dogwood compares decimals by value: 5.0 = 5.0, -0.0 = 0.0, 1.5000 = 1.5",
+    "call 3: Dogwood refuses the Long 5 in the decimal field `price` as nonconforming and denies"
+  ],
+  "paigasus_differs": [
+    {
+      "event": 0,
+      "dogwood": "allow",
+      "paigasus": "deny",
+      "rule": "spec P1 and P3: the kernel reads the argument `5.0` as Long(5) (F8); a Long value against a decimal literal is unknown, and an unknown event makes the slot missing, so Paigasus denies. The kernel classifies an integral number as a Long, as Cedar context.input does. A Long against a decimal literal is unknown (P1)."
+    },
+    {
+      "event": 1,
+      "dogwood": "allow",
+      "paigasus": "deny",
+      "rule": "spec P1 and P3: the kernel reads the argument `-0.0` as Long(0) (F8); a Long value against a decimal literal is unknown, and an unknown event makes the slot missing, so Paigasus denies. The kernel classifies an integral number as a Long, as Cedar context.input does. A Long against a decimal literal is unknown (P1)."
+    }
+  ]
+}
