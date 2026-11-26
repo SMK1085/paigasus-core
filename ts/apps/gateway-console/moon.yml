@@ -451,6 +451,9 @@ tasks:
       # because workspace profiles and inherited dependency features there change the built
       # binary without touching Cargo.lock. The binary itself cannot go stale the same way,
       # because `paigasus-gateway-rs:e2e-bin` is never cached (built fresh every run).
+      # One exception: `paigasus-iam-core` is in the gateway's `fileGroups.upstreams` but absent
+      # here on purpose. It is only a dev-dependency of gateway-core (the parity replay), and the
+      # gateway binary does not link it.
       - '/rs/crates/services/paigasus-gateway/src/**/*'
       - '/rs/crates/services/paigasus-gateway/Cargo.toml'
       - '/rs/Cargo.toml'

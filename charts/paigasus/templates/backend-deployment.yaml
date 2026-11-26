@@ -172,7 +172,8 @@ spec:
 {{- end }}
 {{- if include "paigasus.iamHistoryConditions" $root }}
             # zones.iam.backend.toolPolicies (SMA-753): tool_policies.history_conditions. IAM
-            # evaluates the history conditions of a tool policy. Turn it on in the gateway first.
+            # accepts tool-policy saves that hold history conditions. The gateway evaluates them.
+            # Turn it on in the gateway first.
             - name: IAM_TOOL_POLICIES__HISTORY_CONDITIONS
               value: "true"
 {{- end }}

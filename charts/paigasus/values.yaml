@@ -82,8 +82,8 @@ zones:
         enabled: false
         forwardedBaseUrls: []
       # NOT required. The tool-policy history conditions (SMA-753). With historyConditions true,
-      # IAM evaluates the history conditions of a tool policy. The gateway needs its own matching
-      # setting; the chart does not deploy the gateway. Turn history on in the gateway first, then
+      # IAM accepts tool-policy saves that hold history conditions. The gateway evaluates them, and
+      # it needs its own matching setting; the chart does not deploy the gateway. Turn history on in the gateway first, then
       # in IAM. Turn it off in IAM first, then in the gateway.
       toolPolicies:
         historyConditions: false
