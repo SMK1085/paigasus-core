@@ -498,7 +498,9 @@ impl SessionStore for MemorySessionStore {
             let Some(call) = st.bodies.get_mut(&(h.org, r.event_id)).filter(|e| e.alive(clock)) else {
                 continue;
             };
-            if call.value.result_written {
+            // A denied call was not forwarded, so it gets no result. A deny settle can land
+            // between the lookup and this write.
+            if call.value.result_written || call.value.verdict == EventVerdict::Deny {
                 continue;
             }
             call.value.result_written = true;

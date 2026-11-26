@@ -339,26 +339,19 @@ impl PolicyCache {
         };
         {
             let mut inner = self.lock();
-            let mut stored_it = false;
-            if let Some(Entry { good: Some(good), .. }) = inner.existing(Key::Tenant(org))
+            // Only a compile against the current floor replaces the stored bundle and the last
+            // known plan. A request that still holds an older floor keeps its own result (the
+            // return below), and the next request on the current floor compiles nothing.
+            if Self::is_current_floor(&inner, floor)
+                && let Some(Entry { good: Some(good), .. }) = inner.existing(Key::Tenant(org))
                 && let Data::Tenant(stored) = &mut good.data
                 && Arc::ptr_eq(&stored.source, &data.source)
             {
                 stored.floor = Arc::clone(&floor.floor);
                 stored.compiled.clone_from(&compiled);
-                stored_it = true;
-            }
-            // Only a compile against the current floor is the last known plan. A request that still
-            // holds an older floor must not replace the plan of the newer one.
-            let current_floor = matches!(
-                &inner.floor.good,
-                Some(Good { data: Data::Floor(current), .. }) if Arc::ptr_eq(&current.floor, &floor.floor)
-            );
-            if stored_it
-                && current_floor
-                && let Some(c) = &compiled
-            {
-                self.remember(&mut inner, org, &data.source, c);
+                if let Some(c) = &compiled {
+                    self.remember(&mut inner, org, &data.source, c);
+                }
             }
         }
         compiled.map_or(Lookup::Unavailable, Lookup::Ready)
@@ -375,6 +368,11 @@ impl PolicyCache {
             policies: Arc::new(policies),
             history: Arc::new(history),
         })
+    }
+
+    /// `floor` is the floor entry that the cache serves now.
+    fn is_current_floor(inner: &Inner, floor: &FloorEntry) -> bool {
+        matches!(&inner.floor.good, Some(Good { data: Data::Floor(current), .. }) if Arc::ptr_eq(&current.floor, &floor.floor))
     }
 
     /// Keep the catalog and the field plan of a good tenant compile (plan decision D-F).
@@ -622,6 +620,8 @@ impl PolicyCache {
         }
 
         let compile_started = Instant::now();
+        // The floor that this load compiles the tenant set against.
+        let compiled_on = floor.clone();
         let built = self.build(key, fetched, floor);
         histogram!(names::GATEWAY_TOOL_POLICY_COMPILE_SECONDS).record(compile_started.elapsed().as_secs_f64());
         match built {
@@ -641,7 +641,13 @@ impl PolicyCache {
                 // An entry that was evicted during the load stays evicted, and so does its org.
                 if let Some(entry) = inner.existing(key) {
                     entry.good = Some(good);
-                    if let Some((org, source, compiled)) = known {
+                    // A load that started on an older floor does not publish its field plan: the
+                    // floor can change while the source answers. The entry keeps its result for
+                    // the request that started it, and the next request on the current floor
+                    // compiles again (`tenant_set`).
+                    if let Some((org, source, compiled)) = known
+                        && compiled_on.as_ref().is_some_and(|f| Self::is_current_floor(&inner, f))
+                    {
                         self.remember(&mut inner, org, &source, &compiled);
                     }
                 }
@@ -940,16 +946,19 @@ mod tests {
         }
         async fn tenant(&self, _org: Uuid) -> Result<TenantPolicies, SourceError> {
             self.tenant_calls.fetch_add(1, Ordering::SeqCst);
+            // The whole answer is read before the wait, so a change during the wait cannot pair
+            // the old version with a new payload.
             let (text, version) = self.tenant_text.lock().unwrap().clone();
-            self.pause(Duration::ZERO).await?;
-            Ok(TenantPolicies {
+            let answer = TenantPolicies {
                 text,
                 catalog: self.catalog.lock().unwrap().clone(),
                 version,
                 settings: *self.tenant_settings.lock().unwrap(),
                 conditions: self.tenant_conditions.lock().unwrap().clone(),
                 max_window_ms: MAX_WINDOW_MS,
-            })
+            };
+            self.pause(Duration::ZERO).await?;
+            Ok(answer)
         }
     }
 
@@ -1715,12 +1724,46 @@ mod tests {
         cache.refresh_once().await;
         let f2 = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(!Arc::ptr_eq(&f1.floor, &f2.floor), "F2 is installed");
-        ready_compiled(&cache, &f2, OnUnavailable::Closed).await;
+        let before = ready_compiled(&cache, &f2, OnUnavailable::Closed).await;
         // A request that still holds F1 recompiles against it. That must not replace the plan of F2.
         assert!(matches!(cache.tenant(ORG, &f1, OnUnavailable::Closed).await, Lookup::Ready(_)));
         let history = cache.floor_history(ORG, &f2).expect("a floor condition");
         assert_eq!(history.fields().paths_for("rm"), [path("limit")].into_iter().collect(), "no path of F1");
         assert_eq!(history.fields().paths_for("send"), [path("amount")].into_iter().collect(), "the tenant path stays");
+        // It must not replace the stored bundle of F2 either: the next F2 request compiles nothing.
+        let after = ready_compiled(&cache, &f2, OnUnavailable::Closed).await;
+        assert!(Arc::ptr_eq(&before.policies, &after.policies), "the F2 policies stay");
+        assert!(Arc::ptr_eq(&before.history, &after.history), "the F2 history plan stays");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_load_that_started_on_an_older_floor_does_not_publish_its_field_plan() {
+        let src = FakeSource::new();
+        src.set_floor_conditions(vec![formerly("floor_a", "rm", "force")]);
+        src.set_tenant_conditions(vec![formerly("t_a", "send", "amount")], &["send"]);
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
+        let f1 = ready_floor(&cache, OnUnavailable::Closed).await;
+        // The tenant load starts on F1 and waits in the source.
+        src.set_delay(secs(10));
+        let load = tokio::spawn({
+            let (cache, f1) = (Arc::clone(&cache), f1.clone());
+            async move { cache.tenant_until(ORG, &f1, OnUnavailable::Closed, Instant::now() + secs(60)).await }
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(src.tenant_calls(), 1, "the load is in the source");
+        // F2 replaces the floor path `rm.force` with `rm.limit` while the load waits.
+        src.set_delay(Duration::ZERO);
+        src.set_floor_conditions(vec![formerly("floor_b", "rm", "limit")]);
+        src.set_floor(FLOOR, "f2");
+        cache.invalidate_all();
+        let f2 = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(!Arc::ptr_eq(&f1.floor, &f2.floor), "F2 is installed");
+        tokio::time::advance(secs(10)).await;
+        assert!(matches!(load.await.expect("the load task"), Lookup::Ready(_)), "the F1 request keeps its own result");
+        let history = cache.floor_history(ORG, &f2).expect("a floor condition");
+        assert_eq!(history.fields().paths_for("rm"), [path("limit")].into_iter().collect(), "no path of F1");
     }
 
     #[tokio::test(start_paused = true)]

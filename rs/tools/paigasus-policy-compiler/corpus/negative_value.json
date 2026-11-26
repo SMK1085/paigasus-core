@@ -342,9 +342,9 @@
       "resource": "Pgs::Iam::Organization::\"o1\"",
       "input": {
         "to": "x",
-        "amount": -50
+        "amount": -101
       },
-      "arguments": "{\"to\": \"x\", \"amount\": -50}"
+      "arguments": "{\"to\": \"x\", \"amount\": -101}"
     },
     {
       "ts": 10,
@@ -364,7 +364,8 @@
     "allow"
   ],
   "notes": [
-    "call 1: Dogwood sums -50 + 120 = 70 and allows"
+    "call 1: Dogwood sums -101 + 120 = 19 and allows",
+    "call 0: a reader that lost the minus sign would sum 101, more than 100, and deny"
   ],
   "paigasus_differs": [
     {

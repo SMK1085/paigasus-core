@@ -766,11 +766,10 @@ mod history_rig {
     }
 
     impl TimedStore {
-        /// The mean time of one reserve (one hold), and the number of reserves.
-        pub fn mean_reserve(&self) -> (Duration, u64) {
-            let n = self.reserves.load(Ordering::Relaxed);
-            let total = self.reserve_nanos.load(Ordering::Relaxed);
-            (Duration::from_nanos(total.checked_div(n).unwrap_or(0)), n)
+        /// The time of every reserve so far, in nanoseconds, and the number of reserves. Two reads
+        /// give the mean of the reserves between them.
+        pub fn reserve_totals(&self) -> (u64, u64) {
+            (self.reserve_nanos.load(Ordering::Relaxed), self.reserves.load(Ordering::Relaxed))
         }
 
         /// Forget the window counts: the next reserve starts them again.
@@ -1047,7 +1046,7 @@ async fn run_history_case(
     let first = (sent.status, kept);
     // One snapshot takes the overhead samples and the counters together: it resets the counters.
     let (_warm, first_counters) = take_run(snapshotter);
-    let before = store.mean_reserve().1;
+    let (nanos_before, before) = store.reserve_totals();
     // From here on, a request leaves the history as it found it (see `Keep`).
     let keep = match keep {
         Some(k) => {
@@ -1074,7 +1073,9 @@ async fn run_history_case(
         set.spawn(async move {
             let sent = send(&app, &body).await;
             // The slot goes back first, so 8 measured requests stay in flight. The trim runs after
-            // the answer, outside the overhead sample of this request.
+            // the answer, outside the overhead sample of this request. Nothing bounds the trims that
+            // are still to run: a trim that falls behind leaves more events in the window, and the
+            // window bound of the test then fails. That failure reports a slow trim, not a slow hold.
             drop(permit);
             if let Some(k) = keep {
                 k.trim().await;
@@ -1088,7 +1089,9 @@ async fn run_history_case(
     let wall = started.elapsed();
     let (mut samples, counters) = take_run(snapshotter);
     samples.sort_by(f64::total_cmp);
-    let (reserve_mean, total) = store.mean_reserve();
+    // The warm-up reserve is not part of the mean: only the reserves of the measured requests.
+    let (nanos_after, total) = store.reserve_totals();
+    let reserve_mean = Duration::from_nanos((nanos_after - nanos_before).checked_div(total - before).unwrap_or(0));
     let window = store.windows();
     HistoryRun {
         samples,
@@ -1194,7 +1197,8 @@ async fn p99_policy_overhead_with_history_conditions() {
     assert_eq!(run.first, (StatusCode::OK, 3), "the three calls of the hold are allowed");
     print_history_run("history conditions, 1,000 events", &run, HISTORY_REQUESTS);
     // Every hold reads the 1,000 seeded events, plus 3 events for each hold that runs now or has
-    // not yet been trimmed: at most 8 running and 8 in the trim (about 27 were measured).
+    // not yet been trimmed. The bound allows 8 running and 8 not yet trimmed (about 27 were
+    // measured). The test does not limit the trims, so a slow trim fails this bound (see the loop).
     let inflight = 3 * 2 * CONCURRENCY as u64;
     assert!(run.window.1 >= 1000 && run.window.2 <= 1000 + inflight, "each hold reads the 1,000 seeded events: {:?}", run.window);
     assert_eq!(run.window.3, run.reserves, "every reserve succeeded: a failed reserve has no window");
@@ -1211,9 +1215,11 @@ async fn p99_policy_overhead_with_history_conditions() {
     assert!(p99 < 0.015, "p99 {p99}");
 }
 
-/// SMA-753 P15: 10,000 events in each of three tools and an `Every` read. The read passes
-/// `MAX_READ_EVENTS` (20,000), so it comes back truncated and the slot is missing. That is the
-/// expected result. The test prints it and asserts nothing.
+/// SMA-753 P15: 10,000 events in each of three tools and an `Every` read. The predicate is an
+/// event kind with no tool, so the condition reads the every-tool set (a tool predicate on this
+/// three-tool catalog reads three named sets instead). The read passes `MAX_READ_EVENTS` (20,000),
+/// so it comes back truncated and the slot is missing. That is the expected result. The test
+/// prints it and asserts nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a measurement in release mode"]
 async fn history_read_at_the_read_limits() {
@@ -1235,7 +1241,9 @@ async fn history_read_at_the_read_limits() {
         "p_all",
         "all",
         Shape::CountWithin(pb::CountWithinShape {
-            predicate: Some(tool_predicate(None)),
+            predicate: Some(pb::HistoryPredicate {
+                node: Some(pb::history_predicate::Node::EventKind(pb::HistoryEventKind::Request as i32)),
+            }),
             op: pb::ComparisonOp::Le as i32,
             threshold: 1_000_000,
         }),

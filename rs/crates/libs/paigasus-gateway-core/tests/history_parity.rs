@@ -134,8 +134,12 @@ struct Replay {
 
 impl Replay {
     fn load(path: &Path) -> Self {
-        let case = load(path);
         let name = path.file_stem().expect("a file name").to_string_lossy().into_owned();
+        Self::of(name, load(path))
+    }
+
+    /// A case that the test may have changed after the load.
+    fn of(name: String, case: Value) -> Self {
         let compiled = &case["compiled"];
         let conditions: Vec<HistoryCondition> = serde_json::from_value(compiled["conditions"].clone()).unwrap_or_else(|e| panic!("{name}: the conditions: {e}"));
         let pb: Vec<_> = conditions.iter().map(condition_to_pb).collect();
@@ -287,6 +291,35 @@ fn the_key_and_principal_scopes_read_only_events_of_the_same_value() {
             replay.case["events"][i][member] = Value::String(other.to_owned());
         }
         assert_eq!(replay.decide(2), "allow", "{file}: the earlier calls have another {member}");
+    }
+}
+
+/// The Dogwood grammar has no `||` in a temporal block, so `predicate_any_of` stores
+/// `!(!A && !B)`. This test rewrites that tree as the explicit node `any_of(A, B)` and requires
+/// the same decisions, so the `AnyOf` mapping and evaluation are replayed too.
+#[test]
+fn an_explicit_any_of_tree_replays_the_decisions_of_its_de_morgan_form() {
+    use paigasus_kernel::tool_policy::history::Predicate;
+    let mut case = load(&corpus_dir().join("predicate_any_of.json"));
+    let predicate = &mut case["compiled"]["conditions"][0]["shape"]["predicate"];
+    assert_eq!(
+        (predicate["type"].as_str(), predicate["inner"]["type"].as_str()),
+        (Some("negation"), Some("all_of")),
+        "the De Morgan form"
+    );
+    let side = |s: &str| {
+        let inner = &predicate["inner"][s];
+        assert_eq!(inner["type"], "negation", "{s} is a negated side");
+        inner["inner"].clone()
+    };
+    let rewritten = serde_json::json!({ "type": "any_of", "left": side("left"), "right": side("right") });
+    *predicate = rewritten;
+    let replay = Replay::of("predicate_any_of (any_of)".to_owned(), case);
+    assert!(matches!(replay.history.conditions()[0].shape.predicate(), Predicate::AnyOf(..)), "the mapped tree is an any_of node");
+    let got = replay.replay();
+    assert_eq!(got.len(), 4, "every request event replays");
+    for (i, decided, expected) in got {
+        assert_eq!(decided, expected, "event {i}");
     }
 }
 

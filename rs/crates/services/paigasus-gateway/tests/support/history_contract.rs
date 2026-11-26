@@ -647,6 +647,28 @@ pub async fn a_result_for_a_call_event_that_is_gone_writes_nothing(h: &impl Harn
     assert!(h.ttls_ms(ctx.org, NOW).await.is_empty());
 }
 
+pub async fn a_result_for_a_denied_call_event_writes_nothing(h: &impl Harness) {
+    // A lookup can find the link that the reserve wrote, and a deny settle can land before the
+    // write. A denied call was not forwarded, so the write records no result for it.
+    let (ctx, store) = (Ctx::new(true), h.store().await);
+    let c = call_as("send", "call-1");
+    store.reserve(&ctx.reserve(vec![c.clone()], NOW, None)).await.unwrap();
+    let seen = store.lookup(&ctx.lookup(&[], &["call-1"], &[])).await.unwrap();
+    let linked = seen.results[0].clone().expect("the link of the reserve");
+    assert_eq!(linked.event_id, c.id);
+    store.settle(&ctx.settle(vec![item(c.id, EventVerdict::Deny, "send", Some("call-1"))], NOW + 1)).await.unwrap();
+    let result = ResultEvent {
+        id: fresh_id(),
+        call_id: "call-1".into(),
+        tool: linked.tool.clone(),
+        event_id: linked.event_id,
+    };
+    let reply = store.write(&ctx.write(None, vec![result], NOW + 2)).await.unwrap();
+    assert_eq!(reply.written, 0);
+    let events = principal_events(h, &ctx, "send").await;
+    assert_eq!(events.iter().map(|e| (e.kind, e.verdict)).collect::<Vec<_>>(), [(EventKind::Call, EventVerdict::Deny)]);
+}
+
 pub async fn a_later_allow_settle_of_a_denied_event_writes_no_call_link(h: &impl Harness) {
     // The first settle wins the verdict (T7-c), and the link follows the stored verdict.
     let (ctx, store) = (Ctx::new(true), h.store().await);
@@ -1167,6 +1189,7 @@ pub async fn run_all(h: &impl Harness) {
     the_first_settle_wins(h).await;
     a_repeated_settle_of_the_same_event_keeps_result_written(h).await;
     a_result_for_a_call_event_that_is_gone_writes_nothing(h).await;
+    a_result_for_a_denied_call_event_writes_nothing(h).await;
     a_later_allow_settle_of_a_denied_event_writes_no_call_link(h).await;
     a_local_shell_result_under_both_aliases_is_written_once(h).await;
     a_relink_between_lookup_and_write_marks_the_original_event(h).await;

@@ -529,7 +529,7 @@ pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[To
 
 Rules:
 - `slots` is empty (no slots for any call) or holds one entry per call. Another count is a caller defect: debug panic, release uses no slots (the same pattern as `scans`).
-- `ReadPlan::of`: one `ReadSet` per (scope of a condition, tool): a name gives `Tool(name)`, the `catalog` flag gives `Tool(t)` for each catalog tool (`Every` when the catalog is unknown), `every` gives `Every`. A condition with only named tools adds no `Every` set (the Task 2 rule). `w_max_ms` is the largest `window_ms`.
+- `ReadPlan::of`: one `ReadSet` per (scope of a condition, tool): a name gives `Tool(name)`, the `catalog` flag gives `Tool(t)` for each catalog tool (`Every` when the catalog is unknown, or when the named tools and the catalog tools together are more than `MAX_READ_SETS`; final fix wave), `every` gives `Every`. A condition with only named tools adds no `Every` set (the Task 2 rule). `w_max_ms` is the largest `window_ms`.
 - `HistoryPolicy::build` binds every condition with `bind_digests(org, d)`. Its `FieldPlan` is the plan of all conditions, united with `stored` when it is `Some`.
 - `policy/plan.rs` (request side) keeps `decide()` with no slots (spec P2).
 
@@ -1383,6 +1383,8 @@ Rules (spec P15, design § 9):
 
 Run: `cd rs && cargo nextest run -p paigasus-gateway --release --test perf --run-ignored only -E 'test(history)' --no-capture`
 Expected: the first test passes and prints its numbers. Copy both outputs into the PR description (spec P15: the PR records both results).
+
+**Result (recorded at Stage 6).** The bound is not met. With 8 measured holds in flight and a 1,000-event history, five release runs gave p99 17.5–19.0 ms, so the 15 ms assertion of the first test fails. Sven decided on 2026-11-26 to ship and record: the test stays `#[ignore]` with its 15 ms assertion unchanged, the PR description and the runbook record the measured numbers, and a follow-up issue holds the storage layout change (the body in the sorted-set member) that would meet the bound.
 
 - [ ] **Step 3: Lint, format, commit**
 

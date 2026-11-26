@@ -370,7 +370,7 @@
       "arguments": "{\"memo\": \"x\", \"urgent\": false}"
     },
     {
-      "ts": 100,
+      "ts": 10,
       "kind": "request",
       "tool": "pay",
       "principal": "Pgs::Iam::Principal::\"p1\"",
@@ -400,8 +400,8 @@
     "allow"
   ],
   "notes": [
-    "each call is more than 1 m after the one before, so each call sees only itself",
-    "only call 2 matches both field tests"
+    "call 1 is 10 s after call 0, so its window holds both calls: call 0 matches only `memo`, call 1 matches only `urgent`, and no one event matches both",
+    "call 2 is more than 1 m after call 1, so it sees only itself, and it matches both field tests"
   ],
   "paigasus_differs": []
 }

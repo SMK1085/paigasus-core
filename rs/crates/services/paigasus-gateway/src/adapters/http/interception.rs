@@ -1237,6 +1237,20 @@ mod tests {
         )
     }
 
+    /// The id of the pending event that the reserve of the hold wrote. It polls the store and must
+    /// see the event before the 200 ms decide timeout settles it. So a test can tell a settle of
+    /// the reserved event from an append under a new id.
+    async fn reserved_id(store: &MemorySessionStore, ctx: &DecisionContext, tool: &str) -> uuid::Uuid {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        loop {
+            if let Some(e) = session_events(store, ctx, tool).into_iter().find(|e| e.verdict == EventVerdict::Pending) {
+                return e.id;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the reserve wrote no pending event before the timeout");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
     /// Limits with a decide timeout of 200 ms and `on_failure`.
     fn short_hold(on_failure: OnFailure) -> Limits {
         Limits {
@@ -1253,13 +1267,19 @@ mod tests {
         let (store, h) = memory_history();
         let ctx = session_ctx(&h).await;
         let ti = ti_with_history(short_hold(OnFailure::Allow), cedar_slow_after_reserve(&h), &h);
-        let text = tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO)))
-            .await
-            .expect("the timeout ends the hold");
+        let (text, reserved) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO))),
+            reserved_id(&store, &ctx, "ok")
+        );
+        let text = text.expect("the timeout ends the hold");
         assert!(text.contains(r#""name":"ok","input":{}"#), "allowed on failure: {text}");
         drain(&h).await;
         let events = session_events(&store, &ctx, "ok");
-        assert_eq!(events.iter().map(|e| e.verdict).collect::<Vec<_>>(), [EventVerdict::Allow], "one event, settled: {events:?}");
+        assert_eq!(
+            events.iter().map(|e| (e.id, e.verdict)).collect::<Vec<_>>(),
+            [(reserved, EventVerdict::Allow)],
+            "the reserved event, settled: {events:?}"
+        );
         let session = ctx.session.as_ref().expect("a session").session_id;
         assert_eq!(call_link(&store, "toolu_0").await, Some((session, events[0].id)));
     }
@@ -1287,13 +1307,19 @@ mod tests {
         let (store, h) = memory_history();
         let ctx = session_ctx(&h).await;
         let ti = ti_with_history(short_hold(OnFailure::Block), cedar_slow_after_reserve(&h), &h);
-        let text = tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO)))
-            .await
-            .expect("the timeout ends the hold");
+        let (text, reserved) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO))),
+            reserved_id(&store, &ctx, "ok")
+        );
+        let text = text.expect("the timeout ends the hold");
         assert!(text.contains(&format!(r#""code":"{}""#, BlockCode::DeciderError.as_kebab())), "{text}");
         drain(&h).await;
         let events = session_events(&store, &ctx, "ok");
-        assert_eq!(events.iter().map(|e| e.verdict).collect::<Vec<_>>(), [EventVerdict::Deny], "one event, settled: {events:?}");
+        assert_eq!(
+            events.iter().map(|e| (e.id, e.verdict)).collect::<Vec<_>>(),
+            [(reserved, EventVerdict::Deny)],
+            "the reserved event, settled: {events:?}"
+        );
         assert_eq!(call_link(&store, "toolu_0").await, None, "the deny settle deletes the link of its event");
     }
 
@@ -1304,11 +1330,18 @@ mod tests {
         let ctx = session_ctx(&h).await;
         let ti = ti_with_history(short_hold(OnFailure::Allow), cedar_slow_after_reserve(&h), &h);
         let body = chat_body(&["ok"]);
-        let out = intercept_body(&ti, ti.limits, Format::OpenAiChat, Arc::clone(&ctx), Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]).await;
+        let (out, reserved) = tokio::join!(
+            intercept_body(&ti, ti.limits, Format::OpenAiChat, Arc::clone(&ctx), Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]),
+            reserved_id(&store, &ctx, "ok")
+        );
         assert!(matches!(out, BodyOutcome::Forward { .. }));
         drain(&h).await;
         let events = session_events(&store, &ctx, "ok");
-        assert_eq!(events.iter().map(|e| e.verdict).collect::<Vec<_>>(), [EventVerdict::Allow], "one event, settled: {events:?}");
+        assert_eq!(
+            events.iter().map(|e| (e.id, e.verdict)).collect::<Vec<_>>(),
+            [(reserved, EventVerdict::Allow)],
+            "the reserved event, settled: {events:?}"
+        );
         let session = ctx.session.as_ref().expect("a session").session_id;
         assert_eq!(call_link(&store, "c0").await, Some((session, events[0].id)));
     }

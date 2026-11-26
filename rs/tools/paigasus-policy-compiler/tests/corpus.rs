@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use dogwood_language::{Authorizer, Decision, Event, PolicySchema, Value as DwValue};
 use paigasus_policy_compiler::compile::{SetKind, compile_cedarschema};
 use paigasus_policy_compiler::lower::{lower_units, service_schema, split_policies};
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 /// The schema path (relative to the crate) and its text.
@@ -96,20 +97,44 @@ fn to_dogwood(value: &Value) -> DwValue {
     }
 }
 
-/// Whether `input` is the Dogwood value of `arguments` (`args`, read with serde_json): a Long
-/// is the same integer, a decimal or a string of a number names the same number and appears
-/// in the argument text as written.
-fn names_the_same_value(input: &Value, args: &Value, text: &str) -> bool {
-    match (input, args) {
-        (Value::Object(map), Value::Number(n)) if map.len() == 1 => match map.get(DECIMAL) {
-            Some(Value::String(d)) => !d.contains(['e', 'E']) && text.contains(d.as_str()) && d.parse::<f64>().ok() == n.as_f64(),
+/// Whether `input` is the Dogwood value of the argument text `raw`. Each value is checked at
+/// its own path: a Long is the same integer, and a decimal or a string of a number is the whole
+/// number token at that path, as written. A decimal has no exponent.
+fn names_the_same_value(input: &Value, raw: &RawValue) -> bool {
+    let token = raw.get().trim();
+    let Ok(parsed) = serde_json::from_str::<Value>(token) else {
+        return false;
+    };
+    match (input, &parsed) {
+        (Value::Object(map), Value::Number(_)) if map.len() == 1 => match map.get(DECIMAL) {
+            Some(Value::String(d)) => !d.contains(['e', 'E']) && token == d,
             _ => false,
         },
-        (Value::Object(map), Value::Object(args)) => map.len() == args.len() && map.iter().all(|(k, v)| args.get(k).is_some_and(|a| names_the_same_value(v, a, text))),
+        (Value::Object(map), Value::Object(_)) => {
+            let Ok(members) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(token) else {
+                return false;
+            };
+            map.len() == members.len() && map.iter().all(|(k, v)| members.get(k).is_some_and(|m| names_the_same_value(v, m)))
+        }
         (Value::Number(i), Value::Number(n)) => i.as_i64().is_some() && i.as_i64() == n.as_i64(),
-        (Value::String(s), Value::Number(n)) => s.parse::<i64>().is_err() && text.contains(s.as_str()) && s.parse::<f64>().ok() == n.as_f64(),
-        _ => input == args,
+        (Value::String(s), Value::Number(_)) => s.parse::<i64>().is_err() && token == s,
+        _ => input == &parsed,
     }
+}
+
+#[test]
+fn the_value_check_reads_the_whole_token_at_its_own_path() {
+    let names = |input: Value, text: &str| names_the_same_value(&input, &serde_json::from_str::<Box<RawValue>>(text).expect("JSON"));
+    // Another member with the decimal text does not count.
+    assert!(!names(json!({ "price": decimal("5.0"), "memo": "5.0" }), r#"{"price": 5, "memo": "5.0"}"#));
+    assert!(names(json!({ "price": decimal("5.0") }), r#"{"price": 5.0}"#));
+    // The marker is the whole token, not a part of it.
+    assert!(!names(json!({ "price": decimal("1.5") }), r#"{"price": 1.5000}"#));
+    assert!(names(json!({ "price": decimal("1.5000") }), r#"{"price": 1.5000}"#));
+    assert!(!names(json!({ "price": decimal("1e1") }), r#"{"price": 1e1}"#), "a decimal has no exponent");
+    // A string of a number is the whole token too.
+    assert!(!names(json!({ "n": "1e1", "m": "x" }), r#"{"n": 10, "m": "1e1"}"#));
+    assert!(names(json!({ "n": "1e19" }), r#"{"n": 1e19}"#));
 }
 
 /// A Dogwood event of `call`. The input goes in the logged record (for history) and, for a
@@ -246,12 +271,12 @@ fn pr1_cases() -> Vec<Case> {
                 search(10, r#"{"q": "b", "n": 1}"#, "b"),
                 search(20, r#"{"q": "c", "n": 1}"#, "c"),
                 search(30, r#"{"q": "d", "n": 1}"#, "d"),
-                search(60, r#"{"q": "e", "n": 1}"#, "e"),
+                search(70, r#"{"q": "e", "n": 1}"#, "e"),
                 search(91, r#"{"q": "f", "n": 1}"#, "f"),
             ],
             vec![
                 "call 3 is the fourth call in the window: the event being decided counts",
-                "call 4 is a denied call at 60 s; it still counts, and the window [0, 60] holds five calls",
+                "call 4 at 70 s: the window [10, 70] holds calls 1 to 4, so the decision shows whether the lower edge at 10 s is in the window (four calls) or not (three calls)",
                 "call 5 at 91 s: the window [31, 91] holds calls 4 and 5 only",
             ],
             Vec::new(),
@@ -331,10 +356,13 @@ fn pr2_cases() -> Vec<Case> {
             permit("corpus-all-of", "pay", &format!("formerly within 1m {GW}::\"pay\"::request{{ input.memo: \"x\", input.urgent: true }}")),
             vec![
                 pay(0, r#"{"memo": "x", "urgent": false}"#, json!({ "memo": "x", "urgent": false })),
-                pay(100, r#"{"memo": "y", "urgent": true}"#, json!({ "memo": "y", "urgent": true })),
+                pay(10, r#"{"memo": "y", "urgent": true}"#, json!({ "memo": "y", "urgent": true })),
                 pay(200, r#"{"memo": "x", "urgent": true}"#, json!({ "memo": "x", "urgent": true })),
             ],
-            vec!["each call is more than 1 m after the one before, so each call sees only itself", "only call 2 matches both field tests"],
+            vec![
+                "call 1 is 10 s after call 0, so its window holds both calls: call 0 matches only `memo`, call 1 matches only `urgent`, and no one event matches both",
+                "call 2 is more than 1 m after call 1, so it sees only itself, and it matches both field tests",
+            ],
         ),
         Case::new(
             "predicate_any_of",
@@ -590,10 +618,13 @@ fn pr2_cases() -> Vec<Case> {
                 "sum_within",
                 sum_send("corpus-negative"),
                 vec![
-                    send(0, r#"{"to": "x", "amount": -50}"#, json!({ "to": "x", "amount": -50 })),
+                    send(0, r#"{"to": "x", "amount": -101}"#, json!({ "to": "x", "amount": -101 })),
                     send(10, r#"{"to": "x", "amount": 120}"#, json!({ "to": "x", "amount": 120 })),
                 ],
-                vec!["call 1: Dogwood sums -50 + 120 = 70 and allows"],
+                vec![
+                    "call 1: Dogwood sums -101 + 120 = 19 and allows",
+                    "call 0: a reader that lost the minus sign would sum 101, more than 100, and deny",
+                ],
             )
         },
         Case {
@@ -665,8 +696,8 @@ fn the_decision_corpus_is_current() {
         let compiled = compile_cedarschema(SetKind::Tenant, &case.source, schema, DAY_MS).unwrap_or_else(|rejections| panic!("{}: {rejections:#?}", case.name));
         assert_eq!(compiled.conditions.len(), case.conditions, "{}", case.name);
         for (index, call) in case.calls.iter().enumerate() {
-            let named = match serde_json::from_str::<Value>(call.arguments) {
-                Ok(args) => names_the_same_value(&call.input, &args, call.arguments),
+            let named = match serde_json::from_str::<Box<RawValue>>(call.arguments) {
+                Ok(raw) => names_the_same_value(&call.input, &raw),
                 Err(_) => call.input == json!({}),
             };
             assert!(named, "{}: event {index}: the input is not the Dogwood value of {:?}", case.name, call.arguments);

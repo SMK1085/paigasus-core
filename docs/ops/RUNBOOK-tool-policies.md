@@ -139,10 +139,13 @@ is healthy. Do the steps in section 5 for that organization.
 
 ## 5. History rules
 
-A history rule is a policy with a temporal block, for example `count_within` or `sum_within`. It
-works only when two settings are on. The gateway needs the `[tool_history]` table (section 10).
-IAM needs `tool_policies.history_conditions = true`. With the setting `false`, IAM refuses each save
-with a condition (reason 62 `tool-policy-history-unsupported`). The chart value is
+A history rule is a policy with a temporal block, for example `count_within` or `sum_within`. Two
+settings control it, and they control different things. The gateway evaluates the history
+conditions only when it has the `[tool_history]` table (section 10). The IAM setting
+`tool_policies.history_conditions` controls only whether IAM accepts a save with a condition. With
+the setting `false`, IAM refuses each such save (reason 62 `tool-policy-history-unsupported`). The
+setting does not remove a set that is already stored: the gateway still evaluates a stored history
+rule while the setting is `false`. The chart value is
 `zones.iam.backend.toolPolicies.historyConditions`, and its default is `false`.
 
 Turn the rules on in this order. First configure the gateway and restart it. Then set the IAM
@@ -183,8 +186,10 @@ A set saved before this change can hold such a rule. Do these steps.
 2. Save each set that has a temporal block again, as a condition-free set. Section 10, "Gateway
    rollback", gives the definition of condition-free.
 
-Until a tenant does this, that tenant cannot write its tool catalog. The write is refused with
-`tool-catalog-breaks-policy`, and the message names `tool-policy-history-unsupported`.
+While the IAM setting is `false` and the stored set still has a history rule, that tenant cannot
+write its tool catalog. A catalog write compiles the stored set again, and the setting refuses the
+condition. The write is refused with `tool-catalog-breaks-policy`, and the message names
+`tool-policy-history-unsupported`. With the setting `true`, the catalog write works again.
 
 ## 6. Concurrent first enables
 

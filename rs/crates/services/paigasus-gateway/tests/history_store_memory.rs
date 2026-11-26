@@ -195,6 +195,11 @@ async fn a_result_for_a_call_event_that_is_gone_writes_nothing() {
 }
 
 #[tokio::test]
+async fn a_result_for_a_denied_call_event_writes_nothing() {
+    contract::a_result_for_a_denied_call_event_writes_nothing(&harness()).await;
+}
+
+#[tokio::test]
 async fn a_later_allow_settle_of_a_denied_event_writes_no_call_link() {
     contract::a_later_allow_settle_of_a_denied_event_writes_no_call_link(&harness()).await;
 }

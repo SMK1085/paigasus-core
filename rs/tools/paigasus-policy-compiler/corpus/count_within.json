@@ -170,7 +170,7 @@
       "arguments": "{\"q\": \"d\", \"n\": 1}"
     },
     {
-      "ts": 60,
+      "ts": 70,
       "kind": "request",
       "tool": "search",
       "principal": "Pgs::Iam::Principal::\"p1\"",
@@ -204,7 +204,7 @@
   ],
   "notes": [
     "call 3 is the fourth call in the window: the event being decided counts",
-    "call 4 is a denied call at 60 s; it still counts, and the window [0, 60] holds five calls",
+    "call 4 at 70 s: the window [10, 70] holds calls 1 to 4, so the decision shows whether the lower edge at 10 s is in the window (four calls) or not (three calls)",
     "call 5 at 91 s: the window [31, 91] holds calls 4 and 5 only"
   ],
   "paigasus_differs": []

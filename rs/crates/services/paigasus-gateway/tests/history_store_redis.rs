@@ -188,6 +188,7 @@ contract_cases!(
     the_first_settle_wins,
     a_repeated_settle_of_the_same_event_keeps_result_written,
     a_result_for_a_call_event_that_is_gone_writes_nothing,
+    a_result_for_a_denied_call_event_writes_nothing,
     a_later_allow_settle_of_a_denied_event_writes_no_call_link,
     a_local_shell_result_under_both_aliases_is_written_once,
     a_relink_between_lookup_and_write_marks_the_original_event,

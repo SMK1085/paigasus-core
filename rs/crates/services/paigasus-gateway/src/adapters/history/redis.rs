@@ -204,6 +204,10 @@ for j = 1, N do
     -- (an ACL error on a later write) leaves no guard and a retry writes the result.
     elseif seen_guard[gkey] or redis.call('HEXISTS', gkey, 'r') == 1 then
       skip = true
+    -- A denied call was not forwarded, so it gets no result. A deny settle can land between
+    -- the lookup and this write.
+    elseif redis.call('HGET', gkey, 'v') == 'deny' then
+      skip = true
     end
   end
   local dbase = k

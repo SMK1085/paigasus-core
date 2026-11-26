@@ -248,8 +248,15 @@ the `ToolCall` is there. `ReportedCall` carries the fields. The decision record 
   only appends (PR 1 behaviour).
 - `Scope::Key` with no API key reads the principal sets (F14).
 - **Tool sets.** A `NameKey` reads that tool's set. `AnyCatalogTool` reads the set of each catalog
-  tool: Rust computes the keys, and the script does not read `t:`. Only "every tool" (P3) reads the
-  `t:` index.
+  tool: Rust computes the keys, and the script does not read `t:`. "Every tool" (P3) reads the
+  `t:` index. `AnyCatalogTool` reads the `t:` index too in two cases: the catalog is unknown, or the
+  named tools and the catalog tools of the condition are together more than `MAX_READ_SETS` (64)
+  (`ToolSet::requires_every`, final fix wave). One set per tool would then pass the read limit, and
+  every hold would come back truncated. The evaluator still matches each event of the every-tool
+  set against the catalog, so the result stays exact. The limits below apply to that read as to any
+  other: it is truncated, and the slot is missing, when the index of the history holds more than
+  256 tools or the read passes `MAX_READ_EVENTS`. A read plan whose sets are more than 64 in total
+  still fails closed (a known limit).
 - **Limits.** One reserve reads at most `MAX_READ_SETS = 64` sets and at most
   `MAX_READ_EVENTS = 20_000` events. Over a limit, the script stops reading and returns the set as
   truncated. The slot is then missing, and it is not a store error. The `t:` index of a history
