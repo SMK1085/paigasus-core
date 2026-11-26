@@ -359,6 +359,8 @@ an evicting `maxmemory-policy` can remove any of them (design D11).
 - For Responses, the anchor is the run of assistant, reasoning and call items that holds at least
   one call item. The results are the result items after the start of that run.
 - The 128 cap applies to the result list.
+- **Fallback (Task 12 ruling).** With no assistant message that has tool calls, the anchor is the
+  last assistant message, as in PR 1. With no assistant message at all, every tool result counts.
 - This closes the trailing-text case of design R2. It does not close every case: a client that
   repeats a linked tool turn after the forged results still hides them (R2, revised in § 6).
 
