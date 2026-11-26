@@ -629,13 +629,18 @@ mod tests {
 
     /// The calls of a chat completion, one per `(name, arguments)`.
     fn calls_with(items: &[(&str, &str)]) -> Vec<ToolCall> {
+        body_with(items).calls
+    }
+
+    /// A chat response body with one call per item (name, arguments), the call ids `c0`, `c1`, ...
+    fn body_with(items: &[(&str, &str)]) -> paigasus_gateway_core::BodyCalls {
         let tool_calls: Vec<serde_json::Value> = items
             .iter()
             .enumerate()
             .map(|(i, (n, a))| serde_json::json!({"id": format!("c{i}"), "type": "function", "function": {"name": n, "arguments": a}}))
             .collect();
         let body = serde_json::json!({"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": tool_calls}, "finish_reason": "tool_calls"}]}).to_string();
-        parse_body(Format::OpenAiChat, body.as_bytes(), 1 << 20).expect("body").calls
+        parse_body(Format::OpenAiChat, body.as_bytes(), 1 << 20).expect("body")
     }
 
     /// The request side of a chat request with no tools, for a tenant text, in `mode`.
@@ -997,7 +1002,7 @@ mod tests {
 
     // ---- the reserve (SMA-753) -------------------------------------------------------------------
 
-    use paigasus_gateway_core::{SessionContext, StoreBudget};
+    use paigasus_gateway_core::{Basis, SessionContext, StoreBudget};
 
     use crate::adapters::history::memory::MemorySessionStore;
     use crate::application::tool_history::ToolHistory;
@@ -1220,12 +1225,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_denied_call_still_counts_for_the_next_hold() {
-        let decider = with_store(Arc::new(MemorySessionStore::new()));
+        let store = Arc::new(MemorySessionStore::new());
+        let history = history_over(store.clone());
+        let decider = CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_history(Arc::clone(&history));
         let (ctx, turn) = history_ctx((testing::FLOOR, Vec::new()), (CAP_TENANT, vec![under()]), TenantMode::Enforce, OnUnavailable::Closed).await;
-        let ctx = ctx.with_session(session(Findings::new()));
+        let s = session(Findings::new());
+        let ctx = ctx.with_session(Arc::clone(&s));
+        let items = [SEND_2000, SEND_2000, SEND_2000];
+        let decided = decider.decide(Arc::new(ctx.clone()), Arc::new(turn.clone()), calls_with(&items)).await.expect("decide");
+        assert_eq!(decided.iter().map(|d| d.decision).collect::<Vec<_>>(), [Decision::Allow, Decision::Allow, BLOCK_POLICY]);
+        // Settle the first hold and wait for the write: the third event is then a settled `Deny`.
+        history.settle(&ctx, &body_with(&items).reported(&decided, Basis::Decider, None));
+        history.tasks().close();
+        history.tasks().wait().await;
+        history.tasks().reopen();
+        let events = store.events(ORG_A, Scope::Session, &s.session_id.to_string(), "send");
+        let verdict_of = |d: &DecidedCall| events.iter().find(|e| Some(e.id) == d.decision_id).map(|e| e.verdict);
         assert_eq!(
-            hold_of(&decider, &ctx, &turn, &[SEND_2000, SEND_2000, SEND_2000]).await,
-            [Decision::Allow, Decision::Allow, BLOCK_POLICY]
+            decided.iter().map(verdict_of).collect::<Vec<_>>(),
+            [Some(EventVerdict::Allow), Some(EventVerdict::Allow), Some(EventVerdict::Deny)]
         );
         // The three events count in the next hold, the denied one too: 6000 + 100 is over the cap.
         assert_eq!(hold_of(&decider, &ctx, &turn, &[SEND_100]).await, [BLOCK_POLICY]);
@@ -1497,16 +1515,44 @@ mod tests {
         decider.with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![slow]), DECIDE_TIMEOUT, detector_settings())
     }
 
+    /// The memory store, and whether a reserve asked for a window read.
+    struct ReadSpy(MemorySessionStore, Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl SessionStore for ReadSpy {
+        async fn lookup(&self, req: &LookupRequest) -> Result<LookupReply, HistoryStoreError> {
+            self.0.lookup(req).await
+        }
+        async fn write(&self, req: &WriteRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.write(req).await
+        }
+        async fn reserve(&self, req: &ReserveRequest) -> Result<AppendReply, HistoryStoreError> {
+            if req.read.is_some() {
+                self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.0.reserve(req).await
+        }
+        async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
+            self.0.settle(req).await
+        }
+        async fn append(&self, req: &AppendRequest) -> Result<AppendReply, HistoryStoreError> {
+            self.0.append(req).await
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn the_hold_intent_is_forgotten_on_every_return_path() {
         let (ctx, turn) = ctx_under(testing::PERMIT_ALL).await;
+        // The read-window row needs a snapshot with a read plan, or the reserve reads nothing.
+        let (conditioned, _) = cap_ctx(OnUnavailable::Closed).await;
+        let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let plain = || CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
         let slow_reserve = || with_store(Arc::new(SlowReserve(MemorySessionStore::new(), Duration::from_secs(5))));
         let paths: Vec<(&str, CedarDecider, DecisionContext)> = vec![
             // These three wait in the detector pipeline, and its timeout ends the wait.
             ("no history (disabled)", slow_pipeline(plain()), ctx.clone()),
             ("a reserve error", slow_pipeline(with_store(Arc::new(Down))), ctx.clone()),
-            ("a read window", slow_pipeline(with_store(Arc::new(MemorySessionStore::new()))), ctx.clone()),
+            ("a read window", slow_pipeline(with_store(Arc::new(ReadSpy(MemorySessionStore::new(), Arc::clone(&read))))), conditioned),
             // The reserve waits past the store budget of 1 s: the deadline ends it.
             ("a reserve deadline", slow_reserve(), ctx.clone()),
             // No snapshot: the fallback blocks every call after the reserve deadline.
@@ -1515,6 +1561,7 @@ mod tests {
         for (name, decider, ctx) in paths {
             assert_eq!(intent_during_and_after(&decider, ctx, turn.clone()).await, (true, false), "{name}");
         }
+        assert!(read.load(std::sync::atomic::Ordering::SeqCst), "the read-window row read a window");
     }
 
     #[tokio::test(start_paused = true)]

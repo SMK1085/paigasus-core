@@ -171,16 +171,10 @@ impl State {
             written: events.len(),
             ..AppendReply::empty()
         };
-        // The ids that had a live body: a rewrite moves their list entry, as `ZADD` moves the
-        // score of a member (plan decision D-E).
-        let mut rewritten: HashSet<Uuid> = HashSet::new();
         for e in events {
             // A rewrite of a live body keeps its result guard (as `HSET` keeps the `r` field).
             let clock = self.clock_ms;
             let live = self.bodies.get(&(h.org, e.id)).filter(|b| b.alive(clock));
-            if live.is_some() {
-                rewritten.insert(e.id);
-            }
             let result_written = live.is_some_and(|b| b.value.result_written);
             // A write with an older `now_ms` never shortens a live expiry.
             let live_exp = live.map_or(0, |b| b.exp_ms);
@@ -228,9 +222,10 @@ impl State {
                 }
                 let list = self.lists.entry(lkey).or_insert_with(|| Exp::new(Vec::new(), now_ms));
                 list.exp_ms = list.exp_ms.max(now_ms.saturating_add(TTL_MS));
-                if rewritten.contains(&e.id) {
-                    list.value.retain(|(_, id)| *id != e.id);
-                }
+                // A replay moves the list entry of its id, as `ZADD` moves the score of a member
+                // (plan decision D-E). The id in the list decides, not the body: an evicted body
+                // leaves its member in the list.
+                list.value.retain(|(_, id)| *id != e.id);
                 let entry = (now_ms, e.id);
                 if let Err(at) = list.value.binary_search(&entry) {
                     list.value.insert(at, entry);
@@ -739,6 +734,20 @@ mod tests {
         store.reserve(&reserve_at(2_000, 10)).await.unwrap();
         let ttls = store.ttls_ms(Uuid::from_u128(1), 10_000);
         assert!(ttls.iter().flatten().all(|t| *t >= TTL_MS), "{ttls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_replay_with_a_missing_body_counts_once() {
+        let store = MemorySessionStore::new();
+        store.reserve(&reserve_at(1_000, 10)).await.unwrap();
+        assert!(store.drop_body(Uuid::from_u128(1), Uuid::from_u128(10)));
+        store.reserve(&reserve_at(2_000, 10)).await.unwrap();
+        let ids: Vec<Uuid> = store.events(Uuid::from_u128(1), Scope::Session, &Uuid::from_u128(2).to_string(), "send").iter().map(|e| e.id).collect();
+        // `ZADD` moves the member: one list entry, at the time of the replay.
+        assert_eq!(ids, vec![Uuid::from_u128(10)]);
+        let st = store.lock();
+        let entries: Vec<_> = st.lists.values().flat_map(|l| l.value.iter().copied()).collect();
+        assert!(entries.iter().all(|(ts, _)| *ts == 2_000), "{entries:?}");
     }
 
     #[tokio::test]

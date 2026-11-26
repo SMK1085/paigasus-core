@@ -1461,7 +1461,8 @@ For each row: make the change, run the command, confirm FAIL, then delete the ma
 | M7 | Ignore the append verdict (always `allow`) | `history_contract::an_appended_denied_call_counts_and_writes_no_link` |
 | M8 | Fail the read on a missing body | `history_contract::a_missing_body_is_skipped_and_counted` |
 | M9 | Remove the `Key` to principal alias | `tool_history::a_key_scope_without_an_api_key_reads_the_principal_sets` |
-| M11 | Keep the hold's own events in the window | `tool_history::the_hold_own_events_are_removed_from_the_window`, `history_evaluate::the_events_of_a_window_and_the_hold_are_counted_once_by_id` |
+| M11 | Keep the hold's own events in the window | `tool_history::the_hold_own_events_are_removed_from_the_window` |
+| M11b | The evaluator does not dedup events by id | `history_evaluate::the_events_of_a_window_and_the_hold_are_counted_once_by_id` |
 | M12 | Remove the truncation mark (no `x:` write) | `history_contract::a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns` |
 | M13 | Unknown counts as false | `history_evaluate::count_within_takes_the_value_only_when_every_possible_count_agrees`, `history_parity::every_corpus_decision_replays_through_the_production_chain` (`unknown_value`) |
 

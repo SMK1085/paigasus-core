@@ -348,7 +348,16 @@ impl PolicyCache {
                 stored.compiled.clone_from(&compiled);
                 stored_it = true;
             }
-            if stored_it && let Some(c) = &compiled {
+            // Only a compile against the current floor is the last known plan. A request that still
+            // holds an older floor must not replace the plan of the newer one.
+            let current_floor = matches!(
+                &inner.floor.good,
+                Some(Good { data: Data::Floor(current), .. }) if Arc::ptr_eq(&current.floor, &floor.floor)
+            );
+            if stored_it
+                && current_floor
+                && let Some(c) = &compiled
+            {
                 self.remember(&mut inner, org, &data.source, c);
             }
         }
@@ -1689,6 +1698,29 @@ mod tests {
         tokio::time::advance(secs(3601)).await;
         cache.refresh_once().await;
         assert_eq!(cache.floor_history(ORG, &floor).expect("a floor condition").catalog(), &Catalog::unknown());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_recompile_against_an_older_floor_keeps_the_last_known_plan_of_the_current_floor() {
+        let src = FakeSource::new();
+        src.set_floor_conditions(vec![formerly("floor_a", "rm", "force")]);
+        src.set_tenant_conditions(vec![formerly("t_a", "send", "amount")], &["send"]);
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
+        let f1 = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_compiled(&cache, &f1, OnUnavailable::Closed).await;
+        // F2 replaces the floor path `rm.force` with `rm.limit`.
+        src.set_floor_conditions(vec![formerly("floor_b", "rm", "limit")]);
+        src.set_floor(FLOOR, "f2");
+        tokio::time::advance(secs(30)).await;
+        cache.refresh_once().await;
+        let f2 = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(!Arc::ptr_eq(&f1.floor, &f2.floor), "F2 is installed");
+        ready_compiled(&cache, &f2, OnUnavailable::Closed).await;
+        // A request that still holds F1 recompiles against it. That must not replace the plan of F2.
+        assert!(matches!(cache.tenant(ORG, &f1, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        let history = cache.floor_history(ORG, &f2).expect("a floor condition");
+        assert_eq!(history.fields().paths_for("rm"), [path("limit")].into_iter().collect(), "no path of F1");
+        assert_eq!(history.fields().paths_for("send"), [path("amount")].into_iter().collect(), "the tenant path stays");
     }
 
     #[tokio::test(start_paused = true)]

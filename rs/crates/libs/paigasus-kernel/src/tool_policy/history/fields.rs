@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Field extraction for the session history (SMA-753 P3).
 //!
-//! `extract_fields` reads the same typed walk as `map_input`, so a stored field and the value in
-//! `context.input` cannot differ.
+//! `extract_fields` uses the same parser as `map_input` (`parse_arguments`), so both read one value
+//! from the same arguments. The types that history can compare are a separate, smaller set: a
+//! `Long`, a string, a bool and a decimal with at most four places. Every other value is `Mistyped`
+//! in history, also when `context.input` holds it. For example, an integer outside the `Long` range
+//! is a Cedar string in `context.input`, but `Mistyped` in history. A record, a set and a decimal
+//! with more places are `Mistyped` too. So a value that a policy can compare in `context.input`
+//! cannot always be compared in a history condition.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

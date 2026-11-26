@@ -147,8 +147,8 @@ with a condition (reason 62 `tool-policy-history-unsupported`). The chart value 
 
 Turn the rules on in this order. First configure the gateway and restart it. Then set the IAM
 setting. Turn the rules off in the opposite order. First set the IAM setting to `false`. Wait until
-every in-flight save has finished. Then change the gateway. Section 10, "Gateway rollback", gives
-the full procedure.
+every in-flight save has finished. Then change the gateway, for example a rollback from SMA-753 PR 2
+to PR 1. Section 10, "Gateway rollback", gives the full procedure.
 
 A denied call counts in the history. The gateway keeps the event of a blocked call with the verdict
 `denied`. So a rule such as `count_within(...) >= N` or a `sum_within` counts the blocked calls too.
@@ -617,12 +617,12 @@ Section 2.3 of `RUNBOOK-observability.md` lists the history metrics.
   tenant part, also a `forbid` with no slot. Under `closed`, every call of that hold is blocked.
   All 16 pairs start at 0.
 
-### Before you deploy this build
+### Before you deploy SMA-753 PR 1
 
 A live set can already hold a history rule. SMA-774 (PR 478, merged 2026-11-16) saved compiled
 sets with no history check. SMA-775 (PR 485, merged 2026-11-17) added the check, but it did not
-change the rows that were already live. The gateway before this build refuses such a set. This
-build loads it (section 5). So the deploy changes the decisions of each such organization:
+change the rows that were already live. A gateway older than SMA-753 PR 1 refuses such a set. A
+gateway of PR 1 or later loads it (section 5). So the deploy changes the decisions of each such organization:
 
 - `enforce` with `fail_mode = open`: before the deploy, each call that the floor does not deny is
   observed. After the deploy, the other policies are enforced, and the calls that depend on a slot
@@ -632,7 +632,14 @@ build loads it (section 5). So the deploy changes the decisions of each such org
 - A floor with a history rule: before the deploy, the floor is unavailable. After the deploy, the
   floor works, and its history forbids deny.
 
-Do these steps before you deploy this build.
+The outcomes above hold for PR 1, where the history slots stay missing. They also hold for PR 2
+with history turned off.
+
+With PR 2 and history turned on, the gateway evaluates the slots. The decision then follows the
+condition. For example, a floor forbid with `count_within(...) >= 2` does not deny the first call
+when the count is 1.
+
+Do these steps before you deploy PR 1, or PR 2, to a gateway older than PR 1.
 
 1. Read the floor (`GET /v1/tool-policy-floor`) and the set of each tenant
    (`GET /v1/organizations/{id}/tool-policy-set`), as in section 5.
@@ -642,9 +649,10 @@ Do these steps before you deploy this build.
 
 ### Gateway rollback
 
-This build (SMA-753 PR 1) loads a set that holds history rules, and it leaves the history slots
-empty (section 5). After PR 2, tenants can save history rules. After a rollback from PR 2 to this
-build, the history rules fail closed. The other policies of each set work as usual.
+A gateway of SMA-753 PR 1 loads a set that holds history rules, and it leaves the history slots
+empty (section 5). A gateway of SMA-753 PR 2 evaluates the history rules, and with PR 2, tenants can
+save history rules. After a rollback of the gateway from PR 2 to PR 1, the history rules fail
+closed. The other policies of each set work as usual.
 
 The effect of one history rule is its action scope, not one tool:
 
@@ -666,21 +674,22 @@ call in its scope.
 
 Use this procedure for each of three cases:
 
-- A gateway rollback from PR 2 to this build.
+- A gateway rollback from PR 2 to PR 1.
 - A gateway rollback to a build before SMA-753 PR 1.
 - Removal of the `[tool_history]` table, with a PR 1 or later build and no gateway rollback. Without
-  the table, every history slot is missing. The effect is the same as a rollback to this build.
+  the table, every history slot is missing. The effect is the same as a rollback to PR 1.
 
 1. Set `tool_policies.history_conditions = false` in IAM. IAM then refuses each save with a condition.
-   Wait until every in-flight save has finished. For a rollback to this build, this step is already
-   true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1. Confirm the
-   setting value anyway.
+   Wait until every in-flight save has finished. Do this step also for a rollback of the gateway from
+   PR 2 to PR 1. The gateway rollback does not change IAM. A PR 2 IAM reads this setting, so the
+   setting controls the saves. The PR 1 constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` disables
+   the saves only in a PR 1 IAM.
 2. Prepare the floor and the tenant sets.
-   - For a rollback from PR 2 to this build, and for removal of `[tool_history]` with a PR 1 or later
+   - For a rollback from PR 2 to PR 1, and for removal of `[tool_history]` with a PR 1 or later
      build, replace every history policy, whatever its action scope, with a reviewed replacement that
      has no temporal block. A policy scoped to one tool, for example
      `action == Pgs::Gateway::Action::"send"`, also errors when it reads a slot. A tenant set may move
-     to mode `log_only` instead. In this build, `log_only` only observes the slot policies, so the
+     to mode `log_only` instead. In PR 1, `log_only` only observes the slot policies, so the
      tenant set blocks no call through them.
    - For a rollback to a build before SMA-753 PR 1, publish a condition-free version of each set with
      a condition. A tenant set may move to mode `off` instead. Mode `off` stops the tenant's
@@ -711,8 +720,8 @@ These limits apply after PR 2.
 - A decision on the request side cannot act on the history findings. The findings exist only after
   the model answers.
 - The `forged_history` check uses an anchor. The gateway checks the results after the last
-  assistant message that has tool calls. If no assistant message has tool calls, the anchor is the
-  last assistant message. If there is no assistant message at all, every tool result counts. After
+  assistant message that has tool calls. If no assistant message has tool calls, every tool
+  result in the request counts. After
   the link expiry of 25 hours, the results of the last tool turn can fire `forged_history` on each
   request until the next tool turn.
 - A client can still hide `forged_history`. A client that repeats a linked tool turn after the
@@ -734,8 +743,8 @@ These limits apply after PR 2.
   - A policy edit adds a field path. The events from before the edit do not have the path.
   - A tool joins the catalog of an `any_catalog_tool` rule with a field test. Its events from
     before the catalog change do not have the path.
-  - A replica of the build before this one wrote the events, during the rolling deploy or before
-    it, for a live set that already holds a history rule (see "Before you deploy this build").
+  - A replica of a build before PR 2 wrote the events, during the rolling deploy or before it, for
+    a live set that already holds a history rule (see "Before you deploy SMA-753 PR 1").
   - The tenant set was unavailable on a replica that had no last known field plan of the
     organization. That replica stores only the paths of the floor conditions.
   So a new field cap starts from zero. Do not rely on it for the first 24 hours.

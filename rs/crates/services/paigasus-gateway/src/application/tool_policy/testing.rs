@@ -37,24 +37,38 @@ pub(crate) const PRINCIPAL: &str = "prn:pgs:iam:::principal/0190a1e5-0000-7000-8
 pub(crate) const FLOOR: &str = r#"@id("floor-rm") forbid(principal, action == Pgs::Gateway::Action::"rm", resource);"#;
 pub(crate) const PERMIT_ALL: &str = r#"@id("p") permit(principal, action, resource);"#;
 
+/// The floor answer of [`FakeSource`]: its text, its conditions and a revision of the conditions.
+#[derive(Clone)]
+struct FloorFixture {
+    text: String,
+    conditions: Vec<pb::HistoryCondition>,
+    revision: u64,
+}
+
+/// The tenant answer of [`FakeSource`], with its version. One lock holds all of it.
+#[derive(Clone)]
+struct TenantFixture {
+    text: String,
+    version: u64,
+    /// The tenant catalog.
+    catalog: Vec<String>,
+    /// The history conditions of the tenant set (SMA-753).
+    conditions: Vec<pb::HistoryCondition>,
+    /// The settings that the source returns with the tenant set. `None`: a source with no settings.
+    settings: Option<TenantSettings>,
+}
+
 /// An in-memory policy source. The tenant text applies to every org.
 pub(crate) struct FakeSource {
-    floor: Mutex<String>,
-    tenant: Mutex<(String, u64)>,
+    floor: Mutex<FloorFixture>,
+    tenant: Mutex<TenantFixture>,
     tenant_delay: Mutex<Duration>,
     floor_delay: Mutex<Duration>,
     tenant_calls: AtomicUsize,
-    /// The settings that the source returns with the tenant set. `None`: a source with no settings.
-    tenant_settings: Mutex<Option<TenantSettings>>,
     /// When set, only the tenant load fails (preflight F10).
     fail_tenant: AtomicBool,
     /// When set, the floor load fails.
     fail_floor: AtomicBool,
-    /// The history conditions of the floor and of the tenant set (SMA-753).
-    floor_conditions: Mutex<Vec<pb::HistoryCondition>>,
-    tenant_conditions: Mutex<Vec<pb::HistoryCondition>>,
-    /// The tenant catalog.
-    catalog: Mutex<Vec<String>>,
 }
 
 /// A history digester with no key, as the gateway has with no `digest_key`: it makes no digest.
@@ -128,43 +142,56 @@ pub(crate) fn sum_within(slot: &str, tool: &str, path: &str, max: i64) -> pb::Hi
 impl FakeSource {
     pub(crate) fn new(floor: &str, tenant: &str) -> Arc<Self> {
         Arc::new(FakeSource {
-            floor: Mutex::new(floor.to_owned()),
-            tenant: Mutex::new((tenant.to_owned(), 1)),
+            floor: Mutex::new(FloorFixture {
+                text: floor.to_owned(),
+                conditions: Vec::new(),
+                revision: 1,
+            }),
+            tenant: Mutex::new(TenantFixture {
+                text: tenant.to_owned(),
+                version: 1,
+                catalog: Vec::new(),
+                conditions: Vec::new(),
+                settings: None,
+            }),
             tenant_delay: Mutex::new(Duration::ZERO),
             floor_delay: Mutex::new(Duration::ZERO),
             tenant_calls: AtomicUsize::new(0),
-            tenant_settings: Mutex::new(None),
             fail_tenant: AtomicBool::new(false),
             fail_floor: AtomicBool::new(false),
-            floor_conditions: Mutex::new(Vec::new()),
-            tenant_conditions: Mutex::new(Vec::new()),
-            catalog: Mutex::new(Vec::new()),
         })
     }
 
-    /// Replace the floor conditions. The floor version holds their count, so a new count reloads.
+    /// Replace the floor conditions. The floor revision changes when the conditions change, so
+    /// the next load reloads. The same conditions keep the revision.
     pub(crate) fn set_floor_conditions(&self, conditions: Vec<pb::HistoryCondition>) {
-        *self.floor_conditions.lock().unwrap() = conditions;
+        let mut f = self.floor.lock().unwrap();
+        if f.conditions != conditions {
+            f.conditions = conditions;
+            f.revision += 1;
+        }
     }
 
     /// Replace the tenant conditions and the catalog; the version changes.
     pub(crate) fn set_tenant_conditions(&self, conditions: Vec<pb::HistoryCondition>, catalog: &[&str]) {
-        *self.tenant_conditions.lock().unwrap() = conditions;
-        *self.catalog.lock().unwrap() = catalog.iter().map(|s| (*s).to_owned()).collect();
-        self.tenant.lock().unwrap().1 += 1;
+        let mut t = self.tenant.lock().unwrap();
+        t.conditions = conditions;
+        t.catalog = catalog.iter().map(|s| (*s).to_owned()).collect();
+        t.version += 1;
     }
 
     /// Replace the tenant text; the version changes.
     pub(crate) fn set_tenant(&self, text: &str) {
         let mut t = self.tenant.lock().unwrap();
-        *t = (text.to_owned(), t.1 + 1);
+        t.text = text.to_owned();
+        t.version += 1;
     }
 
     /// Replace the settings of the tenant; the version changes (the IAM token covers the settings).
     pub(crate) fn set_settings(&self, settings: Option<TenantSettings>) {
-        *self.tenant_settings.lock().unwrap() = settings;
         let mut t = self.tenant.lock().unwrap();
-        t.1 += 1;
+        t.settings = settings;
+        t.version += 1;
     }
 
     /// Fail only the tenant load. The floor load still works.
@@ -196,16 +223,16 @@ impl PolicySource for FakeSource {
         if self.fail_floor.load(Ordering::SeqCst) {
             return Err(SourceError::Io("floor down".to_owned()));
         }
-        let text = self.floor.lock().unwrap().clone();
+        // The answer is taken under one lock before the wait, so it holds one version.
+        let f = self.floor.lock().unwrap().clone();
         let delay = *self.floor_delay.lock().unwrap();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let conditions = self.floor_conditions.lock().unwrap().clone();
         Ok(PolicyText {
-            version: format!("{}:{}", text.len(), conditions.len()),
-            text,
-            conditions,
+            version: format!("{}:{}", f.text.len(), f.revision),
+            text: f.text,
+            conditions: f.conditions,
             max_window_ms: MAX_WINDOW_MS,
         })
     }
@@ -215,17 +242,19 @@ impl PolicySource for FakeSource {
         if self.fail_tenant.load(Ordering::SeqCst) {
             return Err(SourceError::Io("tenant down".to_owned()));
         }
-        let (text, version) = self.tenant.lock().unwrap().clone();
+        // The payload and its version are taken under one lock before the wait: a fixture change
+        // during the wait reaches the next load, not this answer.
+        let t = self.tenant.lock().unwrap().clone();
         let delay = *self.tenant_delay.lock().unwrap();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
         Ok(TenantPolicies {
-            text,
-            catalog: self.catalog.lock().unwrap().clone(),
-            version: version.to_string(),
-            settings: *self.tenant_settings.lock().unwrap(),
-            conditions: self.tenant_conditions.lock().unwrap().clone(),
+            text: t.text,
+            catalog: t.catalog,
+            version: t.version.to_string(),
+            settings: t.settings,
+            conditions: t.conditions,
             max_window_ms: MAX_WINDOW_MS,
         })
     }
@@ -418,5 +447,42 @@ pub(crate) struct PanicStage(pub(crate) &'static str);
 impl BuiltInStage for PanicStage {
     fn run(&self, _batch: &DetectBatch) -> PipelineOutput {
         std::panic::panic_any(self.0.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_floor_version_changes_with_the_condition_payload_not_its_count() {
+        let source = FakeSource::new(FLOOR, PERMIT_ALL);
+        source.set_floor_conditions(vec![formerly("a", "send", "amount")]);
+        let first = source.floor().await.expect("floor").version;
+        // The same answer keeps its version.
+        source.set_floor_conditions(vec![formerly("a", "send", "amount")]);
+        assert_eq!(source.floor().await.expect("floor").version, first);
+        // One condition for another, with the same count: a new version.
+        source.set_floor_conditions(vec![formerly("a", "send", "limit")]);
+        assert_ne!(source.floor().await.expect("floor").version, first);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_delayed_tenant_load_returns_the_payload_of_its_version() {
+        let source = FakeSource::new(FLOOR, PERMIT_ALL);
+        source.set_tenant_delay(Duration::from_secs(1));
+        let load = {
+            let source = Arc::clone(&source);
+            tokio::spawn(async move { source.tenant(ORG_A).await.expect("tenant") })
+        };
+        // Let the load take its snapshot, then change the fixture while it waits.
+        tokio::task::yield_now().await;
+        source.set_tenant_conditions(vec![formerly("a", "send", "amount")], &["send"]);
+        let answer = load.await.expect("join");
+        assert_eq!((answer.version.as_str(), answer.conditions.len(), answer.catalog.len()), ("1", 0, 0));
+        // The next load sees the update under the new version.
+        source.set_tenant_delay(Duration::ZERO);
+        let next = source.tenant(ORG_A).await.expect("tenant");
+        assert_eq!((next.version.as_str(), next.conditions.len(), next.catalog.len()), ("2", 1, 1));
     }
 }

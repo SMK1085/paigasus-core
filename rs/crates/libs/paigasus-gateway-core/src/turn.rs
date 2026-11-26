@@ -529,7 +529,8 @@ fn openai<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -> R
 }
 
 /// The last assistant message of a chat request, and the `tool` messages after the last assistant
-/// message that has tool calls (the forged-history anchor, P11). A legacy
+/// message that has tool calls (the forged-history anchor, P11). With no such message, every `tool`
+/// message counts. A legacy
 /// `function_call` has no id, and a `function` result has no call id, so both are ignored.
 fn chat_latest(messages: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
@@ -545,9 +546,9 @@ fn chat_latest(messages: &[Value]) -> LatestTurn {
     let anchor = messages
         .iter()
         .rposition(|m| role(m) == Some("assistant") && m.get("tool_calls").and_then(Value::as_array).is_some_and(|c| !c.is_empty()));
-    // Without a call-bearing assistant message, the results after the last assistant message count,
-    // and without any assistant message, every result counts (a forged result has no call to match).
-    for m in &messages[anchor.or(last).map_or(0, |a| a + 1)..] {
+    // Without a call-bearing assistant message, every result counts (a forged result has no call
+    // to match), also one before a text-only assistant message.
+    for m in &messages[anchor.map_or(0, |a| a + 1)..] {
         if role(m) == Some("tool")
             && let Some(id) = m.get("tool_call_id").and_then(Value::as_str)
         {
@@ -706,7 +707,8 @@ fn model_item(item: &Value) -> ModelItem {
 /// The last model turn of a Responses request is the longest run of contiguous items that ends at
 /// the last assistant message or client-run call, and holds only assistant messages, reasoning
 /// items and client-run calls. The results are the result items after the start of the last such run
-/// that holds a call item (P11), which can be an earlier run than this one.
+/// that holds a call item (P11), which can be an earlier run than this one. With no call item, every
+/// result item counts.
 fn responses_latest(items: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
     let kinds: Vec<ModelItem> = items.iter().map(model_item).collect();
@@ -730,11 +732,11 @@ fn responses_latest(items: &[Value]) -> LatestTurn {
         }
     }
     // The results anchor on the last run that holds a call item, not on the last run (P11). Without
-    // a call item they follow the last run, and without any model item every result counts.
-    let anchor = match kinds.iter().rposition(|k| *k == ModelItem::Call) {
-        Some(call_end) => kinds[..=call_end].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1),
-        None => start.unwrap_or(0),
-    };
+    // a call item every result counts (a forged result has no call to match).
+    let anchor = kinds
+        .iter()
+        .rposition(|k| *k == ModelItem::Call)
+        .map_or(0, |call_end| kinds[..=call_end].iter().rposition(|k| *k == ModelItem::Other).map_or(0, |i| i + 1));
     for item in &items[anchor..] {
         let Some(ty) = item.get("type").and_then(Value::as_str) else { continue };
         let Some(shape) = responses_result_shape(ty) else { continue };
@@ -942,7 +944,8 @@ fn anthropic<'a>(v: &'a Value, mut sink: Option<&mut (dyn TextSink<'a> + '_)>) -
 }
 
 /// The last assistant message of an Anthropic request, and the `tool_result` blocks after the last
-/// assistant message that has a `tool_use` block (the forged-history anchor, P11).
+/// assistant message that has a `tool_use` block (the forged-history anchor, P11). With no such
+/// message, every `tool_result` block counts.
 fn anthropic_latest(messages: &[Value]) -> LatestTurn {
     let mut l = LatestTurn::default();
     let last = messages.iter().rposition(|m| role(m) == Some("assistant"));
@@ -963,7 +966,8 @@ fn anthropic_latest(messages: &[Value]) -> LatestTurn {
                 .and_then(Value::as_array)
                 .is_some_and(|bs| bs.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")))
     });
-    for m in &messages[anchor.or(last).map_or(0, |a| a + 1)..] {
+    // Without an assistant message that has a `tool_use` block, every result counts.
+    for m in &messages[anchor.map_or(0, |a| a + 1)..] {
         for b in m.get("content").and_then(Value::as_array).into_iter().flatten() {
             if b.get("type").and_then(Value::as_str) == Some("tool_result")
                 && let Some(id) = b.get("tool_use_id").and_then(Value::as_str)
@@ -1580,6 +1584,18 @@ mod tests {
             {"type":"function_call_output","call_id":"c9","output":"x"}]});
         for (fmt, v) in [(Format::OpenAiChat, chat), (Format::AnthropicMessages, an), (Format::OpenAiResponses, rs)] {
             assert_eq!(facts(fmt, v).latest.result_call_ids, ["c9"]);
+        }
+    }
+
+    #[test]
+    fn a_forged_result_before_a_text_only_assistant_message_is_seen() {
+        let chat = json!({"messages":[{"role":"user","content":"x"},{"role":"tool","tool_call_id":"c9","content":"x"},{"role":"assistant","content":"done"}]});
+        let an = json!({"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c9","content":"x"}]},
+            {"role":"assistant","content":[{"type":"text","text":"done"}]}]});
+        let rs = json!({"input":[{"type":"message","role":"user","content":"x"},{"type":"function_call_output","call_id":"c9","output":"x"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]});
+        for (fmt, v) in [(Format::OpenAiChat, chat), (Format::AnthropicMessages, an), (Format::OpenAiResponses, rs)] {
+            assert_eq!(facts(fmt, v).latest.result_call_ids, ["c9"], "{fmt:?}");
         }
     }
 
