@@ -36,7 +36,7 @@ use paigasus_observability::names;
 
 use crate::adapters::http::relay::{feed_scan, finish_scan};
 use crate::adapters::http::usage::StreamUsage;
-use crate::adapters::upstream::UpstreamByteStream;
+use crate::adapters::upstream::{StreamReadError, UpstreamByteStream};
 use crate::application::charge_guard::ChargeGuard;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::tool_history::ToolHistory;
@@ -213,7 +213,7 @@ struct Relay {
 enum Event {
     Decided(Result<Vec<DecidedCall>, DeciderError>),
     Wake,
-    Upstream(Option<Result<Bytes, reqwest::Error>>),
+    Upstream(Option<Result<Bytes, StreamReadError>>),
 }
 
 impl Relay {
@@ -588,7 +588,7 @@ mod tests {
         use crate::test_support::ScriptedStore;
         let store = ScriptedStore::new(admit);
         let upstream = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let ti = Arc::new(ToolInterception {
             limits: Limits::defaults(),

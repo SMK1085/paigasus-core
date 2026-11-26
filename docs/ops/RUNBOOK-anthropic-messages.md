@@ -22,6 +22,11 @@ The routes are off by default. With `[messages] enabled = false`, the three rout
 | `default_version` | `2023-06-01` | The `anthropic-version` value. The gateway sends it when the caller sends none. |
 | `non_stream_timeout_secs` | `600` | The time limit of one call that is not a stream. |
 
+The wait for the response head is the larger of `stream_idle_timeout_secs` and
+`non_stream_timeout_secs`. In a stream body, each next chunk must arrive within
+`stream_idle_timeout_secs`. If no chunk arrives in that time, the gateway ends the stream with its
+terminal error event.
+
 ### 1.2 Table `[messages]`
 
 | Setting | Default | Meaning |
@@ -95,6 +100,9 @@ These gaps stay open after SMA-750. Tool-call policy (ADR-0027) does not cover t
   event type. An unknown delta on a text block is a deviation. An unknown block type is held and
   decided as a tool call. If Anthropic adds a new type, a feature can stop working until the
   gateway supports it. Section 5 describes the alert for this case.
+- **Observe mode can release a tool call that no policy checked.** With
+  `[tool_interception] on_failure = "allow"`, a stream that the gateway cannot parse is forwarded.
+  Use `"block"` (the default) where enforcement matters.
 
 ## 4. Metric and log labels
 

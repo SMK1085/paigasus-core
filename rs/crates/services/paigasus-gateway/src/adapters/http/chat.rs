@@ -140,7 +140,7 @@ pub(crate) mod tests {
         // After the first upstream error the adapter emits exactly one terminal event and ends —
         // any items the upstream would have produced afterwards are never observed.
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: a\n\n"))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let out: Vec<Bytes> = plain_relay(inner, None).map(|r| r.unwrap()).collect().await;
         let assembled: Vec<u8> = out.iter().flat_map(|b| b.to_vec()).collect();
@@ -156,7 +156,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_terminal_frame_is_its_own_record_after_a_partial_one() {
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"par"))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let out: Vec<Bytes> = plain_relay(inner, None).map(|r| r.unwrap()).collect().await;
         let text = String::from_utf8(out.iter().flat_map(|b| b.to_vec()).collect()).unwrap();
@@ -213,7 +213,7 @@ pub(crate) mod tests {
     async fn an_error_after_an_unterminated_usage_record_charges_the_reported_tokens() {
         let store = ScriptedStore::new(admit);
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let out: Vec<Bytes> = plain_relay(inner, Some(sent_guard(&store))).map(|r| r.unwrap()).collect().await;
         assert!(out.concat().ends_with(TERMINAL_SSE_ERROR.as_bytes()));

@@ -81,6 +81,10 @@
 #                                                         # ADDS to the trust store, never replaces it
 # default_version         = "2023-06-01"                 # env GATEWAY_UPSTREAM__ANTHROPIC__DEFAULT_VERSION; sent when the caller sends no anthropic-version
 # non_stream_timeout_secs = 600                          # env GATEWAY_UPSTREAM__ANTHROPIC__NON_STREAM_TIMEOUT_SECS; time limit of one non-stream call
+#
+# The wait for a response head is the larger of stream_idle_timeout_secs and
+# non_stream_timeout_secs. In a stream body, a per-chunk timer applies stream_idle_timeout_secs
+# to each next chunk.
 
 # --- Metrics (SMA-446 Unit 2: Prometheus `GET /metrics`) ---
 

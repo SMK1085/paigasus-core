@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use bytes::Bytes;
+use futures::StreamExt;
 use reqwest::Method;
 use reqwest::header::{HeaderMap, HeaderValue};
 use secrecy::SecretString;
 use support::MockOpenAi;
 
 use paigasus_gateway::adapters::anthropic::{AnthropicClient, AnthropicRoute};
-use paigasus_gateway::adapters::upstream::{Provider, UpstreamError, UpstreamResponse};
+use paigasus_gateway::adapters::upstream::{Provider, StreamReadError, UpstreamError, UpstreamResponse};
 use paigasus_gateway::config::AnthropicConfig;
 
 const KEY: &str = "test-operator-key";
@@ -188,6 +189,37 @@ async fn a_slow_non_stream_head_survives_the_idle_timeout() {
     let fwd = client.forward(&HeaderMap::new(), None);
     let resp = client.send(AnthropicRoute::Messages, Method::POST, body(), false, &fwd).await.expect("slow head is fine");
     assert!(matches!(resp, UpstreamResponse::Full { status, .. } if status == reqwest::StatusCode::OK));
+}
+
+#[tokio::test]
+async fn a_stalled_stream_ends_after_the_idle_timeout_not_the_non_stream_timeout() {
+    // The mock sends the head and one frame at once, then stalls forever. The client read
+    // timeout is 30 s (the larger value). The per-chunk timer must end the stream after 1 s.
+    let (mock, cancelled) = MockOpenAi::spawn_abortable_stream().await;
+    let client = client_with(mock.base_url.clone(), 30, Duration::from_secs(1));
+    let fwd = client.forward(&HeaderMap::new(), None);
+    let resp = client.send(AnthropicRoute::Messages, Method::POST, body(), true, &fwd).await.expect("stream head");
+    let UpstreamResponse::Stream { mut stream, .. } = resp else { panic!("expected Stream") };
+    let first = stream.next().await.expect("one frame").expect("the first frame is Ok");
+    assert_eq!(first, Bytes::from_static(b"data: hold\n\n"));
+
+    let started = std::time::Instant::now();
+    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("the stream must not wait for the 30 s read timeout");
+    let elapsed = started.elapsed();
+    assert!(matches!(next, Some(Err(StreamReadError::Idle(d))) if d == Duration::from_secs(1)), "an idle error item, got {next:?}");
+    assert!(elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(5), "ended after {elapsed:?}");
+    assert!(stream.next().await.is_none(), "the stream ends after the idle error");
+    drop(stream);
+    // The upstream request is cancelled when the stream ends.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the upstream request is cancelled");
 }
 
 #[tokio::test]

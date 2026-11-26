@@ -15,7 +15,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, StatusCode};
 use secrecy::ExposeSecret;
 
-use crate::adapters::upstream::{Provider, ResponseHead, UpstreamError, UpstreamResponse, build_client, classify};
+use crate::adapters::upstream::{Provider, ResponseHead, StreamReadError, UpstreamByteStream, UpstreamError, UpstreamResponse, build_client, classify};
 use crate::config::AnthropicConfig;
 
 /// The upstream routes the client can call. A closed set, so a caller never picks a path.
@@ -61,11 +61,15 @@ pub struct AnthropicClient {
     api_key: HeaderValue,
     default_version: HeaderValue,
     non_stream_timeout: Duration,
+    /// The longest wait for the next chunk of a stream body (§ 5).
+    stream_idle_timeout: Duration,
 }
 
 impl AnthropicClient {
     /// Build the client. The read timeout is the larger of the stream idle timeout and the
-    /// non-stream timeout, so a slow non-stream head does not hit the idle limit (§ 5).
+    /// non-stream timeout, so a slow non-stream head does not hit the idle limit (§ 5). That
+    /// timeout covers the response head. A per-chunk timer in `send` applies the stream idle
+    /// timeout to a stream body.
     pub fn new(cfg: &AnthropicConfig, connect_timeout: Duration, stream_idle_timeout: Duration) -> Result<Self, UpstreamError> {
         let non_stream_timeout = Duration::from_secs(cfg.non_stream_timeout_secs);
         let http = build_client(Provider::Anthropic, cfg.extra_ca_bundle_path.as_deref(), connect_timeout, stream_idle_timeout.max(non_stream_timeout))?;
@@ -86,6 +90,7 @@ impl AnthropicClient {
             api_key,
             default_version,
             non_stream_timeout,
+            stream_idle_timeout,
         })
     }
 
@@ -144,11 +149,29 @@ impl AnthropicClient {
             Ok(UpstreamResponse::Stream {
                 status,
                 head,
-                stream: response.bytes_stream().boxed(),
+                stream: idle_limited(response.bytes_stream().map(|r| r.map_err(StreamReadError::from)).boxed(), self.stream_idle_timeout),
             })
         } else {
             let body = response.bytes().await.map_err(|e| classify(Provider::Anthropic, e))?;
             Ok(UpstreamResponse::Full { status, head, body })
         }
     }
+}
+
+/// Wrap a stream body so that each next chunk must arrive within `idle` (§ 5).
+///
+/// The timer applies always. When `idle` is not smaller than the reqwest read timeout, the
+/// reqwest timeout fires first or at the same time, and the result is the same. On idle, the
+/// stream yields one [`StreamReadError::Idle`] item and then ends. The relays treat that item
+/// like a reqwest read error. Ending drops the inner stream, which cancels the upstream request.
+fn idle_limited(inner: UpstreamByteStream, idle: Duration) -> UpstreamByteStream {
+    futures::stream::unfold(Some(inner), move |state| async move {
+        let mut inner = state?;
+        match tokio::time::timeout(idle, inner.next()).await {
+            Ok(Some(item)) => Some((item, Some(inner))),
+            Ok(None) => None,
+            Err(_) => Some((Err(StreamReadError::Idle(idle)), None)),
+        }
+    })
+    .boxed()
 }

@@ -194,7 +194,14 @@ impl AnthropicClient {
   reqwest's `read_timeout` (set from `stream_idle_timeout_secs`, default 300) also runs until the
   response head arrives, so it would fire first. The Anthropic client therefore builds its own
   `reqwest::Client` with `read_timeout = max(stream_idle_timeout_secs, non_stream_timeout_secs)`.
-  A test holds the mock's response head for longer than `stream_idle_timeout_secs`.
+  This client read timeout covers the response head. A test holds the mock's response head for
+  longer than `stream_idle_timeout_secs`.
+  A per-chunk timer applies `stream_idle_timeout_secs` to a stream body. Each next chunk must
+  arrive within that time. If it does not, the stream yields one idle error item and ends. The
+  relays treat that item like a reqwest read error, so the caller gets the same terminal event.
+  The timer applies always. When `stream_idle_timeout_secs` is not smaller than the read timeout,
+  both limits are equal and the result does not change. A test stalls the mock after one frame
+  with a 1 s idle limit and a 30 s non-stream limit, and the stream ends after about 1 s.
 - Redirects: none (D16). The shared helper takes the config key name for its CA-bundle error and
   log texts, so the Anthropic errors name `upstream.anthropic.extra_ca_bundle_path` and the OpenAI
   texts stay byte-identical (the test at GW `adapters/openai/client.rs:496-512`).

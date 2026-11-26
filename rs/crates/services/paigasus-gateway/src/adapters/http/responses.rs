@@ -191,7 +191,7 @@ mod tests {
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(
             b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"par",
         ))])
-        .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+        .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
         .boxed();
         let out: Vec<Bytes> = terminal_sse_error_stream(inner, None, StreamUsage::Responses(ResponsesUsageScanner::new()), RESPONSES_TERMINAL_SSE_ERROR)
             .map(|r| r.expect("infallible"))

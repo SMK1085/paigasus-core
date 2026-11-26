@@ -37,7 +37,7 @@ use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::adapters::upstream::{Provider, ResponseHead, UpstreamError, UpstreamResponse, build_client, classify};
+use crate::adapters::upstream::{Provider, ResponseHead, StreamReadError, UpstreamError, UpstreamResponse, build_client, classify};
 use crate::config::OpenAiConfig;
 
 /// The upstream routes the client can call (SMA-769 D7). A closed set: a caller never passes a
@@ -138,7 +138,7 @@ impl OpenAiClient {
             Ok(UpstreamResponse::Stream {
                 status,
                 head: ResponseHead::default(),
-                stream: response.bytes_stream().boxed(),
+                stream: response.bytes_stream().map(|r| r.map_err(StreamReadError::from)).boxed(),
             })
         } else {
             let body = response.bytes().await.map_err(|e| classify(Provider::OpenAi, e))?;

@@ -3,7 +3,7 @@
 
 mod support;
 
-use paigasus_gateway_core::{Decision, Format, Metric, OnFailure, ToolCall, ToolCallKind};
+use paigasus_gateway_core::{Basis, Decision, Format, Metric, OnFailure, ToolCall, ToolCallKind};
 use proptest::prelude::*;
 use support::driver::{DECIDERS, Outcome, allow_all, block_named, cut, drive, limits};
 use support::oracle::{Run, check_i1, runners};
@@ -126,6 +126,23 @@ proptest! {
         // with no decision by design, so a failed core is excepted too.
         if !passed_through && !o.core_failed() {
             check_i1(Format::AnthropicMessages, &bytes, &o.out, &o.decided, o.core_failed()).map_err(TestCaseError::fail)?;
+        }
+        // The excepted branch must still record the failure precisely. Observe mode counts each
+        // failure with a known code, never sends the terminal frame, and releases every call on
+        // the `on_failure` basis as `allow`, never as `block`.
+        if o.core_failed() {
+            for m in &o.metrics {
+                match m {
+                    Metric::OnFailure(code) => prop_assert!(["hold_limit", "truncated", "decider_error", "malformed"].contains(code), "unknown on_failure code {code}"),
+                    Metric::RecordDropped(reason) => prop_assert!(["malformed", "oversized", "after_done", "late_fragment"].contains(reason), "unknown drop reason {reason}"),
+                    Metric::Decision { decision, basis } if *basis == Basis::OnFailure.as_str() => prop_assert_eq!(*decision, "allow", "observe mode blocked on the on_failure basis:\n{}", out),
+                    _ => {}
+                }
+            }
+            prop_assert!(!o.aborted, "observe mode sent the terminal frame:\n{out}");
+            if o.metrics.contains(&Metric::OnFailure("malformed")) {
+                prop_assert!(passed_through, "a malformed stream in observe mode must switch to pass-through:\n{out}");
+            }
         }
         let payloads = |b: &str| b.lines().filter_map(|l| l.strip_prefix("data: ").map(str::to_owned)).collect::<Vec<_>>();
         let input = payloads(&show(&bytes));

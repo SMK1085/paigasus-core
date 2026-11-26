@@ -84,7 +84,19 @@ impl ResponseHead {
 /// The boxed, UNBUFFERED chunk stream the [`UpstreamResponse::Stream`] path yields. Each item is a
 /// raw upstream body chunk as it arrived off the socket. `'static + Send` so axum can own it.
 /// Dropping it cancels the upstream request (cancel-on-drop).
-pub type UpstreamByteStream = futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>;
+pub type UpstreamByteStream = futures::stream::BoxStream<'static, Result<Bytes, StreamReadError>>;
+
+/// An error item of an [`UpstreamByteStream`]. Every relay treats each variant the same way: it
+/// sends its terminal event and ends the stream. So a caller sees no difference between them.
+#[derive(Debug, thiserror::Error)]
+pub enum StreamReadError {
+    /// reqwest failed to read the body. This includes its own read timeout.
+    #[error("failed to read the upstream stream body")]
+    Read(#[from] reqwest::Error),
+    /// No chunk arrived within the stream idle timeout (SMA-750 § 5).
+    #[error("no upstream stream chunk arrived within {0:?}")]
+    Idle(Duration),
+}
 
 /// The upstream response. A NON-2xx upstream is NOT an error: it arrives with the upstream status
 /// and body, so the caller forwards the provider's own error envelope verbatim. For a non-stream
