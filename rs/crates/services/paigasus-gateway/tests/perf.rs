@@ -19,6 +19,7 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use paigasus_gateway::adapters::detectors::BuiltInDetector;
+use paigasus_gateway::adapters::history::redis::history_key;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::policy_source::file::FilePolicySource;
 use paigasus_gateway::application::decision_log::{DecisionRecorder, DigestKey};
@@ -28,6 +29,7 @@ use paigasus_gateway::config::{DETECTOR_MARGIN_MS, DetectorSettings, ToolPolicyS
 use paigasus_gateway::domain::decision_log::{DecisionLog, OsEntropy};
 use paigasus_gateway::domain::detectors::{BuiltInStage, DetectBatch, Side as DetectSide, Subject};
 use paigasus_gateway::domain::limits::SystemClock;
+use paigasus_gateway::domain::tool_history::Scope;
 use paigasus_gateway_core::decision_log::DecisionRecord;
 use paigasus_gateway_core::{
     CallScan, DecisionContext, Format, Limits as CoreLimits, OnUnavailable, PolicySet, TenantMode, ToolCall, ToolCallDecider, call_schema, decide_calls, invocation, parse_body, parse_request,
@@ -742,6 +744,10 @@ mod history_rig {
         inner: Arc<RedisSessionStore>,
         reserve_nanos: AtomicU64,
         reserves: AtomicU64,
+        /// The events that the reserves read: the sum, the smallest and the largest of one reserve.
+        window_sum: AtomicU64,
+        window_min: AtomicU64,
+        window_max: AtomicU64,
     }
 
     impl TimedStore {
@@ -750,6 +756,23 @@ mod history_rig {
             let n = self.reserves.load(Ordering::Relaxed);
             let total = self.reserve_nanos.load(Ordering::Relaxed);
             (Duration::from_nanos(total.checked_div(n).unwrap_or(0)), n)
+        }
+
+        /// Forget the window counts: the next reserve starts them again.
+        pub fn reset_windows(&self) {
+            self.window_sum.store(0, Ordering::Relaxed);
+            self.window_min.store(u64::MAX, Ordering::Relaxed);
+            self.window_max.store(0, Ordering::Relaxed);
+        }
+
+        /// The mean, the smallest and the largest number of events that one reserve read, over
+        /// `reserves` reserves.
+        pub fn windows(&self, reserves: u64) -> (u64, u64, u64) {
+            (
+                self.window_sum.load(Ordering::Relaxed).checked_div(reserves).unwrap_or(0),
+                self.window_min.load(Ordering::Relaxed),
+                self.window_max.load(Ordering::Relaxed),
+            )
         }
     }
 
@@ -766,6 +789,12 @@ mod history_rig {
             let reply = self.inner.reserve(req).await;
             self.reserve_nanos.fetch_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
             self.reserves.fetch_add(1, Ordering::Relaxed);
+            if let Ok(r) = &reply {
+                let read = r.window.iter().map(|w| w.events.len() as u64).sum::<u64>();
+                self.window_sum.fetch_add(read, Ordering::Relaxed);
+                self.window_min.fetch_min(read, Ordering::Relaxed);
+                self.window_max.fetch_max(read, Ordering::Relaxed);
+            }
             reply
         }
         async fn settle(&self, req: &SettleRequest) -> Result<(), HistoryStoreError> {
@@ -783,6 +812,9 @@ mod history_rig {
             inner,
             reserve_nanos: AtomicU64::new(0),
             reserves: AtomicU64::new(0),
+            window_sum: AtomicU64::new(0),
+            window_min: AtomicU64::new(u64::MAX),
+            window_max: AtomicU64::new(0),
         });
         let key = HistoryKey::new(SecretString::from("history-perf-test-key-of-32-bytes".to_owned())).expect("a 32-byte key");
         let digester = HmacHistoryDigester::new(Some(key), None).expect("a digester");
@@ -914,10 +946,52 @@ struct HistoryRun {
     wall: Duration,
     reserve_mean: Duration,
     reserves: u64,
+    /// The events that one reserve read: the mean, the smallest and the largest.
+    window: (u64, u64, u64),
     /// The status of the first answer, and the tool calls that it kept.
     first: (StatusCode, usize),
     /// The counters of `gateway_tool_history_*` above zero, with their labels.
     counters: Vec<String>,
+}
+
+/// Keeps a history at its seeded size. After each request, the events that the run added (those
+/// after the start of the run) are removed from the sets `keys`, so every hold reads the seeded
+/// events and the few of the holds in flight. The removal runs after the answer, outside the
+/// overhead sample, on its own client from `paigasus_redis::connect`.
+struct Keep {
+    url: String,
+    keys: Vec<String>,
+}
+
+impl Keep {
+    async fn connect(&self) -> paigasus_redis::RedisHandle {
+        paigasus_redis::connect(&self.url, paigasus_gateway::adapters::history::redis::breaker_metrics())
+            .await
+            .expect("connect to the test Redis")
+    }
+}
+
+/// The connection, the history sets and the start of the run (ms) of a `Keep`.
+struct Kept {
+    conn: paigasus_redis::RedisHandle,
+    keys: Vec<String>,
+    from_ms: u64,
+}
+
+impl Kept {
+    /// Removes the events of the sets that are later than the start of the run.
+    async fn trim(&self) {
+        for key in &self.keys {
+            let mut conn = self.conn.clone();
+            let _: u64 = redis::cmd("ZREMRANGEBYSCORE")
+                .arg(key)
+                .arg(format!("({}", self.from_ms))
+                .arg("+inf")
+                .query_async(&mut conn)
+                .await
+                .expect("trim the events of the run");
+        }
+    }
 }
 
 /// Builds the gateway on the history, runs `requests` requests through it, and gives the overhead
@@ -928,9 +1002,9 @@ async fn run_history_case(
     store: &history_rig::TimedStore,
     history: Arc<paigasus_gateway::application::tool_history::ToolHistory>,
     source: history_rig::Source,
-    request: String,
-    answer: String,
+    (request, answer): (String, String),
     requests: usize,
+    keep: Option<Keep>,
 ) -> HistoryRun {
     let settings = settings();
     let recorder = Arc::new(DecisionRecorder::tracing());
@@ -952,15 +1026,35 @@ async fn run_history_case(
     let first_counters = take_counters(snapshotter);
     let _warm = take_overhead(snapshotter);
     let before = store.mean_reserve().1;
+    // From here on, a request leaves the history as it found it (see `Keep`).
+    let keep = match keep {
+        Some(k) => {
+            let from_ms = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after the epoch").as_millis()).expect("ms fit u64");
+            Some(Arc::new(Kept {
+                conn: k.connect().await,
+                keys: k.keys,
+                from_ms,
+            }))
+        }
+        None => None,
+    };
+    if let Some(k) = &keep {
+        k.trim().await;
+    }
+    store.reset_windows();
 
     let gate = Arc::new(tokio::sync::Semaphore::new(CONCURRENCY));
     let mut set = tokio::task::JoinSet::new();
     let started = Instant::now();
     for _ in 0..requests {
         let permit = Arc::clone(&gate).acquire_owned().await.expect("semaphore");
-        let (app, body) = (app.clone(), Arc::clone(&body));
+        let (app, body, keep) = (app.clone(), Arc::clone(&body), keep.clone());
         set.spawn(async move {
             let sent = send(&app, &body).await;
+            // After the answer, so outside the overhead sample of this request.
+            if let Some(k) = keep {
+                k.trim().await;
+            }
             drop(permit);
             sent.status
         });
@@ -972,6 +1066,7 @@ async fn run_history_case(
     let mut samples = take_overhead(snapshotter);
     samples.sort_by(f64::total_cmp);
     let (reserve_mean, total) = store.mean_reserve();
+    let window = store.windows(total - before);
     let mut counters = first_counters;
     counters.extend(take_counters(snapshotter));
     HistoryRun {
@@ -979,6 +1074,7 @@ async fn run_history_case(
         wall,
         reserve_mean,
         reserves: total - before,
+        window,
         first,
         counters,
     }
@@ -1013,13 +1109,14 @@ fn print_history_run(title: &str, run: &HistoryRun, requests: usize) {
         std::env::consts::ARCH,
         profile(),
     );
+    println!("{title}: events read per hold: mean {}, min {}, max {}", run.window.0, run.window.1, run.window.2);
     println!("{title}: first answer status {}, tool calls kept {} (requests {requests})", run.first.0, run.first.1);
     println!("{title}: history counters above zero (first request included): {:?}", run.counters);
 }
 
 /// SMA-753 P15: a principal history of 1,000 events of `send` and `search`, a hold of three calls,
-/// one `sum_within` and one `formerly` condition, on a real Redis store. The history grows by 3,000
-/// events during the run (about 4,000 in all, under the cap of 10,000 for each tool).
+/// one `sum_within` and one `formerly` condition, on a real Redis store. The run removes the events
+/// that it adds (`Keep`), so every hold reads the 1,000 seeded events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a measurement in release mode"]
 async fn p99_policy_overhead_with_history_conditions() {
@@ -1056,12 +1153,21 @@ async fn p99_policy_overhead_with_history_conditions() {
         catalog: vec!["send".to_owned(), "search".to_owned()],
         conditions: vec![sum, seen],
     };
+    let org = Uuid::try_parse(ORG_A).expect("org uuid");
+    let keep = Keep {
+        url: url.clone(),
+        keys: ["send", "search"].map(|t| history_key(org, Scope::Principal, PRINCIPAL_1, t)).to_vec(),
+    };
     let answer = call_answer(&[("send", r#"{"amount":5}"#), ("search", r#"{"q":"x"}"#), ("send", r#"{"amount":7}"#)]);
-    let run = run_history_case(&snapshotter, &store, history, source, tools_request(&["send", "search"]), answer, HISTORY_REQUESTS).await;
+    let run = run_history_case(&snapshotter, &store, history, source, (tools_request(&["send", "search"]), answer), HISTORY_REQUESTS, Some(keep)).await;
 
     assert_eq!(run.samples.len(), HISTORY_REQUESTS, "one overhead sample per request");
     assert_eq!(run.first, (StatusCode::OK, 3), "the three calls of the hold are allowed");
     print_history_run("history conditions, 1,000 events", &run, HISTORY_REQUESTS);
+    // Every hold reads the 1,000 seeded events, plus 3 events for each hold that runs now or has
+    // not yet been trimmed: at most the 8 slots and one more (measured: at most 27).
+    let inflight = 3 * (CONCURRENCY as u64 + 2);
+    assert!(run.window.1 >= 1000 && run.window.2 <= 1000 + inflight, "each hold reads the 1,000 seeded events: {:?}", run.window);
     let p99 = percentile(&run.samples, 0.99);
     assert!(p99 < 0.015, "p99 {p99}");
 }
@@ -1101,6 +1207,15 @@ async fn history_read_at_the_read_limits() {
         conditions: vec![all],
     };
     let answer = call_answer(&[("tool_a", "{}")]);
-    let run = run_history_case(&snapshotter, &store, history, source, tools_request(&["tool_a", "tool_b", "tool_c"]), answer, READ_LIMIT_REQUESTS).await;
+    let run = run_history_case(
+        &snapshotter,
+        &store,
+        history,
+        source,
+        (tools_request(&["tool_a", "tool_b", "tool_c"]), answer),
+        READ_LIMIT_REQUESTS,
+        None,
+    )
+    .await;
     print_history_run("history read at the limits, 3 x 10,000 events", &run, READ_LIMIT_REQUESTS);
 }
