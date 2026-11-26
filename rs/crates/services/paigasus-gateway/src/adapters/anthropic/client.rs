@@ -40,8 +40,8 @@ impl AnthropicRoute {
 /// What the gateway forwards of one caller request: the raw query and the `anthropic-*` headers.
 #[derive(Debug, Clone, Default)]
 pub struct Forward {
-    pub query: Option<String>,
-    pub headers: Vec<(HeaderName, HeaderValue)>,
+    query: Option<String>,
+    headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl Forward {

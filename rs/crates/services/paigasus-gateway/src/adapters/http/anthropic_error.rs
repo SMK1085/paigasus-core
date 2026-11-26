@@ -46,7 +46,12 @@ pub fn anthropic_type(err: GatewayError) -> &'static str {
         GatewayError::RateLimited { .. } => "rate_limit_error",
         GatewayError::BudgetExhausted { .. } => "billing_error",
         GatewayError::UpstreamTimeout => "timeout_error",
-        GatewayError::MissingScope | GatewayError::IamUnavailable | GatewayError::Internal | GatewayError::UpstreamUnavailable | GatewayError::ToolInterceptionMalformedResponse => "api_error",
+        GatewayError::MissingScope
+        | GatewayError::IamUnavailable
+        | GatewayError::Internal
+        | GatewayError::UpstreamUnavailable
+        | GatewayError::UpstreamRedirected
+        | GatewayError::ToolInterceptionMalformedResponse => "api_error",
         GatewayError::BadRequestBody
         | GatewayError::InvalidRequestSchema
         | GatewayError::StreamingDisabled
@@ -108,7 +113,7 @@ pub async fn rerender(resp: Response) -> Response {
         GatewayError::BudgetExhausted { retry_after_secs, .. } => {
             headers.insert(header::RETRY_AFTER, HeaderValue::from(retry_after_secs.max(BUDGET_RETRY_AFTER_FLOOR_SECS)));
         }
-        GatewayError::ToolInterceptionMalformedResponse => {
+        GatewayError::ToolInterceptionMalformedResponse | GatewayError::UpstreamRedirected => {
             headers.insert(SHOULD_RETRY_HEADER, HeaderValue::from_static("false"));
         }
         _ => {}
@@ -304,6 +309,9 @@ mod tests {
         assert_eq!(resp.headers()["x-should-retry"], "false");
         let other = rerendered(GatewayError::UpstreamUnavailable).await;
         assert!(other.headers().get("x-should-retry").is_none());
+        let redirected = rerendered(GatewayError::UpstreamRedirected).await;
+        assert_eq!(redirected.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(redirected.headers()["x-should-retry"], "false");
     }
 
     /// The body's `request_id` is the `paigasus-request-id` of the scope the request runs in.

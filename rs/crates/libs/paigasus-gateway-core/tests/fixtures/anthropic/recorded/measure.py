@@ -13,17 +13,27 @@ from `<name>.timing.json`: the arrival time of the network chunk that holds the 
 
 import json
 import pathlib
+import re
 import sys
 
 
+BLANK_LINE = re.compile(rb"\r?\n\r?\n")
+
+
 def records(raw: bytes) -> list:
-    """Splits SSE bytes into records: {"event", "data", "bytes", "end"} (`end` is a byte offset)."""
+    """Splits SSE bytes into records: {"event", "data", "bytes", "end"} (`end` is a byte offset).
+
+    Offsets and sizes are of the raw bytes. Only the parsing of a record reads LF line endings.
+    """
     out = []
     pos = 0
-    for block in raw.replace(b"\r\n", b"\n").split(b"\n\n"):
-        end = pos + len(block) + 2
-        pos = end
-        text = block.decode("utf-8").strip("\n")
+    blocks = []
+    for m in BLANK_LINE.finditer(raw):
+        blocks.append((raw[pos : m.start()], m.end()))
+        pos = m.end()
+    blocks.append((raw[pos:], pos + len(raw[pos:]) + 2))
+    for block, end in blocks:
+        text = block.replace(b"\r\n", b"\n").decode("utf-8").strip("\n")
         if not text:
             continue
         event, data = None, []
@@ -113,6 +123,14 @@ def self_test() -> int:
     bad = [k for k, v in want.items() if m[k] != v]
     if m["max_content_block_start_bytes"] <= 0 or m["max_record_bytes"].get("message_stop", 0) <= 0:
         bad.append("sizes")
+    # CRLF: offsets and sizes are of the raw bytes, so the stop record gets the late chunk time.
+    crlf = SELF.replace(b"\n", b"\r\n")
+    first_crlf = crlf.index(b"event: content_block_delta")
+    mc = measure(crlf, {"chunks": [{"t": 0.1, "end": first_crlf}, {"t": 2.1, "end": len(crlf)}]})
+    if mc["tool_use"] != want["tool_use"]:
+        bad.append("crlf tool_use")
+    if mc["max_record_bytes"]["message_stop"] != m["max_record_bytes"]["message_stop"] + 1:
+        bad.append("crlf sizes")
     if bad:
         print("self-test failed:", bad, json.dumps(m), file=sys.stderr)
         return 1

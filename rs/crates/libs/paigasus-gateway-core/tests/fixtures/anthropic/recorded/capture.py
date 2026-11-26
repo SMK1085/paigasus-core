@@ -189,7 +189,7 @@ def scenarios(model: str, thinking_model: str) -> dict:
 
 # --- The D21 scrub ---------------------------------------------------------------------------------
 
-REQUEST_ID_RE = re.compile(r'("request_id"\s*:\s*)"[^"]*"')
+REQUEST_ID_RE = re.compile(r'("request_id"\s*:\s*)"([^"]*)"')
 
 
 def scrub_headers(headers) -> dict:
@@ -209,12 +209,18 @@ def top_level_request_id(text: str) -> bool:
     return isinstance(v, dict) and "request_id" in v
 
 
+def fixed_id_of_length(n: int) -> str:
+    """`FIXED_ID`, padded with `0` or cut, so that it is exactly `n` bytes long."""
+    return (FIXED_ID + "0" * n)[:n]
+
+
 def scrub_sse(raw: bytes) -> bytes:
-    """Replaces a top-level `request_id` in a data line. Every other byte stays."""
+    """Replaces a top-level `request_id` in a data line. Every other byte stays, and the
+    replacement has the length of the old value, so the timing offsets stay valid."""
     lines = raw.decode("utf-8").split("\n")
     for i, line in enumerate(lines):
         if line.startswith("data:") and top_level_request_id(line[5:].strip()):
-            lines[i] = REQUEST_ID_RE.sub(lambda m: m.group(1) + '"' + FIXED_ID + '"', line)
+            lines[i] = REQUEST_ID_RE.sub(lambda m: m.group(1) + '"' + fixed_id_of_length(len(m.group(2).encode("utf-8"))) + '"', line)
     return "\n".join(lines).encode("utf-8")
 
 
@@ -335,8 +341,13 @@ def run_scenario(key: str, name: str, spec: dict, out: pathlib.Path) -> dict:
         write(out / f"{name}.timing.json", json.dumps({"chunks": ends}, indent=1) + "\n")
         if b"event: error" in raw:
             write(out / f"mid_stream_error_{name}.sse", clean)
+        stale = [f"{name}.body.json"] + ([] if b"event: error" in raw else [f"mid_stream_error_{name}.sse"])
     else:
         write(out / f"{name}.body.json", scrub_body(raw))
+        stale = [f"{name}.sse", f"{name}.timing.json", f"mid_stream_error_{name}.sse"]
+    # The other kind of response for this scenario is from an older run. Remove it.
+    for old in stale:
+        (out / old).unlink(missing_ok=True)
     return {"scenario": name, "status": status, "bytes": len(raw), "sse": is_sse}
 
 

@@ -84,14 +84,15 @@ async fn forward_keeps_every_anthropic_value_in_order() {
     let mut h = HeaderMap::new();
     h.append("Anthropic-Beta", hv("b1"));
     h.append("anthropic-beta", hv("b2"));
-    h.append("anthropic-version", hv("2023-06-01"));
+    h.append("anthropic-version", hv("2024-01-01"));
     let fwd = client.forward(&h, None);
     assert_eq!(fwd.beta_values().as_deref(), Some("b1,b2"));
     client.send(AnthropicRoute::Messages, Method::POST, body(), false, &fwd).await.expect("send");
     let rec = mock.recorded().unwrap();
     let betas: Vec<&str> = rec.headers.get_all("anthropic-beta").iter().map(|v| v.to_str().unwrap()).collect();
     assert_eq!(betas, ["b1", "b2"]);
-    assert_eq!(rec.headers.get_all("anthropic-version").iter().count(), 1);
+    let caller_versions: Vec<&str> = rec.headers.get_all("anthropic-version").iter().map(|v| v.to_str().unwrap()).collect();
+    assert_eq!(caller_versions, ["2024-01-01"], "the caller version wins over the default");
 
     // No caller version: the default is sent once.
     let fwd = client.forward(&HeaderMap::new(), None);

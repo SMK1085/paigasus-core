@@ -5,7 +5,7 @@
 //! serde_json keeps the last of two duplicate keys, and an upstream may keep the first. So a check
 //! that reads the parsed value can see a different value than the upstream does. The routes that
 //! decide on a field (`background` on `/v1/responses`, `stream` on `/v1/messages`) refuse such a
-//! body. Keys compare after JSON unescaping (`"a"` and `"a"` are one key). The walk holds one
+//! body. Keys compare after JSON unescaping (`"a"` and `"\u0061"` are one key). The walk holds one
 //! key set per open object and no values.
 
 use std::collections::HashSet;
@@ -103,7 +103,7 @@ mod tests {
         assert!(nested.any);
         assert!(nested.top.is_empty(), "a nested duplicate is not a top-level one");
         assert_eq!(duplicates(br#"{"a":1,"A":2}"#).expect("JSON"), Duplicates::default());
-        assert_eq!(top(r#"{"a":1,"a":2}"#), ["a"], "keys compare after unescaping");
+        assert_eq!(top(r#"{"a":1,"\u0061":2}"#), ["a"], "keys compare after unescaping");
         assert!(duplicates(b"{not json").is_none());
     }
 }

@@ -106,6 +106,9 @@ pub enum GatewayError {
     RequestTooLarge,
     /// The OpenAI upstream could not be reached (connect/transport/build failure) → 502.
     UpstreamUnavailable,
+    /// The upstream answered with a redirect, which the gateway never follows (D16) → 502. It has
+    /// the wire body of `UpstreamUnavailable`. Not retryable: the same request meets the same redirect.
+    UpstreamRedirected,
     /// The OpenAI upstream did not respond within a configured timeout → 504.
     UpstreamTimeout,
     /// Streaming is disabled by configuration and the request asked for it → 400. Carries
@@ -192,12 +195,10 @@ impl From<UpstreamError> for GatewayError {
     fn from(err: UpstreamError) -> Self {
         match err {
             UpstreamError::Timeout { .. } => GatewayError::UpstreamTimeout,
-            UpstreamError::Connect { .. }
-            | UpstreamError::Transport { .. }
-            | UpstreamError::Build { .. }
-            | UpstreamError::Redirect { .. }
-            | UpstreamError::CaBundle { .. }
-            | UpstreamError::InvalidHeaderValue { .. } => GatewayError::UpstreamUnavailable,
+            UpstreamError::Redirect { .. } => GatewayError::UpstreamRedirected,
+            UpstreamError::Connect { .. } | UpstreamError::Transport { .. } | UpstreamError::Build { .. } | UpstreamError::CaBundle { .. } | UpstreamError::InvalidHeaderValue { .. } => {
+                GatewayError::UpstreamUnavailable
+            }
         }
     }
 }
@@ -259,7 +260,7 @@ impl GatewayError {
                 None,
                 "The request body is too large.",
             ),
-            GatewayError::UpstreamUnavailable => (
+            GatewayError::UpstreamUnavailable | GatewayError::UpstreamRedirected => (
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 Some("upstream-unavailable"),
@@ -359,6 +360,7 @@ impl GatewayError {
             | Self::InvalidRequestSchema
             | Self::RequestTooLarge
             | Self::StreamingDisabled
+            | Self::UpstreamRedirected
             | Self::InvalidOrgHeader
             | Self::OrgRequired
             | Self::ResponsesStatefulNotSupported { .. }
@@ -623,15 +625,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_redirect_maps_to_502() {
+    #[tokio::test]
+    async fn a_redirect_maps_to_502_and_is_not_retryable() {
         assert_eq!(
             GatewayError::from(UpstreamError::Redirect {
                 provider: Provider::Anthropic,
                 status: StatusCode::TEMPORARY_REDIRECT
             }),
-            GatewayError::UpstreamUnavailable
+            GatewayError::UpstreamRedirected
         );
+        let resp = GatewayError::UpstreamRedirected.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
+        assert_eq!(body_json(resp).await["error"]["code"], "upstream-unavailable");
     }
 
     /// Produce a genuine `reqwest::Error` (no public constructor) by dialing an unroutable port.

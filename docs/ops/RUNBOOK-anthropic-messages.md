@@ -123,8 +123,11 @@ Do these steps when the alert fires:
 3. Check if the user sees a lost tool call or a stopped stream. A dropped record is not
    forwarded to the caller.
 4. If the cause is a new Anthropic type, report it to the gateway team. The fix is a code change.
-   As a short-term action, you can set `[tool_interception] enabled = false`. This removes the
-   policy check for all tool calls, so get approval first.
+   As a short-term action, you can set `[tool_policy] enabled = false` and
+   `[tool_interception] enabled = false` in the same change. The configuration check refuses
+   `[tool_policy]` without tool interception. If `[decision_log] enabled = true`, set it to
+   `false` also. The decision log needs tool policy. This removes the policy check for all
+   tool calls, so get approval first.
 5. If the cause is an upstream defect, keep the alert open until Anthropic fixes it.
 
 A conforming upstream keeps this counter at 0. The series `reason="oversized"` does not fire

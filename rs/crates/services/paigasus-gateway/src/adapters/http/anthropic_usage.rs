@@ -41,6 +41,8 @@ impl Counts {
     }
 }
 
+const DATA_PREFIX: &[u8] = b"data:";
+
 /// Reads a copy of a forwarded Anthropic SSE stream (§ 7.2). It dispatches on the top-level
 /// `type` of each complete `data:` record, never on a substring.
 #[derive(Debug, Default)]
@@ -52,6 +54,11 @@ pub struct AnthropicUsageScanner {
     has_data: bool,
     record_bytes: usize,
     oversized: bool,
+    /// The first bytes of the current line, kept even after the record is oversized.
+    line_head: Vec<u8>,
+    /// The record has a `data:` line. It is tracked apart from the buffers, which an oversized
+    /// record clears. A record with only comment lines is not a completion record.
+    saw_data: bool,
     counts: Counts,
     started: bool,
     delta_seen: bool,
@@ -81,6 +88,12 @@ impl AnthropicUsageScanner {
                 _ => {
                     self.line_len = self.line_len.saturating_add(1);
                     self.record_bytes = self.record_bytes.saturating_add(1);
+                    if self.line_len <= DATA_PREFIX.len() {
+                        self.line_head.push(byte);
+                        if self.line_head == DATA_PREFIX {
+                            self.saw_data = true;
+                        }
+                    }
                     if self.record_bytes > MAX_RECORD_BYTES {
                         self.oversized = true;
                         self.line.clear();
@@ -117,6 +130,7 @@ impl AnthropicUsageScanner {
     }
 
     fn end_line(&mut self) {
+        self.line_head.clear();
         if self.line_len == 0 {
             self.end_record();
             return;
@@ -138,13 +152,16 @@ impl AnthropicUsageScanner {
 
     fn end_record(&mut self) {
         if self.oversized {
-            self.count_record();
+            if self.saw_data {
+                self.count_record();
+            }
         } else if self.has_data {
             self.dispatch();
         }
         self.data.clear();
         self.has_data = false;
         self.oversized = false;
+        self.saw_data = false;
         self.record_bytes = 0;
     }
 
@@ -382,6 +399,20 @@ mod tests {
         assert!(sc.line.len() <= MAX_RECORD_BYTES && sc.data.len() <= MAX_RECORD_BYTES);
         sc.feed(b"\n\n");
         assert_eq!((sc.completion_records(), sc.reported_total()), (1, Some(11)));
+    }
+
+    /// An oversized comment has no `data` field. It is not a completion record.
+    #[test]
+    fn an_oversized_comment_is_not_a_completion_record() {
+        let mut sc = AnthropicUsageScanner::new();
+        sc.feed(start(10, 0, 0, 0).as_bytes());
+        sc.feed(b": ");
+        for _ in 0..10 {
+            sc.feed(&vec![b'x'; 8 * 1024]);
+        }
+        sc.feed(b"\n\n");
+        sc.finish();
+        assert_eq!((sc.completion_records(), sc.reported_total()), (0, Some(10)));
     }
 
     #[test]

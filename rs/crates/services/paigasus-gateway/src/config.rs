@@ -249,10 +249,10 @@ impl AnthropicConfig {
         // The client builds every URL as `base_url + route path`: it needs an absolute URL with a
         // scheme and a host. Without one, every request fails at run time.
         match reqwest::Url::parse(&self.base_url) {
-            Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {}
+            Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() && u.query().is_none() && u.fragment().is_none() => {}
             _ => {
                 return Err(format!(
-                    "upstream.anthropic.base_url must be an absolute http or https URL with a host (for example https://api.anthropic.com); got {:?}",
+                    "upstream.anthropic.base_url must be an absolute http or https URL with a host and no query or fragment (for example https://api.anthropic.com); got {:?}",
                     self.base_url
                 ));
             }
@@ -2591,7 +2591,18 @@ mod tests {
 
     #[test]
     fn an_anthropic_base_url_must_be_absolute_with_a_host() {
-        for bad in ["api.anthropic.com", "/v1", "", "https://", "ftp://api.anthropic.com", "http:"] {
+        for bad in [
+            "api.anthropic.com",
+            "/v1",
+            "",
+            "https://",
+            "ftp://api.anthropic.com",
+            "http:",
+            "https://proxy.internal/anthropic#gateway",
+            "https://proxy.internal/anthropic?x=1",
+            "https://proxy.internal/anthropic?",
+            "https://proxy.internal/anthropic#",
+        ] {
             let cfg = tp_load(&anthropic_toml(&format!("base_url = \"{bad}\""))).expect("loads");
             let err = cfg.validate().expect_err(bad);
             assert!(err.contains("upstream.anthropic.base_url"), "{bad}: {err}");

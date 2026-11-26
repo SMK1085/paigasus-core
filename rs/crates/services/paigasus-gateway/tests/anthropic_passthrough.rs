@@ -195,6 +195,18 @@ async fn a_pass_through_error_is_forwarded_unchanged() {
     }
 }
 
+/// An upstream answer without a `content-type` stays without one: the gateway makes none up.
+#[tokio::test]
+async fn an_absent_upstream_content_type_stays_absent() {
+    let mock = MockOpenAi::spawn_json_with_headers(StatusCode::SERVICE_UNAVAILABLE, "", vec![], "upstream is down").await;
+    let app = app(&mock.base_url, true, None);
+    for sent in [count(&app).await, models(&app).await] {
+        assert_eq!(sent.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(sent.body.as_ref(), b"upstream is down");
+        assert!(sent.headers.get("content-type").is_none(), "{:?}", sent.headers);
+    }
+}
+
 #[tokio::test]
 async fn a_rate_refusal_on_count_tokens_is_429_in_the_anthropic_envelope() {
     let mock = MockOpenAi::spawn_json(StatusCode::OK, COUNT_ANSWER).await;

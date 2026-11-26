@@ -23,7 +23,7 @@ use std::time::Instant;
 use axum::Extension;
 use axum::body::Body;
 use axum::extract::{OriginalUri, Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -63,6 +63,17 @@ pub async fn require_anthropic_version(req: Request, next: Next) -> Response {
 }
 
 /// Proxy `POST /v1/messages/count_tokens`. [`EnvelopeBytes`] consumes the body, so it comes last.
+/// Build the answer with the upstream `Content-Type` only when the upstream sent one. A made-up
+/// type would mislabel a body that has none.
+fn with_upstream_content_type(status: StatusCode, head: &crate::adapters::upstream::ResponseHead, body: Body) -> Response {
+    let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+    if let Some(content_type) = head.content_type.clone() {
+        resp.headers_mut().insert(header::CONTENT_TYPE, content_type);
+    }
+    resp
+}
+
 pub(crate) async fn count_tokens(State(state): State<AppState>, caller: Option<Extension<CallerContext>>, headers: HeaderMap, uri: OriginalUri, body: EnvelopeBytes) -> Response {
     let EnvelopeBytes(body) = body;
     let call = Call {
@@ -118,15 +129,13 @@ async fn pass_through(state: AppState, caller: Option<Extension<CallerContext>>,
     let (response, status) = match client.send(route, method, body, false, &fwd).await {
         Ok(UpstreamResponse::Full { status, head, body }) => {
             record_upstream_call(status, started, endpoint);
-            let content_type = head.content_type.clone().unwrap_or_else(|| HeaderValue::from_static("application/json"));
-            let mut resp = (status, [(header::CONTENT_TYPE, content_type)], body).into_response();
+            let mut resp = with_upstream_content_type(status, &head, Body::from(body));
             head.apply(resp.headers_mut());
             (resp, status)
         }
         Ok(UpstreamResponse::Stream { status, head, stream }) => {
             record_upstream_call(status, started, endpoint);
-            let content_type = head.content_type.clone().unwrap_or_else(|| HeaderValue::from_static("application/json"));
-            let mut resp = (status, [(header::CONTENT_TYPE, content_type)], Body::from_stream(stream)).into_response();
+            let mut resp = with_upstream_content_type(status, &head, Body::from_stream(stream));
             head.apply(resp.headers_mut());
             (resp, status)
         }

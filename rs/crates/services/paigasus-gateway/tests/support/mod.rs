@@ -138,7 +138,7 @@ impl MockOpenAi {
         Self::spawn(MockResponse::RawSse { chunks }).await
     }
 
-    /// Start a mock that answers with `status`, the content type, the extra headers and the body.
+    /// Start a mock that answers with `status`, the content type (empty: none), the extra headers and the body.
     pub async fn spawn_json_with_headers(status: StatusCode, content_type: &str, headers: Vec<(String, String)>, body: impl Into<String>) -> Self {
         Self::spawn(MockResponse::JsonWithHeaders {
             status,
@@ -204,7 +204,11 @@ async fn handle(State(state): State<Arc<MockState>>, method: axum::http::Method,
 
     match &state.response {
         MockResponse::JsonWithHeaders { status, content_type, headers, body } => {
-            let mut b = Response::builder().status(*status).header(axum::http::header::CONTENT_TYPE, content_type.as_str());
+            let mut b = Response::builder().status(*status);
+            // An empty content type means: send none.
+            if !content_type.is_empty() {
+                b = b.header(axum::http::header::CONTENT_TYPE, content_type.as_str());
+            }
             for (k, v) in headers {
                 b = b.header(k.as_str(), v.as_str());
             }
