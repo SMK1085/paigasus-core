@@ -180,6 +180,21 @@ mod tests {
         assert_eq!(id, key(K1).id());
     }
 
+    /// Final review T6: the `b` and `d` tags are pinned too. The hex values were computed outside
+    /// this code, with Python `hmac` and `hashlib` over `org || 0x00 || "a" || 0x00 || tag || value`
+    /// (the bool value is the ASCII byte `1` or `0`; the decimal is the scaled value as an 8-byte
+    /// big-endian `i64`). A change of `canonical_bytes` changes a digest under the same key id, and
+    /// old events would then compare as `false`, not unknown.
+    #[test]
+    fn the_bool_and_decimal_digests_match_pinned_vectors() {
+        let at = |v: Scalar| hex(&single().current(org(1), &path(&["a"]), &v).unwrap().1.0);
+        assert_eq!(at(Scalar::Bool(true)), "d8d7bde5a94ac8e404b41da8a1671ff3");
+        assert_eq!(at(Scalar::Bool(false)), "5520dd52bc42a5c0262e91dd070443fc");
+        // 12.5 and -1.5, scaled by 10,000.
+        assert_eq!(at(Scalar::Decimal(125_000)), "f186b379bc5370678c85fb129efc1d6a");
+        assert_eq!(at(Scalar::Decimal(-15_000)), "b071593b61b353496cd450ced4598c00");
+    }
+
     #[test]
     fn the_key_id_bytes_match_an_independent_hmac_of_the_label() {
         let expected = hmac_of(K1, &[b"paigasus-history-kid"]);
