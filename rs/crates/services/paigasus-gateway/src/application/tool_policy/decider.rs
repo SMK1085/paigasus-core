@@ -1332,6 +1332,84 @@ mod tests {
         assert_eq!((got.len(), others), (16, 0), "{got:?}");
     }
 
+    /// The `(part, reason)` pairs of the slots metric that are not 0.
+    fn counted(snapshotter: &metrics_util::debugging::Snapshotter) -> Vec<((String, String), u64)> {
+        slot_series(snapshotter).into_iter().filter(|(_, v)| *v > 0).collect()
+    }
+
+    fn pair(part: &str, reason: &str, n: u64) -> ((String, String), u64) {
+        ((part.to_owned(), reason.to_owned()), n)
+    }
+
+    #[tokio::test]
+    async fn with_no_tool_history_the_slots_are_missing_as_disabled_and_the_set_is_enforced() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let no_history = CedarDecider::new(Arc::new(DecisionRecorder::tracing()));
+        // The tenant row: under `open` the set is still enforced, not observed. The cap forbid
+        // errors on its missing slot and denies; the forbid of `x` denies; the floor blocks `rm`.
+        let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
+        let ctx = ctx.with_session(session(Findings::new()));
+        let items = [SEND_100, ("x", "{}"), ("rm", "{}")];
+        assert_eq!(hold_of(&no_history, &ctx, &turn, &items).await, [BLOCK_POLICY, BLOCK_POLICY, BLOCK_POLICY]);
+        assert_eq!(counted(&snapshotter), [pair("tenant", "disabled", 3)], "one count per call and slot");
+        // The floor row: a floor slot forbid denies, in each mode.
+        for mode in [TenantMode::Enforce, TenantMode::Off] {
+            let (ctx, turn) = history_ctx((CAP_FLOOR, vec![fcap()]), (testing::PERMIT_ALL, Vec::new()), mode, OnUnavailable::Open).await;
+            let ctx = ctx.with_session(session(Findings::new()));
+            assert_eq!(hold_of(&no_history, &ctx, &turn, &[SEND_100]).await, [BLOCK_POLICY], "{mode:?}");
+            assert_eq!(counted(&snapshotter), [pair("floor", "disabled", 1)], "{mode:?}");
+        }
+        // Control: with a history, the cap slot has a value and the call is allowed.
+        let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
+        let ctx = ctx.with_session(session(Findings::new()));
+        assert_eq!(
+            hold_of(&with_store(Arc::new(MemorySessionStore::new())), &ctx, &turn, &items).await,
+            [Decision::Allow, BLOCK_POLICY, BLOCK_POLICY]
+        );
+        assert_eq!(counted(&snapshotter), []);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reserve_deadline_or_a_spent_budget_counts_store_and_the_tenant_fail_mode_decides() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let items = [SEND_100, ("x", "{}"), ("rm", "{}")];
+        let spent = || {
+            Arc::new(SessionContext::new(
+                ORG_A,
+                uuid::Uuid::from_u128(0x0190a1f0_0000_7000_8000_000000000006),
+                1,
+                Findings::new(),
+                StoreBudget::new(Duration::ZERO),
+            ))
+        };
+        for (on, want) in [
+            (OnUnavailable::Open, [OBSERVE_UNAVAILABLE, OBSERVE_UNAVAILABLE, BLOCK_POLICY]),
+            (OnUnavailable::Closed, [BLOCK_UNAVAILABLE, BLOCK_UNAVAILABLE, BLOCK_POLICY]),
+        ] {
+            let (ctx, turn) = cap_ctx(on).await;
+            // The deadline: the reserve waits 5 s, past the store budget of 1 s.
+            let slow = with_store(Arc::new(SlowReserve(MemorySessionStore::new(), Duration::from_secs(5))));
+            let deadline = ctx.clone().with_session(session(Findings::new()));
+            assert_eq!(hold_of(&slow, &deadline, &turn, &items).await, want, "deadline {on:?}");
+            assert_eq!(counted(&snapshotter), [pair("tenant", "store", 3)], "deadline {on:?}");
+            // The budget skip: a spent budget makes no reserve call.
+            let skipped = ctx.with_session(spent());
+            assert_eq!(hold_of(&with_store(Arc::new(MemorySessionStore::new())), &skipped, &turn, &items).await, want, "budget {on:?}");
+            assert_eq!(counted(&snapshotter), [pair("tenant", "store", 3)], "budget {on:?}");
+        }
+        // The floor row: a floor slot forbid denies on a deadline in every fail mode.
+        for on in [OnUnavailable::Open, OnUnavailable::Closed] {
+            let (ctx, turn) = history_ctx((CAP_FLOOR, vec![fcap()]), (testing::PERMIT_ALL, Vec::new()), TenantMode::Enforce, on).await;
+            let slow = with_store(Arc::new(SlowReserve(MemorySessionStore::new(), Duration::from_secs(5))));
+            assert_eq!(hold_of(&slow, &ctx.with_session(session(Findings::new())), &turn, &[SEND_100]).await, [BLOCK_POLICY], "{on:?}");
+            assert_eq!(counted(&snapshotter), [pair("floor", "store", 1)], "{on:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_call_named_in_another_case_counts_for_its_name_key() {
         let decider = with_store(Arc::new(MemorySessionStore::new()));

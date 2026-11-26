@@ -223,8 +223,10 @@ mod tests {
             assert!(got.tenant_unavailable, "{reason:?}");
             assert_eq!(missing(&got), [("f", Part::Floor, reason), ("t1", Part::Tenant, reason), ("t2", Part::Tenant, reason)]);
         }
-        // Every primed pair can count: `disabled` of both parts here, and the rest of the reasons
-        // of both parts by the evaluator (the tests below and the kernel tests).
+        // 15 of the 16 primed pairs can count: `disabled`, `store` and `no_session` of both parts
+        // here, and the other reasons by the evaluator (the tests below and the kernel tests). The
+        // pair (tenant, catalog) cannot count: a compiled tenant set always has its catalog. It is
+        // primed so that the series exists.
         let pairs: HashSet<(Part, MissingReason)> = [StoreOutcome::Disabled, StoreOutcome::NoSession, reserve_with(WindowRead::Failed)]
             .iter()
             .flat_map(|o| hold_slots(Some(&p), o, 1).missing)
