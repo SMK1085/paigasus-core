@@ -54,6 +54,7 @@
 //! The connection is `paigasus_redis::connect` with the SMA-476 breaker; its series carry the
 //! gateway's names and `role="tool_history"`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use paigasus_kernel::tool_policy::history::{Fields, KeyId, SetTool};
@@ -324,8 +325,10 @@ end
 
 -- The window read (spec P4), after every write. A set past a read limit and every later set come
 -- back truncated with no event and no mark. An entry is {set index (1..R), truncated, mark ('' =
--- none), then 4 values per event: id, score, body, verdict}. The adapter checks the index against
--- the request order. A member whose e: body is gone is skipped and counted.
+-- none), then 2 values per event: body, verdict}. The member and the score are not sent: every
+-- write puts the member into the body `id` and the score into the body `ts`, so the adapter takes
+-- both from the body (Task 19b: 20 % less server time, 32 % less reply). The adapter checks the
+-- index against the request order. A member whose e: body is gone is skipped and counted.
 local window, missing = {}, 0
 if window_from ~= '' then
   local R = tonumber(ARGV[a + 1])
@@ -361,12 +364,10 @@ if window_from ~= '' then
         read_events = read_events + count
         entry = {tostring(r), '0', mark and string.format('%.0f', mark) or ''}
         for _, h in ipairs(hkeys) do
-          local m = redis.call('ZRANGEBYSCORE', h, window_from, '+inf', 'WITHSCORES')
-          for p = 1, #m, 2 do
+          local m = redis.call('ZRANGEBYSCORE', h, window_from, '+inf')
+          for p = 1, #m do
             local f = redis.call('HMGET', eprefix .. m[p], 'b', 'v')
             if f[1] and f[2] then
-              entry[#entry + 1] = m[p]
-              entry[#entry + 1] = m[p + 1]
               entry[#entry + 1] = f[1]
               entry[#entry + 1] = f[2]
             else
@@ -787,9 +788,15 @@ impl RedisSessionStore {
 }
 
 /// Map the window part of the script reply: per set, the 1-based index of the requested set that
-/// the script read, the truncated flag, the mark, then 4 values per event (id, score, body,
-/// verdict). The events are sorted by (`ts_ms`, id); the score is the time. The reply must hold one
-/// entry per requested set, in order: the echoed index of each entry must be its position.
+/// the script read, the truncated flag, the mark, then 2 values per event (body, verdict). The
+/// reply holds no member and no score: every write puts the member into the body `id` and the score
+/// into the body `ts` (the same `now_ms`), so the event takes both from its body. The events are
+/// sorted by (`ts_ms`, id). The reply must hold one entry per requested set, in order: the echoed
+/// index of each entry must be its position.
+///
+/// The script read only members with a score of at least `from_ms`, and the members of a set are
+/// distinct. So a body whose `ts` is before `from_ms`, or a body id twice in one set, disagrees
+/// with its member or score: a decode error, as a member that is not the id of its body was.
 fn window_reply(req: &ReadRequest, raw: &[Vec<String>]) -> Result<Vec<SetWindow>, HistoryStoreError> {
     let mut window = Vec::with_capacity(raw.len());
     for (position, (entry, (scope, tool))) in raw.iter().zip(&req.sets).enumerate() {
@@ -799,17 +806,20 @@ fn window_reply(req: &ReadRequest, raw: &[Vec<String>]) -> Result<Vec<SetWindow>
         if index.parse::<usize>().ok() != Some(position + 1) {
             return Err(decode_error("a window entry is not the set of its position in the request"));
         }
-        if events.len() % 4 != 0 {
+        if events.len() % 2 != 0 {
             return Err(decode_error("a window entry has an incomplete event"));
         }
-        let mut stored = Vec::with_capacity(events.len() / 4);
-        for e in events.chunks(4) {
-            let mut event = decode_event(&[("b".into(), e[2].clone()), ("v".into(), e[3].clone())])?;
-            if event.id.to_string() != e[0] {
-                return Err(decode_error("a window member is not the id of its body"));
+        let mut stored = Vec::with_capacity(events.len() / 2);
+        for e in events.chunks(2) {
+            let event = decode_event(&[("b".into(), e[0].clone()), ("v".into(), e[1].clone())])?;
+            if event.ts_ms < req.from_ms {
+                return Err(decode_error("a window body has a time before the window"));
             }
-            event.ts_ms = e[1].parse().map_err(|_| decode_error("a window score is not an integer"))?;
             stored.push(event);
+        }
+        let mut ids = HashSet::with_capacity(stored.len());
+        if !stored.iter().all(|e| ids.insert(e.id)) {
+            return Err(decode_error("a window body id is in one set twice"));
         }
         stored.sort_by_key(|e| (e.ts_ms, e.id));
         window.push(SetWindow {
@@ -1071,6 +1081,64 @@ mod tests {
         assert!(window_reply(&req, &[entry(1), vec!["2".into(), "0".into()]]).is_err(), "an entry with no mark");
         assert!(window_reply(&req, &[entry(1), vec!["2".into(), "0".into(), String::new(), "x".into()]]).is_err(), "an incomplete event");
         assert!(window_reply(&req, &[entry(1), vec!["2".into(), "2".into(), String::new()]]).is_err(), "a bad flag");
+    }
+
+    /// A one-set read from `from_ms` of the tool `send`.
+    fn send_read(from_ms: u64) -> ReadRequest {
+        ReadRequest {
+            from_ms,
+            sets: vec![(Scope::Session, SetTool::Tool("send".into()))],
+        }
+    }
+
+    /// One window entry of set 1: two values per event, the body and the verdict.
+    fn send_entry(events: &[(String, &str)]) -> Vec<String> {
+        let mut entry = vec!["1".to_string(), "0".to_string(), String::new()];
+        for (body, verdict) in events {
+            entry.push(body.clone());
+            entry.push((*verdict).to_string());
+        }
+        entry
+    }
+
+    fn call_body(id: u128, ts_ms: u64) -> String {
+        encode_body(Uuid::from_u128(id), ts_ms, EventKind::Call, "send", Some((&Fields::Unparsed, None)))
+    }
+
+    /// Task 19b: the reply holds no member and no score. Every write puts the same `now_ms` into
+    /// the score and into the body `ts`, and the member is the body `id`, so the event takes both
+    /// from its body. The events are sorted by (`ts_ms`, id).
+    #[test]
+    fn a_window_event_takes_its_id_and_time_from_its_body() {
+        let entry = send_entry(&[(call_body(2, 20), "allow"), (call_body(1, 20), "pending"), (call_body(3, 10), "deny")]);
+        let window = window_reply(&send_read(10), &[entry]).expect("decodes");
+        let got: Vec<(Uuid, u64, EventVerdict)> = window[0].events.iter().map(|e| (e.id, e.ts_ms, e.verdict)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (Uuid::from_u128(3), 10, EventVerdict::Deny),
+                (Uuid::from_u128(1), 20, EventVerdict::Pending),
+                (Uuid::from_u128(2), 20, EventVerdict::Allow),
+            ]
+        );
+    }
+
+    /// The script reads members with a score of at least `from_ms`. A body whose `ts` is before it
+    /// disagrees with its score: the reply is corrupt, and the read fails closed (a decode error).
+    #[test]
+    fn a_window_body_from_before_the_window_is_a_decode_error() {
+        let entry = send_entry(&[(call_body(1, 10), "allow"), (call_body(2, 9), "allow")]);
+        let err = window_reply(&send_read(10), &[entry]).unwrap_err();
+        assert!(matches!(err, HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }), "{err:?}");
+    }
+
+    /// The members of one set are distinct, and each body names its own member. Two bodies with
+    /// one id in a set disagree with their members: a decode error.
+    #[test]
+    fn a_window_body_id_twice_in_one_set_is_a_decode_error() {
+        let entry = send_entry(&[(call_body(1, 10), "allow"), (call_body(1, 11), "allow")]);
+        let err = window_reply(&send_read(10), &[entry]).unwrap_err();
+        assert!(matches!(err, HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }), "{err:?}");
     }
 
     #[test]

@@ -16,9 +16,11 @@ use paigasus_gateway::application::tool_history::ToolHistory;
 use paigasus_gateway::domain::decision_log::OsEntropy;
 use paigasus_gateway::domain::limits::{SystemClock, UnavailableKind};
 use paigasus_gateway::domain::tool_history::{
-    AppendReply, AppendRequest, EventVerdict, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, Scope, SessionStore, SettleRequest, StoredEvent, WriteRequest,
+    AppendReply, AppendRequest, CallEvent, EventVerdict, Histories, HistoryStoreError, LookupReply, LookupRequest, ReadRequest, ReserveRequest, Scope, SessionStore, SettleRequest, StoredEvent,
+    WriteRequest,
 };
 use paigasus_gateway_core::{Basis, DecidedCall, Decision, DecisionContext, Format, ToolTurn, TurnFacts, parse_body};
+use paigasus_kernel::tool_policy::history::{Fields, SetTool};
 use support::history_contract::{self as contract, Harness};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -211,6 +213,62 @@ contract_cases!(
     a_tool_past_256_in_the_index_marks_every_tool,
     a_missing_body_is_skipped_and_counted,
 );
+
+/// Task 19b: the window reply carries no member and no score, so the adapter takes both from the
+/// body. A body whose `ts` is before the window (its score is inside it), or a body that names
+/// another member of the same set, disagrees with the sorted set: the read fails closed with a
+/// decode error, and a decider then treats every history slot as missing (reason `store`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_body_that_disagrees_with_its_member_or_score_fails_the_window_read_on_redis() {
+    let Some(h) = harness("7.4-alpine", "history_store_redis body disagrees with its member").await else {
+        return;
+    };
+    const NOW: u64 = 1_700_000_000_000;
+    let store = h.store().await;
+    let (org, session) = (Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0019_0b01), Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0019_0b02));
+    let histories = Histories {
+        org,
+        principal: "prn:pgs:iam:::principal/t19b".into(),
+        key: None,
+        session,
+    };
+    let call = |n: u128| CallEvent {
+        id: Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0019_0c00 + n),
+        tool: "send".into(),
+        call_id: None,
+        item_id: None,
+        fields: Fields::Unparsed,
+        key: None,
+    };
+    let reserve = |calls: Vec<CallEvent>, read: Option<ReadRequest>| ReserveRequest {
+        histories: histories.clone(),
+        turn: 1,
+        calls,
+        now_ms: NOW,
+        read,
+    };
+    let read = || ReadRequest {
+        from_ms: NOW - 100,
+        sets: vec![(Scope::Session, SetTool::Tool("send".into()))],
+    };
+    let (a, b) = (call(1), call(2));
+    store.reserve(&reserve(vec![a.clone(), b.clone()], None)).await.expect("the seed reserve");
+    let reply = store.reserve(&reserve(Vec::new(), Some(read()))).await.expect("a clean read");
+    assert_eq!(reply.window[0].events.iter().map(|e| (e.id, e.ts_ms)).collect::<Vec<_>>(), vec![(a.id, NOW), (b.id, NOW)]);
+
+    let decode = |r: Result<AppendReply, HistoryStoreError>| matches!(r, Err(HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }));
+    // The score of `a` is NOW; its body says a time before the window.
+    let (aid, bid) = (a.id, b.id);
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{aid}","ts":{},"k":"request","t":"send","b":1}}"#, NOW - 1_000))
+        .await;
+    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body time before the window");
+    // The body of `a` names the member `b`.
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{bid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
+    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body that names another member");
+    // The right body reads again.
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{aid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
+    assert_eq!(store.reserve(&reserve(Vec::new(), Some(read()))).await.expect("a clean read").window[0].events.len(), 2);
+}
 
 #[tokio::test]
 async fn an_evicting_policy_is_reported() {
