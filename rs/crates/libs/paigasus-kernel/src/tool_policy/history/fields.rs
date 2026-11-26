@@ -184,14 +184,25 @@ impl fmt::Debug for ExtractedFields {
     }
 }
 
-/// The value of one path, as the history stores it.
+/// The value of one path, as the history stores it. `Debug` prints the kind only, never the value.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Long(i64),
     Digest(Digest),
     Absent,
     Mistyped,
+}
+
+impl fmt::Debug for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Long(_) => "Field::Long(..)",
+            Self::Digest(_) => "Field::Digest(..)",
+            Self::Absent => "Field::Absent",
+            Self::Mistyped => "Field::Mistyped",
+        })
+    }
 }
 
 /// The stored fields of one call.
@@ -502,6 +513,14 @@ mod tests {
             assert!(text.contains('2'), "the path count is shown: {text}");
         }
         assert_eq!(format!("{:?}", Digest([9; 16])), "Digest(..)");
+    }
+
+    #[test]
+    fn field_debug_prints_no_value() {
+        assert_eq!(format!("{:?}", Field::Long(4242)), "Field::Long(..)");
+        assert_eq!(format!("{:?}", Field::Digest(Digest([9; 16]))), "Field::Digest(..)");
+        assert_eq!(format!("{:?}", Field::Absent), "Field::Absent");
+        assert_eq!(format!("{:?}", Field::Mistyped), "Field::Mistyped");
     }
 
     #[test]
