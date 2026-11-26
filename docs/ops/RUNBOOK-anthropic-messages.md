@@ -22,8 +22,9 @@ The routes are off by default. With `[messages] enabled = false`, the three rout
 | `default_version` | `2023-06-01` | The `anthropic-version` value. The gateway sends it when the caller sends none. |
 | `non_stream_timeout_secs` | `600` | The time limit of one call that is not a stream. |
 
-The wait for the response head is the larger of `stream_idle_timeout_secs` and
-`non_stream_timeout_secs`. In a stream body, each next chunk must arrive within
+For a stream request, the wait for the response head is the larger of `stream_idle_timeout_secs`
+and `non_stream_timeout_secs`. A call that is not a stream has one limit for the whole call,
+response head included: `non_stream_timeout_secs`. In a stream body, each next chunk must arrive within
 `stream_idle_timeout_secs`. If no chunk arrives in that time, the gateway ends the stream with its
 terminal error event.
 
