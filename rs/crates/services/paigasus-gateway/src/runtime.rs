@@ -342,7 +342,7 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
         Some(h) => h.digester(),
         None => history_digester(config.tool_history.as_ref())?,
     };
-    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings)).with_digester(digester);
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings), digester);
     if settings.settings_from_source {
         // The source holds the mode of each org, so `default_mode` applies to no org (final review M-2).
         tracing::info!(

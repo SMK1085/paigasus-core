@@ -131,7 +131,11 @@ impl Replica {
         let history = Arc::new(ToolHistory::new(store, Arc::new(OffsetClock(skew)), Arc::new(OsEntropy), Duration::from_secs(10), Arc::new(digester)));
         let s = settings();
         let recorder = Arc::new(DecisionRecorder::tracing());
-        let policy = RequestToolPolicy::new(PolicyCache::new(Arc::new(CapSource), CacheSettings::from_settings(&s)), s, Arc::clone(&recorder));
+        let policy = RequestToolPolicy::new(
+            PolicyCache::new(Arc::new(CapSource), CacheSettings::from_settings(&s), Arc::new(HmacHistoryDigester::keyless())),
+            s,
+            Arc::clone(&recorder),
+        );
         let decider = CedarDecider::new(recorder).with_history(Arc::clone(&history));
         Self { history, policy, decider }
     }

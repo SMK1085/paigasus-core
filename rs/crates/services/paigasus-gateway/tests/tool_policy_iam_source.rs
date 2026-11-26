@@ -9,6 +9,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use paigasus_gateway::adapters::history::HmacHistoryDigester;
 use paigasus_gateway::adapters::iam::{CallerCredential, Iam, IamClient};
 use paigasus_gateway::adapters::policy_source::iam::IamPolicySource;
 use paigasus_gateway::application::tool_policy::{CacheSettings, Lookup, PolicyCache, RequestToolPolicy};
@@ -386,7 +387,7 @@ async fn an_org_in_mode_off_still_gets_the_floor() {
     s.script_tenant(Ok(tenant_response(1, pb::ToolPolicyMode::Off, "@id(\"p\") permit(principal, action, resource);")));
     let (_dir, path) = credential("K");
     let cfg = settings();
-    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg));
+    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg), Arc::new(HmacHistoryDigester::keyless()));
     let policy = RequestToolPolicy::new(cache, cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()));
 
     let body = Bytes::from_static(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"rm","parameters":{}}},{"type":"function","function":{"name":"ls","parameters":{}}}]}"#);
@@ -411,7 +412,7 @@ async fn a_mode_change_alone_at_iam_applies_on_the_next_load() {
     s.script_tenant(Ok(tenant_response(3, pb::ToolPolicyMode::LogOnly, FORBID_X)));
     let (_dir, path) = credential("K");
     let cfg = settings();
-    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg));
+    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg), Arc::new(HmacHistoryDigester::keyless()));
     let policy = RequestToolPolicy::new(Arc::clone(&cache), cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()));
 
     let body = Bytes::from_static(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"x","parameters":{}}},{"type":"function","function":{"name":"y","parameters":{}}}]}"#);
@@ -525,7 +526,7 @@ struct Decided {
 async fn decide_through_iam(s: &Server_, tools: &[&str], calls: &[&str]) -> Decided {
     let (_dir, path) = credential("K");
     let cfg = settings();
-    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg));
+    let cache = PolicyCache::new(Arc::new(s.source(&path)), CacheSettings::from_settings(&cfg), Arc::new(HmacHistoryDigester::keyless()));
     let policy = RequestToolPolicy::new(cache, cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()));
 
     let defs: Vec<serde_json::Value> = tools.iter().map(|n| serde_json::json!({"type":"function","function":{"name":n,"parameters":{}}})).collect();

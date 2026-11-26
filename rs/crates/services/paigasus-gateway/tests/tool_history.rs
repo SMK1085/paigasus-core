@@ -18,6 +18,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use paigasus_gateway::adapters::history::HmacHistoryDigester;
 use paigasus_gateway::adapters::history::memory::MemorySessionStore;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
@@ -163,7 +164,7 @@ fn rig_with(o: Options) -> Rig {
 
     let s = ToolPolicySettings { default_mode: o.mode, ..settings() };
     let source = o.source.unwrap_or_else(|| Arc::new(FilePolicySource::new(dir.path())));
-    let cache = PolicyCache::new(source, CacheSettings::from_settings(&s));
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&s), Arc::new(HmacHistoryDigester::keyless()));
     let tp = Arc::new(RequestToolPolicy::new(cache, s, Arc::clone(&recorder)).with_history(Arc::clone(&history)));
     let mut decider = CedarDecider::new(Arc::clone(&recorder)).with_history(Arc::clone(&history));
     if o.slow_after_reserve {

@@ -24,6 +24,7 @@ use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorErro
 use crate::domain::limits::SystemClock;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 use paigasus_kernel::detect::Finding;
+use paigasus_kernel::tool_policy::history::{Digest, FieldPath, HistoryDigester, KeyId, Scalar};
 
 pub(crate) const ORG_A: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
 pub(crate) const ORG_A_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
@@ -54,6 +55,24 @@ pub(crate) struct FakeSource {
     tenant_conditions: Mutex<Vec<pb::HistoryCondition>>,
     /// The tenant catalog.
     catalog: Mutex<Vec<String>>,
+}
+
+/// A history digester with no key, as the gateway has with no `digest_key`: it makes no digest.
+struct KeylessDigester;
+
+impl HistoryDigester for KeylessDigester {
+    fn current(&self, _org: Uuid, _path: &FieldPath, _value: &Scalar) -> Option<(KeyId, Digest)> {
+        None
+    }
+
+    fn all(&self, _org: Uuid, _path: &FieldPath, _value: &Scalar) -> Vec<(KeyId, Digest)> {
+        Vec::new()
+    }
+}
+
+/// The keyless digester as the port that [`PolicyCache::new`] takes.
+pub(crate) fn keyless() -> Arc<dyn HistoryDigester> {
+    Arc::new(KeylessDigester)
 }
 
 /// The window limit that the fake source reports with every set.
@@ -257,6 +276,7 @@ pub(crate) fn policy_with(source: &Arc<FakeSource>, settings: ToolPolicySettings
             idle_evict: settings.idle_evict,
             load_timeout: settings.load_timeout,
         },
+        keyless(),
     );
     RequestToolPolicy::new(cache, settings, recorder)
 }

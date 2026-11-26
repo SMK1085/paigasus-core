@@ -19,6 +19,7 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use paigasus_gateway::adapters::detectors::BuiltInDetector;
+use paigasus_gateway::adapters::history::HmacHistoryDigester;
 use paigasus_gateway::adapters::history::redis::history_key;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::policy_source::file::FilePolicySource;
@@ -152,7 +153,11 @@ async fn p99_policy_overhead_with_50_policies() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_policies(dir.path(), false);
     let settings = settings();
-    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(
+        Arc::new(FilePolicySource::new(dir.path())),
+        CacheSettings::from_settings(&settings),
+        Arc::new(HmacHistoryDigester::keyless()),
+    );
     let tp = Some(Arc::new(RequestToolPolicy::new(
         cache,
         settings,
@@ -221,7 +226,11 @@ async fn cold_load_and_compile_of_50_policies() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_policies(dir.path(), false);
     let settings = settings();
-    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(
+        Arc::new(FilePolicySource::new(dir.path())),
+        CacheSettings::from_settings(&settings),
+        Arc::new(HmacHistoryDigester::keyless()),
+    );
     let org = Uuid::try_parse(ORG_A).expect("uuid");
     let started = Instant::now();
     let Lookup::Ready(floor) = cache.floor(OnUnavailable::Closed).await else {
@@ -398,7 +407,11 @@ fn digest_recorder() -> Arc<DecisionRecorder> {
 fn detector_stack(dir: &std::path::Path, detectors: bool) -> (Arc<RequestToolPolicy>, Arc<CedarDecider>) {
     let recorder = digest_recorder();
     let tp_settings = settings();
-    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir)), CacheSettings::from_settings(&tp_settings));
+    let cache = PolicyCache::new(
+        Arc::new(FilePolicySource::new(dir)),
+        CacheSettings::from_settings(&tp_settings),
+        Arc::new(HmacHistoryDigester::keyless()),
+    );
     let det = detector_settings(detectors);
     let mut cedar = CedarDecider::new(Arc::clone(&recorder));
     let pipeline = detectors.then(|| Arc::new(DetectorPipeline::new(Arc::new(BuiltInDetector::new(MAX_SCAN_BYTES)), Vec::new(), None, det.timeout)));
@@ -1017,7 +1030,7 @@ async fn run_history_case(
 ) -> HistoryRun {
     let settings = settings();
     let recorder = Arc::new(DecisionRecorder::tracing());
-    let cache = PolicyCache::new(Arc::new(source), CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(Arc::new(source), CacheSettings::from_settings(&settings), Arc::new(HmacHistoryDigester::keyless()));
     let tp = Some(Arc::new(RequestToolPolicy::new(cache, settings, Arc::clone(&recorder)).with_history(Arc::clone(&history))));
     let ti = Some(Arc::new(ToolInterception {
         limits: CoreLimits::defaults(),

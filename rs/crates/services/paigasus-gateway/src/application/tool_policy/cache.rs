@@ -33,7 +33,6 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::adapters::history::HmacHistoryDigester;
 use crate::config::ToolPolicySettings;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 
@@ -243,15 +242,16 @@ pub struct PolicyCache {
 }
 
 impl PolicyCache {
-    /// A cache with no history key: a digest literal gets no digest, so its slot is missing with
-    /// reason `no_key`. [`Self::with_digester`] sets the key of the gateway.
+    /// The cache. `digester` binds the digest literals of the history conditions to an org (plan
+    /// decision D-A). A digester with no key gives a literal no digest, so its slot is missing
+    /// with reason `no_key`.
     #[must_use]
-    pub fn new(source: Arc<dyn PolicySource>, settings: CacheSettings) -> Arc<Self> {
+    pub fn new(source: Arc<dyn PolicySource>, settings: CacheSettings, digester: Arc<dyn HistoryDigester>) -> Arc<Self> {
         let now = Instant::now();
         Arc::new(PolicyCache {
             source,
             settings,
-            digester: Arc::new(HmacHistoryDigester::keyless()),
+            digester,
             inner: Mutex::new(Inner {
                 gen_now: 0,
                 floor: Entry::new(now),
@@ -259,21 +259,6 @@ impl PolicyCache {
                 last_known: HashMap::new(),
             }),
         })
-    }
-
-    /// The cache with this digester. Call it at boot, right after [`Self::new`].
-    ///
-    /// # Panics
-    ///
-    /// When the cache is already shared (another `Arc` to it exists): the digester must be set
-    /// before any load binds a condition.
-    #[must_use]
-    pub fn with_digester(self: Arc<Self>, digester: Arc<dyn HistoryDigester>) -> Arc<Self> {
-        let Ok(mut cache) = Arc::try_unwrap(self) else {
-            panic!("PolicyCache::with_digester runs before the cache is shared");
-        };
-        cache.digester = digester;
-        Arc::new(cache)
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -800,7 +785,8 @@ mod tests {
     use paigasus_proto::paigasus::iam::v1 as pb;
 
     use super::*;
-    use crate::application::tool_policy::testing::{MAX_WINDOW_MS, formerly};
+    use crate::adapters::history::HmacHistoryDigester;
+    use crate::application::tool_policy::testing::{MAX_WINDOW_MS, formerly, keyless};
 
     const ORG: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
     const FLOOR: &str = r#"@id("f") forbid(principal, action == Pgs::Gateway::Action::"read_file", resource);"#;
@@ -992,7 +978,7 @@ mod tests {
     async fn concurrent_misses_share_one_load() {
         let src = FakeSource::new();
         src.set_delay(Duration::from_millis(100));
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let results = futures::future::join_all((0..8).map(|_| cache.floor(OnUnavailable::Closed))).await;
         assert!(results.iter().all(|r| matches!(r, Lookup::Ready(_))));
         assert_eq!(src.floor_calls(), 1, "eight waiters, one source call");
@@ -1002,7 +988,7 @@ mod tests {
     async fn a_dropped_waiter_does_not_cancel_the_load() {
         let src = FakeSource::new();
         src.set_delay(Duration::from_millis(100));
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         // Poll the first lookup until it waits, then drop it.
         assert!(tokio::time::timeout(Duration::from_millis(10), cache.floor(OnUnavailable::Closed)).await.is_err());
         assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)));
@@ -1016,7 +1002,7 @@ mod tests {
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
         src.set_delay(secs(2));
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let started = Instant::now();
         let (a, b) = tokio::join!(cache.floor(OnUnavailable::Closed), cache.floor(OnUnavailable::Closed));
         assert!(matches!((a, b), (Lookup::Unavailable, Lookup::Unavailable)));
@@ -1034,7 +1020,7 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         ready_floor(&cache, OnUnavailable::Closed).await;
         src.set_fail(true);
         tokio::time::advance(secs(30)).await;
@@ -1056,7 +1042,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_failed_reload_after_invalidate_is_unavailable_under_closed() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         ready_floor(&cache, OnUnavailable::Closed).await;
         src.set_fail(true);
         cache.invalidate_all();
@@ -1069,7 +1055,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_invalidate_does_not_change_a_set_a_request_already_holds() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let before = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         src.set_tenant(r#"@id("t2") permit(principal, action, resource);"#, "t2");
@@ -1087,7 +1073,7 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         tokio::time::advance(secs(3601)).await;
@@ -1109,7 +1095,7 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         let compiles = snap(&snapshotter).hist_len(names::GATEWAY_TOOL_POLICY_COMPILE_SECONDS);
@@ -1131,7 +1117,7 @@ mod tests {
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
         src.set_fail(true);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         assert!(matches!(cache.floor(OnUnavailable::Open).await, Lookup::Unavailable), "open has no last good entry");
         assert_eq!(snap(&snapshotter).loads("source_error"), 1);
         // Once the source works again, the next lookup loads.
@@ -1146,7 +1132,7 @@ mod tests {
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
         src.set_tenant("permit((", "bad");
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable));
         assert_eq!(snap(&snapshotter).loads("compile_error"), 1);
@@ -1165,7 +1151,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_new_floor_recompiles_the_tenant_without_a_source_call() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let old_floor = ready_floor(&cache, OnUnavailable::Closed).await;
         tokio::time::advance(secs(299)).await;
         let old_set = ready_tenant(&cache, &old_floor, OnUnavailable::Closed).await;
@@ -1185,14 +1171,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_floor_only_set_is_built_on_the_floor() {
-        let cache = PolicyCache::new(FakeSource::new(), settings());
+        let cache = PolicyCache::new(FakeSource::new(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(Arc::ptr_eq(floor.floor_only.floor(), &floor.floor), "P-4: the floor-only set uses the same floor");
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_unchanged_floor_keeps_its_arcs() {
-        let cache = PolicyCache::new(FakeSource::new(), settings());
+        let cache = PolicyCache::new(FakeSource::new(), settings(), keyless());
         let first = ready_floor(&cache, OnUnavailable::Closed).await;
         tokio::time::advance(secs(30)).await;
         cache.refresh_once().await;
@@ -1203,7 +1189,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn run_refresh_reloads_every_interval_and_stops_on_shutdown() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         ready_floor(&cache, OnUnavailable::Closed).await;
         let (tx, rx) = watch::channel(());
         let task = tokio::spawn(Arc::clone(&cache).run_refresh(rx));
@@ -1218,7 +1204,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_invalidate_trait_clears_the_cache() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         ready_floor(&cache, OnUnavailable::Closed).await;
         let as_trait: Arc<dyn Invalidate> = cache.clone();
         as_trait.invalidate_all();
@@ -1229,7 +1215,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_hung_floor_call_does_not_stop_the_refresh_pass() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         src.set_floor_delay(secs(3600));
@@ -1243,7 +1229,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_new_load_starts_after_the_cap_of_a_hung_call() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         ready_floor(&cache, OnUnavailable::Closed).await;
         src.set_floor_delay(secs(3600));
         cache.invalidate_all();
@@ -1270,7 +1256,7 @@ mod tests {
             load_timeout: secs(4),
             ..settings()
         };
-        let cache = PolicyCache::new(src.clone(), s);
+        let cache = PolicyCache::new(src.clone(), s, keyless());
         src.set_floor_delay(Duration::from_millis(1500));
         assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "the load ends inside load_timeout");
         assert_eq!(src.floor_calls(), 1);
@@ -1280,7 +1266,7 @@ mod tests {
     async fn an_invalidate_during_a_load_is_not_lost() {
         for ou in [OnUnavailable::Closed, OnUnavailable::Open] {
             let src = FakeSource::new();
-            let cache = PolicyCache::new(src.clone(), settings());
+            let cache = PolicyCache::new(src.clone(), settings(), keyless());
             let floor = ready_floor(&cache, ou).await;
             src.set_delay(Duration::from_millis(300));
             let change = async {
@@ -1299,7 +1285,7 @@ mod tests {
     async fn the_last_round_load_is_read_when_it_finishes_current() {
         for ou in [OnUnavailable::Closed, OnUnavailable::Open] {
             let src = FakeSource::new();
-            let cache = PolicyCache::new(src.clone(), settings());
+            let cache = PolicyCache::new(src.clone(), settings(), keyless());
             let floor = ready_floor(&cache, ou).await;
             src.set_delay(Duration::from_millis(300));
             let change = async {
@@ -1322,7 +1308,7 @@ mod tests {
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
         src.set_tenant("permit((", "bad");
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
         snap(&snapshotter);
@@ -1342,7 +1328,7 @@ mod tests {
     async fn tenant_settings_are_none_before_the_first_load() {
         let src = FakeSource::new();
         src.set_settings(ENFORCE_OPEN);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         assert_eq!(cache.tenant_settings(ORG), None);
         assert_eq!(src.tenant_calls(), 0, "the read starts no load");
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
@@ -1355,7 +1341,7 @@ mod tests {
     async fn tenant_settings_survive_a_failed_reload() {
         let src = FakeSource::new();
         src.set_settings(ENFORCE_OPEN);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
         src.set_fail(true);
@@ -1370,7 +1356,7 @@ mod tests {
     async fn an_evicted_tenant_has_no_settings() {
         let src = FakeSource::new();
         src.set_settings(ENFORCE_OPEN);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
         tokio::time::advance(secs(3601)).await;
@@ -1392,7 +1378,7 @@ mod tests {
         };
         let src = FakeSource::new();
         src.set_settings(LOG_ONLY_OPEN);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_tenant(&cache, &floor, OnUnavailable::Open).await;
         src.set_settings(ENFORCE_CLOSED);
@@ -1412,7 +1398,7 @@ mod tests {
     async fn a_bad_set_with_no_settings_keeps_the_last_good_set() {
         // The file source has no settings: a bad new version keeps the last good set.
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let good = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         src.set_tenant("permit((", "bad");
@@ -1435,7 +1421,7 @@ mod tests {
         // Closed -> Open: the caller still has `closed`, the entry says `open`. The last good set serves.
         let src = FakeSource::new();
         src.set_settings(ENFORCE_OPEN);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let good = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         src.set_fail(true);
@@ -1446,7 +1432,7 @@ mod tests {
         // Open -> Closed: the caller still has `open`, the entry says `closed`. Nothing serves.
         let src = FakeSource::new();
         src.set_settings(ENFORCE_CLOSED);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
         src.set_fail(true);
@@ -1464,7 +1450,7 @@ mod tests {
         };
         let src = FakeSource::new();
         src.set_settings(ENFORCE_OPEN);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let deadline = || Instant::now() + secs(5);
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
@@ -1502,7 +1488,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_floor_entry_knows_whether_it_has_conditions() {
         let src = FakeSource::new();
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         assert!(!ready_floor(&cache, OnUnavailable::Closed).await.has_conditions(), "a floor with no condition");
         src.set_floor_conditions(vec![formerly("floor_a", "send", "amount")]);
         src.set_floor(FLOOR, "f2");
@@ -1517,7 +1503,7 @@ mod tests {
         let src = FakeSource::new();
         src.set_floor_conditions(vec![formerly("floor_a", "rm", "force")]);
         src.set_tenant_conditions(vec![formerly("t_a", "send", "amount")], &["send"]);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let compiled = ready_compiled(&cache, &floor, OnUnavailable::Closed).await;
         let history = &compiled.history;
@@ -1541,7 +1527,7 @@ mod tests {
         let src = FakeSource::new();
         src.set_settings(ENFORCE_OPEN);
         src.set_tenant_conditions(vec![malformed("t_a")], &["send"]);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, Instant::now() + secs(5)).await;
         assert!(matches!(set, Lookup::Unavailable), "a malformed condition is a compile failure of the set");
@@ -1558,7 +1544,7 @@ mod tests {
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
         src.set_floor_conditions(vec![malformed("floor_a")]);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         assert!(matches!(cache.floor(OnUnavailable::Open).await, Lookup::Unavailable));
         assert_eq!(snap(&snapshotter).loads("compile_error"), 1);
     }
@@ -1568,7 +1554,7 @@ mod tests {
         let src = FakeSource::new();
         src.set_floor_conditions(vec![formerly("same", "rm", "force")]);
         src.set_tenant_conditions(vec![formerly("same", "send", "amount")], &["send"]);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(floor.has_conditions(), "the floor loads with its condition");
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable), "the tenant set is malformed");
@@ -1579,7 +1565,7 @@ mod tests {
     async fn a_new_floor_with_a_clashing_slot_makes_the_stored_tenant_unavailable() {
         let src = FakeSource::new();
         src.set_tenant_conditions(vec![formerly("same", "send", "amount")], &["send"]);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         tokio::time::advance(secs(299)).await;
         ready_compiled(&cache, &floor, OnUnavailable::Closed).await;
@@ -1612,7 +1598,7 @@ mod tests {
         let src = FakeSource::new();
         src.set_floor_conditions(vec![formerly("floor_a", "rm", "force")]);
         src.set_tenant_conditions(vec![formerly("t_a", "send", "amount")], &["send"]);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_compiled(&cache, &floor, OnUnavailable::Closed).await;
         // The source fails: the tenant set is unavailable under `closed`.
@@ -1636,7 +1622,7 @@ mod tests {
         let src = FakeSource::new();
         src.set_floor_conditions(vec![formerly("floor_a", "rm", "force")]);
         src.set_tenant_conditions(vec![malformed("t_a")], &["send"]);
-        let cache = PolicyCache::new(src.clone(), settings());
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert_eq!(cache.floor_history(ORG, &floor).catalog(), &Catalog::unknown(), "never loaded");
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
@@ -1670,16 +1656,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn with_digester_binds_the_digest_literals_and_keyless_gives_no_digest() {
+    async fn the_injected_digester_binds_the_digest_literals_and_keyless_gives_no_digest() {
         let make = || {
             let src = FakeSource::new();
             src.set_floor_conditions(vec![with_string_literal(formerly("floor_a", "rm", "force"))]);
             src.set_tenant_conditions(vec![with_string_literal(formerly("t_a", "send", "to"))], &["send"]);
             src
         };
-        // The default cache has no key: a bound literal has no digest (reason `no_key` at
+        // A keyless digester gives no key: a bound literal has no digest (reason `no_key` at
         // evaluation, plan decision D-A).
-        let keyless = PolicyCache::new(make(), settings());
+        let keyless = PolicyCache::new(make(), settings(), keyless());
         let floor = ready_floor(&keyless, OnUnavailable::Closed).await;
         assert!(
             matches!(&floor.conditions[0].shape.predicate().field_tests()[0].1.literal, Literal::Unbound(_)),
@@ -1691,7 +1677,7 @@ mod tests {
         // With a key, the tenant history and the floor history are bound to the org.
         let key = crate::adapters::history::HistoryKey::new(secrecy::SecretString::from("0123456789abcdef0123456789abcdef-one".to_owned())).expect("a valid key");
         let digester = HmacHistoryDigester::new(Some(key), None).expect("a digester");
-        let keyed = PolicyCache::new(make(), settings()).with_digester(Arc::new(digester));
+        let keyed = PolicyCache::new(make(), settings(), Arc::new(digester));
         let floor = ready_floor(&keyed, OnUnavailable::Closed).await;
         let bound = literals(&ready_compiled(&keyed, &floor, OnUnavailable::Closed).await.history);
         assert_eq!(bound.len(), 2);

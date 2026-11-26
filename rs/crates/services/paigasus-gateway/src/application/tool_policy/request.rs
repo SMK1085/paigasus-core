@@ -1236,7 +1236,11 @@ mod tests {
         };
         let mut s = settings_from_source(TenantMode::Enforce);
         s.on_policy_unavailable = global;
-        let cache = PolicyCache::new(Arc::new(IamHistoryAnswer(answer)), crate::application::tool_policy::CacheSettings::from_settings(&s));
+        let cache = PolicyCache::new(
+            Arc::new(IamHistoryAnswer(answer)),
+            crate::application::tool_policy::CacheSettings::from_settings(&s),
+            testing::keyless(),
+        );
         RequestToolPolicy::new(cache, s, Arc::new(DecisionRecorder::tracing()))
     }
 
