@@ -1233,7 +1233,7 @@ mod tests {
             .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["rate"]))));
         let rejections = rejected(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
         assert_eq!(rejections.len(), 1, "{rejections:?}");
-        assert_eq!(rejections[0].reason.code(), "tool-policy-history-unsupported");
+        assert_eq!(rejections[0].reason, RejectionReason::HistoryUnsupported);
     }
 
     #[tokio::test]
