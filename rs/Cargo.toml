@@ -219,6 +219,10 @@ paigasus-nats-creds = { path = "crates/libs/paigasus-nats-creds", version = "0.0
 # In-tree path dep: the gateway's sans-IO tool-call interception core (SMA-749). `version` is
 # required: `rs/deny.toml` sets `wildcards = "deny"`.
 paigasus-gateway-core = { path = "crates/libs/paigasus-gateway-core", version = "0.0.0" }
+# In-tree path dep: the IAM pure domain crate. gateway-core's parity replay uses its protocol
+# types and `condition_to_pb` as a dev-dependency (SMA-753 P15). `paigasus-iam` keeps its own
+# `path =` entry. `version` is required: `rs/deny.toml` sets `wildcards = "deny"`.
+paigasus-iam-core = { path = "crates/libs/paigasus-iam-core", version = "0.0.0" }
 # In-tree path dep: the agent host's pure domain crate (SMA-786). `version` is required:
 # `rs/deny.toml` sets `wildcards = "deny"`.
 paigasus-agent-host-core = { path = "crates/libs/paigasus-agent-host-core", version = "0.0.0" }

@@ -31,6 +31,9 @@ uuid = { workspace = true }
 # The differential oracle's hostile-stream generators (spec § 8.1). `bytes` and `serde_json` are
 # already normal dependencies, which integration tests can use.
 proptest = { workspace = true }
+# The parity replay of the decision corpus (SMA-753 P15) reads the compiled conditions into the IAM
+# protocol types and maps them with `condition_to_pb`, the chain that IAM uses in production.
+paigasus-iam-core = { workspace = true }
 
 [lints]
 workspace = true

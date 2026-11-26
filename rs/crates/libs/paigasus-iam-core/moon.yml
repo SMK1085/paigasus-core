@@ -6,6 +6,8 @@ language: 'rust'
 
 dependsOn:
   - 'paigasus-kernel-rs'
+  # SMA-753: `tool_policy::proto` maps the history conditions to the proto form.
+  - 'paigasus-proto-rs'
 
 # SMA-528 — the transitive dependsOn closure's sources, consumed by build/test/lint via
 # `@group(upstreams)` in .moon/tasks/rust.yml. Moon confers affectedness ONLY through a task's own
@@ -15,6 +17,10 @@ fileGroups:
   upstreams:
     - '/rs/crates/libs/paigasus-kernel/src/**/*'
     - '/rs/crates/libs/paigasus-kernel/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto-derive/src/**/*'
+    - '/rs/crates/libs/paigasus-proto-derive/Cargo.toml'
+    - '/rs/crates/libs/paigasus-proto/src/**/*'
+    - '/rs/crates/libs/paigasus-proto/Cargo.toml'
 
 tasks:
   build:

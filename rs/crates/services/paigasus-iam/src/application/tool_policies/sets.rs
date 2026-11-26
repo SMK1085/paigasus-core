@@ -7,8 +7,7 @@
 //! [`decode_compiled`] reads them back to a [`CompiledOutput`]. The catalog coupling compares the
 //! decoded live output with a new one through `outputs_identical` only. It never compares bytes.
 
-use paigasus_iam_core::tool_policy::protocol::{CmpOp, EventKind, HistoryCondition, Literal, Predicate, Scope, Shape};
-use paigasus_iam_core::tool_policy::{CompiledOutput, ToolEntry, ToolPolicySetKey};
+use paigasus_iam_core::tool_policy::{CompiledOutput, ProtoError, ToolEntry, ToolPolicySetKey, condition_from_pb, condition_to_pb};
 use paigasus_proto::paigasus::iam::v1 as pb;
 use prost::Message;
 
@@ -83,7 +82,12 @@ pub(crate) fn encode_compiled(meta: &CompiledMeta, out: &CompiledOutput) -> Vec<
 pub(crate) fn decode_compiled(bytes: &[u8]) -> Result<CompiledOutput, TenancyError> {
     let set = pb::CompiledToolPolicySet::decode(bytes).map_err(|error| corrupt(&format!("the compiled bytes do not decode: {error}")))?;
     let cedar_schema_json = serde_json::from_str(&set.cedar_schema).map_err(|error| corrupt(&format!("the stored schema is not JSON: {error}")))?;
-    let conditions = set.conditions.into_iter().map(condition_from_pb).collect::<Result<Vec<_>, _>>()?;
+    let conditions = set
+        .conditions
+        .into_iter()
+        .map(condition_from_pb)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|ProtoError::Malformed(reason)| corrupt(reason))?;
     Ok(CompiledOutput {
         cedar_policies: set.cedar_policies,
         cedar_schema_json,
@@ -102,177 +106,6 @@ pub(crate) fn restamp_version(bytes: &[u8], version: u64) -> Result<Vec<u8>, Ten
 fn corrupt(what: &str) -> TenancyError {
     tracing::error!(reason = %what, "a stored tool policy set version is corrupt");
     TenancyError::Internal
-}
-
-fn condition_to_pb(c: &HistoryCondition) -> pb::HistoryCondition {
-    let shape = match &c.shape {
-        Shape::Formerly { predicate } => pb::history_condition::Shape::Formerly(pb::FormerlyShape {
-            predicate: Some(predicate_to_pb(predicate)),
-        }),
-        Shape::CountWithin { predicate, op, threshold } => pb::history_condition::Shape::CountWithin(pb::CountWithinShape {
-            predicate: Some(predicate_to_pb(predicate)),
-            op: op_to_pb(*op) as i32,
-            threshold: *threshold,
-        }),
-        Shape::SumWithin { predicate, field_path, op, threshold } => pb::history_condition::Shape::SumWithin(pb::SumWithinShape {
-            predicate: Some(predicate_to_pb(predicate)),
-            field_path: field_path.clone(),
-            op: op_to_pb(*op) as i32,
-            threshold: *threshold,
-        }),
-    };
-    let scope = match c.scope {
-        Scope::Session => pb::HistoryScope::Session,
-        Scope::Principal => pb::HistoryScope::Principal,
-        Scope::Key => pb::HistoryScope::Key,
-    };
-    pb::HistoryCondition {
-        slot: c.slot.clone(),
-        policy_id: c.policy_id.clone(),
-        scope: scope as i32,
-        window_ms: c.window_ms,
-        shape: Some(shape),
-    }
-}
-
-fn condition_from_pb(c: pb::HistoryCondition) -> Result<HistoryCondition, TenancyError> {
-    let scope = match pb::HistoryScope::try_from(c.scope) {
-        Ok(pb::HistoryScope::Session) => Scope::Session,
-        Ok(pb::HistoryScope::Principal) => Scope::Principal,
-        Ok(pb::HistoryScope::Key) => Scope::Key,
-        _ => return Err(corrupt("a condition has an unknown scope")),
-    };
-    let shape = match c.shape.ok_or_else(|| corrupt("a condition has no shape"))? {
-        pb::history_condition::Shape::Formerly(s) => Shape::Formerly {
-            predicate: predicate_from_pb(s.predicate)?,
-        },
-        pb::history_condition::Shape::CountWithin(s) => Shape::CountWithin {
-            predicate: predicate_from_pb(s.predicate)?,
-            op: op_from_pb(s.op)?,
-            threshold: s.threshold,
-        },
-        pb::history_condition::Shape::SumWithin(s) => Shape::SumWithin {
-            predicate: predicate_from_pb(s.predicate)?,
-            field_path: s.field_path,
-            op: op_from_pb(s.op)?,
-            threshold: s.threshold,
-        },
-    };
-    Ok(HistoryCondition {
-        slot: c.slot,
-        policy_id: c.policy_id,
-        scope,
-        window_ms: c.window_ms,
-        shape,
-    })
-}
-
-fn op_to_pb(op: CmpOp) -> pb::ComparisonOp {
-    match op {
-        CmpOp::Lt => pb::ComparisonOp::Lt,
-        CmpOp::Le => pb::ComparisonOp::Le,
-        CmpOp::Eq => pb::ComparisonOp::Eq,
-        CmpOp::Ge => pb::ComparisonOp::Ge,
-        CmpOp::Gt => pb::ComparisonOp::Gt,
-        CmpOp::Ne => pb::ComparisonOp::Ne,
-    }
-}
-
-fn op_from_pb(op: i32) -> Result<CmpOp, TenancyError> {
-    match pb::ComparisonOp::try_from(op) {
-        Ok(pb::ComparisonOp::Lt) => Ok(CmpOp::Lt),
-        Ok(pb::ComparisonOp::Le) => Ok(CmpOp::Le),
-        Ok(pb::ComparisonOp::Eq) => Ok(CmpOp::Eq),
-        Ok(pb::ComparisonOp::Ge) => Ok(CmpOp::Ge),
-        Ok(pb::ComparisonOp::Gt) => Ok(CmpOp::Gt),
-        Ok(pb::ComparisonOp::Ne) => Ok(CmpOp::Ne),
-        _ => Err(corrupt("a condition has an unknown comparison operator")),
-    }
-}
-
-fn predicate_to_pb(p: &Predicate) -> pb::HistoryPredicate {
-    use pb::history_predicate::Node;
-    let pair = |left: &Predicate, right: &Predicate| {
-        Box::new(pb::PredicatePair {
-            left: Some(Box::new(predicate_to_pb(left))),
-            right: Some(Box::new(predicate_to_pb(right))),
-        })
-    };
-    let node = match p {
-        Predicate::EventKind { kind } => Node::EventKind(match kind {
-            EventKind::Request => pb::HistoryEventKind::Request,
-            EventKind::Response => pb::HistoryEventKind::Response,
-        } as i32),
-        Predicate::Tool { name_key } => Node::Tool(pb::ToolMatch {
-            name_key: name_key.clone(),
-            any_catalog_tool: false,
-        }),
-        Predicate::AnyCatalogTool {} => Node::Tool(pb::ToolMatch {
-            name_key: String::new(),
-            any_catalog_tool: true,
-        }),
-        Predicate::Field { path, op, value } => Node::Field(pb::FieldComparison {
-            path: path.clone(),
-            op: op_to_pb(*op) as i32,
-            value: Some(pb::LiteralValue {
-                value: Some(match value {
-                    Literal::Long(v) => pb::literal_value::Value::LongValue(*v),
-                    Literal::String(v) => pb::literal_value::Value::StringValue(v.clone()),
-                    Literal::Bool(v) => pb::literal_value::Value::BoolValue(*v),
-                    Literal::Decimal(v) => pb::literal_value::Value::DecimalValue(v.clone()),
-                }),
-            }),
-        }),
-        Predicate::AllOf { left, right } => Node::AllOf(pair(left, right)),
-        Predicate::AnyOf { left, right } => Node::AnyOf(pair(left, right)),
-        Predicate::Negation { inner } => Node::Negation(Box::new(predicate_to_pb(inner))),
-    };
-    pb::HistoryPredicate { node: Some(node) }
-}
-
-fn predicate_from_pb(p: Option<pb::HistoryPredicate>) -> Result<Predicate, TenancyError> {
-    use pb::history_predicate::Node;
-    let node = p.and_then(|p| p.node).ok_or_else(|| corrupt("a predicate has no node"))?;
-    let pair = |pair: Box<pb::PredicatePair>| -> Result<(Box<Predicate>, Box<Predicate>), TenancyError> {
-        let pair = *pair;
-        Ok((Box::new(predicate_from_pb(pair.left.map(|b| *b))?), Box::new(predicate_from_pb(pair.right.map(|b| *b))?)))
-    };
-    Ok(match node {
-        Node::EventKind(kind) => Predicate::EventKind {
-            kind: match pb::HistoryEventKind::try_from(kind) {
-                Ok(pb::HistoryEventKind::Request) => EventKind::Request,
-                Ok(pb::HistoryEventKind::Response) => EventKind::Response,
-                _ => return Err(corrupt("a predicate has an unknown event kind")),
-            },
-        },
-        Node::Tool(t) if t.any_catalog_tool && t.name_key.is_empty() => Predicate::AnyCatalogTool {},
-        Node::Tool(t) if !t.any_catalog_tool && !t.name_key.is_empty() => Predicate::Tool { name_key: t.name_key },
-        Node::Tool(_) => return Err(corrupt("a tool match sets both or neither of its fields")),
-        Node::Field(f) => {
-            let value = match f.value.and_then(|v| v.value).ok_or_else(|| corrupt("a field comparison has no value"))? {
-                pb::literal_value::Value::LongValue(v) => Literal::Long(v),
-                pb::literal_value::Value::StringValue(v) => Literal::String(v),
-                pb::literal_value::Value::BoolValue(v) => Literal::Bool(v),
-                pb::literal_value::Value::DecimalValue(v) => Literal::Decimal(v),
-            };
-            Predicate::Field {
-                path: f.path,
-                op: op_from_pb(f.op)?,
-                value,
-            }
-        }
-        Node::AllOf(p) => {
-            let (left, right) = pair(p)?;
-            Predicate::AllOf { left, right }
-        }
-        Node::AnyOf(p) => {
-            let (left, right) = pair(p)?;
-            Predicate::AnyOf { left, right }
-        }
-        Node::Negation(inner) => Predicate::Negation {
-            inner: Box::new(predicate_from_pb(Some(*inner))?),
-        },
-    })
 }
 
 /// Adds the `dropped_fields` reason to a rejection whose message names a dropped path of a
@@ -337,6 +170,7 @@ fn names_path(message: &str, path: &str) -> bool {
 mod tests {
     use super::*;
     use crate::application::tool_policies::rejection::RejectionReason;
+    use paigasus_iam_core::tool_policy::protocol::{CmpOp, EventKind, HistoryCondition, Literal, Predicate, Scope, Shape};
     use paigasus_iam_core::tool_policy::{CatalogLimits, ToolKind, build_manual, outputs_identical};
     use serde_json::json;
     use uuid::Uuid;
