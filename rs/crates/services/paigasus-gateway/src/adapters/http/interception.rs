@@ -165,7 +165,8 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
         record(Metric::Decision { decision, basis: basis.as_str() });
     }
     // One record per report entry, at the same place as the header (SMA-755 P-1).
-    let reported = calls.reported(&decisions, basis);
+    let plan = ctx.policy.as_ref().and_then(|p| p.history.as_ref()).map(|h| Arc::clone(h.fields()));
+    let reported = calls.reported(&decisions, basis, plan.as_deref());
     if let Some(recorder) = &ti.recorder {
         for r in &reported {
             recorder.record_response(&ctx, r);
@@ -335,7 +336,8 @@ fn relay(
     prelude: Vec<Chunk>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
     let now = Instant::now();
-    let icpt = Interceptor::new(format, limits, Bytes::from_static(terminal), now);
+    let plan = ctx.policy.as_ref().and_then(|p| p.history.as_ref()).map(|h| Arc::clone(h.fields()));
+    let icpt = Interceptor::new(format, limits, Bytes::from_static(terminal), now).with_field_plan(plan);
     let sleep = Box::pin(tokio::time::sleep(limits.keepalive));
     let start = Relay {
         inner: Some(inner),
@@ -1095,7 +1097,13 @@ mod tests {
     /// A memory store and a tool history over it.
     fn memory_history() -> (Arc<MemorySessionStore>, Arc<ToolHistory>) {
         let store = Arc::new(MemorySessionStore::new());
-        let h = Arc::new(ToolHistory::new(store.clone(), Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(1)));
+        let h = Arc::new(ToolHistory::new(
+            store.clone(),
+            Arc::new(SystemClock),
+            Arc::new(OsEntropy),
+            Duration::from_secs(1),
+            Arc::new(crate::adapters::history::HmacHistoryDigester::keyless()),
+        ));
         (store, h)
     }
 
@@ -1201,42 +1209,79 @@ mod tests {
         assert_eq!(call_link(&store, "c1").await, None);
     }
 
-    /// The Cedar decider runs to its end (so the reserve runs), then this waits past the decide timeout.
-    struct CedarThenSleep(Arc<CedarDecider>);
+    /// The Cedar decider with a webhook that sleeps 5 s. The reserve runs first and returns, then the
+    /// pipeline waits past the decide timeout of the hold, so the interceptor drops the future after
+    /// the reserve, with the hold intent still recorded.
+    fn cedar_slow_after_reserve(h: &Arc<ToolHistory>) -> Arc<CedarDecider> {
+        use crate::adapters::detectors::BuiltInDetector;
+        use crate::application::detectors::DetectorPipeline;
+        use crate::application::tool_policy::testing::SlowDetector;
+        use crate::config::{DETECTOR_MARGIN_MS, DetectorSettings};
 
-    impl ToolCallDecider for CedarThenSleep {
-        fn decide(&self, ctx: Arc<DecisionContext>, turn: Arc<ToolTurn>, calls: Vec<ToolCall>) -> DecideFuture {
-            let inner = self.0.decide(ctx, turn, calls);
-            Box::pin(async move {
-                let out = inner.await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                out
-            })
+        let settings = DetectorSettings {
+            enabled: true,
+            timeout: Duration::from_secs(10),
+            max_scan_bytes: 16 << 20,
+            margin: Duration::from_millis(DETECTOR_MARGIN_MS),
+        };
+        let pipeline = Arc::new(DetectorPipeline::new(
+            Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
+            vec![Arc::new(SlowDetector("hook_slow", Duration::from_secs(5)))],
+            None,
+            settings.timeout,
+        ));
+        Arc::new(
+            CedarDecider::new(Arc::new(DecisionRecorder::tracing()))
+                .with_history(Arc::clone(h))
+                .with_detectors(pipeline, Duration::from_secs(20), settings),
+        )
+    }
+
+    /// The id of the pending event that the reserve of the hold wrote. It polls the store and must
+    /// see the event before the 200 ms decide timeout settles it. So a test can tell a settle of
+    /// the reserved event from an append under a new id.
+    async fn reserved_id(store: &MemorySessionStore, ctx: &DecisionContext, tool: &str) -> uuid::Uuid {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        loop {
+            if let Some(e) = session_events(store, ctx, tool).into_iter().find(|e| e.verdict == EventVerdict::Pending) {
+                return e.id;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the reserve wrote no pending event before the timeout");
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }
 
-    /// Ruling F3: the reserve left a pending event, and the report site appends an allowed one.
-    #[tokio::test]
-    async fn a_timed_out_hold_under_allow_appends_and_keeps_the_pending_event() {
-        let (store, h) = memory_history();
-        let ctx = session_ctx(&h).await;
-        let limits = Limits {
-            on_failure: OnFailure::Allow,
+    /// Limits with a decide timeout of 200 ms and `on_failure`.
+    fn short_hold(on_failure: OnFailure) -> Limits {
+        Limits {
+            on_failure,
             decide_timeout: Duration::from_millis(200),
             ..Limits::defaults()
-        };
-        let ti = ti_with_history(limits, Arc::new(CedarThenSleep(cedar_with(&h))), &h);
-        let text = tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO)))
-            .await
-            .expect("the timeout ends the hold");
+        }
+    }
+
+    /// Spec P9: a forward under `on_failure = allow` settles the reserved event `allow` and appends
+    /// nothing, so the call counts once (design R10).
+    #[tokio::test]
+    async fn a_timed_out_hold_under_allow_settles_the_reserved_event_allow() {
+        let (store, h) = memory_history();
+        let ctx = session_ctx(&h).await;
+        let ti = ti_with_history(short_hold(OnFailure::Allow), cedar_slow_after_reserve(&h), &h);
+        let (text, reserved) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO))),
+            reserved_id(&store, &ctx, "ok")
+        );
+        let text = text.expect("the timeout ends the hold");
         assert!(text.contains(r#""name":"ok","input":{}"#), "allowed on failure: {text}");
         drain(&h).await;
-        let mut verdicts: Vec<_> = session_events(&store, &ctx, "ok").iter().map(|e| e.verdict.as_str()).collect();
-        verdicts.sort_unstable();
-        assert_eq!(verdicts, ["allow", "pending"]);
-        let appended = session_events(&store, &ctx, "ok").into_iter().find(|e| e.verdict == EventVerdict::Allow).expect("the append");
+        let events = session_events(&store, &ctx, "ok");
+        assert_eq!(
+            events.iter().map(|e| (e.id, e.verdict)).collect::<Vec<_>>(),
+            [(reserved, EventVerdict::Allow)],
+            "the reserved event, settled: {events:?}"
+        );
         let session = ctx.session.as_ref().expect("a session").session_id;
-        assert_eq!(call_link(&store, "toolu_0").await, Some((session, appended.id)));
+        assert_eq!(call_link(&store, "toolu_0").await, Some((session, events[0].id)));
     }
 
     #[tokio::test]
@@ -1254,49 +1299,50 @@ mod tests {
         assert_eq!(call_link(&store, "c0").await, None);
     }
 
-    /// A block that the interceptor makes itself (`decider-error` under `block`): the reserve left
-    /// a pending event, and nothing settles or appends it.
+    /// Spec P9: a block that the interceptor makes itself (`decider-error` under `block`) finds the
+    /// reserved event through the hold intent and settles it `deny`. Nothing is appended, and the
+    /// settle deletes the `c:` link of the reserve.
     #[tokio::test]
-    async fn an_interceptor_block_keeps_the_pending_event_and_appends_nothing() {
+    async fn an_interceptor_block_settles_the_reserved_event_deny() {
         let (store, h) = memory_history();
         let ctx = session_ctx(&h).await;
-        let limits = Limits {
-            on_failure: OnFailure::Block,
-            decide_timeout: Duration::from_millis(200),
-            ..Limits::defaults()
-        };
-        let ti = ti_with_history(limits, Arc::new(CedarThenSleep(cedar_with(&h))), &h);
-        let text = tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO)))
-            .await
-            .expect("the timeout ends the hold");
+        let ti = ti_with_history(short_hold(OnFailure::Block), cedar_slow_after_reserve(&h), &h);
+        let (text, reserved) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(4), run_ctx(ti, Arc::clone(&ctx), tool_blocks(&["ok"], Duration::ZERO))),
+            reserved_id(&store, &ctx, "ok")
+        );
+        let text = text.expect("the timeout ends the hold");
         assert!(text.contains(&format!(r#""code":"{}""#, BlockCode::DeciderError.as_kebab())), "{text}");
         drain(&h).await;
-        let verdicts: Vec<_> = session_events(&store, &ctx, "ok").iter().map(|e| e.verdict).collect();
-        assert_eq!(verdicts, [EventVerdict::Pending]);
-        assert_eq!(call_link(&store, "toolu_0").await, None);
+        let events = session_events(&store, &ctx, "ok");
+        assert_eq!(
+            events.iter().map(|e| (e.id, e.verdict)).collect::<Vec<_>>(),
+            [(reserved, EventVerdict::Deny)],
+            "the reserved event, settled: {events:?}"
+        );
+        assert_eq!(call_link(&store, "toolu_0").await, None, "the deny settle deletes the link of its event");
     }
 
-    /// Ruling F3 on the body path: a decide timeout under `allow` appends an allowed event.
+    /// Spec P9 on the body path: a decide timeout under `allow` settles the reserved event `allow`.
     #[tokio::test]
-    async fn a_timed_out_body_under_allow_appends_and_keeps_the_pending_event() {
+    async fn a_timed_out_body_under_allow_settles_the_reserved_event_allow() {
         let (store, h) = memory_history();
         let ctx = session_ctx(&h).await;
-        let limits = Limits {
-            on_failure: OnFailure::Allow,
-            decide_timeout: Duration::from_millis(200),
-            ..Limits::defaults()
-        };
-        let ti = ti_with_history(limits, Arc::new(CedarThenSleep(cedar_with(&h))), &h);
+        let ti = ti_with_history(short_hold(OnFailure::Allow), cedar_slow_after_reserve(&h), &h);
         let body = chat_body(&["ok"]);
-        let out = intercept_body(&ti, ti.limits, Format::OpenAiChat, Arc::clone(&ctx), Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]).await;
+        let (out, reserved) = tokio::join!(
+            intercept_body(&ti, ti.limits, Format::OpenAiChat, Arc::clone(&ctx), Arc::new(ToolTurn::Unavailable("unit test")), body.as_bytes(), &[]),
+            reserved_id(&store, &ctx, "ok")
+        );
         assert!(matches!(out, BodyOutcome::Forward { .. }));
         drain(&h).await;
         let events = session_events(&store, &ctx, "ok");
-        let mut verdicts: Vec<_> = events.iter().map(|e| e.verdict.as_str()).collect();
-        verdicts.sort_unstable();
-        assert_eq!(verdicts, ["allow", "pending"]);
-        let appended = events.iter().find(|e| e.verdict == EventVerdict::Allow).expect("the append");
+        assert_eq!(
+            events.iter().map(|e| (e.id, e.verdict)).collect::<Vec<_>>(),
+            [(reserved, EventVerdict::Allow)],
+            "the reserved event, settled: {events:?}"
+        );
         let session = ctx.session.as_ref().expect("a session").session_id;
-        assert_eq!(call_link(&store, "c0").await, Some((session, appended.id)));
+        assert_eq!(call_link(&store, "c0").await, Some((session, events[0].id)));
     }
 }

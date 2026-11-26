@@ -7,6 +7,7 @@
 //! reads a clock and never spawns anything.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -17,6 +18,7 @@ use crate::decider::DecidedCall;
 use crate::decision_log::{CallFacts, ReportedCall};
 use crate::limits::{Limits, OnFailure};
 use crate::openai::stream::OpenAiStream;
+use crate::policy::{FieldPlan, call_fields};
 use crate::protocol::{Frame, Protocol, Step, StepError, Verdict, Verdicts};
 use crate::report::{ReportDecision, ReportEntry, reason_label, report_comment, report_entry};
 use crate::responses::stream::ResponsesStream;
@@ -91,6 +93,8 @@ pub struct Interceptor {
     ended: bool,
     last_emit: Instant,
     out: Vec<Action>,
+    /// The field plan of the request (SMA-753 P3). `None`: the report entries carry no fields.
+    plan: Option<Arc<FieldPlan>>,
 }
 
 fn choice_of(k: HoldKey) -> u32 {
@@ -101,6 +105,13 @@ fn choice_of(k: HoldKey) -> u32 {
 }
 
 impl Interceptor {
+    /// Set the field plan. Each report entry then carries the stored fields of its call.
+    #[must_use]
+    pub fn with_field_plan(mut self, plan: Option<Arc<FieldPlan>>) -> Self {
+        self.plan = plan;
+        self
+    }
+
     #[must_use]
     pub fn new(format: Format, limits: Limits, terminal: Bytes, now: Instant) -> Self {
         let proto: Box<dyn Protocol> = match format {
@@ -123,6 +134,7 @@ impl Interceptor {
             input_done: false,
             ended: false,
             last_emit: now,
+            plan: None,
             out: Vec::new(),
         }
     }
@@ -419,8 +431,11 @@ impl Interceptor {
             });
             let entry = report_entry(c, decision, basis, code);
             self.emit(report_comment(&entry), now);
-            self.out
-                .push(Action::Reported(Box::new(ReportedCall::new(entry, Some(CallFacts::of(c)), d.detail).with_decision_id(d.decision_id))));
+            self.out.push(Action::Reported(Box::new(
+                ReportedCall::new(entry, Some(CallFacts::of(c)), d.detail)
+                    .with_decision_id(d.decision_id)
+                    .with_fields(call_fields(c, self.plan.as_deref())),
+            )));
         }
         if !observe {
             self.verdicts.insert(hold, verdict);
@@ -1348,6 +1363,36 @@ mod tests {
             life("response.completed", output),
         ]);
         evs.into_iter().map(ev).collect()
+    }
+
+    /// One hold of one call, then a decider error. Returns the reported entries.
+    fn decider_error_reports(plan: Option<Arc<FieldPlan>>) -> Vec<ReportedCall> {
+        let t0 = Instant::now();
+        let mut i = Interceptor::new(Format::OpenAiChat, limits(), Bytes::from_static(TERMINAL), t0).with_field_plan(plan);
+        let chunks = [call(0, 0, "send", r#"{"amount":5}"#), finish(0), "data: [DONE]\n\n".into()];
+        let mut acts: Vec<Action> = Vec::new();
+        for c in &chunks {
+            acts.extend(i.push(c.as_bytes(), t0));
+        }
+        acts.extend(i.finish(t0));
+        let hold = acts.iter().find_map(|a| if let Action::Decide { hold, .. } = a { Some(*hold) } else { None }).expect("one hold");
+        acts.extend(i.decided(hold, Err(DeciderError { reason: "test" }), t0));
+        reported(&acts).into_iter().cloned().collect()
+    }
+
+    #[test]
+    fn a_reported_call_carries_the_fields_of_its_plan() {
+        use paigasus_kernel::tool_policy::history::{Extracted, FieldPath};
+        let reps = decider_error_reports(Some(Arc::new(crate::policy::test_plan("send", "amount"))));
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].entry.basis, Some(Basis::OnFailure), "the decider error path");
+        let fields = reps[0].fields.as_ref().expect("a plan gives fields");
+        assert!(matches!(fields.get(&FieldPath::new(vec!["amount".to_owned()]).unwrap()), Some(Extracted::Long(5))));
+    }
+
+    #[test]
+    fn no_plan_gives_no_fields() {
+        assert!(decider_error_reports(None).iter().all(|r| r.fields.is_none()));
     }
 
     #[test]

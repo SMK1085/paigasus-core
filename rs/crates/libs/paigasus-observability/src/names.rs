@@ -92,6 +92,13 @@ pub const GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL: &str = "gateway_tool_history_id
 /// History events that a write removed (SMA-753 D11). `reason` = `retention` (older than the retention) |
 /// `cap` (past 10,000 events for one tool). Primed at 0 for both values.
 pub const GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL: &str = "gateway_tool_history_events_trimmed_total";
+/// History members that the window read skipped because their event body was gone (SMA-753 spec
+/// P10): an expiry race or an eviction. No label. Primed at 0.
+pub const GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL: &str = "gateway_tool_history_events_missing_total";
+/// History slots with no value in a decision (SMA-753 spec P7), once per call and slot. Labels
+/// `part` (`floor`, `tenant`) and `reason` (`disabled`, `store`, `no_session`, `truncated`,
+/// `unknown`, `retention`, `no_key`, `catalog`). All 16 pairs are primed at 0.
+pub const GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL: &str = "gateway_tool_history_slots_missing_total";
 // Gateway tool decision log (SMA-755 § 5.9). No label carries a tool name, an org or an argument.
 /// Records that the decision log accepted from the recorder (counted before the queue).
 pub const GATEWAY_DECISION_LOG_RECORDED_TOTAL: &str = "gateway_decision_log_recorded_total";
@@ -490,6 +497,8 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
     GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL,
     GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL,
+    GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL,
+    GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL,
     GATEWAY_DECISION_LOG_RECORDED_TOTAL,
     GATEWAY_DECISION_LOG_WRITTEN_TOTAL,
     GATEWAY_DECISION_LOG_DROPPED_TOTAL,
@@ -647,6 +656,8 @@ mod tests {
             GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
             GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL,
             GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL,
+            GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL,
+            GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

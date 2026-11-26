@@ -1,0 +1,401 @@
+{
+  "shape": "count_within",
+  "schema": "tests/fixtures/corpus_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-event-kind\")\npermit (principal, action == Pgs::Gateway::Action::\"search\", resource)\nwhen temporal { count_within(1m, Pgs::Gateway::Action::\"search\"::response{}) < 2 };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-event-kind\")\npermit(principal, action == Pgs::Gateway::Action::\"search\", resource) when { context.p_corpus_hevent_hkind_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "op_eq": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ge": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_gt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_le": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_lt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ne": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "pay": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "memo": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      },
+                      "meta": {
+                        "type": "Record",
+                        "attributes": {
+                          "limit": {
+                            "type": "Record",
+                            "attributes": {
+                              "max": {
+                                "type": "EntityOrCommon",
+                                "name": "Long",
+                                "required": false
+                              }
+                            },
+                            "required": false
+                          },
+                          "region": {
+                            "type": "EntityOrCommon",
+                            "name": "String",
+                            "required": false
+                          }
+                        },
+                        "required": false
+                      },
+                      "price": {
+                        "type": "EntityOrCommon",
+                        "name": "decimal",
+                        "required": false
+                      },
+                      "urgent": {
+                        "type": "EntityOrCommon",
+                        "name": "Bool",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  },
+                  "p_corpus_hevent_hkind_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hevent_hkind_0__temporal_0",
+        "policy_id": "corpus-event-kind",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "count_within",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "event_kind",
+              "kind": "response"
+            },
+            "right": {
+              "type": "tool",
+              "name_key": "search"
+            }
+          },
+          "op": "lt",
+          "threshold": 2
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "a"
+      },
+      "arguments": "{\"q\": \"a\"}"
+    },
+    {
+      "ts": 10,
+      "kind": "response",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "a"
+      },
+      "arguments": "{\"q\": \"a\"}"
+    },
+    {
+      "ts": 20,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "b"
+      },
+      "arguments": "{\"q\": \"b\"}"
+    },
+    {
+      "ts": 30,
+      "kind": "response",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "b"
+      },
+      "arguments": "{\"q\": \"b\"}"
+    },
+    {
+      "ts": 40,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "c"
+      },
+      "arguments": "{\"q\": \"c\"}"
+    }
+  ],
+  "decisions": [
+    "allow",
+    null,
+    "allow",
+    null,
+    "deny"
+  ],
+  "notes": [
+    "only `response` events count: the requests 0, 2 and 4 see 0, 1 and 2 responses"
+  ],
+  "paigasus_differs": []
+}

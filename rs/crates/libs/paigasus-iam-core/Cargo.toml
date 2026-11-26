@@ -14,6 +14,9 @@ paigasus-kernel = { workspace = true, features = ["tool-policy"] }
 uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+# `tool_policy::proto` maps a history condition to and from its `paigasus.iam.v1` form. IAM stores
+# that form, and the gateway-core parity replay runs the same mapping (SMA-753 P15).
+paigasus-proto = { workspace = true }
 async-trait = { workspace = true }
 cedar-policy = { workspace = true }
 # `api_key`'s token codec (`format_token`/`parse_token`) encodes/decodes the secret segment

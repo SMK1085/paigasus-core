@@ -139,12 +139,32 @@ is healthy. Do the steps in section 5 for that organization.
 
 ## 5. History rules
 
-IAM refuses a save that holds a history rule (reason 62 `tool-policy-history-unsupported`) until
-the gateway can enforce them (SMA-753 PR 2).
+A history rule is a policy with a temporal block, for example `count_within` or `sum_within`. Two
+settings control it, and they control different things. The gateway evaluates the history
+conditions only when it has the `[tool_history]` table (section 10). The IAM setting
+`tool_policies.history_conditions` controls only whether IAM accepts a save with a condition. With
+the setting `false`, IAM refuses each such save (reason 62 `tool-policy-history-unsupported`). The
+setting does not remove a set that is already stored: the gateway still evaluates a stored history
+rule while the setting is `false`. The chart value is
+`zones.iam.backend.toolPolicies.historyConditions`, and its default is `false`.
 
-This gateway (SMA-753 PR 1 and later) loads a stored set that holds a history rule. It uses the
-policy text and the catalog, but it does not fill the history slots. A policy that reads a slot
-then has an evaluation error. An errored `forbid` denies the call. An errored `permit` does not
+Turn the rules on in this order. First configure the gateway and restart it. Then set the IAM
+setting. Turn the rules off in the opposite order. First set the IAM setting to `false`. Wait until
+every in-flight save has finished. Then change the gateway, for example a rollback from SMA-753 PR 2
+to PR 1. Section 10, "Gateway rollback", gives the full procedure.
+
+A denied call counts in the history. The gateway keeps the event of a blocked call with the verdict
+`denied`. So a rule such as `count_within(...) >= N` or a `sum_within` counts the blocked calls too.
+A client that retries a blocked call raises its own count each time.
+
+A call whose arguments are free text, or whose value has the wrong type, makes a dependent slot
+missing. The same is true for arguments that the gateway cannot parse. This lasts for up to 24
+hours, in the histories of that call. A missing slot fails closed. Only the session, the principal
+or the key of that client is affected. Section 10, "Known limits", gives more detail.
+
+A gateway without a `[tool_history]` table, and a gateway of SMA-753 PR 1, load a stored set that
+holds a history rule. They use the policy text and the catalog, but they do not fill the history
+slots. A policy that reads a slot then has an evaluation error. An errored `forbid` denies the call. An errored `permit` does not
 allow the call. So only the history rules fail closed. The other policies of the set work as
 usual. A floor history rule denies its calls in every mode, for every tenant. A tenant history
 rule follows the tenant mode: `enforce` blocks the call, `log_only` records the block and does not
@@ -166,8 +186,10 @@ A set saved before this change can hold such a rule. Do these steps.
 2. Save each set that has a temporal block again, as a condition-free set. Section 10, "Gateway
    rollback", gives the definition of condition-free.
 
-Until a tenant does this, that tenant cannot write its tool catalog. The write is refused with
-`tool-catalog-breaks-policy`, and the message names `tool-policy-history-unsupported`.
+While the IAM setting is `false` and the stored set still has a history rule, that tenant cannot
+write its tool catalog. A catalog write compiles the stored set again, and the setting refuses the
+condition. The write is refused with `tool-catalog-breaks-policy`, and the message names
+`tool-policy-history-unsupported`. With the setting `true`, the catalog write works again.
 
 ## 6. Concurrent first enables
 
@@ -432,8 +454,8 @@ in one release. The new schema adds two attributes: `context.max_severity` and
 ## 10. Tool history (SMA-753)
 
 The tool history records each tool call and each tool result of a session. It also links each
-request to a session. In PR 1 no policy rule reads the history window. But the history changes
-the policy input. With `[tool_history]` set, each response-side decision gets the findings
+request to a session. Since PR 2, a policy rule can read the history window (section 5). The
+history also changes the policy input. With `[tool_history]` set, each response-side decision gets the findings
 `mixed_sessions` and `forged_history` in `context.findings` when the request has them.
 `context.session` then holds a real session id and turn. Before you turn the history on, check
 each policy that reads `context.findings` or `context.session`. A rule that forbids on a finding
@@ -458,12 +480,80 @@ tool policy is off, the gateway logs one `info` line and does not use the histor
 The `deadline` must be shorter than `tool_interception.decide_timeout_secs`. The gateway refuses a
 config where it is not.
 
+Two more keys are in the same table.
+
+| Key | Meaning |
+|---|---|
+| `digest_key` | The key that the gateway uses to store a string, bool or decimal argument value as a digest. Use at least 32 bytes. Optional. Environment: `GATEWAY_TOOL_HISTORY__DIGEST_KEY`. |
+| `previous_digest_key` | The old key during a rotation. The gateway only reads with it. Optional. Environment: `GATEWAY_TOOL_HISTORY__PREVIOUS_DIGEST_KEY`. |
+
+The key id is not a setting. The gateway derives it from the key bytes: the first 8 bytes of
+`HMAC-SHA-256(key, "paigasus-history-kid")`, as lower-case hex. So two keys never share one id. The
+gateway refuses a previous key that has the same id as the current key. A key never appears in a log
+or in a `Debug` output.
+
+With no `digest_key`, the gateway logs a warning at boot. It stores no string, bool or decimal
+value. It still stores a `Long` value and an absent value. Every condition with a string, bool or
+decimal literal then has a missing slot, with the reason `no_key`. A condition on a `Long` value
+still works.
+
+#### Rotate the key
+
+Use two phases. The order matters.
+
+1. Phase 1. On every replica, set the new key as `previous_digest_key`. Keep the current key as
+   `digest_key`. Deploy, and wait until every replica runs the new config.
+2. Phase 2. On every replica, swap the two keys. The new key becomes `digest_key`. The old key
+   becomes `previous_digest_key`.
+3. Keep the old key as `previous_digest_key` for 25 hours. This is the retention time of the
+   history (`RETENTION_MS`). The 25 hours start when the last replica runs the phase 2 config, not
+   when the first one does. A replica that still runs phase 1 writes events under the old key.
+   After that time, remove the old key.
+
+An event with a key id that no replica knows is an unknown event. A slot that reads it can be
+missing. So a wrong order fails closed. It never allows a call that the rule should block.
+
+A `previous_digest_key` without a `digest_key` fails the boot. So in phase 1, set the new key as
+`previous_digest_key` only on a replica that already has a `digest_key`.
+
+#### Failure rules
+
+The next table shows what the gateway does when a slot has no value. A missing slot fails closed: a
+`forbid` that reads it denies the call, and a `permit` that reads it does not allow the call. The
+`reason` is the label of the metric `gateway_tool_history_slots_missing_total`.
+
+| Case | Floor slots | Tenant part |
+|---|---|---|
+| No `[tool_history]` table | missing (`disabled`) | its slots are missing (`disabled`). The set is enforced. |
+| Reserve error, deadline or budget skip | missing (`store`) | unavailable when it has a condition. The tenant `fail_mode` decides. |
+| No session because the lookup failed | missing (`no_session`) | the same as a reserve error |
+| A set is truncated or over a read limit | the slots that read it are missing (`truncated`) | the same |
+| An unknown event | missing (`unknown`) | the same |
+| `any_catalog_tool` with no known catalog | missing (`catalog`) | not possible: the tenant set has its catalog |
+| No condition in either set | no effect on the decision | no effect |
+
+When the tenant part is unavailable for one hold, the gateway decides that hold with the floor
+only. Under a tenant `fail_mode = open`, every tenant policy is then only observed for that hold.
+This includes a `forbid` that reads no slot, and it includes the caps. A store error can therefore
+let a call pass that a tenant `forbid` would block. Under `closed`, every call of that hold is
+blocked.
+
+A missing floor slot denies the call in every mode, for every tenant. With the tenant mode `off`,
+the gateway still links the request when the floor has a condition. So a floor history rule also
+works for such a tenant. For a floor condition, the gateway uses the last known catalog of the
+organization when the tenant set is unavailable or the mode is `off`. With no known catalog, the
+slot is missing.
+
 ### Redis requirements
 
 - Use a dedicated Redis instance or a dedicated logical database.
 - Set `maxmemory-policy noeviction`. Every history key has a TTL. Any other policy can evict a
-  history key.
-- The history can share the limits Redis of SMA-677.
+  history key. An evicting policy can remove any key of the history, an event body too.
+- A window read skips a member whose event body is gone. The event then does not count for a
+  condition. The metric `gateway_tool_history_events_missing_total` counts it. An expiry race
+  causes a rare count. A steady rise means eviction. Set `noeviction`.
+- The history can share the limits Redis of SMA-677. Split them when the hold read time grows
+  (see "Sizing").
 - The history must NOT share the IAM Redis.
 
 ### The memory backend
@@ -486,20 +576,58 @@ Memory is about: events per day x (event body of about 60 B + 3 sorted-set entri
 each) + the links. One history and tool pair holds at most 10,000 events. The retention is 25 hours.
 The gateway removes older events at each write.
 
+Each hold reads its window of events from Redis. The cost of the read is linear in the number of
+events in the window. It measured about 1 to 2 microseconds of Redis and client time for each event.
+Redis runs one hold read at a time. So the holds of concurrent requests wait for each other. The
+gateway tests measure a history of 1,000 events. The time grows with the number of events and with
+the number of concurrent requests.
+
+The read has limits. A request reads at most 64 entries, and at most 20,000 events in total. An
+entry is one tool set of one scope. The every-tool set counts as one entry. An `any_catalog_tool`
+rule over more than 64 tools (the catalog tools and the tools that the rule names) reads the
+every-tool set, not one entry for each tool. Its result is the same, because the gateway still
+matches each event against the catalog. A read plan with more than 64 entries in total is still
+truncated after the 64th entry. This can occur with many rules, or with catalog rules of up to 64
+tools in more than one scope. The slots that read such an entry are missing, with the reason
+`truncated`, and they fail closed. A read that goes past 20,000 events is truncated. The slots that read it are then missing, with the reason
+`truncated`, and they fail closed. A history of 3 tools with 10,000 events each, read by an
+every-tool rule, measured about 240 ms for one hold read on a development host.
+
+The design limit is a p99 of less than 15 ms for `gateway_tool_policy_overhead_seconds` (spec P15).
+This build does not meet it at 8 concurrent holds. With a history of 1,000 events and 8 holds in
+flight, the measured p99 was 17.5 to 19.0 ms in 5 of 5 runs. The host was a development Mac, with
+Redis in Docker Desktop. A change of the storage layout is expected to lower the Redis time. It is a
+follow-up.
+
+Watch the time of the hold read. When it grows, move the history to its own Redis instance. Do not
+share it with the limits Redis. A long hold read on a shared instance delays the rate-limit calls.
+
 ### Metrics
 
-Section 2.3 of `RUNBOOK-observability.md` lists the three history metrics.
+Section 2.3 of `RUNBOOK-observability.md` lists the history metrics.
 
 - `gateway_tool_history_store_errors_total`: store calls that failed.
 - `gateway_tool_history_ids_capped_total`: ids that a request sent past the cap of 128 in one list.
 - `gateway_tool_history_events_trimmed_total`: events that a write removed, by `retention` or `cap`.
+- `gateway_tool_history_events_missing_total`: events that a window read skipped, because the event
+  body was gone. It has no label. A steady rise means that Redis evicts keys.
+- `gateway_tool_history_slots_missing_total{part, reason}`: slots with no value in a decision.
+  `part` is `floor` or `tenant`. `reason` is one of 8 values: `disabled` (no `[tool_history]`
+  table), `store` (a reserve error, a deadline or a budget skip), `no_session` (the session lookup
+  failed), `truncated` (a set over a read limit, or trimmed inside the window), `unknown` (an event
+  value that the rule cannot read), `retention` (a window longer than the retention), `no_key` (no
+  history key for a string, bool or decimal literal) and `catalog` (`any_catalog_tool` with no known
+  catalog). The metric counts once for each call and slot. A hold that timed out counts nothing.
+  Under a tenant `fail_mode = open`, every tenant policy is only observed for the hold of a missing
+  tenant part, also a `forbid` with no slot. Under `closed`, every call of that hold is blocked.
+  All 16 pairs start at 0.
 
-### Before you deploy this build
+### Before you deploy SMA-753 PR 1
 
 A live set can already hold a history rule. SMA-774 (PR 478, merged 2026-11-16) saved compiled
 sets with no history check. SMA-775 (PR 485, merged 2026-11-17) added the check, but it did not
-change the rows that were already live. The gateway before this build refuses such a set. This
-build loads it (section 5). So the deploy changes the decisions of each such organization:
+change the rows that were already live. A gateway older than SMA-753 PR 1 refuses such a set. A
+gateway of PR 1 or later loads it (section 5). So the deploy changes the decisions of each such organization:
 
 - `enforce` with `fail_mode = open`: before the deploy, each call that the floor does not deny is
   observed. After the deploy, the other policies are enforced, and the calls that depend on a slot
@@ -509,7 +637,14 @@ build loads it (section 5). So the deploy changes the decisions of each such org
 - A floor with a history rule: before the deploy, the floor is unavailable. After the deploy, the
   floor works, and its history forbids deny.
 
-Do these steps before you deploy this build.
+The outcomes above hold for PR 1, where the history slots stay missing. They also hold for PR 2
+with history turned off.
+
+With PR 2 and history turned on, the gateway evaluates the slots. The decision then follows the
+condition. For example, a floor forbid with `count_within(...) >= 2` does not deny the first call
+when the count is 1.
+
+Do these steps before you deploy PR 1, or PR 2, to a gateway older than PR 1.
 
 1. Read the floor (`GET /v1/tool-policy-floor`) and the set of each tenant
    (`GET /v1/organizations/{id}/tool-policy-set`), as in section 5.
@@ -519,9 +654,10 @@ Do these steps before you deploy this build.
 
 ### Gateway rollback
 
-This build (SMA-753 PR 1) loads a set that holds history rules, and it leaves the history slots
-empty (section 5). After PR 2, tenants can save history rules. After a rollback from PR 2 to this
-build, the history rules fail closed. The other policies of each set work as usual.
+A gateway of SMA-753 PR 1 loads a set that holds history rules, and it leaves the history slots
+empty (section 5). A gateway of SMA-753 PR 2 evaluates the history rules, and with PR 2, tenants can
+save history rules. After a rollback of the gateway from PR 2 to PR 1, the history rules fail
+closed. The other policies of each set work as usual.
 
 The effect of one history rule is its action scope, not one tool:
 
@@ -543,21 +679,22 @@ call in its scope.
 
 Use this procedure for each of three cases:
 
-- A gateway rollback from PR 2 to this build.
+- A gateway rollback from PR 2 to PR 1.
 - A gateway rollback to a build before SMA-753 PR 1.
 - Removal of the `[tool_history]` table, with a PR 1 or later build and no gateway rollback. Without
-  the table, every history slot is missing. The effect is the same as a rollback to this build.
+  the table, every history slot is missing. The effect is the same as a rollback to PR 1.
 
 1. Set `tool_policies.history_conditions = false` in IAM. IAM then refuses each save with a condition.
-   Wait until every in-flight save has finished. For a rollback to this build, this step is already
-   true, because the constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` is `false` in PR 1. Confirm the
-   setting value anyway.
+   Wait until every in-flight save has finished. Do this step also for a rollback of the gateway from
+   PR 2 to PR 1. The gateway rollback does not change IAM. A PR 2 IAM reads this setting, so the
+   setting controls the saves. The PR 1 constant `HISTORY_CONDITIONS_ENFORCED_BY_GATEWAY` disables
+   the saves only in a PR 1 IAM.
 2. Prepare the floor and the tenant sets.
-   - For a rollback from PR 2 to this build, and for removal of `[tool_history]` with a PR 1 or later
+   - For a rollback from PR 2 to PR 1, and for removal of `[tool_history]` with a PR 1 or later
      build, replace every history policy, whatever its action scope, with a reviewed replacement that
      has no temporal block. A policy scoped to one tool, for example
      `action == Pgs::Gateway::Action::"send"`, also errors when it reads a slot. A tenant set may move
-     to mode `log_only` instead. In this build, `log_only` only observes the slot policies, so the
+     to mode `log_only` instead. In PR 1, `log_only` only observes the slot policies, so the
      tenant set blocks no call through them.
    - For a rollback to a build before SMA-753 PR 1, publish a condition-free version of each set with
      a condition. A tenant set may move to mode `off` instead. Mode `off` stops the tenant's
@@ -578,21 +715,50 @@ has the basis `errored_forbid` in `gateway_tool_policy_decisions_total`. The dec
 names that forbid in `errored=`. A call that only a history permit can allow has the basis `policy`
 and an empty `determining=` list.
 
-### Known limits of PR 1
+### Known limits
+
+These limits apply after PR 2.
 
 - The settle is asynchronous. A very fast follow-up request can arrive before the settle ends. The
   gateway can then report `forged_history` for a real call.
 - `forged_history` also fires for a blocked call, and for a link older than 25 hours.
-- `history_truncated` cannot fire in PR 1. No code reads a history window yet.
 - A decision on the request side cannot act on the history findings. The findings exist only after
   the model answers.
-- A client can hide `forged_history`. The gateway reads only the tool results after the last
-  assistant message (spec D4). A client that adds one assistant message after the forged results
-  gets no `forged_history` finding for them. Do not use `forged_history` as the only control.
-  SMA-753 PR 2 closes this limit. It checks the results after the last assistant message that has
-  tool calls (spec D4, decision of 2026-11-22). After PR 2, the results of the last tool turn are
-  checked again on each later request, until the next tool turn. After the link expiry of 25
-  hours, these results can fire `forged_history` on each of these requests.
+- The `forged_history` check uses an anchor. The gateway checks the results after the last
+  assistant message that has tool calls. If no assistant message has tool calls, every tool
+  result in the request counts. After
+  the link expiry of 25 hours, the results of the last tool turn can fire `forged_history` on each
+  request until the next tool turn.
+- A client can still hide `forged_history`. A client that repeats a linked tool turn after the
+  forged results hides them. A trailing assistant message with text only no longer hides them. Do
+  not use `forged_history` as the only control.
+- A lost settle keeps the call link of a blocked call. A forged result for that call then counts
+  as linked, and it adds a result event. This can make a `formerly(x::response)` or a
+  `count_within(...) >= N` permit allow a call. The risk is low, because the client never sees the
+  call id of a blocked call. A deny append that runs before a late reserve has the same effect. The
+  reserve then writes the call link of the blocked call, and nothing deletes it.
+- One mistyped call, or one call with unparsed arguments, makes every condition that depends on it
+  missing for up to 24 hours, in the histories of that call. Only the session, the principal or
+  the key of that client is affected.
+- With no history key, every condition with a string, bool or decimal literal has a missing slot.
+- A field path that is not in an event reads as `false` (design R3). So a `sum_within` adds 0 for
+  that event, and a `count_within` or a `formerly` with a field test does not count it. A cap can
+  then count fewer events than were made, and it can allow a call that it should block. This
+  applies for up to 24 hours (the longest window) to the events of these four cases:
+  - A policy edit adds a field path. The events from before the edit do not have the path.
+  - A tool joins the catalog of an `any_catalog_tool` rule with a field test. Its events from
+    before the catalog change do not have the path.
+  - A replica of a build before PR 2 wrote the events, during the rolling deploy or before it, for
+    a live set that already holds a history rule (see "Before you deploy SMA-753 PR 1").
+  - The tenant set was unavailable on a replica that had no last known field plan of the
+    organization. That replica stores only the paths of the floor conditions.
+  So a new field cap starts from zero. Do not rely on it for the first 24 hours.
+- The tool index never removes a tool. A history that reaches 256 tools makes every-tool rules
+  fail closed (the slot is missing) while that history is active.
+- The hold read costs time in proportion to the events in the window (see "Sizing"). A truncated
+  hold that passes through still makes no event.
+- Under a tenant `fail_mode = open`, a store error makes every tenant policy only observed for that
+  hold. The caps are included.
 - Some providers use the same call id again, for example `call_0`. For one principal with
   concurrent sessions, the last settle links that id to its own session. A result of the other
   session can then give a false `mixed_sessions`. The gateway can also write no result event for

@@ -16,6 +16,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use paigasus_gateway::adapters::history::HmacHistoryDigester;
 use paigasus_gateway::adapters::history::memory::MemorySessionStore;
 use paigasus_gateway::adapters::http::interception::ToolInterception;
 use paigasus_gateway::adapters::http::{AppState, ResponsesSettings, router};
@@ -105,7 +106,7 @@ fn tp_settings_on(mode: TenantMode, on: OnUnavailable) -> ToolPolicySettings {
 
 /// The request side over `source`, as `runtime::build_tool_policy` builds it.
 fn tp_with(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Option<Arc<RequestToolPolicy>> {
-    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings), Arc::new(HmacHistoryDigester::keyless()));
     Some(Arc::new(RequestToolPolicy::new(
         cache,
         settings,
@@ -116,7 +117,7 @@ fn tp_with(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Optio
 /// `tp_with`, with the floor loaded into the cache before the first request. A request then
 /// spends its `load_timeout` on the tenant load only.
 async fn tp_preloaded(source: Arc<dyn PolicySource>, settings: ToolPolicySettings) -> Option<Arc<RequestToolPolicy>> {
-    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(source, CacheSettings::from_settings(&settings), Arc::new(HmacHistoryDigester::keyless()));
     assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "the floor loads");
     Some(Arc::new(RequestToolPolicy::new(
         cache,
@@ -746,9 +747,19 @@ async fn a_limit_refusal_after_the_request_side_carries_the_request_entries_head
 /// SMA-753 D4: the request side over the file source in `dir`, with a memory session history.
 fn tool_policy_with_history(dir: &TempDir, store: &Arc<MemorySessionStore>) -> Option<Arc<RequestToolPolicy>> {
     let settings = tp_settings(TenantMode::Enforce);
-    let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&settings));
+    let cache = PolicyCache::new(
+        Arc::new(FilePolicySource::new(dir.path())),
+        CacheSettings::from_settings(&settings),
+        Arc::new(HmacHistoryDigester::keyless()),
+    );
     let store: Arc<dyn SessionStore> = store.clone();
-    let history = ToolHistory::new(store, Arc::new(FixedClock(at(NOON))), Arc::new(OsEntropy), Duration::from_secs(1));
+    let history = ToolHistory::new(
+        store,
+        Arc::new(FixedClock(at(NOON))),
+        Arc::new(OsEntropy),
+        Duration::from_secs(1),
+        Arc::new(paigasus_gateway::adapters::history::HmacHistoryDigester::keyless()),
+    );
     Some(Arc::new(
         RequestToolPolicy::new(cache, settings, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing())).with_history(Arc::new(history)),
     ))
@@ -767,6 +778,10 @@ async fn seed_link(store: &MemorySessionStore, session: Uuid) {
     let calls = vec![CallEvent {
         id: event_id,
         tool: "read_file".to_owned(),
+        call_id: None,
+        item_id: None,
+        fields: paigasus_kernel::tool_policy::history::Fields::Values(std::collections::BTreeMap::new()),
+        key: None,
     }];
     store
         .reserve(&ReserveRequest {
@@ -774,7 +789,7 @@ async fn seed_link(store: &MemorySessionStore, session: Uuid) {
             turn: 1,
             calls,
             now_ms,
-            window_from_ms: None,
+            read: None,
         })
         .await
         .expect("reserve");
@@ -1644,7 +1659,11 @@ mod detectors {
             cedar = cedar.with_detectors(Arc::clone(&pipeline), limits.decide_timeout, settings);
         }
         let tp_settings = tp_settings(mode);
-        let cache = PolicyCache::new(Arc::new(FilePolicySource::new(dir.path())), CacheSettings::from_settings(&tp_settings));
+        let cache = PolicyCache::new(
+            Arc::new(FilePolicySource::new(dir.path())),
+            CacheSettings::from_settings(&tp_settings),
+            Arc::new(HmacHistoryDigester::keyless()),
+        );
         // The request side keeps the pipeline also with `enabled = false`, so a test can prove that
         // the switch alone stops the screen.
         let tp = RequestToolPolicy::new(cache, tp_settings, Arc::clone(&recorder)).with_detectors(Some(pipeline), settings);

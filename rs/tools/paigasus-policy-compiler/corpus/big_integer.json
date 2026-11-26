@@ -1,0 +1,414 @@
+{
+  "shape": "formerly",
+  "schema": "tests/fixtures/corpus_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-big-permit\")\npermit (principal, action == Pgs::Gateway::Action::\"send\", resource);\n@id(\"corpus-big\")\nforbid (principal, action == Pgs::Gateway::Action::\"send\", resource)\nwhen temporal { formerly within 10m Pgs::Gateway::Action::\"send\"::request{ input.amount: 5 } };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-big-permit\")\npermit(principal, action == Pgs::Gateway::Action::\"send\", resource) when { true };\n@id(\"corpus-big\")\nforbid(principal, action == Pgs::Gateway::Action::\"send\", resource) when { context.p_corpus_hbig_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "op_eq": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ge": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_gt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_le": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_lt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ne": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "pay": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "memo": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      },
+                      "meta": {
+                        "type": "Record",
+                        "attributes": {
+                          "limit": {
+                            "type": "Record",
+                            "attributes": {
+                              "max": {
+                                "type": "EntityOrCommon",
+                                "name": "Long",
+                                "required": false
+                              }
+                            },
+                            "required": false
+                          },
+                          "region": {
+                            "type": "EntityOrCommon",
+                            "name": "String",
+                            "required": false
+                          }
+                        },
+                        "required": false
+                      },
+                      "price": {
+                        "type": "EntityOrCommon",
+                        "name": "decimal",
+                        "required": false
+                      },
+                      "urgent": {
+                        "type": "EntityOrCommon",
+                        "name": "Bool",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  },
+                  "p_corpus_hbig_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hbig_0__temporal_0",
+        "policy_id": "corpus-big",
+        "scope": "session",
+        "window_ms": 600000,
+        "shape": {
+          "type": "formerly",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "all_of",
+              "left": {
+                "type": "event_kind",
+                "kind": "request"
+              },
+              "right": {
+                "type": "tool",
+                "name_key": "send"
+              }
+            },
+            "right": {
+              "type": "field",
+              "path": [
+                "amount"
+              ],
+              "op": "eq",
+              "value": {
+                "type": "long",
+                "value": 5
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 7
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 7}"
+    },
+    {
+      "ts": 10,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": "99999999999999999999"
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 99999999999999999999}"
+    },
+    {
+      "ts": 20,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 7
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 7}"
+    },
+    {
+      "ts": 700,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 7
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 7}"
+    }
+  ],
+  "decisions": [
+    "allow",
+    "deny",
+    "allow",
+    "allow"
+  ],
+  "notes": [
+    "a forbid when a call in the last 10 m had `amount: 5`, and a plain permit",
+    "call 1: Dogwood gets the big integer as a string, refuses it as nonconforming, denies it and does not record it",
+    "call 3 is 690 s after call 1: the window is closed"
+  ],
+  "paigasus_differs": [
+    {
+      "event": 2,
+      "dogwood": "allow",
+      "paigasus": "deny",
+      "rule": "spec P1: the kernel reads 99999999999999999999 as a Text number, which is stored as Mistyped and is unknown; `formerly` with no true event and one unknown event makes the slot missing, and the errored forbid denies"
+    }
+  ]
+}

@@ -112,8 +112,7 @@ async fn the_real_compiler_compiles_a_generic_floor() {
     assert!(compiled.cedar_policies.contains("floor-no-unregistered"), "{}", compiled.cedar_policies);
 }
 
-// SMA-753: IAM refuses a history rule until the gateway evaluates one. When SMA-753 lifts that,
-// restore the round-trip test (slot, policy id, window and threshold of the stored condition).
+// IAM refuses a history rule while `tool_policies.history_conditions` is off (the default).
 #[tokio::test]
 async fn a_count_within_policy_is_refused_until_the_gateway_supports_history() {
     let Some(path) = support::real_compiler_path("a_count_within_policy_is_refused_until_the_gateway_supports_history") else {

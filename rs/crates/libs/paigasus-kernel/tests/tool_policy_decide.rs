@@ -5,8 +5,10 @@
 use std::sync::Arc;
 
 use paigasus_kernel::detect::{HOSTS_OVERFLOW, HostSet, Severity, call_hosts};
+use paigasus_kernel::tool_policy::history::Slots;
 use paigasus_kernel::tool_policy::{
-    ActionGroup, Declared, Effect, Facts, Findings, PolicyOrigin, PolicyRef, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, UNPARSED_ARGUMENTS, decide,
+    ActionGroup, Declared, Effect, Facts, Findings, PolicyOrigin, PolicyRef, RESERVED_CONTEXT_NAMES, RequestInfo, SessionInfo, ToolInput, ToolInvocation, ToolPolicies, UNPARSED_ARGUMENTS, decide,
+    decide_with_slots,
 };
 use paigasus_kernel::{CedarUid, Prn, to_cedar_uid};
 
@@ -464,4 +466,42 @@ fn an_unevaluable_verdict_has_the_caller_severity_and_empty_lists() {
     let v = decide(&call("x", "not json"), &bad_facts(), &findings(&["name_collision"]), &policies("", "", &[]));
     assert_eq!(v.max_severity, Some(Severity::High));
     assert!(v.added.is_empty() && v.errored_forbids.is_empty() && v.determining_forbids.is_empty());
+}
+
+#[test]
+fn a_slot_reaches_the_context_and_a_missing_slot_errors() {
+    let p = policies(
+        "",
+        r#"@id("all") permit(principal, action, resource); @id("cap") forbid(principal, action, resource) when { context.over };"#,
+        &[],
+    );
+    let mut over = Slots::new();
+    over.insert("over", true);
+    assert_eq!(decide_with_slots(&call("x", "{}"), &facts(), &Findings::new(), &over, &p).decision, Effect::Deny);
+    let mut under = Slots::new();
+    under.insert("over", false);
+    assert_eq!(decide_with_slots(&call("x", "{}"), &facts(), &Findings::new(), &under, &p).decision, Effect::Allow);
+    let v = decide(&call("x", "{}"), &facts(), &Findings::new(), &p);
+    assert_eq!(v.decision, Effect::Deny);
+    assert!(v.errored_forbid, "a missing slot errors the forbid");
+}
+
+#[test]
+fn a_reserved_slot_name_is_skipped_and_does_not_panic() {
+    let p = policies("", ALL, &[]);
+    for name in RESERVED_CONTEXT_NAMES {
+        let mut s = Slots::new();
+        s.insert(name, true);
+        let v = decide_with_slots(&call("x", "{}"), &facts(), &Findings::new(), &s, &p);
+        assert_eq!(v.decision, Effect::Allow, "{name}");
+    }
+}
+
+#[test]
+fn a_permit_on_a_missing_slot_does_not_allow() {
+    let p = policies("", r#"@id("p") permit(principal, action, resource) when { context.slot_x };"#, &[]);
+    let v = decide(&call("x", "{}"), &facts(), &Findings::new(), &p);
+    assert_eq!(v.decision, Effect::Deny, "an errored permit does not allow");
+    assert!(!v.errored_forbid);
+    assert_eq!(v.errored, vec![pref(PolicyOrigin::Tenant, "p")]);
 }

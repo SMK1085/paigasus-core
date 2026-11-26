@@ -8,16 +8,49 @@
 //! interleaves with another. Every instant comes from the gateway's clock; no script calls `TIME`.
 //! Rust builds every key name and passes it in `KEYS`. The exceptions are the `s:` key of a
 //! session and the `e:` key of an event that a link names, which `LOOKUP_SCRIPT` builds from a
-//! prefix in `ARGV` and only reads. That is allowed because Redis Cluster is not supported (N4).
+//! prefix in `ARGV` and only reads, and the keys of the window read in `APPEND_SCRIPT`: the `e:`
+//! key of each member that it reads, and the `h:` and `x:` keys of each tool of an every-tool read
+//! (the `t:` index holds tool digests, so only the script knows them). All of these are only read.
+//! That is allowed because Redis Cluster is not supported (N4).
 //!
 //! Layout. A client string in a key name is a digest (`link_digest`), never the raw string:
 //! - `h:<org>:<s|p|k>:<sha256(scope id)>:<sha256(tool)>`: a sorted set, score `ts_ms`, member the event id.
 //! - `t:<org>:<s|p|k>:<sha256(scope id)>`: the set of tool digests of a history.
 //! - `e:<org>:<event id>`: a hash, `b` = the JSON body, `v` = the verdict, and on a call event
 //!   `r` = the id of its result event once that exists (the result guard).
-//! - `l:<org>:<sha256(principal)>:c:<sha256(call id)>`: a hash, `s`, `t`, `e`.
+//! - `l:<org>:<sha256(principal)>:c:<sha256(call id)>`: a hash, `s`, `t`, `e`. No state field, so a
+//!   PR 1 replica can read it after a rollback.
 //! - `l:<org>:<sha256(principal)>:d:<decision id>`: a string, the session.
 //! - `s:<org>:<session>`: a hash, `last_ms` and `turn`.
+//! - `x:<org>:<s|p|k>:<sha256(scope id)>:<sha256(tool)>`: a string, the truncation mark of an `h:`
+//!   key: the largest score that a cap trim removed from it (spec P4). It keeps the larger value.
+//! - `x:t:<org>:<s|p|k>:<sha256(scope id)>`: a string, the every-tool mark of a history: the time of
+//!   a write whose tool did not fit in the `t:` index (`MAX_INDEXED_TOOLS`). It keeps the larger
+//!   value.
+//!
+//! The window read (spec P4) runs at the end of a reserve, after its writes, so the reply holds the
+//! pending events of the reserve. It reads at most `MAX_READ_SETS` sets and `MAX_READ_EVENTS`
+//! events: the set that passes a limit and every later set come back truncated, with no event. A
+//! member whose `e:` body is gone is skipped and counted (spec P10). The reply carries the body and
+//! the verdict of each event, not the member or the score: the adapter takes the id and the time
+//! from the body. The script checks the body id against the member, and the read fails closed on a
+//! body that names another id. The body time is trusted as the score, as the `v` and `f` fields of
+//! the `e:` hash are trusted: every write puts one `now_ms` into both.
+//!
+//! The body `b` (spec P3, `body.rs`) keeps `v: 1` and has these members: `id`, `ts`, `k`, `t`, and
+//! then the stored fields of the call: `f` (path to value) and `kid` (the hex key id), or `b: 1`
+//! (unparsed arguments). A result event gets the `f`, `kid` and `b` of its call: the write script
+//! copies them by text from the call body that the result guard reads (design D5).
+//!
+//! The `c:` links (spec P8, P9):
+//! - The reserve writes the `c:` link of each call next to its `d:` link, under the call id and
+//!   under the item id. It keeps a link that already names another event (a reused call id).
+//! - An allow settle writes the link, and replaces a link of another event (PR 1).
+//! - A deny settle deletes a link only when its `e` is this event and the stored verdict is `deny`.
+//! - An append writes the verdict of the call. Only an allowed call writes (and replaces) links. A
+//!   denied call deletes each link that still names its event (a late reserve wrote it). An
+//!   append under an id that a reserve wrote replaces the body, the verdict and the score of that
+//!   one member: one event (plan decision D-E).
 //!
 //! Every key gets `EXPIRE KEY_TTL_SECS` on each write. A trim never deletes an `e:` body: another
 //! history can still hold the event, and the body expires by its TTL.
@@ -27,15 +60,16 @@
 
 use std::sync::Arc;
 
+use paigasus_kernel::tool_policy::history::{Fields, KeyId, SetTool};
 use paigasus_observability::names;
 use paigasus_redis::{BreakerMetrics, RedisHandle};
-use serde::Deserialize;
 use uuid::Uuid;
 
+use super::body::{decode_body, decode_error, encode_body, id_offset};
 use crate::domain::limits::UnavailableKind;
 use crate::domain::tool_history::{
-    AppendReply, AppendRequest, CallLink, EventKind, EventVerdict, Histories, HistoryStoreError, KEY_TTL_SECS, LookupReply, LookupRequest, MAX_EVENTS_PER_TOOL, RETENTION_MS, ReserveRequest, Scope,
-    SessionState, SessionStore, SettleRequest, StoredEvent, WriteRequest, link_digest,
+    AppendReply, AppendRequest, CallLink, EventKind, EventVerdict, Histories, HistoryStoreError, KEY_TTL_SECS, LookupReply, LookupRequest, MAX_EVENTS_PER_TOOL, MAX_INDEXED_TOOLS, MAX_READ_EVENTS,
+    MAX_READ_SETS, RETENTION_MS, ReadRequest, ReserveRequest, Scope, SessionState, SessionStore, SetWindow, SettleRequest, StoredEvent, WriteRequest, check_window, link_digest,
 };
 
 /// Every key starts with this. `v1` lets a later format use new keys with no migration.
@@ -44,10 +78,7 @@ pub const KEY_PREFIX: &str = "paigasus:gateway:history:v1:";
 /// The `role` label of the breaker series of this connection.
 pub const HISTORY_BREAKER_ROLE: &str = "tool_history";
 
-/// The version of the event body encoding. A reader ignores unknown fields (rolling upgrade).
-const BODY_VERSION: u64 = 1;
-
-/// The `c:` link rule, shared by `APPEND_SCRIPT` and `SETTLE_SCRIPT`.
+/// The `c:` link rules, shared by `APPEND_SCRIPT` and `SETTLE_SCRIPT`.
 macro_rules! call_link_lua {
     () => {
         r#"
@@ -58,6 +89,12 @@ local function put_call_link(key, session, tool, id, ttl)
   redis.call('HSET', key, 's', session, 't', tool, 'e', id)
   redis.call('EXPIRE', key, ttl)
 end
+-- Delete the c: link only when it still names the event `id` (spec P8).
+local function drop_own_call_link(key, id)
+  if redis.call('HGET', key, 'e') == id then
+    redis.call('DEL', key)
+  end
+end
 "#
     };
 }
@@ -67,13 +104,25 @@ const APPEND_SCRIPT: &str = concat!(
     call_link_lua!(),
     r#"
 -- ARGV: now_ms, retention_ms, cap, ttl_secs, window_from ('' = none), turn ('' = no touch),
---       session, verdict, guard ('0'|'1'), link kind ('-'|'d'|'c'), H, T, N,
+--       session, c-link mode ('keep'|'replace'), guard ('0'|'1'), H, T, N,
+--       max indexed tools, max read sets, max read events, the e: key prefix, the byte offset of
+--       the id in a body (`id_offset` in body.rs),
 --       then per tool (2 values): tool digest, tool name,
---       then per event (4 values): id, body, tool index (1..T), link count.
--- KEYS: s-key, H t-keys, T * H h-keys (tool t, history i at 1 + H + (t - 1) * H + i),
+--       then per event (6 values): id, body, tool index (1..T), verdict, d-link count, c-link count,
+--       then R (the number of read sets; only read when window_from is set),
+--       then per read set (3 values): 't' (one tool), 'e' (every tool) or another value (a set
+--       that the adapter does not know: truncated), the h: key prefix and the x: key prefix of
+--       the history ('' unless 'e').
+-- KEYS: s-key, H t-keys, H x:t keys (the every-tool marks), T * H h-keys (tool t, history i at
+--       1 + 2H + (t - 1) * H + i), T * H x-keys (at 1 + 2H + T * H + (t - 1) * H + i),
 --       then per event: e-key, the guard key when guard = '1' (the e: key of the CALL event
---       that the result belongs to), then `link count` link keys (a local shell call has two c:
---       links, F7).
+--       that the result belongs to), then the d: keys, then the c: keys (a local shell call has
+--       two c: links, F7),
+--       then per read set (2 keys): the h: key and its x: key ('t'), or the t: key and the x:t key
+--       of the history ('e').
+-- c-link mode 'keep' (reserve): a c: link that names another event stays. 'replace' (append): the
+-- link is written. An event with the verdict 'deny' (an append) writes no c: link: it deletes each
+-- one that still names it.
 -- A history key and a tool go once per distinct tool, not once per event: a reserve of 10,000
 -- events must stay small on the wire.
 local now = tonumber(ARGV[1])
@@ -83,29 +132,62 @@ local ttl = tonumber(ARGV[4])
 local window_from = ARGV[5]
 local turn = ARGV[6]
 local session = ARGV[7]
-local verdict = ARGV[8]
+local cmode = ARGV[8]
 local guard = ARGV[9]
-local link = ARGV[10]
-local H = tonumber(ARGV[11])
-local T = tonumber(ARGV[12])
-local N = tonumber(ARGV[13])
+local H = tonumber(ARGV[10])
+local T = tonumber(ARGV[11])
+local N = tonumber(ARGV[12])
+local max_tools = tonumber(ARGV[13])
+local max_sets = tonumber(ARGV[14])
+local max_events = tonumber(ARGV[15])
+local eprefix = ARGV[16]
+local idat = tonumber(ARGV[17])
+local A0 = 17
 
 local digests, names, members = {}, {}, {}
 for t = 1, T do
-  digests[t] = ARGV[13 + 2 * t - 1]
-  names[t] = ARGV[13 + 2 * t]
+  digests[t] = ARGV[A0 + 2 * t - 1]
+  names[t] = ARGV[A0 + 2 * t]
   members[t] = {}
 end
 local function hkey(t, i)
-  return KEYS[1 + H + (t - 1) * H + i]
+  return KEYS[1 + 2 * H + (t - 1) * H + i]
+end
+local function xkey(t, i)
+  return KEYS[1 + 2 * H + T * H + (t - 1) * H + i]
+end
+
+-- A truncation mark keeps the larger value, and gets the TTL of its set.
+local function raise_mark(key, value)
+  local old = redis.call('GET', key)
+  if not old or tonumber(old) < value then
+    redis.call('SET', key, string.format('%.0f', value))
+  end
+  redis.call('EXPIRE', key, ttl)
+end
+
+-- The stored fields of a call body are its last members (`,"f":` or `,"b":` up to the closing
+-- brace, see body.rs). Copy them into the result body by text: Lua reads a JSON number as a
+-- double, so a decode and an encode would change a large Long. A call body with neither member
+-- (PR 1) gives none.
+local function copy_fields(body, call_body)
+  if not call_body then
+    return body
+  end
+  local at = string.find(call_body, ',"f":', 1, true) or string.find(call_body, ',"b":', 1, true)
+  if not at then
+    return body
+  end
+  return string.sub(body, 1, -2) .. string.sub(call_body, at, -2) .. '}'
 end
 
 local written = 0
 local seen_guard, guard_sets = {}, {}
-local k, a = 1 + H + T * H, 13 + 2 * T
+local k, a = 1 + 2 * H + 2 * T * H, A0 + 2 * T
 for j = 1, N do
-  local id, body, t, nlinks = ARGV[a + 1], ARGV[a + 2], tonumber(ARGV[a + 3]), tonumber(ARGV[a + 4])
-  a = a + 4
+  local id, body, t, verdict = ARGV[a + 1], ARGV[a + 2], tonumber(ARGV[a + 3]), ARGV[a + 4]
+  local nd, nc = tonumber(ARGV[a + 5]), tonumber(ARGV[a + 6])
+  a = a + 6
   k = k + 1
   local ekey = KEYS[k]
   local skip = false
@@ -122,20 +204,36 @@ for j = 1, N do
     -- (an ACL error on a later write) leaves no guard and a retry writes the result.
     elseif seen_guard[gkey] or redis.call('HEXISTS', gkey, 'r') == 1 then
       skip = true
+    -- A denied call was not forwarded, so it gets no result. A deny settle can land between
+    -- the lookup and this write.
+    elseif redis.call('HGET', gkey, 'v') == 'deny' then
+      skip = true
     end
   end
-  local lbase = k
-  k = k + nlinks
+  local dbase = k
+  local cbase = k + nd
+  k = k + nd + nc
   if not skip then
+    if gkey then
+      body = copy_fields(body, redis.call('HGET', gkey, 'b'))
+    end
     redis.call('HSET', ekey, 'b', body, 'v', verdict)
     redis.call('EXPIRE', ekey, ttl)
     table.insert(members[t], id)
-    for l = 1, nlinks do
-      local lkey = KEYS[lbase + l]
-      if link == 'd' then
-        redis.call('SET', lkey, session, 'EX', ttl)
-      elseif link == 'c' then
-        put_call_link(lkey, session, names[t], id, ttl)
+    for l = 1, nd do
+      redis.call('SET', KEYS[dbase + l], session, 'EX', ttl)
+    end
+    for l = 1, nc do
+      local lkey = KEYS[cbase + l]
+      if verdict == 'deny' then
+        -- A denied call was not forwarded: it deletes the links that still name it (a reserve
+        -- that returned too late for the report site wrote them), and writes none.
+        drop_own_call_link(lkey, id)
+      else
+        local held = cmode == 'keep' and redis.call('HGET', lkey, 'e') or false
+        if not held or held == id then
+          put_call_link(lkey, session, names[t], id, ttl)
+        end
       end
     end
     if gkey then
@@ -168,7 +266,16 @@ for t = 1, T do
         end
         redis.call('ZADD', key, unpack(batch))
       end
-      redis.call('SADD', KEYS[1 + i], digests[t])
+      -- The t: index holds at most max_tools tools. A tool past it keeps its own set, and the
+      -- history gets the every-tool mark (spec P4).
+      local tkey = KEYS[1 + i]
+      if redis.call('SISMEMBER', tkey, digests[t]) == 0 then
+        if redis.call('SCARD', tkey) < max_tools then
+          redis.call('SADD', tkey, digests[t])
+        else
+          raise_mark(KEYS[1 + H + i], now)
+        end
+      end
       for _, old in ipairs(redis.call('ZRANGEBYSCORE', key, '-inf', cut)) do
         if not retention_seen[old] then
           retention_seen[old] = true
@@ -189,6 +296,8 @@ for t = 1, T do
             flag = true
           end
         end
+        -- ZPOPMIN answers in ascending score order: the last score is the largest removed one.
+        raise_mark(xkey(t, i), tonumber(popped[#popped]))
         if flag then
           table.insert(flagged, tostring(i))
           table.insert(flagged, tostring(t))
@@ -223,11 +332,73 @@ if turn ~= '' then
   redis.call('EXPIRE', skey, ttl)
 end
 
-local out = {tostring(written), tostring(trimmed_retention), tostring(trimmed_cap)}
+-- The window read (spec P4), after every write. A set past a read limit and every later set come
+-- back truncated with no event and no mark. An entry is {set index (1..R), truncated, mark ('' =
+-- none), then 2 values per event: body, verdict}. The member and the score are not sent: every
+-- write puts the member into the body `id` and the score into the body `ts`, so the adapter takes
+-- both from the body. The script checks the body id (36 bytes at `idat`) against the member, and
+-- counts a body that names another id as corrupt; the adapter fails the read on a corrupt body.
+-- The adapter checks the index against the request order. A member whose e: body is gone is
+-- skipped and counted.
+local window, missing, corrupt = {}, 0, 0
+if window_from ~= '' then
+  local R = tonumber(ARGV[a + 1])
+  local read_events, stopped = 0, false
+  for r = 1, R do
+    local kind, hprefix, xprefix = ARGV[a + 3 * r - 1], ARGV[a + 3 * r], ARGV[a + 3 * r + 1]
+    local k1, k2 = KEYS[k + 2 * r - 1], KEYS[k + 2 * r]
+    if r > max_sets or (kind ~= 't' and kind ~= 'e') then
+      stopped = true
+    end
+    local entry = {tostring(r), '1', ''}
+    if not stopped then
+      local hkeys, mark = {}, redis.call('GET', k2)
+      mark = mark and tonumber(mark) or nil
+      if kind == 't' then
+        hkeys[1] = k1
+      else
+        for _, d in ipairs(redis.call('SMEMBERS', k1)) do
+          hkeys[#hkeys + 1] = hprefix .. d
+          local m = redis.call('GET', xprefix .. d)
+          if m and (not mark or tonumber(m) > mark) then
+            mark = tonumber(m)
+          end
+        end
+      end
+      local count = 0
+      for _, h in ipairs(hkeys) do
+        count = count + redis.call('ZCOUNT', h, window_from, '+inf')
+      end
+      if read_events + count > max_events then
+        stopped = true
+      else
+        read_events = read_events + count
+        entry = {tostring(r), '0', mark and string.format('%.0f', mark) or ''}
+        for _, h in ipairs(hkeys) do
+          local m = redis.call('ZRANGEBYSCORE', h, window_from, '+inf')
+          for p = 1, #m do
+            local f = redis.call('HMGET', eprefix .. m[p], 'b', 'v')
+            if not (f[1] and f[2]) then
+              missing = missing + 1
+            elseif string.sub(f[1], idat + 1, idat + 36) ~= m[p] then
+              corrupt = corrupt + 1
+            else
+              entry[#entry + 1] = f[1]
+              entry[#entry + 1] = f[2]
+            end
+          end
+        end
+      end
+    end
+    window[r] = entry
+  end
+end
+
+local out = {tostring(written), tostring(trimmed_retention), tostring(trimmed_cap), tostring(missing), tostring(corrupt)}
 for _, v in ipairs(flagged) do
   table.insert(out, v)
 end
-return out
+return {out, window}
 "#
 );
 
@@ -289,10 +460,15 @@ for j = 1, N do
       stored = verdict
     end
     redis.call('EXPIRE', ekey, ttl)
-    -- The link follows the STORED verdict: a later allow settle of a denied event writes no link.
+    -- The link follows the STORED verdict: a later allow settle of a denied event writes no link,
+    -- and a later deny settle of an allowed event deletes none.
     if verdict == 'allow' and stored == 'allow' then
       for l = 1, nlinks do
         put_call_link(KEYS[lbase + l], session, tool, id, ttl)
+      end
+    elseif verdict == 'deny' and stored == 'deny' then
+      for l = 1, nlinks do
+        drop_own_call_link(KEYS[lbase + l], id)
       end
     end
   end
@@ -307,6 +483,22 @@ pub fn history_key(org: Uuid, scope: Scope, scope_id: &str, tool: &str) -> Strin
 
 fn tools_key(org: Uuid, scope: Scope, scope_id: &str) -> String {
     format!("{KEY_PREFIX}t:{org}:{}:{}", scope.as_str(), link_digest(scope_id))
+}
+
+/// The truncation mark of `history_key(org, scope, scope_id, tool)`.
+pub fn mark_key(org: Uuid, scope: Scope, scope_id: &str, tool: &str) -> String {
+    format!("{KEY_PREFIX}x:{org}:{}:{}:{}", scope.as_str(), link_digest(scope_id), link_digest(tool))
+}
+
+/// The every-tool mark of a history.
+fn tools_mark_key(org: Uuid, scope: Scope, scope_id: &str) -> String {
+    format!("{KEY_PREFIX}x:t:{org}:{}:{}", scope.as_str(), link_digest(scope_id))
+}
+
+/// The key prefixes of the sets of one history: `h:` and `x:`. The script adds a tool digest.
+fn set_prefixes(org: Uuid, scope: Scope, scope_id: &str) -> (String, String) {
+    let tail = format!("{org}:{}:{}:", scope.as_str(), link_digest(scope_id));
+    (format!("{KEY_PREFIX}h:{tail}"), format!("{KEY_PREFIX}x:{tail}"))
 }
 
 pub fn event_key(org: Uuid, id: Uuid) -> String {
@@ -325,49 +517,24 @@ pub fn session_key(org: Uuid, session: Uuid) -> String {
     format!("{KEY_PREFIX}s:{org}:{session}")
 }
 
-fn encode_body(id: Uuid, ts_ms: u64, kind: EventKind, tool: &str) -> String {
-    serde_json::json!({ "v": BODY_VERSION, "id": id.to_string(), "ts": ts_ms, "k": kind.as_str(), "t": tool }).to_string()
-}
-
-/// The JSON body. serde ignores unknown keys, so a body of a later version still decodes.
-#[derive(Deserialize)]
-struct Body {
-    v: u64,
-    id: String,
-    ts: u64,
-    k: String,
-    t: String,
-}
-
-fn decode_error(detail: impl Into<String>) -> HistoryStoreError {
-    HistoryStoreError::Unavailable {
-        kind: UnavailableKind::Decode,
-        detail: detail.into(),
-    }
-}
-
 /// Decode the fields of an `e:` hash (`b` = the JSON body, `v` = the verdict). Unknown fields of
 /// the hash and unknown keys of the body are ignored (rolling upgrade).
+///
+/// # Errors
+///
+/// A hash with no `b` or no `v`, a body that `decode_body` refuses, or an unknown verdict.
 pub fn decode_event(fields: &[(String, String)]) -> Result<StoredEvent, HistoryStoreError> {
     let field = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
-    let raw = field("b").ok_or_else(|| decode_error("event body has no `b` field"))?;
-    let body: Body = serde_json::from_str(raw).map_err(|_| decode_error("event body is not valid JSON"))?;
-    if body.v < BODY_VERSION {
-        return Err(decode_error(format!("event body has version {}", body.v)));
-    }
-    let id = Uuid::try_parse(&body.id).map_err(|_| decode_error("event body id is not a uuid"))?;
-    let kind = match body.k.as_str() {
-        "request" => EventKind::Call,
-        "response" => EventKind::Result,
-        _ => return Err(decode_error("event body has an unknown kind")),
-    };
+    let body = decode_body(field("b").ok_or_else(|| decode_error("event body has no `b` field"))?)?;
     let verdict = parse_verdict(field("v").ok_or_else(|| decode_error("event has no `v` field"))?)?;
     Ok(StoredEvent {
-        id,
-        ts_ms: body.ts,
-        kind,
-        tool: body.t,
+        id: body.id,
+        ts_ms: body.ts_ms,
+        kind: body.kind,
+        tool: body.tool,
         verdict,
+        fields: body.fields,
+        key: body.key,
     })
 }
 
@@ -462,19 +629,20 @@ fn text_of(value: &redis::Value) -> Option<String> {
     }
 }
 
+/// How `APPEND_SCRIPT` writes a `c:` link that already exists.
 #[derive(Clone, Copy)]
-enum LinkKind {
-    None,
-    Decision,
-    Call,
+enum CallLinkMode {
+    /// The reserve: a link that names another event stays (spec P8).
+    Keep,
+    /// The append: the link is written.
+    Replace,
 }
 
-impl LinkKind {
+impl CallLinkMode {
     fn as_arg(self) -> &'static str {
         match self {
-            LinkKind::None => "-",
-            LinkKind::Decision => "d",
-            LinkKind::Call => "c",
+            CallLinkMode::Keep => "keep",
+            CallLinkMode::Replace => "replace",
         }
     }
 }
@@ -483,21 +651,25 @@ impl LinkKind {
 struct NewEvent {
     id: Uuid,
     tool: String,
+    verdict: EventVerdict,
+    /// The stored fields and their key id. `None` for a result event: the script copies them from
+    /// the call body.
+    stored: Option<(Fields, Option<KeyId>)>,
     /// The `e:` key of the call event whose `r` guard decides if the result is written. `write` only.
     guard: Option<String>,
-    link_keys: Vec<String>,
+    decision_keys: Vec<String>,
+    call_keys: Vec<String>,
 }
 
-/// One `APPEND_SCRIPT` call. Every event of a call has the same kind, verdict and link kind.
+/// One `APPEND_SCRIPT` call. Every event of a call has the same kind and the same link mode.
 struct Batch<'a> {
     histories: &'a Histories,
     turn: Option<i64>,
     kind: EventKind,
-    verdict: EventVerdict,
-    link: LinkKind,
+    call_links: CallLinkMode,
     events: Vec<NewEvent>,
     now_ms: u64,
-    window_from_ms: Option<u64>,
+    read: Option<&'a ReadRequest>,
 }
 
 /// The shared-Redis store. `Clone` shares the handle (one breaker) and the scripts.
@@ -533,8 +705,8 @@ impl RedisSessionStore {
 
     async fn run_append(&self, batch: &Batch<'_>) -> Result<AppendReply, HistoryStoreError> {
         let h = batch.histories;
-        if batch.events.is_empty() && batch.turn.is_none() {
-            return Ok(empty_reply());
+        if batch.events.is_empty() && batch.turn.is_none() && batch.read.is_none() {
+            return Ok(AppendReply::empty());
         }
         let scopes = h.scopes();
         // The distinct tools in first-seen order. An event names its tool by index (1..T).
@@ -550,24 +722,36 @@ impl RedisSessionStore {
         for (scope, id) in &scopes {
             inv.key(tools_key(h.org, *scope, id));
         }
+        for (scope, id) in &scopes {
+            inv.key(tools_mark_key(h.org, *scope, id));
+        }
         for tool in &tools {
             for (scope, id) in &scopes {
                 inv.key(history_key(h.org, *scope, id, tool));
+            }
+        }
+        for tool in &tools {
+            for (scope, id) in &scopes {
+                inv.key(mark_key(h.org, *scope, id, tool));
             }
         }
         inv.arg(batch.now_ms)
             .arg(RETENTION_MS)
             .arg(MAX_EVENTS_PER_TOOL)
             .arg(KEY_TTL_SECS)
-            .arg(batch.window_from_ms.map(|w| w.to_string()).unwrap_or_default())
+            .arg(batch.read.map(|r| r.from_ms.to_string()).unwrap_or_default())
             .arg(batch.turn.map(|t| t.to_string()).unwrap_or_default())
             .arg(h.session.to_string())
-            .arg(batch.verdict.as_str())
+            .arg(batch.call_links.as_arg())
             .arg(if guarded { "1" } else { "0" })
-            .arg(batch.link.as_arg())
             .arg(scopes.len())
             .arg(tools.len())
-            .arg(batch.events.len());
+            .arg(batch.events.len())
+            .arg(MAX_INDEXED_TOOLS)
+            .arg(MAX_READ_SETS)
+            .arg(MAX_READ_EVENTS)
+            .arg(format!("{KEY_PREFIX}e:{}:", h.org))
+            .arg(id_offset());
         for tool in &tools {
             inv.arg(link_digest(tool)).arg(*tool);
         }
@@ -577,31 +761,110 @@ impl RedisSessionStore {
             if let Some(guard) = &e.guard {
                 inv.key(guard);
             }
-            for key in &e.link_keys {
+            for key in e.decision_keys.iter().chain(&e.call_keys) {
                 inv.key(key);
             }
             let index = tools.iter().position(|t| *t == e.tool).map_or(0, |i| i + 1);
-            inv.arg(e.id.to_string()).arg(encode_body(e.id, batch.now_ms, batch.kind, &e.tool)).arg(index).arg(e.link_keys.len());
+            let body = encode_body(e.id, batch.now_ms, batch.kind, &e.tool, e.stored.as_ref().map(|(f, k)| (f, *k)));
+            inv.arg(e.id.to_string()).arg(body).arg(index).arg(e.verdict.as_str()).arg(e.decision_keys.len()).arg(e.call_keys.len());
+        }
+        if let Some(read) = batch.read {
+            inv.arg(read.sets.len());
+            for (scope, set) in &read.sets {
+                let id = h.scope_id(*scope);
+                match set {
+                    SetTool::Tool(tool) => {
+                        inv.key(history_key(h.org, *scope, &id, tool)).key(mark_key(h.org, *scope, &id, tool));
+                        inv.arg("t").arg("").arg("");
+                    }
+                    SetTool::Every => {
+                        let (hprefix, xprefix) = set_prefixes(h.org, *scope, &id);
+                        inv.key(tools_key(h.org, *scope, &id)).key(tools_mark_key(h.org, *scope, &id));
+                        inv.arg("e").arg(hprefix).arg(xprefix);
+                    }
+                    // A later kind of set that this adapter does not know: the script returns it
+                    // truncated, so it fails closed.
+                    _ => {
+                        inv.key(tools_key(h.org, *scope, &id)).key(tools_mark_key(h.org, *scope, &id));
+                        inv.arg("?").arg("").arg("");
+                    }
+                }
+            }
         }
         let mut con = self.handle.clone();
-        let reply: Vec<String> = inv.invoke_async(&mut con).await.map_err(|err| unavailable(&err))?;
-        append_reply(&reply, &scopes, &tools)
+        let (counts, window): (Vec<String>, Vec<Vec<String>>) = inv.invoke_async(&mut con).await.map_err(|err| unavailable(&err))?;
+        let (mut reply, corrupt) = append_reply(&counts, &scopes, &tools)?;
+        // A window body whose id is not its member: the read fails closed.
+        if corrupt > 0 {
+            return Err(decode_error(format!("{corrupt} window bodies name another id than their member")));
+        }
+        if let Some(read) = batch.read {
+            reply.window = window_reply(read, &window)?;
+        }
+        Ok(reply)
     }
 }
 
-fn empty_reply() -> AppendReply {
-    AppendReply {
-        written: 0,
-        trimmed_retention: 0,
-        trimmed_cap: 0,
-        truncated: Vec::new(),
+/// Map the window part of the script reply: per set, the 1-based index of the requested set that
+/// the script read, the truncated flag, the mark, then 2 values per event (body, verdict). The
+/// reply holds no member and no score: every write puts the member into the body `id` and the score
+/// into the body `ts` (the same `now_ms`), so the event takes both from its body. The events are
+/// sorted by (`ts_ms`, id). The reply must hold one entry per requested set, in order: the echoed
+/// index of each entry must be its position.
+///
+/// The script read only members with a score of at least `from_ms`, so a body whose `ts` is before
+/// `from_ms` disagrees with its score: a decode error. The script itself checks the body id against
+/// the member (`run_append` fails the read on a corrupt count).
+fn window_reply(req: &ReadRequest, raw: &[Vec<String>]) -> Result<Vec<SetWindow>, HistoryStoreError> {
+    let mut window = Vec::with_capacity(raw.len());
+    for (position, (entry, (scope, tool))) in raw.iter().zip(&req.sets).enumerate() {
+        let [index, truncated, mark, events @ ..] = entry.as_slice() else {
+            return Err(decode_error("a window entry has no set index, truncated flag or mark"));
+        };
+        if index.parse::<usize>().ok() != Some(position + 1) {
+            return Err(decode_error("a window entry is not the set of its position in the request"));
+        }
+        if events.len() % 2 != 0 {
+            return Err(decode_error("a window entry has an incomplete event"));
+        }
+        let mut stored = Vec::with_capacity(events.len() / 2);
+        for e in events.chunks(2) {
+            let event = decode_event(&[("b".into(), e[0].clone()), ("v".into(), e[1].clone())])?;
+            if event.ts_ms < req.from_ms {
+                return Err(decode_error("a window body has a time before the window"));
+            }
+            stored.push(event);
+        }
+        stored.sort_by_key(|e| (e.ts_ms, e.id));
+        window.push(SetWindow {
+            scope: *scope,
+            tool: tool.clone(),
+            events: stored,
+            mark_ms: match mark.as_str() {
+                "" => None,
+                m => Some(m.parse().map_err(|_| decode_error("a window mark is not an integer"))?),
+            },
+            truncated: match truncated.as_str() {
+                "0" => false,
+                "1" => true,
+                _ => return Err(decode_error("a window truncated flag is not 0 or 1")),
+            },
+        });
     }
+    // A short reply leaves a requested set out: a decode error, never an empty set.
+    if raw.len() != req.sets.len() {
+        return Err(decode_error(format!("the window reply holds {} sets for {} requested", raw.len(), req.sets.len())));
+    }
+    check_window(req, &window)?;
+    Ok(window)
 }
 
-/// Map the script reply: three counts, then (history index, tool index) pairs. The key names use
-/// the tool digest; the tool index maps back to the tool NAME of the request (F6).
-fn append_reply(reply: &[String], scopes: &[(Scope, String)], tools: &[&str]) -> Result<AppendReply, HistoryStoreError> {
-    let [written, retention, cap, flagged @ ..] = reply else {
+/// Map the script reply: five counts (the fourth is the missing bodies, the fifth the window bodies
+/// whose id is not their member, returned beside the reply), then (history index,
+/// tool index) pairs. The key names use the tool digest; the tool index maps back to the tool NAME
+/// of the request (F6).
+fn append_reply(reply: &[String], scopes: &[(Scope, String)], tools: &[&str]) -> Result<(AppendReply, u64), HistoryStoreError> {
+    let [written, retention, cap, missing, corrupt, flagged @ ..] = reply else {
         return Err(decode_error(format!("the append script returned {} values", reply.len())));
     };
     let count = |raw: &String| raw.parse::<u64>().map_err(|_| decode_error("the append script returned a count that is not an integer"));
@@ -618,12 +881,15 @@ fn append_reply(reply: &[String], scopes: &[(Scope, String)], tools: &[&str]) ->
             truncated.push(flag);
         }
     }
-    Ok(AppendReply {
+    let reply = AppendReply {
         written: usize::try_from(count(written)?).map_err(|_| decode_error("the written count is too large"))?,
         trimmed_retention: count(retention)?,
         trimmed_cap: count(cap)?,
         truncated,
-    })
+        window: Vec::new(),
+        missing_bodies: count(missing)?,
+    };
+    Ok((reply, count(corrupt)?))
 }
 
 /// One `c:` link from `HMGET s t e r`. All of `s`, `t`, `e` absent is no link; some absent is a
@@ -701,19 +967,21 @@ impl SessionStore for RedisSessionStore {
             .map(|r| NewEvent {
                 id: r.id,
                 tool: r.tool.clone(),
+                verdict: EventVerdict::Allow,
+                stored: None,
                 guard: Some(event_key(h.org, r.event_id)),
-                link_keys: Vec::new(),
+                decision_keys: Vec::new(),
+                call_keys: Vec::new(),
             })
             .collect();
         self.run_append(&Batch {
             histories: h,
             turn: req.turn,
             kind: EventKind::Result,
-            verdict: EventVerdict::Allow,
-            link: LinkKind::None,
+            call_links: CallLinkMode::Replace,
             events,
             now_ms: req.now_ms,
-            window_from_ms: None,
+            read: None,
         })
         .await
     }
@@ -726,19 +994,21 @@ impl SessionStore for RedisSessionStore {
             .map(|c| NewEvent {
                 id: c.id,
                 tool: c.tool.clone(),
+                verdict: EventVerdict::Pending,
+                stored: Some((c.fields.clone(), c.key)),
                 guard: None,
-                link_keys: vec![decision_link_key(h.org, &h.principal, c.id)],
+                decision_keys: vec![decision_link_key(h.org, &h.principal, c.id)],
+                call_keys: c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect(),
             })
             .collect();
         self.run_append(&Batch {
             histories: h,
             turn: Some(req.turn),
             kind: EventKind::Call,
-            verdict: EventVerdict::Pending,
-            link: LinkKind::Decision,
+            call_links: CallLinkMode::Keep,
             events,
             now_ms: req.now_ms,
-            window_from_ms: req.window_from_ms,
+            read: req.read.as_ref(),
         })
         .await
     }
@@ -769,19 +1039,23 @@ impl SessionStore for RedisSessionStore {
             .map(|c| NewEvent {
                 id: c.id,
                 tool: c.tool.clone(),
+                verdict: c.verdict,
+                stored: Some((c.fields.clone(), c.key)),
                 guard: None,
-                link_keys: c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect(),
+                decision_keys: Vec::new(),
+                // The script links an allowed call, and deletes the own links of a denied call (spec
+                // P8, P9).
+                call_keys: c.call_id.iter().chain(c.item_id.iter()).map(|id| call_link_key(h.org, &h.principal, id)).collect(),
             })
             .collect();
         self.run_append(&Batch {
             histories: h,
             turn: Some(req.turn),
             kind: EventKind::Call,
-            verdict: EventVerdict::Allow,
-            link: LinkKind::Call,
+            call_links: CallLinkMode::Replace,
             events,
             now_ms: req.now_ms,
-            window_from_ms: None,
+            read: None,
         })
         .await
     }
@@ -803,6 +1077,97 @@ mod tests {
     /// RESP3: `CONFIG GET` answers with a map.
     fn resp3(policy: &str) -> redis::RedisResult<redis::Value> {
         Ok(redis::Value::Map(vec![(bulk("maxmemory-policy"), bulk(policy))]))
+    }
+
+    /// A script reply that leaves out a requested set is a decode error, never an empty set
+    /// (spec P4).
+    #[test]
+    fn a_window_reply_with_a_missing_entry_is_a_decode_error() {
+        let req = ReadRequest {
+            from_ms: 0,
+            sets: vec![(Scope::Session, SetTool::Tool("a".into())), (Scope::Session, SetTool::Every)],
+        };
+        let entry = |i: usize| vec![i.to_string(), "0".to_string(), String::new()];
+        assert_eq!(window_reply(&req, &[entry(1), entry(2)]).expect("a full reply").len(), 2);
+        let short = window_reply(&req, &[entry(1)]).unwrap_err();
+        assert!(matches!(short, HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }), "{short:?}");
+        assert!(window_reply(&req, &[entry(1), entry(2), entry(3)]).is_err(), "a long reply");
+        assert!(window_reply(&req, &[entry(2), entry(1)]).is_err(), "entries out of the request order");
+        assert!(window_reply(&req, &[entry(1), entry(1)]).is_err(), "one set twice");
+        assert!(window_reply(&req, &[entry(1), vec!["2".into(), "0".into()]]).is_err(), "an entry with no mark");
+        assert!(window_reply(&req, &[entry(1), vec!["2".into(), "0".into(), String::new(), "x".into()]]).is_err(), "an incomplete event");
+        assert!(window_reply(&req, &[entry(1), vec!["2".into(), "2".into(), String::new()]]).is_err(), "a bad flag");
+    }
+
+    /// A one-set read from `from_ms` of the tool `send`.
+    fn send_read(from_ms: u64) -> ReadRequest {
+        ReadRequest {
+            from_ms,
+            sets: vec![(Scope::Session, SetTool::Tool("send".into()))],
+        }
+    }
+
+    /// One window entry of set 1: two values per event, the body and the verdict.
+    fn send_entry(events: &[(String, &str)]) -> Vec<String> {
+        let mut entry = vec!["1".to_string(), "0".to_string(), String::new()];
+        for (body, verdict) in events {
+            entry.push(body.clone());
+            entry.push((*verdict).to_string());
+        }
+        entry
+    }
+
+    fn call_body(id: u128, ts_ms: u64) -> String {
+        encode_body(Uuid::from_u128(id), ts_ms, EventKind::Call, "send", Some((&Fields::Unparsed, None)))
+    }
+
+    /// The reply holds no member and no score. Every write puts the same `now_ms` into
+    /// the score and into the body `ts`, and the member is the body `id`, so the event takes both
+    /// from its body. The events are sorted by (`ts_ms`, id).
+    #[test]
+    fn a_window_event_takes_its_id_and_time_from_its_body() {
+        let entry = send_entry(&[(call_body(2, 20), "allow"), (call_body(1, 20), "pending"), (call_body(3, 10), "deny")]);
+        let window = window_reply(&send_read(10), &[entry]).expect("decodes");
+        let got: Vec<(Uuid, u64, EventVerdict)> = window[0].events.iter().map(|e| (e.id, e.ts_ms, e.verdict)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (Uuid::from_u128(3), 10, EventVerdict::Deny),
+                (Uuid::from_u128(1), 20, EventVerdict::Pending),
+                (Uuid::from_u128(2), 20, EventVerdict::Allow),
+            ]
+        );
+    }
+
+    /// The script reads members with a score of at least `from_ms`. A body whose `ts` is before it
+    /// disagrees with its score: the reply is corrupt, and the read fails closed (a decode error).
+    #[test]
+    fn a_window_body_from_before_the_window_is_a_decode_error() {
+        let entry = send_entry(&[(call_body(1, 10), "allow"), (call_body(2, 9), "allow")]);
+        let err = window_reply(&send_read(10), &[entry]).unwrap_err();
+        assert!(matches!(err, HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }), "{err:?}");
+    }
+
+    /// The fifth count of the script reply is the window bodies whose id is not their member.
+    /// `run_append` fails the read when it is above zero; the flag pairs follow it.
+    #[test]
+    fn the_append_reply_returns_the_corrupt_body_count() {
+        let scopes = [(Scope::Session, "s".to_string())];
+        let reply: Vec<String> = ["1", "0", "0", "2", "3", "1", "1"].map(String::from).to_vec();
+        let (mapped, corrupt) = append_reply(&reply, &scopes, &["send"]).expect("decodes");
+        assert_eq!((mapped.missing_bodies, corrupt, mapped.truncated), (2, 3, vec![(Scope::Session, "send".to_string())]));
+        assert!(append_reply(&reply[..4], &scopes, &["send"]).is_err(), "a reply with four counts");
+    }
+
+    #[test]
+    fn a_mark_key_is_the_history_key_under_x() {
+        let org = Uuid::from_u128(1);
+        let h = history_key(org, Scope::Key, "k1", "send");
+        let x = mark_key(org, Scope::Key, "k1", "send");
+        assert_eq!(x.strip_prefix(&format!("{KEY_PREFIX}x:")), h.strip_prefix(&format!("{KEY_PREFIX}h:")));
+        let (hp, xp) = set_prefixes(org, Scope::Key, "k1");
+        assert_eq!((format!("{hp}{}", link_digest("send")), format!("{xp}{}", link_digest("send"))), (h, x));
+        assert_eq!(tools_mark_key(org, Scope::Key, "k1"), format!("{KEY_PREFIX}x:t:{org}:k:{}", link_digest("k1")));
     }
 
     #[test]
@@ -871,12 +1236,15 @@ mod tests {
                 ts_ms: 42,
                 kind: EventKind::Result,
                 tool: "send".into(),
-                verdict: EventVerdict::Deny
+                verdict: EventVerdict::Deny,
+                fields: Fields::Values(std::collections::BTreeMap::new()),
+                key: None,
             }
         );
         // The encoder and the decoder agree.
-        let own = encode_body(id, 7, EventKind::Call, "read");
-        assert_eq!(decode_event(&fields(&own, "pending")).expect("decodes").ts_ms, 7);
+        let own = encode_body(id, 7, EventKind::Call, "read", Some((&Fields::Unparsed, None)));
+        let decoded = decode_event(&fields(&own, "pending")).expect("decodes");
+        assert_eq!((decoded.ts_ms, decoded.fields), (7, Fields::Unparsed));
         assert!(decode_event(&fields("not json", "allow")).is_err());
         assert!(decode_event(&fields(&own, "maybe")).is_err());
     }

@@ -9,6 +9,8 @@ use std::time::Duration;
 use paigasus_kernel::tool_policy::{Findings, SessionInfo};
 use uuid::Uuid;
 
+use crate::decision_log::CallFacts;
+
 /// The store time budget of one request (spec D10 "Deadline"). It reads no clock: callers pass
 /// the time they spent.
 #[derive(Debug)]
@@ -71,6 +73,9 @@ pub struct SessionContext {
     /// The decision ids whose pending event a reserve wrote. A call that is not in this set has no
     /// event to settle, so the report site appends it (SMA-753 final review, finding 1).
     reserved: Mutex<HashSet<Uuid>>,
+    /// The hold intent (plan decision D-D): the calls of a hold with the decision id the decider
+    /// gave each one, in order. The report site claims an entry for a call that has no decision id.
+    intent: Mutex<Vec<(CallFacts, Uuid)>>,
 }
 
 impl SessionContext {
@@ -83,12 +88,31 @@ impl SessionContext {
             findings,
             budget,
             reserved: Mutex::new(HashSet::new()),
+            intent: Mutex::new(Vec::new()),
         }
     }
 
     /// Record that a reserve wrote the events of `ids`.
     pub fn mark_reserved(&self, ids: &[Uuid]) {
         self.reserved.lock().unwrap_or_else(PoisonError::into_inner).extend(ids.iter().copied());
+    }
+
+    /// Add the intent entries of a hold. They go after the entries that are already there.
+    pub fn record_intent(&self, entries: Vec<(CallFacts, Uuid)>) {
+        self.intent.lock().unwrap_or_else(PoisonError::into_inner).extend(entries);
+    }
+
+    /// Take the oldest unclaimed entry with facts equal to `call`, and remove it.
+    #[must_use]
+    pub fn claim_intent(&self, call: &CallFacts) -> Option<Uuid> {
+        let mut intent = self.intent.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = intent.iter().position(|(facts, _)| facts == call)?;
+        Some(intent.remove(at).1)
+    }
+
+    /// Remove the entries with these ids. The decider calls this with its own ids when it returns.
+    pub fn forget_intent(&self, ids: &[Uuid]) {
+        self.intent.lock().unwrap_or_else(PoisonError::into_inner).retain(|(_, id)| !ids.contains(id));
     }
 
     /// Whether a reserve wrote the event of `id`.
@@ -103,6 +127,46 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::types::ToolCallKind;
+
+    fn facts(name: &str) -> CallFacts {
+        CallFacts::of(&crate::types::ToolCall {
+            choice: 0,
+            position: 0,
+            id: Some("c".into()),
+            name: name.into(),
+            namespace: None,
+            kind: ToolCallKind::Function,
+            arguments: "{}".into(),
+        })
+    }
+
+    fn session() -> SessionContext {
+        SessionContext::new(Uuid::nil(), Uuid::nil(), 0, Findings::new(), StoreBudget::new(Duration::from_secs(1)))
+    }
+
+    #[test]
+    fn equal_call_facts_claim_their_intents_in_order() {
+        let s = session();
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        s.record_intent(vec![(facts("c0"), a), (facts("c0"), b)]);
+        assert_eq!(s.claim_intent(&facts("c1")), None);
+        assert_eq!(s.claim_intent(&facts("c0")), Some(a));
+        assert_eq!(s.claim_intent(&facts("c0")), Some(b));
+        assert_eq!(s.claim_intent(&facts("c0")), None);
+    }
+
+    #[test]
+    fn a_forgotten_intent_cannot_be_claimed() {
+        let s = session();
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        s.record_intent(vec![(facts("c0"), a)]);
+        s.record_intent(vec![(facts("c0"), b)]);
+        s.forget_intent(&[a]);
+        assert_eq!(s.claim_intent(&facts("c0")), Some(b));
+        s.forget_intent(&[b]);
+        assert_eq!(s.claim_intent(&facts("c0")), None);
+    }
 
     #[test]
     fn the_budget_shrinks_with_each_charge_and_ends_at_zero() {

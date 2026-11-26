@@ -12,6 +12,7 @@ pub mod json_schema;
 pub mod model;
 pub mod name;
 pub mod ports;
+pub mod proto;
 pub mod protocol;
 pub mod report;
 pub mod schema;
@@ -27,6 +28,7 @@ pub use model::{
 };
 pub use name::{NameError, RESERVED_NAME_KEYS, ToolName, name_key, parse_qualified, parse_tool_name};
 pub use ports::{CompileOutcome, CompilerFailure, PolicyCompiler, RecompileLock, RecompileLockGuard, ToolPolicyRepository};
+pub use proto::{ProtoError, condition_from_pb, condition_to_pb};
 pub use protocol::{CompileRequest, CompileResult, CompiledOutput, PROTOCOL_VERSION, Rejection, RevisionOutput, SetKind};
 pub use report::{HeldReport, HeldResult, NameDiff, ReportRejection, diff_outputs, failed_report};
 pub use schema::{ACTION_NAMESPACE, TOOL_SCHEMA_REVISION, base_schema_json, catalog_names, tenant_schema_json};

@@ -570,6 +570,7 @@ fn service_with(db: &DatabaseConnection, compiler: GatedCompiler) -> paigasus_ia
             max_source_bytes: 65_536,
             max_window_ms: 3_600_000,
             max_catalog_response_bytes: 2_097_152,
+            history_conditions: false,
         },
         ids: KernelIdGenerator,
         clock: SystemClock,

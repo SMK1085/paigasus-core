@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Finding, HostSet, Severity};
-use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, Verdict, decide};
+use paigasus_kernel::tool_policy::history::Slots;
+use paigasus_kernel::tool_policy::{Declared, Effect, Facts, Findings, Verdict, decide_with_slots};
 
 use super::mapping::{call_findings, invocation, name_collisions};
 use super::snapshot::{OnUnavailable, PolicySet, PolicySnapshot, TenantMode, TenantPart};
@@ -171,21 +172,32 @@ fn scans_for(calls: usize, scans: &[CallScan]) -> ScansFor<'_> {
 /// difference is the `decide_duration` of the call. The core reads no clock of its own.
 #[must_use]
 pub fn decide_calls(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
-    decide_calls_with(snapshot, turn, calls, scans, &Findings::new(), now)
+    decide_calls_with(snapshot, turn, calls, scans, &Findings::new(), &[], now)
 }
 
 /// `decide_calls` with request-level findings (`extra`) that every call of the hold carries, in
 /// addition to its own findings (SMA-753). Each one has the detector `kernel` and the severity
 /// that `extra` holds for it.
+///
+/// `slots` holds the history slots of each call (SMA-753 spec P2): empty (no slots for any call)
+/// or one entry per call, in the order of `calls`. Any other count is a defect of the caller: a
+/// debug build panics, and a release build uses no slots, so a forbid that reads a slot errors.
 #[must_use]
-pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+pub fn decide_calls_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: &[CallScan], extra: &Findings, slots: &[Slots], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
     debug_assert!(scans.is_empty() || scans.len() == calls.len(), "one scan per call, or none");
-    decide_with(snapshot, turn, calls, scans_for(calls.len(), scans), extra, now)
+    debug_assert!(slots.is_empty() || slots.len() == calls.len(), "one slot set per call, or none");
+    decide_with(snapshot, turn, calls, scans_for(calls.len(), scans), extra, slots_for(calls.len(), slots), now)
 }
 
-/// `decide_calls_with` after the count check. It is also the release path of a wrong count.
-fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: ScansFor<'_>, extra: &Findings, now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
-    let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
+/// The slots of `calls` calls: `slots` with one entry per call, else none.
+fn slots_for(calls: usize, slots: &[Slots]) -> &[Slots] {
+    if slots.len() == calls { slots } else { &[] }
+}
+
+/// `decide_calls_with` after the count checks. It is also the release path of a wrong count.
+/// `slots` is empty or holds one entry per call.
+fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], scans: ScansFor<'_>, extra: &Findings, slots: &[Slots], now: &dyn Fn() -> Instant) -> Vec<CallOutcome> {
+    let PolicySet::Available { policies, tenant, facts, .. } = &snapshot.set else {
         // P-6: `closed` blocks in every tenant mode, `off` included.
         return calls
             .iter()
@@ -201,6 +213,7 @@ fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], s
         ToolTurn::Parsed(f) => name_collisions(&f.definitions),
         ToolTurn::Unavailable(_) => BTreeSet::new(),
     };
+    let no_slots = Slots::new();
     calls
         .iter()
         .enumerate()
@@ -223,7 +236,7 @@ fn decide_with(snapshot: &PolicySnapshot, turn: &ToolTurn, calls: &[ToolCall], s
                 given.push(Finding::new(DETECTOR_KERNEL, kind, severity, ""));
             }
             let started = now();
-            let v = decide(&inv, facts, &kernel_findings(&given), policies);
+            let v = decide_with_slots(&inv, facts, &kernel_findings(&given), slots.get(i).unwrap_or(&no_slots), policies);
             let duration = now().saturating_duration_since(started);
             let cedar = cedar_detail(&v, &given, inv.declared, facts, duration);
             outcome(v, cedar, *tenant, snapshot.mode, snapshot.on_unavailable)
@@ -264,10 +277,16 @@ mod tests {
 
     /// The compiled set for a tenant part: floor and tenant when evaluated, else the floor alone (P-4).
     fn available(floor: &str, tenant: TenantPart) -> PolicySet {
-        let floor = Arc::new(ToolPolicies::compile_floor(floor).expect("floor"));
         let text = if tenant == TenantPart::Evaluated { TENANT } else { "" };
+        set_of(floor, text, tenant)
+    }
+
+    /// The set of the floor and `text`, with the floor-only set beside it (P-4).
+    fn set_of(floor: &str, text: &str, tenant: TenantPart) -> PolicySet {
+        let floor = Arc::new(ToolPolicies::compile_floor(floor).expect("floor"));
         PolicySet::Available {
-            policies: Arc::new(ToolPolicies::compile(floor, text, &[]).expect("compile")),
+            policies: Arc::new(ToolPolicies::compile(Arc::clone(&floor), text, &[]).expect("compile")),
+            floor_only: Arc::new(ToolPolicies::compile(floor, "", &[]).expect("floor only")),
             tenant,
             facts: facts(),
         }
@@ -412,18 +431,13 @@ mod tests {
             @id("all") permit(principal, action, resource);
             @id("forged") forbid(principal, action, resource) when { context.findings.contains("forged_history") };
         "#;
-        let floor = Arc::new(ToolPolicies::compile_floor(FLOOR).expect("floor"));
-        let set = PolicySet::Available {
-            policies: Arc::new(ToolPolicies::compile(floor, TENANT_FORGED, &[]).expect("compile")),
-            tenant: TenantPart::Evaluated,
-            facts: facts(),
-        };
+        let set = set_of(FLOOR, TENANT_FORGED, TenantPart::Evaluated);
         let snap = PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed);
         let turn = ToolTurn::Unavailable("test");
         let calls = [call("a"), call("b")];
         let mut extra = Findings::new();
         extra.add(paigasus_kernel::detect::FORGED_HISTORY, Severity::High);
-        let blocked = decide_calls_with(&snap, &turn, &calls, &[], &extra, &Instant::now);
+        let blocked = decide_calls_with(&snap, &turn, &calls, &[], &extra, &[], &Instant::now);
         assert_eq!(blocked.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY]);
         // Each call records the extra finding with the detector `kernel` and its severity.
         for o in &blocked {
@@ -487,14 +501,11 @@ mod tests {
 
     #[test]
     fn with_detection_off_the_record_keeps_the_severities_and_no_max_severity() {
-        let PolicySet::Available { policies, tenant, facts } = available(FLOOR, TenantPart::Evaluated) else {
+        let mut set = available(FLOOR, TenantPart::Evaluated);
+        let PolicySet::Available { facts, .. } = &mut set else {
             unreachable!("available() is always Available")
         };
-        let set = PolicySet::Available {
-            policies,
-            tenant,
-            facts: facts.with_detection(false),
-        };
+        *facts = facts.clone().with_detection(false);
         let snap = PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed);
         let mut bad = call("send");
         bad.arguments = "[1]".to_owned();
@@ -568,13 +579,7 @@ mod tests {
 
     /// A snapshot whose tenant part is `tenant` (enforced) over the test floor.
     fn tenant_snapshot(tenant: &str) -> PolicySnapshot {
-        let floor = Arc::new(ToolPolicies::compile_floor(FLOOR).expect("floor"));
-        let set = PolicySet::Available {
-            policies: Arc::new(ToolPolicies::compile(floor, tenant, &[]).expect("compile")),
-            tenant: TenantPart::Evaluated,
-            facts: facts(),
-        };
-        PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed)
+        PolicySnapshot::new(set_of(FLOOR, tenant, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed)
     }
 
     fn secret() -> Finding {
@@ -655,7 +660,7 @@ mod tests {
         // The release path: `decide_calls` checks the count with a `debug_assert!` first.
         let snap = tenant_snapshot(FORBID_HIGH);
         let turn = ToolTurn::Unavailable("test");
-        let out = decide_with(&snap, &turn, &[call("a"), call("b")], scans_for(2, &one), &Findings::new(), &Instant::now);
+        let out = decide_with(&snap, &turn, &[call("a"), call("b")], scans_for(2, &one), &Findings::new(), &[], &Instant::now);
         assert_eq!(out.len(), 2);
         for o in &out {
             assert_eq!(o.decision, BLOCK_POLICY);
@@ -678,6 +683,91 @@ mod tests {
         hosts.insert("canary.example");
         let d = format!("{:?}", CallScan::new(vec![secret()], Some(hosts)));
         assert!(!d.contains("canary"), "{d}");
+    }
+
+    const FORBID_OVER: &str = r#"@id("all") permit(principal, action, resource); @id("over") forbid(principal, action, resource) when { context.over };"#;
+
+    fn over(value: bool) -> Slots {
+        let mut s = Slots::new();
+        s.insert("over", value);
+        s
+    }
+
+    #[test]
+    fn each_call_gets_its_own_slots() {
+        let snap = tenant_snapshot(FORBID_OVER);
+        let turn = ToolTurn::Unavailable("test");
+        let out = decide_calls_with(&snap, &turn, &[call("a"), call("b")], &[], &Findings::new(), &[over(true), over(false)], &Instant::now);
+        assert_eq!(
+            out.iter().map(|o| (o.decision, o.basis)).collect::<Vec<_>>(),
+            [(BLOCK_POLICY, PolicyBasis::Policy), (Decision::Allow, PolicyBasis::Policy)]
+        );
+        // With no slots, the forbid that reads `context.over` errors, and an errored forbid denies.
+        let none = decide_calls_with(&snap, &turn, &[call("a"), call("b")], &[], &Findings::new(), &[], &Instant::now);
+        assert!(none.iter().all(|o| (o.decision, o.basis) == (BLOCK_POLICY, PolicyBasis::ErroredForbid)));
+    }
+
+    #[test]
+    fn a_wrong_slot_count_uses_no_slots() {
+        let slots = [over(false)];
+        assert_eq!(slots_for(1, &slots).len(), 1);
+        assert!(slots_for(2, &slots).is_empty());
+        assert!(slots_for(0, &slots).is_empty());
+        // The release path: `decide_calls_with` checks the count with a `debug_assert!` first.
+        let snap = tenant_snapshot(FORBID_OVER);
+        let out = decide_with(
+            &snap,
+            &ToolTurn::Unavailable("test"),
+            &[call("a"), call("b")],
+            ScansFor::None,
+            &Findings::new(),
+            slots_for(2, &slots),
+            &Instant::now,
+        );
+        assert!(out.iter().all(|o| o.basis == PolicyBasis::ErroredForbid), "no call gets the slots of another");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one slot set per call, or none")]
+    fn a_wrong_slot_count_panics_in_a_debug_build() {
+        let snap = tenant_snapshot(FORBID_OVER);
+        let _ = decide_calls_with(&snap, &ToolTurn::Unavailable("test"), &[call("a"), call("b")], &[], &Findings::new(), &[over(false)], &Instant::now);
+    }
+
+    #[test]
+    fn with_tenant_unavailable_decides_with_the_floor_only() {
+        let snap = PolicySnapshot::new(available(FLOOR, TenantPart::Evaluated), TenantMode::Enforce, OnUnavailable::Closed);
+        let turn = ToolTurn::Unavailable("test");
+        let calls = [call("tdeny"), call("danger")];
+        let full = decide_calls(&snap, &turn, &calls, &[], &Instant::now);
+        assert_eq!(full.iter().map(|o| o.decision).collect::<Vec<_>>(), [BLOCK_POLICY, BLOCK_POLICY]);
+        assert_eq!(ids(&full[0].verdict.as_ref().expect("verdict").determining), ["t"]);
+
+        let down = snap.with_tenant_unavailable();
+        let PolicySet::Available { policies, floor_only, tenant, .. } = &down.set else {
+            panic!("the set stays available")
+        };
+        assert!(Arc::ptr_eq(policies, floor_only), "the policies are the floor-only set");
+        assert_eq!(*tenant, TenantPart::Unavailable);
+        let out = decide_calls(&down, &turn, &calls, &[], &Instant::now);
+        // The tenant forbid `t` is not evaluated; the tenant part follows `closed`.
+        assert_eq!((out[0].decision, out[0].basis), (BLOCK_UNAVAILABLE, PolicyBasis::Unavailable));
+        assert!(out[0].verdict.as_ref().expect("verdict").determining.iter().all(|p| p.id != "t"));
+        // A floor deny is still enforced (D33).
+        assert_eq!((out[1].decision, out[1].basis), (BLOCK_POLICY, PolicyBasis::Policy));
+        // Under `open` the tenant part is observed only.
+        let mut open = snap.with_tenant_unavailable();
+        open.on_unavailable = OnUnavailable::Open;
+        assert_eq!(decide_calls(&open, &turn, &calls[..1], &[], &Instant::now)[0].decision, OBSERVE_UNAVAILABLE);
+        // An unavailable set stays unavailable; the original snapshot is not changed.
+        let none = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed).with_tenant_unavailable();
+        assert!(matches!(none.set, PolicySet::Unavailable));
+        assert!(matches!(snap.set, PolicySet::Available { tenant: TenantPart::Evaluated, .. }));
+    }
+
+    fn ids(refs: &[paigasus_kernel::tool_policy::PolicyRef]) -> Vec<&str> {
+        refs.iter().map(|r| r.id.as_str()).collect()
     }
 
     #[test]

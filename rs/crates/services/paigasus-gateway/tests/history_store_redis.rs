@@ -16,9 +16,11 @@ use paigasus_gateway::application::tool_history::ToolHistory;
 use paigasus_gateway::domain::decision_log::OsEntropy;
 use paigasus_gateway::domain::limits::{SystemClock, UnavailableKind};
 use paigasus_gateway::domain::tool_history::{
-    AppendReply, AppendRequest, EventVerdict, HistoryStoreError, LookupReply, LookupRequest, ReserveRequest, Scope, SessionStore, SettleRequest, StoredEvent, WriteRequest,
+    AppendReply, AppendRequest, CallEvent, EventVerdict, Histories, HistoryStoreError, LookupReply, LookupRequest, ReadRequest, ReserveRequest, Scope, SessionStore, SettleRequest, StoredEvent,
+    WriteRequest,
 };
 use paigasus_gateway_core::{Basis, DecidedCall, Decision, DecisionContext, Format, ToolTurn, TurnFacts, parse_body};
+use paigasus_kernel::tool_policy::history::{Fields, SetTool};
 use support::history_contract::{self as contract, Harness};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -89,6 +91,15 @@ impl Harness for RedisHarness {
                 ms => Some(Some(u64::try_from(ms).expect("a positive PTTL"))),
             })
             .collect()
+    }
+
+    async fn put_raw_body(&self, org: Uuid, id: Uuid, body: &str) {
+        // `HSET` answers 0 when it replaces a field: the event exists.
+        assert_eq!(redis_cli(&self.node, &["HSET", &event_key(org, id), "b", body]).await, "0", "the event exists");
+    }
+
+    async fn drop_body(&self, org: Uuid, id: Uuid) {
+        assert_eq!(redis_cli(&self.node, &["DEL", &event_key(org, id)]).await, "1", "the event exists");
     }
 }
 
@@ -177,10 +188,94 @@ contract_cases!(
     the_first_settle_wins,
     a_repeated_settle_of_the_same_event_keeps_result_written,
     a_result_for_a_call_event_that_is_gone_writes_nothing,
+    a_result_for_a_denied_call_event_writes_nothing,
     a_later_allow_settle_of_a_denied_event_writes_no_call_link,
     a_local_shell_result_under_both_aliases_is_written_once,
     a_relink_between_lookup_and_write_marks_the_original_event,
+    a_reserved_event_keeps_its_fields_and_key_id,
+    an_unparsed_call_is_stored_as_unparsed,
+    a_pr1_body_reads_as_no_fields,
+    a_result_event_copies_the_fields_of_its_call,
+    the_reserve_writes_the_call_links_of_each_call,
+    the_reserve_keeps_a_link_of_another_event,
+    a_deny_settle_deletes_only_its_own_link,
+    an_allow_settle_relinks_a_reused_call_id,
+    an_appended_denied_call_counts_and_writes_no_link,
+    an_append_under_a_reserved_id_keeps_one_event,
+    a_denied_append_under_a_reserved_id_deletes_its_own_link,
+    a_result_copies_the_exact_fields_of_an_adversarial_call,
+    the_window_returns_the_events_of_each_requested_set_in_order,
+    the_window_includes_future_events_and_the_pending_events_of_this_hold,
+    an_every_tool_read_returns_the_events_of_every_indexed_tool,
+    a_cap_trim_writes_a_mark_that_a_later_read_of_that_set_returns,
+    the_mark_keeps_the_larger_value,
+    a_read_over_64_sets_returns_the_rest_as_truncated,
+    a_read_over_20_000_events_returns_the_rest_as_truncated,
+    a_tool_past_256_in_the_index_marks_every_tool,
+    a_missing_body_is_skipped_and_counted,
 );
+
+/// The window reply carries no score, so the adapter takes the time from the body. A body whose
+/// `ts` is before the window (its score is inside it), or a body whose id is not its member (another
+/// member of the set, or an id in no read set), disagrees with the sorted set: the read fails
+/// closed with a decode error, and a decider then treats every history slot as missing (reason
+/// `store`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_body_that_disagrees_with_its_member_or_score_fails_the_window_read_on_redis() {
+    let Some(h) = harness("7.4-alpine", "history_store_redis body disagrees with its member").await else {
+        return;
+    };
+    const NOW: u64 = 1_700_000_000_000;
+    let store = h.store().await;
+    let (org, session) = (Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0019_0b01), Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0019_0b02));
+    let histories = Histories {
+        org,
+        principal: "prn:pgs:iam:::principal/t19b".into(),
+        key: None,
+        session,
+    };
+    let call = |n: u128| CallEvent {
+        id: Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0019_0c00 + n),
+        tool: "send".into(),
+        call_id: None,
+        item_id: None,
+        fields: Fields::Unparsed,
+        key: None,
+    };
+    let reserve = |calls: Vec<CallEvent>, read: Option<ReadRequest>| ReserveRequest {
+        histories: histories.clone(),
+        turn: 1,
+        calls,
+        now_ms: NOW,
+        read,
+    };
+    let read = || ReadRequest {
+        from_ms: NOW - 100,
+        sets: vec![(Scope::Session, SetTool::Tool("send".into()))],
+    };
+    let (a, b) = (call(1), call(2));
+    store.reserve(&reserve(vec![a.clone(), b.clone()], None)).await.expect("the seed reserve");
+    let reply = store.reserve(&reserve(Vec::new(), Some(read()))).await.expect("a clean read");
+    assert_eq!(reply.window[0].events.iter().map(|e| (e.id, e.ts_ms)).collect::<Vec<_>>(), vec![(a.id, NOW), (b.id, NOW)]);
+
+    let decode = |r: Result<AppendReply, HistoryStoreError>| matches!(r, Err(HistoryStoreError::Unavailable { kind: UnavailableKind::Decode, .. }));
+    // The score of `a` is NOW; its body says a time before the window.
+    let (aid, bid) = (a.id, b.id);
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{aid}","ts":{},"k":"request","t":"send","b":1}}"#, NOW - 1_000))
+        .await;
+    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body time before the window");
+    // The body of `a` names the other member `b` of the same set.
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{bid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
+    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body that names another member of the set");
+    // The body of `a` names an id that is in no read set. A reader that drops the own events of a
+    // hold by id would drop such an event silently, so the read must fail closed.
+    let cid = call(3).id;
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{cid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
+    assert!(decode(store.reserve(&reserve(Vec::new(), Some(read()))).await), "a body that names an id in no read set");
+    // The right body reads again.
+    h.put_raw_body(org, aid, &format!(r#"{{"v":1,"id":"{aid}","ts":{NOW},"k":"request","t":"send","b":1}}"#)).await;
+    assert_eq!(store.reserve(&reserve(Vec::new(), Some(read()))).await.expect("a clean read").window[0].events.len(), 2);
+}
 
 #[tokio::test]
 async fn an_evicting_policy_is_reported() {
@@ -265,7 +360,13 @@ async fn an_unreserved_allowed_call_links_on_redis(fail_reserve: bool) {
     };
     let redis: Arc<dyn SessionStore> = h.store().await;
     let store: Arc<dyn SessionStore> = if fail_reserve { Arc::new(FailReserve(Arc::clone(&redis))) } else { Arc::clone(&redis) };
-    let history = ToolHistory::new(store, Arc::new(SystemClock), Arc::new(OsEntropy), Duration::from_secs(2));
+    let history = ToolHistory::new(
+        store,
+        Arc::new(SystemClock),
+        Arc::new(OsEntropy),
+        Duration::from_secs(2),
+        Arc::new(paigasus_gateway::adapters::history::HmacHistoryDigester::keyless()),
+    );
     let first = history.link(SVC_PRINCIPAL, SVC_ORG, None, &results_turn(&[])).await.expect("a session").session;
     if !fail_reserve {
         first.budget.fail();
@@ -276,9 +377,9 @@ async fn an_unreserved_allowed_call_links_on_redis(fail_reserve: bool) {
     let parsed = parse_body(Format::OpenAiChat, body.to_string().as_bytes(), 1 << 20).expect("body");
     let decision_id = Uuid::from_u128(0x0190_a1e5_0000_7000_8000_0000_0000_00d1);
     let ctx = DecisionContext::new(SVC_PRINCIPAL, SVC_ORG_PRN, None).with_request(None, "chat", "m");
-    history.reserve(&ctx, &first, &parsed.calls, &[decision_id]).await;
+    history.reserve(&ctx, &first, &parsed.calls, &[decision_id], None).await;
     assert!(!first.is_reserved(decision_id));
-    let reported = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(decision_id)], Basis::Decider);
+    let reported = parsed.reported(&[DecidedCall::new(Decision::Allow, None).with_decision_id(decision_id)], Basis::Decider, None);
     history.settle(&ctx.clone().with_session(first.clone()), &reported);
     history.tasks().close();
     history.tasks().wait().await;

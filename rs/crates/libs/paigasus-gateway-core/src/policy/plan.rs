@@ -672,7 +672,7 @@ fn choice_after(choice: &ToolChoice, removed: &BTreeSet<&str>) -> (ChoiceRewrite
 /// step 5 (dropping `tools`, `tool_choice` and their companions) belong to the rewrite.
 #[must_use]
 pub fn plan_request(snapshot: &PolicySnapshot, format: Format, turn: &TurnFacts, result_findings: &[Vec<Finding>], now: &dyn Fn() -> Instant) -> RequestPlan {
-    let PolicySet::Available { policies, tenant, facts } = &snapshot.set else {
+    let PolicySet::Available { policies, tenant, facts, .. } = &snapshot.set else {
         return RequestPlan::empty();
     };
     // Only the floor counts when the mode is `off` (controller ruling, Task 8), when the set is the
@@ -853,7 +853,7 @@ mod tests {
     use paigasus_kernel::{Prn, to_cedar_uid};
     use uuid::Uuid;
 
-    use paigasus_kernel::detect::{INJECTION_MARKERS, INJECTION_MARKERS_VERSION};
+    use paigasus_kernel::detect::{INJECTION_MARKERS, INJECTION_MARKERS_VERSION, SECRET_IN_ARGS};
     use paigasus_kernel::tool_policy::{ToolInput, ToolInvocation};
 
     use super::*;
@@ -902,7 +902,8 @@ mod tests {
         let floor = Arc::new(ToolPolicies::compile_floor(floor).expect("floor"));
         let text = if tenant == TenantPart::Evaluated { tenant_text } else { "" };
         let set = PolicySet::Available {
-            policies: Arc::new(ToolPolicies::compile(floor, text, &[]).expect("compile")),
+            policies: Arc::new(ToolPolicies::compile(Arc::clone(&floor), text, &[]).expect("compile")),
+            floor_only: Arc::new(ToolPolicies::compile(floor, "", &[]).expect("floor only")),
             tenant,
             facts: facts(),
         };
@@ -1623,15 +1624,11 @@ mod tests {
 
     #[test]
     fn a_detail_states_that_the_detectors_were_off() {
-        let PolicySet::Available { policies, tenant: part, facts } = tenant(PERMIT_ALL_STARTER, TenantMode::Enforce).set else {
+        let mut s = tenant(PERMIT_ALL_STARTER, TenantMode::Enforce);
+        let PolicySet::Available { facts, .. } = &mut s.set else {
             unreachable!("snap() is always Available")
         };
-        let set = PolicySet::Available {
-            policies,
-            tenant: part,
-            facts: facts.with_detection(false),
-        };
-        let s = PolicySnapshot::new(set, TenantMode::Enforce, OnUnavailable::Closed);
+        *facts = facts.clone().with_detection(false);
         let p = plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![high()]]);
         // With the detectors off, `max_severity` is -1, so the starter policy does not deny.
         assert!(p.replaced.is_empty());
@@ -1723,6 +1720,37 @@ mod tests {
         assert_eq!(more.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["c"]);
         let p = plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![high()]]);
         assert_eq!(p.replaced, [c0(true)]);
+    }
+
+    /// Spec P2: the request side passes no slots. A forbid that reads only a slot errors in both
+    /// decisions, so F(A) is a subset of F(B) and the result is not replaced.
+    #[test]
+    fn a_slot_forbid_errors_in_both_decisions_and_is_no_difference() {
+        let s = tenant(&format!(r#"{PERMIT_ALL} @id("s") forbid(principal, action, resource) when {{ context.s }};"#), TenantMode::Enforce);
+        let (a, b) = pair(&s);
+        assert_eq!((a.decision, ids(&a.errored_forbids)), (Effect::Deny, vec!["s"]));
+        assert_eq!((b.decision, ids(&b.errored_forbids)), (Effect::Deny, vec!["s"]));
+        assert!(difference(&a, &b).is_none());
+        let p = plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![high()]]);
+        assert!(p.replaced.is_empty() && p.entries.is_empty());
+        assert_eq!(p.screen_records.len(), 1);
+    }
+
+    /// Spec P2: a forbid that reads a finding and then a slot errors only in the decision with the
+    /// finding, so the result is replaced. Empty slots can add a replacement, never remove one.
+    #[test]
+    fn a_findings_and_slot_forbid_is_replaced() {
+        let s = tenant(
+            &format!(r#"{PERMIT_ALL} @id("fs") forbid(principal, action, resource) when {{ context.findings.contains("secret_in_args") && context.s }};"#),
+            TenantMode::Enforce,
+        );
+        let secret = Finding::new(DETECTOR_BUILT_IN, SECRET_IN_ARGS, Severity::High, "");
+        let p = plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![secret]]);
+        assert_eq!(p.replaced, [c0(true)]);
+        let d = detail(&p, 0);
+        assert_eq!((d.effect, ids(&d.errored)), (Effect::Deny, vec!["fs"]));
+        // The control: with no finding, the forbid does not reach the slot, and nothing is planned.
+        assert!(plan_with(&s, Format::OpenAiChat, chat_one(), &[vec![]]).replaced.is_empty());
     }
 
     #[test]

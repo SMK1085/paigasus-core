@@ -698,6 +698,7 @@ async fn two_concurrent_first_enables_write_one_starter() {
             max_source_bytes: 65_536,
             max_window_ms: 3_600_000,
             max_catalog_response_bytes: 2_097_152,
+            history_conditions: false,
         },
         ids: KernelIdGenerator,
         clock: SystemClock,

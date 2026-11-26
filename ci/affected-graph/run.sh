@@ -295,8 +295,10 @@ run_suite() {
   # iam-console-ts above: its `dependsOn` names paigasus-proto-ts (alongside paigasus-sdk-ts,
   # paigasus-discovery-ts, paigasus-app-shell-ts and paigasus-console-core-ts), so the deep
   # downstream traversal reaches it from a contracts edit.
+  # + paigasus-iam-core-rs (SMA-753 P15): `tool_policy::proto` maps the history conditions to the
+  # proto form, so iam-core now `dependsOn` paigasus-proto-rs.
   run_case "contracts->proto" "contracts/proto/paigasus/gateway/v1/health.proto" \
-    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-core-rs,paigasus-agent-host-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts,iam-console-ts,paigasus-console-core-ts,gateway-console-ts"
+    "contracts,paigasus-proto-rs,paigasus-proto-py,paigasus-proto-ts,paigasus-gateway-core-rs,paigasus-iam-core-rs,paigasus-agent-host-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,paigasus-sdk-ts,paigasus-discovery-ts,paigasus-app-shell-ts,iam-console-ts,paigasus-console-core-ts,gateway-console-ts"
   # derive-crate edit -> the derive crate + paigasus-proto and everything downstream of it
   # (SMA-438). One-directional w.r.t. contracts: the derive crate is strictly UPSTREAM of
   # paigasus-proto, so a proto edit must NOT reach it — enforced implicitly by the strict
@@ -307,8 +309,9 @@ run_suite() {
   # `playground` e2e project runs the real gateway binary, which those sources feed. MEASURED with
   # the no-flag `moon query tasks --affected` traversal (assert_task_case_ci's own): a throwaway
   # kernel edit selects exactly one gateway-console-ts task, test-e2e.
+  # SMA-753: paigasus-iam-core-rs through its new paigasus-proto edge.
   run_case "proto-derive->proto" "rs/crates/libs/paigasus-proto-derive/src/lib.rs" \
-    "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-core-rs,paigasus-agent-host-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,gateway-console-ts"
+    "paigasus-proto-derive-rs,paigasus-proto-rs,paigasus-gateway-core-rs,paigasus-iam-core-rs,paigasus-agent-host-rs,paigasus-gateway-rs,paigasus-iam-rs,paigasus-service-info-rs,gateway-console-ts"
   # service-info edit -> the crate + the three services that serve the descriptor (the gateway, the IAM service and the agent host; SMA-524). Guards the
   # DOWNSTREAM direction, which no case covered before: paigasus-service-info was a graph LEAF, so an
   # edit to ServiceInfoDto — the wire body the three services return — retested nothing.
@@ -370,14 +373,15 @@ run_suite() {
   # project affected. This is the behavioral half of SMA-524 (build/test) and SMA-526 (lint): the
   # parity gate asserts `^:build` is DECLARED, this asserts it takes EFFECT.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
+  # SMA-753: iam-core's build, test and lint key on paigasus-proto through its new edge.
   run_task_case "proto->svc-info-deep" "rs/crates/libs/paigasus-proto/src/lib.rs" \
-    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-agent-host-rs:build,paigasus-agent-host-rs:test,paigasus-agent-host-rs:lint,paigasus-gateway-core-rs:build,paigasus-gateway-core-rs:test,paigasus-gateway-core-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,gateway-console-ts:test-e2e"
+    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-agent-host-rs:build,paigasus-agent-host-rs:test,paigasus-agent-host-rs:lint,paigasus-gateway-core-rs:build,paigasus-gateway-core-rs:test,paigasus-gateway-core-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,gateway-console-ts:test-e2e"
   # CI-traversal twin of proto->svc-info-deep: a proto edit must SELECT the consumers under the
   # traversal moon ci uses, not merely cascade in the task graph. Expected to equal the deep set:
   # every consumer reaches paigasus-proto through @group(upstreams) now.
   # SMA-635: gateway-console-ts:test-e2e keys on the gateway's sources and upstreams (its playground project runs the real binary).
   run_task_case_ci "proto->svc-info-ci" "rs/crates/libs/paigasus-proto/src/lib.rs" \
-    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-agent-host-rs:build,paigasus-agent-host-rs:test,paigasus-agent-host-rs:lint,paigasus-gateway-core-rs:build,paigasus-gateway-core-rs:test,paigasus-gateway-core-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,gateway-console-ts:test-e2e"
+    "paigasus-proto-rs:build,paigasus-proto-rs:test,paigasus-proto-rs:lint,paigasus-service-info-rs:build,paigasus-service-info-rs:test,paigasus-service-info-rs:lint,paigasus-iam-rs:build,paigasus-iam-rs:test,paigasus-iam-rs:lint,paigasus-agent-host-rs:build,paigasus-agent-host-rs:test,paigasus-agent-host-rs:lint,paigasus-gateway-core-rs:build,paigasus-gateway-core-rs:test,paigasus-gateway-core-rs:lint,paigasus-iam-core-rs:build,paigasus-iam-core-rs:test,paigasus-iam-core-rs:lint,paigasus-gateway-rs:build,paigasus-gateway-rs:test,paigasus-gateway-rs:lint,gateway-console-ts:test-e2e"
   # A workspace-level change must schedule EVERY crate's lint, AND the three tasks that compile the
   # FFI cdylibs. `rs/` has no Moon project, so these files belong to `repo`; affectedness reaches
   # both sets through task INPUTS, not through `dependsOn` — which is why no project case above

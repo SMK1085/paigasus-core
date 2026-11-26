@@ -5,9 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use paigasus_kernel::detect::{DETECTOR_KERNEL, Finding, Severity};
+use paigasus_kernel::tool_policy::history::{ExtractedFields, extract_fields};
 use paigasus_kernel::tool_policy::{Declared, NAME_COLLISION, ToolInput, ToolInvocation, normalise};
 use serde_json::Value;
 
+use crate::policy::history::FieldPlan;
 use crate::turn::{ToolDefinition, ToolTurn};
 use crate::types::{Format, ToolCall, ToolCallKind};
 
@@ -52,6 +54,15 @@ pub(crate) fn input_for(kind: ToolCallKind, arguments: &str) -> ToolInput {
         | ToolCallKind::ToolSearch
         | ToolCallKind::McpApprovalRequest => ToolInput::Json(arguments.to_owned()),
     }
+}
+
+/// The stored fields of one call under a field plan (SMA-753 P3). `None` when no plan applies.
+/// The values stay in memory until the report site digests them; no record holds them.
+#[must_use]
+pub fn call_fields(call: &ToolCall, plan: Option<&FieldPlan>) -> Option<ExtractedFields> {
+    let plan = plan?;
+    let paths = plan.paths_for(&normalise(&call.display_name()));
+    Some(extract_fields(&input_for(call.kind, &call.arguments), &paths))
 }
 
 /// Whether a call of this kind carries JSON arguments that a definition's JSON schema describes.
@@ -114,6 +125,18 @@ pub fn call_findings(call: &ToolCall, collisions: &BTreeSet<String>) -> Vec<Find
     }
 }
 
+/// A field plan that stores `path` for the tool `tool`, for the tests of the report sites.
+#[cfg(test)]
+pub(crate) fn test_plan(tool: &str, path: &str) -> FieldPlan {
+    use paigasus_kernel::tool_policy::history::{Catalog, CmpOp, Condition, FieldPath, FieldTest, Literal, Part, Predicate, Scope, Shape, ToolMatch};
+    let path = FieldPath::new(path.split('.').map(str::to_owned).collect()).expect("path");
+    let predicate = Predicate::AllOf(
+        Box::new(Predicate::Tool(ToolMatch::NameKey(tool.to_owned()))),
+        Box::new(Predicate::Field(FieldTest::new(path, CmpOp::Gt, Literal::Long(1)))),
+    );
+    FieldPlan::of(&[Condition::new("s", Part::Tenant, Scope::Session, 1000, Shape::Formerly { predicate })], &Catalog::unknown())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -144,6 +167,22 @@ mod tests {
             kind,
             arguments: "{}".to_owned(),
         }
+    }
+
+    /// The reserve and the report sites share `call_fields` (SMA-753 Task 10): the paths of the
+    /// normalised tool name only, and nothing with no plan.
+    #[test]
+    fn call_fields_extracts_the_paths_of_the_plan_for_the_normalised_tool() {
+        use paigasus_kernel::tool_policy::history::{Extracted, FieldPath};
+        let plan = test_plan("send", "n");
+        let mut c = call("Send", ToolCallKind::Function);
+        c.arguments = r#"{"n":5,"m":7}"#.to_owned();
+        let fields = call_fields(&c, Some(&plan)).expect("a plan gives fields");
+        let n = FieldPath::new(vec!["n".to_owned()]).expect("path");
+        let m = FieldPath::new(vec!["m".to_owned()]).expect("path");
+        assert!(matches!(fields.get(&n), Some(Extracted::Long(5))));
+        assert!(fields.get(&m).is_none(), "a path outside the plan");
+        assert!(call_fields(&c, None).is_none());
     }
 
     fn turn(definitions: Vec<ToolDefinition>, definitions_complete: bool) -> ToolTurn {

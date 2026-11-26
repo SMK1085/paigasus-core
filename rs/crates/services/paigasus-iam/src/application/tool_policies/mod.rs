@@ -56,7 +56,7 @@ pub use self::fetch::CompiledTenant;
 pub use self::held::HeldTarget;
 pub use self::recompile::{RECOMPILE_JOB_ACTOR, RECOMPILE_RESULT_LABELS, RecompileOutcome, RecompileRun, RecompileTasks, SetRecompile};
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
-use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, reject_history_until_gateway_supports_it};
+use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, history_rejections};
 use self::settings::check_transition;
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
@@ -74,6 +74,9 @@ pub struct ToolPolicyLimits {
     /// The largest catalog, measured as the encoded size of all its tools in one
     /// `ListToolsResponse`. A write over it is a `tool-catalog-invalid` rejection.
     pub max_catalog_response_bytes: usize,
+    /// `tool_policies.history_conditions`. When `false`, a save with a history rule is refused as
+    /// `tool-policy-history-unsupported`.
+    pub history_conditions: bool,
 }
 
 /// The ports and values that [`ToolPolicyService::new`] takes.
@@ -489,9 +492,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         let raw = match self.compiler.compile(&request).await {
             Ok(CompileOutcome::Accepted(out)) => match check_compiled(kind, &out) {
                 Ok(()) => {
-                    // SMA-753: remove this check with `reject_history_until_gateway_supports_it`
-                    // when the gateway evaluates history conditions.
-                    let history = reject_history_until_gateway_supports_it(&out);
+                    let history = history_rejections(&out, self.limits.history_conditions);
                     return Ok(if history.is_empty() { Compiled::Accepted(out) } else { Compiled::Rejected(history) });
                 }
                 // IAM's own checks: their reasons are `tool-policy-invalid` and
@@ -844,7 +845,12 @@ mod tests {
 
     /// A harness whose actor holds every tenant action at the org and every floor action at Root.
     pub(super) fn harness() -> Harness {
-        let h = bare_harness();
+        harness_with_history(false)
+    }
+
+    /// [`harness`] with `tool_policies.history_conditions` set to `history_conditions`.
+    pub(super) fn harness_with_history(history_conditions: bool) -> Harness {
+        let h = bare_harness_with(DEFAULT_CATALOG_CAP, history_conditions);
         for action in [
             Action::ManageToolCatalog,
             Action::ReadToolCatalog,
@@ -862,11 +868,15 @@ mod tests {
 
     /// A harness whose actor holds nothing.
     pub(super) fn bare_harness() -> Harness {
-        bare_harness_with_cap(DEFAULT_CATALOG_CAP)
+        bare_harness_with(DEFAULT_CATALOG_CAP, false)
     }
 
     /// [`bare_harness`] with another catalog size cap.
     fn bare_harness_with_cap(max_catalog_response_bytes: usize) -> Harness {
+        bare_harness_with(max_catalog_response_bytes, false)
+    }
+
+    fn bare_harness_with(max_catalog_response_bytes: usize, history_conditions: bool) -> Harness {
         let orgs = InMemoryOrgs::default();
         let org_id = seed_org(&orgs.0, ORG);
         let repo = InMemoryToolPolicies::default();
@@ -891,6 +901,7 @@ mod tests {
                 max_source_bytes: MAX_SOURCE,
                 max_window_ms: MAX_WINDOW_MS,
                 max_catalog_response_bytes,
+                history_conditions,
             },
             ids: SeqIds::default(),
             clock: clock.clone(),
@@ -1209,10 +1220,30 @@ mod tests {
         assert_eq!((rejections[0].line, rejections[0].column), (None, None));
         assert_eq!(
             rejections[0].message,
-            "policy rate uses a history rule (formerly, count_within or sum_within). The gateway cannot enforce history rules yet, so this set cannot be saved. Remove the temporal block, or wait for history support."
+            "policy rate uses a history rule (formerly, count_within or sum_within). History rules are off in this IAM (tool_policies.history_conditions = false), so this set cannot be saved. Remove the temporal block, or ask the operator to turn history rules on."
         );
         assert_eq!((h.repo.writes(), h.repo.insert_attempts(), h.uow.commits()), (0, 0, 0));
         assert!(audit_actions(&h).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_save_with_a_condition_is_refused_when_history_conditions_is_off() {
+        let h = harness_with_history(false);
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["rate"]))));
+        let rejections = rejected(h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await);
+        assert_eq!(rejections.len(), 1, "{rejections:?}");
+        assert_eq!(rejections[0].reason, RejectionReason::HistoryUnsupported);
+    }
+
+    #[tokio::test]
+    async fn a_save_with_a_condition_is_accepted_when_history_conditions_is_on() {
+        let h = harness_with_history(true);
+        h.compiler
+            .push(Ok(CompileOutcome::Accepted(output_with_history(STARTER_TOOL_POLICY_SOURCE, tenant_schema_json(&[]), &["rate"]))));
+        let saved = h.svc.put_set(&h.actor, h.org, STARTER_TOOL_POLICY_SOURCE, 0).await;
+        assert!(saved.is_ok(), "{saved:?}");
+        assert_eq!(h.repo.writes(), 1);
     }
 
     #[tokio::test]

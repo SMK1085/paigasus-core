@@ -1,0 +1,414 @@
+{
+  "shape": "count_within",
+  "schema": "tests/fixtures/corpus_schema.cedarschema",
+  "timestamp_unit": "seconds",
+  "formerly_sees_the_decided_event": true,
+  "policy": "@id(\"corpus-any-tool\")\npermit (principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource)\nwhen temporal { count_within(1m, Pgs::Gateway::Action::\"InvokeTool\"::request{}) <= 1 };\n",
+  "compiled": {
+    "cedar_policies": "@id(\"corpus-any-tool\")\npermit(principal, action in Pgs::Gateway::Action::\"InvokeTool\", resource) when { context.p_corpus_hany_htool_0__temporal_0 };",
+    "cedar_schema_json": {
+      "Pgs::Gateway": {
+        "entityTypes": {},
+        "actions": {
+          "InvokeTool": {
+            "appliesTo": {
+              "resourceTypes": [],
+              "principalTypes": []
+            }
+          },
+          "op_eq": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ge": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_gt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_le": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_lt": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "op_ne": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {}
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "pay": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "memo": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      },
+                      "meta": {
+                        "type": "Record",
+                        "attributes": {
+                          "limit": {
+                            "type": "Record",
+                            "attributes": {
+                              "max": {
+                                "type": "EntityOrCommon",
+                                "name": "Long",
+                                "required": false
+                              }
+                            },
+                            "required": false
+                          },
+                          "region": {
+                            "type": "EntityOrCommon",
+                            "name": "String",
+                            "required": false
+                          }
+                        },
+                        "required": false
+                      },
+                      "price": {
+                        "type": "EntityOrCommon",
+                        "name": "decimal",
+                        "required": false
+                      },
+                      "urgent": {
+                        "type": "EntityOrCommon",
+                        "name": "Bool",
+                        "required": false
+                      }
+                    }
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "search": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "n": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "q": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          },
+          "send": {
+            "appliesTo": {
+              "resourceTypes": [
+                "Pgs::Iam::Organization"
+              ],
+              "principalTypes": [
+                "Pgs::Iam::Principal"
+              ],
+              "context": {
+                "type": "Record",
+                "attributes": {
+                  "input": {
+                    "type": "Record",
+                    "attributes": {
+                      "amount": {
+                        "type": "EntityOrCommon",
+                        "name": "Long",
+                        "required": false
+                      },
+                      "to": {
+                        "type": "EntityOrCommon",
+                        "name": "String",
+                        "required": false
+                      }
+                    }
+                  },
+                  "p_corpus_hany_htool_0__temporal_0": {
+                    "type": "Boolean"
+                  }
+                }
+              }
+            },
+            "memberOf": [
+              {
+                "id": "InvokeTool"
+              }
+            ]
+          }
+        }
+      },
+      "Pgs::Iam": {
+        "entityTypes": {
+          "Organization": {},
+          "Principal": {}
+        },
+        "actions": {}
+      }
+    },
+    "conditions": [
+      {
+        "slot": "p_corpus_hany_htool_0__temporal_0",
+        "policy_id": "corpus-any-tool",
+        "scope": "session",
+        "window_ms": 60000,
+        "shape": {
+          "type": "count_within",
+          "predicate": {
+            "type": "all_of",
+            "left": {
+              "type": "event_kind",
+              "kind": "request"
+            },
+            "right": {
+              "type": "any_catalog_tool"
+            }
+          },
+          "op": "le",
+          "threshold": 1
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "ts": 0,
+      "kind": "request",
+      "tool": "search",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "q": "a"
+      },
+      "arguments": "{\"q\": \"a\"}"
+    },
+    {
+      "ts": 10,
+      "kind": "request",
+      "tool": "send",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "to": "x",
+        "amount": 1
+      },
+      "arguments": "{\"to\": \"x\", \"amount\": 1}"
+    },
+    {
+      "ts": 20,
+      "kind": "request",
+      "tool": "pay",
+      "principal": "Pgs::Iam::Principal::\"p1\"",
+      "resource": "Pgs::Iam::Organization::\"o1\"",
+      "input": {
+        "memo": "x"
+      },
+      "arguments": "{\"memo\": \"x\"}"
+    }
+  ],
+  "decisions": [
+    "allow",
+    "allow",
+    "allow"
+  ],
+  "notes": [
+    "Dogwood matches `InvokeTool::request` only on an event whose action is `InvokeTool` itself, not on a call of a member tool: it counts 0 and allows every call"
+  ],
+  "paigasus_differs": [
+    {
+      "event": 1,
+      "dogwood": "allow",
+      "paigasus": "deny",
+      "rule": "The compiler maps InvokeTool::request{} to any_catalog_tool, which matches every catalog tool (SMA-751). Dogwood matches only an event whose action is InvokeTool itself, and no gateway call has that action, so Dogwood's rule could never match in the gateway."
+    },
+    {
+      "event": 2,
+      "dogwood": "allow",
+      "paigasus": "deny",
+      "rule": "The compiler maps InvokeTool::request{} to any_catalog_tool, which matches every catalog tool (SMA-751). Dogwood matches only an event whose action is InvokeTool itself, and no gateway call has that action, so Dogwood's rule could never match in the gateway."
+    }
+  ]
+}
