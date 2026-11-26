@@ -577,6 +577,12 @@ that goes past 20,000 events is truncated. The slots that read it are then missi
 `truncated`, and they fail closed. A history of 3 tools with 10,000 events each, read by an
 every-tool rule, measured about 240 ms for one hold read on a development host.
 
+The design limit is a p99 of less than 15 ms for `gateway_tool_policy_overhead_seconds` (spec P15).
+This build does not meet it at 8 concurrent holds. With a history of 1,000 events and 8 holds in
+flight, the measured p99 was 17.5 to 19.0 ms in 5 of 5 runs. The host was a development Mac, with
+Redis in Docker Desktop. A change of the storage layout is expected to lower the Redis time. It is a
+follow-up.
+
 Watch the time of the hold read. When it grows, move the history to its own Redis instance. Do not
 share it with the limits Redis. A long hold read on a shared instance delays the rate-limit calls.
 
