@@ -572,24 +572,44 @@ impl PolicyCache {
             Fetched::Tenant(_, t) => t.version.clone(),
         };
 
-        // An unchanged version needs no compile: the stored set stays.
-        {
+        // An unchanged version needs no source text: the stored set stays. When the floor changed
+        // after the stored tenant set was compiled, the stored text is compiled against the new
+        // floor here, so the result (and the metrics) are those of the current floor, not of the
+        // older one.
+        let stored_for_new_floor = {
             let mut inner = self.lock();
-            if let Some(Entry { good: Some(good), .. }) = inner.existing(key)
-                && good.version == version
-            {
-                good.loaded_at = Instant::now();
-                good.gen_at_load = gen_at_load;
-                // A remembered tenant set that does not compile is still a compile failure, not a good load.
-                if matches!(&good.data, Data::Tenant(t) if t.compiled.is_none()) {
-                    good.stale = true;
-                    counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "compile_error").increment(1);
-                    return false;
+            match inner.existing(key) {
+                Some(Entry { good: Some(good), .. }) if good.version == version => {
+                    good.loaded_at = Instant::now();
+                    good.gen_at_load = gen_at_load;
+                    match (&good.data, &floor) {
+                        (Data::Tenant(t), Some(f)) if !Arc::ptr_eq(&t.floor, &f.floor) => Some(t.clone()),
+                        // A remembered tenant set that does not compile is still a compile failure, not a good load.
+                        (Data::Tenant(t), _) if t.compiled.is_none() => {
+                            good.stale = true;
+                            counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "compile_error").increment(1);
+                            return false;
+                        }
+                        _ => {
+                            good.stale = false;
+                            counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "ok").increment(1);
+                            return true;
+                        }
+                    }
                 }
-                good.stale = false;
-                counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "ok").increment(1);
-                return true;
+                _ => None,
             }
+        };
+        if let (Some(stored), Key::Tenant(org), Some(f)) = (stored_for_new_floor, key, &floor) {
+            // `recompile` counts a compile error and logs it.
+            let ok = matches!(self.recompile(org, &stored, f), Lookup::Ready(_));
+            if ok {
+                counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "ok").increment(1);
+            }
+            if let Some(Entry { good: Some(good), .. }) = self.lock().existing(key) {
+                good.stale = !ok;
+            }
+            return ok;
         }
 
         let compile_started = Instant::now();
@@ -1605,6 +1625,46 @@ mod tests {
         let slots: Vec<&str> = compiled.history.conditions().iter().map(|c| c.slot.as_str()).collect();
         assert_eq!(slots, ["other", "same"]);
         assert_eq!(src.tenant_calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_after_a_floor_change_judges_the_unchanged_tenant_set_against_the_new_floor() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let src = FakeSource::new();
+        src.set_tenant_conditions(vec![formerly("same", "send", "amount")], &["send"]);
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        ready_compiled(&cache, &floor, OnUnavailable::Closed).await;
+        // 1. The new floor clashes with the tenant slot. The refresh reloads the floor, then the
+        // tenant with an unchanged version: the stored set must be a compile error of this floor.
+        src.set_floor_conditions(vec![formerly("same", "rm", "force")]);
+        src.set_floor(F2, "f2");
+        snap(&snapshotter);
+        tokio::time::advance(secs(30)).await;
+        cache.refresh_once().await;
+        let s = snap(&snapshotter);
+        assert_eq!(s.loads("compile_error"), 1, "the clash is a compile error at the refresh");
+        assert_eq!(s.loads("ok"), 1, "only the floor reload is ok");
+        assert_eq!(s.counter(names::GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL, &[]), 1);
+        assert_eq!(s.gauge(names::GATEWAY_TOOL_POLICY_STALE_ENTRIES), Some(1.0));
+        // 2. The floor is fixed. The next refresh compiles the stored set against it: no false
+        // compile error, no refresh error, no stale entry.
+        src.set_floor_conditions(vec![formerly("other", "rm", "force")]);
+        src.set_floor(FLOOR, "f3");
+        tokio::time::advance(secs(30)).await;
+        cache.refresh_once().await;
+        let s = snap(&snapshotter);
+        assert_eq!(s.loads("compile_error"), 0, "no false compile error");
+        assert_eq!(s.loads("ok"), 2, "the floor and the tenant reload are ok");
+        assert_eq!(s.counter(names::GATEWAY_TOOL_POLICY_REFRESH_ERRORS_TOTAL, &[]), 0);
+        assert_eq!(s.gauge(names::GATEWAY_TOOL_POLICY_STALE_ENTRIES), Some(0.0));
+        let fixed = ready_floor(&cache, OnUnavailable::Closed).await;
+        let compiled = ready_compiled(&cache, &fixed, OnUnavailable::Closed).await;
+        let slots: Vec<&str> = compiled.history.conditions().iter().map(|c| c.slot.as_str()).collect();
+        assert_eq!(slots, ["other", "same"]);
+        assert_eq!(src.tenant_calls(), 3, "one load and two reloads, no other source call");
     }
 
     #[tokio::test(start_paused = true)]
