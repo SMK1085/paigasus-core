@@ -447,6 +447,52 @@ fn a_named_tool_condition_does_not_require_the_every_set() {
     assert!(ToolSet::new(BTreeSet::new(), false, true).requires_every(&known(&[])));
 }
 
+/// A catalog of `n` tools `t0` .. `t{n-1}`.
+fn catalog_of(n: usize) -> Catalog {
+    Catalog::known((0..n).map(|i| format!("t{i}")))
+}
+
+#[test]
+fn a_catalog_tool_set_past_the_read_set_limit_requires_the_every_set() {
+    use paigasus_kernel::tool_policy::history::MAX_READ_SETS;
+    assert_eq!(MAX_READ_SETS, 64);
+    let catalog_tools = ToolSet::new(BTreeSet::new(), true, false);
+    assert!(!catalog_tools.requires_every(&catalog_of(MAX_READ_SETS)), "64 catalog tools: one set each");
+    assert!(catalog_tools.requires_every(&catalog_of(MAX_READ_SETS + 1)), "65 catalog tools: the Every set");
+    // The named tools of the set count too, once each, with the catalog tools.
+    let with_name = ToolSet::new(BTreeSet::from(["x".to_owned()]), true, false);
+    assert!(with_name.requires_every(&catalog_of(MAX_READ_SETS)), "64 catalog tools and one more name");
+    let with_catalog_name = ToolSet::new(BTreeSet::from(["t0".to_owned()]), true, false);
+    assert!(!with_catalog_name.requires_every(&catalog_of(MAX_READ_SETS)), "a name in the catalog counts once");
+    // A tool set with no catalog never expands, so the limit does not apply to it.
+    let many: BTreeSet<String> = (0..=MAX_READ_SETS).map(|i| format!("n{i}")).collect();
+    assert!(!ToolSet::new(many, false, false).requires_every(&catalog_of(MAX_READ_SETS + 1)));
+}
+
+#[test]
+fn a_large_catalog_condition_reads_the_every_set_and_counts_only_catalog_tools() {
+    let catalog = catalog_of(65);
+    let c = count(Predicate::Tool(ToolMatch::AnyCatalogTool), CmpOp::Ge, 2);
+    // The Every set alone: the reserve reads no per-tool set for this condition.
+    let events = vec![
+        req(1, 1, "t64", Fields::Values(BTreeMap::new())),
+        req(2, 2, "t0", Fields::Values(BTreeMap::new())),
+        req(3, 3, "other", Fields::Values(BTreeMap::new())),
+    ];
+    let only_every = Window::new(vec![set(Scope::Session, SetTool::Every, events.clone())]);
+    let e = evaluate(std::slice::from_ref(&c), &only_every, &[], 0, NOW, &catalog);
+    assert_eq!(e.missing, vec![], "no set is missing and none is truncated");
+    assert_eq!(e.slots.get("s"), Some(true), "t64 and t0 count; `other` is not in the catalog");
+    let one_catalog_call = Window::new(vec![set(Scope::Session, SetTool::Every, vec![events[0].clone(), events[2].clone()])]);
+    assert_eq!(evaluate(std::slice::from_ref(&c), &one_catalog_call, &[], 0, NOW, &catalog).slots.get("s"), Some(false));
+    // A truncated Every set still makes the slot missing: the fallback does not fail open.
+    let truncated = Window::new(vec![WindowSet::new(Scope::Session, SetTool::Every, events, None, true)]);
+    assert_eq!(
+        evaluate(std::slice::from_ref(&c), &truncated, &[], 0, NOW, &catalog).missing,
+        vec![Missing::new("s", Part::Tenant, MissingReason::Truncated)]
+    );
+}
+
 #[test]
 fn field_tests_gives_each_field_test_its_own_tool_set() {
     let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>();

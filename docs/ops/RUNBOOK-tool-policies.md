@@ -572,8 +572,14 @@ Redis runs one hold read at a time. So the holds of concurrent requests wait for
 gateway tests measure a history of 1,000 events. The time grows with the number of events and with
 the number of concurrent requests.
 
-The read has limits. A request reads at most 64 entries, and at most 20,000 events in total. A read
-that goes past 20,000 events is truncated. The slots that read it are then missing, with the reason
+The read has limits. A request reads at most 64 entries, and at most 20,000 events in total. An
+entry is one tool set of one scope. The every-tool set counts as one entry. An `any_catalog_tool`
+rule over more than 64 tools (the catalog tools and the tools that the rule names) reads the
+every-tool set, not one entry for each tool. Its result is the same, because the gateway still
+matches each event against the catalog. A read plan with more than 64 entries in total is still
+truncated after the 64th entry. This can occur with many rules, or with catalog rules of up to 64
+tools in more than one scope. The slots that read such an entry are missing, with the reason
+`truncated`, and they fail closed. A read that goes past 20,000 events is truncated. The slots that read it are then missing, with the reason
 `truncated`, and they fail closed. A history of 3 tools with 10,000 events each, read by an
 every-tool rule, measured about 240 ms for one hold read on a development host.
 

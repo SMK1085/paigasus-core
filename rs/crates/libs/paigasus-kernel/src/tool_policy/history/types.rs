@@ -10,6 +10,10 @@ use super::fields::{Digest, FieldPath, Fields, KeyId, Scalar};
 /// The longest window that the history keeps, in milliseconds (25 hours, design D10).
 pub const RETENTION_MS: u64 = 90_000_000;
 
+/// The most sets that one reserve reads (spec P4). One value, here: the gateway re-exports it.
+/// A `catalog` tool set that would expand to more tools reads the `Every` set instead.
+pub const MAX_READ_SETS: usize = 64;
+
 /// The policy set that a condition comes from.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -377,8 +381,21 @@ impl ToolSet {
     }
 
     /// The condition reads the `Every` set (and all sets of its scope): when `every`, or when
-    /// `catalog` and the catalog is not known. `ReadPlan::of` uses the same rule.
+    /// `catalog` and the catalog is not known, or when `catalog` and the named tools and the
+    /// catalog tools together are more than `MAX_READ_SETS`. One set per tool would then pass the
+    /// read limit of the store, and the sets past it would come back truncated on every read. The
+    /// `Every` set holds every tool, and the evaluator still matches each event against the
+    /// catalog, so the result stays exact. `ReadPlan::of` and `FieldPlan::of` use the same rule.
     pub fn requires_every(&self, catalog: &Catalog) -> bool {
-        self.every || (self.catalog && catalog.0.is_none())
+        if self.every {
+            return true;
+        }
+        if !self.catalog {
+            return false;
+        }
+        match &catalog.0 {
+            None => true,
+            Some(names) => names.len() + self.names.iter().filter(|n| !names.contains(*n)).count() > MAX_READ_SETS,
+        }
     }
 }

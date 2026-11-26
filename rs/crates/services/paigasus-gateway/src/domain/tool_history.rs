@@ -25,8 +25,9 @@ pub use paigasus_kernel::tool_policy::history::RETENTION_MS;
 /// The time to live of a history key, in seconds. It follows `RETENTION_MS`.
 pub const KEY_TTL_SECS: u64 = RETENTION_MS / 1000;
 /// The most sets that one reserve reads (spec P4). A set is one entry of `ReadRequest::sets`, so
-/// an every-tool set counts once.
-pub const MAX_READ_SETS: usize = 64;
+/// an every-tool set counts once. One value, in the kernel: a `catalog` tool set past it reads the
+/// every-tool set.
+pub use paigasus_kernel::tool_policy::history::MAX_READ_SETS;
 /// The most events that one reserve reads, over all its sets (spec P4).
 pub const MAX_READ_EVENTS: usize = 20_000;
 /// The most tools in the tool index of one history (spec P4). A later tool still gets its own

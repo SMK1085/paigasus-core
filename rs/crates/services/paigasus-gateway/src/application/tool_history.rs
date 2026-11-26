@@ -1604,6 +1604,47 @@ mod tests {
         assert_eq!(e.slots.get(&slot_of(0)), Some(false), "a set before the limit is read");
     }
 
+    /// Final review I-2: an `any_catalog_tool` condition over a catalog of 65 tools reads the
+    /// every-tool set, not 65 sets. No set comes back truncated, and the count is exact: two calls
+    /// of catalog tools count, a call of a tool outside the catalog does not.
+    #[tokio::test]
+    async fn a_catalog_of_65_tools_reads_the_every_set_and_counts_exactly() {
+        use paigasus_kernel::tool_policy::history::{Predicate, ToolMatch};
+
+        use crate::domain::tool_history::MAX_READ_SETS;
+
+        let read = |w: &WindowRead| match w {
+            WindowRead::Read(window) => window.clone(),
+            other => panic!("a read window, not {other:?}"),
+        };
+        let (_store, h) = setup();
+        let session = link(&h, &turn(&[], &[])).await.expect("a session").session;
+        let catalog = Catalog::known((0..=MAX_READ_SETS).map(|i| format!("t{i}")));
+        let condition = Condition::new(
+            "c_cat",
+            Part::Tenant,
+            KernelScope::Session,
+            60_000,
+            Shape::CountWithin {
+                predicate: Predicate::Tool(ToolMatch::AnyCatalogTool),
+                op: CmpOp::Ge,
+                threshold: 2,
+            },
+        );
+        let policy = HistoryPolicy::build(&[], &[condition], ORG_A, catalog, None, &HmacHistoryDigester::keyless());
+        let plan = policy.read().expect("a read plan");
+        assert_eq!(plan.sets.len(), 1, "one every-tool set, not one set per catalog tool");
+        assert_eq!(plan.sets[0].tool, SetTool::Every);
+        let first = h.reserve(&ctx(), &session, &calls(&[("c-1", "t64"), ("c-2", "other")]), &[u(1), u(2)], Some(&policy)).await;
+        let e = evaluate(policy.conditions(), &read(&first.window), &first.hold, 1, first.now_ms, policy.catalog());
+        assert_eq!(e.missing, vec![], "no truncated set and no missing set");
+        assert_eq!(e.slots.get("c_cat"), Some(false), "t64 counts once; `other` is not in the catalog");
+        let second = h.reserve(&ctx(), &session, &calls(&[("c-3", "t0")]), &[u(3)], Some(&policy)).await;
+        let e = evaluate(policy.conditions(), &read(&second.window), &second.hold, 0, second.now_ms, policy.catalog());
+        assert_eq!(e.missing, vec![]);
+        assert_eq!(e.slots.get("c_cat"), Some(true), "t64 from the history and t0 from the hold");
+    }
+
     /// F14: with no API key, a `Key` condition reads the principal set. One store set serves the
     /// `Principal` and the `Key` condition, and the window holds both kernel sets.
     #[tokio::test]

@@ -9,7 +9,8 @@ use paigasus_kernel::tool_policy::history::{Catalog, Condition, FieldPath, Histo
 use uuid::Uuid;
 
 /// The tools of a tool set as the store keys them: `None` for every tool (the `Every` set), else
-/// the named tools and, when `catalog`, each catalog tool. This is the rule of the evaluator
+/// the named tools and, when `catalog`, each catalog tool. A `catalog` set that would list more
+/// than `MAX_READ_SETS` tools is `None` too. This is the rule of the evaluator
 /// (`ToolSet::requires_every`), so the plans and the evaluator read the same sets.
 fn set_tools(tools: &ToolSet, catalog: &Catalog) -> Option<BTreeSet<String>> {
     if tools.requires_every(catalog) {
@@ -33,7 +34,7 @@ pub struct FieldPlan {
 impl FieldPlan {
     /// The paths of the field tests of each condition, and the `sum_within` path, under the tool
     /// set that holds at each one. A `catalog` tool set gives each catalog tool, or every tool when
-    /// the catalog is not known.
+    /// the catalog is not known or has more than `MAX_READ_SETS` tools.
     #[must_use]
     pub fn of(conditions: &[Condition], catalog: &Catalog) -> Self {
         let mut plan = Self::default();
@@ -108,7 +109,7 @@ pub struct ReadPlan {
 impl ReadPlan {
     /// One set for each scope and tool that a condition reads: a named tool gives its set, a
     /// `catalog` tool set gives the set of each catalog tool, and every tool (or a `catalog` tool
-    /// set with no known catalog) gives the `Every` set. A condition with only named tools reads no
+    /// set with no known catalog, or with more than `MAX_READ_SETS` tools) gives the `Every` set. A condition with only named tools reads no
     /// `Every` set. `None` with no condition.
     ///
     /// The `AllOf` catalog over-approximation of `Predicate::tools` can list more sets than the
@@ -364,6 +365,34 @@ mod tests {
         // A named-tool condition adds no `Every` set; an unknown catalog gives `Every`.
         assert_eq!(ReadPlan::of(&conditions[..1], &Catalog::unknown()).expect("one").sets, [read(Scope::Session, named("send"))]);
         assert_eq!(ReadPlan::of(&conditions[1..2], &Catalog::unknown()).expect("one").sets, [read(Scope::Principal, SetTool::Every)]);
+    }
+
+    #[test]
+    fn a_catalog_of_more_than_the_read_set_limit_reads_the_every_set_once_per_scope() {
+        use paigasus_kernel::tool_policy::history::MAX_READ_SETS;
+        let names: Vec<String> = (0..=MAX_READ_SETS).map(|i| format!("t{i}")).collect();
+        let catalog = Catalog::known(names.clone());
+        let conditions = [
+            session("a", all(any_catalog(), field("amount"))),
+            formerly("b", Part::Tenant, Scope::Principal, 5000, any_catalog()),
+            session("c", tool("send")),
+        ];
+        let plan = ReadPlan::of(&conditions, &catalog).expect("conditions");
+        // No per-tool set of the 65 catalog tools: the read stays far under the limit.
+        assert_eq!(
+            plan.sets,
+            [read(Scope::Session, named("send")), read(Scope::Session, SetTool::Every), read(Scope::Principal, SetTool::Every)]
+        );
+        assert!(plan.sets.len() <= MAX_READ_SETS);
+        // The field plan stores the path for every tool, so each catalog tool keeps it.
+        let fields = FieldPlan::of(&conditions, &catalog);
+        assert_eq!(fields.paths_for("t64"), paths(&["amount"]));
+        assert_eq!(fields.paths_for("t0"), paths(&["amount"]));
+        // At the limit, each catalog tool still has its own set.
+        let at_limit = Catalog::known(names.into_iter().take(MAX_READ_SETS));
+        let plan = ReadPlan::of(&conditions[..1], &at_limit).expect("one");
+        assert_eq!(plan.sets.len(), MAX_READ_SETS);
+        assert!(!plan.sets.contains(&read(Scope::Session, SetTool::Every)));
     }
 
     #[test]
