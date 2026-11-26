@@ -501,10 +501,15 @@ Use two phases. The order matters.
 2. Phase 2. On every replica, swap the two keys. The new key becomes `digest_key`. The old key
    becomes `previous_digest_key`.
 3. Keep the old key as `previous_digest_key` for 25 hours. This is the retention time of the
-   history (`RETENTION_MS`). After that time, remove it.
+   history (`RETENTION_MS`). The 25 hours start when the last replica runs the phase 2 config, not
+   when the first one does. A replica that still runs phase 1 writes events under the old key.
+   After that time, remove the old key.
 
-An event with a key id that no replica knows is an unknown event. A slot that reads it is missing.
-So a wrong order fails closed. It never allows a call that the rule should block.
+An event with a key id that no replica knows is an unknown event. A slot that reads it can be
+missing. So a wrong order fails closed. It never allows a call that the rule should block.
+
+A `previous_digest_key` without a `digest_key` fails the boot. So in phase 1, set the new key as
+`previous_digest_key` only on a replica that already has a `digest_key`.
 
 #### Failure rules
 
@@ -716,11 +721,24 @@ These limits apply after PR 2.
 - A lost settle keeps the call link of a blocked call. A forged result for that call then counts
   as linked, and it adds a result event. This can make a `formerly(x::response)` or a
   `count_within(...) >= N` permit allow a call. The risk is low, because the client never sees the
-  call id of a blocked call.
+  call id of a blocked call. A deny append that runs before a late reserve has the same effect. The
+  reserve then writes the call link of the blocked call, and nothing deletes it.
 - One mistyped call, or one call with unparsed arguments, makes every condition that depends on it
   missing for up to 24 hours, in the histories of that call. Only the session, the principal or
   the key of that client is affected.
 - With no history key, every condition with a string, bool or decimal literal has a missing slot.
+- A field path that is not in an event reads as `false` (design R3). So a `sum_within` adds 0 for
+  that event, and a `count_within` or a `formerly` with a field test does not count it. A cap can
+  then count fewer events than were made, and it can allow a call that it should block. This
+  applies for up to 24 hours (the longest window) to the events of these four cases:
+  - A policy edit adds a field path. The events from before the edit do not have the path.
+  - A tool joins the catalog of an `any_catalog_tool` rule with a field test. Its events from
+    before the catalog change do not have the path.
+  - A replica of the build before this one wrote the events, during the rolling deploy or before
+    it, for a live set that already holds a history rule (see "Before you deploy this build").
+  - The tenant set was unavailable on a replica that had no last known field plan of the
+    organization. That replica stores only the paths of the floor conditions.
+  So a new field cap starts from zero. Do not rely on it for the first 24 hours.
 - The tool index never removes a tool. A history that reaches 256 tools makes every-tool rules
   fail closed (the slot is missing) while that history is active.
 - The hold read costs time in proportion to the events in the window (see "Sizing"). A truncated
