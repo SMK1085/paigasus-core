@@ -748,6 +748,8 @@ mod history_rig {
         window_sum: AtomicU64,
         window_min: AtomicU64,
         window_max: AtomicU64,
+        /// The reserves that succeeded. A failed reserve has no window.
+        window_reserves: AtomicU64,
     }
 
     impl TimedStore {
@@ -763,15 +765,18 @@ mod history_rig {
             self.window_sum.store(0, Ordering::Relaxed);
             self.window_min.store(u64::MAX, Ordering::Relaxed);
             self.window_max.store(0, Ordering::Relaxed);
+            self.window_reserves.store(0, Ordering::Relaxed);
         }
 
-        /// The mean, the smallest and the largest number of events that one reserve read, over
-        /// `reserves` reserves.
-        pub fn windows(&self, reserves: u64) -> (u64, u64, u64) {
+        /// The mean, the smallest and the largest number of events that one successful reserve read,
+        /// and the number of successful reserves.
+        pub fn windows(&self) -> (u64, u64, u64, u64) {
+            let ok = self.window_reserves.load(Ordering::Relaxed);
             (
-                self.window_sum.load(Ordering::Relaxed).checked_div(reserves).unwrap_or(0),
+                self.window_sum.load(Ordering::Relaxed).checked_div(ok).unwrap_or(0),
                 self.window_min.load(Ordering::Relaxed),
                 self.window_max.load(Ordering::Relaxed),
+                ok,
             )
         }
     }
@@ -794,6 +799,7 @@ mod history_rig {
                 self.window_sum.fetch_add(read, Ordering::Relaxed);
                 self.window_min.fetch_min(read, Ordering::Relaxed);
                 self.window_max.fetch_max(read, Ordering::Relaxed);
+                self.window_reserves.fetch_add(1, Ordering::Relaxed);
             }
             reply
         }
@@ -815,6 +821,7 @@ mod history_rig {
             window_sum: AtomicU64::new(0),
             window_min: AtomicU64::new(u64::MAX),
             window_max: AtomicU64::new(0),
+            window_reserves: AtomicU64::new(0),
         });
         let key = HistoryKey::new(SecretString::from("history-perf-test-key-of-32-bytes".to_owned())).expect("a 32-byte key");
         let digester = HmacHistoryDigester::new(Some(key), None).expect("a digester");
@@ -947,10 +954,12 @@ struct HistoryRun {
     reserve_mean: Duration,
     reserves: u64,
     /// The events that one reserve read: the mean, the smallest and the largest.
-    window: (u64, u64, u64),
+    window: (u64, u64, u64, u64),
     /// The status of the first answer, and the tool calls that it kept.
     first: (StatusCode, usize),
-    /// The counters of `gateway_tool_history_*` above zero, with their labels.
+    /// The counters of `gateway_tool_history_*` above zero, with their labels: the first request,
+    /// and the measured requests.
+    first_counters: Vec<String>,
     counters: Vec<String>,
 }
 
@@ -1023,8 +1032,8 @@ async fn run_history_case(
     let sent = send(&app, &body).await;
     let kept = sent.json()["choices"][0]["message"]["tool_calls"].as_array().map_or(0, Vec::len);
     let first = (sent.status, kept);
-    let first_counters = take_counters(snapshotter);
-    let _warm = take_overhead(snapshotter);
+    // One snapshot takes the overhead samples and the counters together: it resets the counters.
+    let (_warm, first_counters) = take_run(snapshotter);
     let before = store.mean_reserve().1;
     // From here on, a request leaves the history as it found it (see `Keep`).
     let keep = match keep {
@@ -1051,11 +1060,12 @@ async fn run_history_case(
         let (app, body, keep) = (app.clone(), Arc::clone(&body), keep.clone());
         set.spawn(async move {
             let sent = send(&app, &body).await;
-            // After the answer, so outside the overhead sample of this request.
+            // The slot goes back first, so 8 measured requests stay in flight. The trim runs after
+            // the answer, outside the overhead sample of this request.
+            drop(permit);
             if let Some(k) = keep {
                 k.trim().await;
             }
-            drop(permit);
             sent.status
         });
     }
@@ -1063,12 +1073,10 @@ async fn run_history_case(
         assert_eq!(status.expect("task"), StatusCode::OK);
     }
     let wall = started.elapsed();
-    let mut samples = take_overhead(snapshotter);
+    let (mut samples, counters) = take_run(snapshotter);
     samples.sort_by(f64::total_cmp);
     let (reserve_mean, total) = store.mean_reserve();
-    let window = store.windows(total - before);
-    let mut counters = first_counters;
-    counters.extend(take_counters(snapshotter));
+    let window = store.windows();
     HistoryRun {
         samples,
         wall,
@@ -1076,24 +1084,28 @@ async fn run_history_case(
         reserves: total - before,
         window,
         first,
+        first_counters,
         counters,
     }
 }
 
-/// The `gateway_tool_history_*` counters above zero, as `name{labels} = value`.
-fn take_counters(snapshotter: &Snapshotter) -> Vec<String> {
-    snapshotter
-        .snapshot()
-        .into_vec()
-        .into_iter()
-        .filter_map(|(k, _, _, v)| match v {
+/// The overhead samples and the `gateway_tool_history_*` counters above zero (`name{labels} = value`)
+/// since the last call. One snapshot gives both, because a snapshot resets every counter.
+fn take_run(snapshotter: &Snapshotter) -> (Vec<f64>, Vec<String>) {
+    let mut samples = Vec::new();
+    let mut counters = Vec::new();
+    for (k, _, _, v) in snapshotter.snapshot().into_vec() {
+        match v {
+            DebugValue::Histogram(h) if k.key().name() == names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS => samples.extend(h.into_iter().map(f64::from)),
             DebugValue::Counter(n) if n > 0 && k.key().name().starts_with("gateway_tool_history_") => {
                 let labels: Vec<String> = k.key().labels().map(|l| format!("{}={}", l.key(), l.value())).collect();
-                Some(format!("{}{{{}}} = {n}", k.key().name(), labels.join(",")))
+                counters.push(format!("{}{{{}}} = {n}", k.key().name(), labels.join(",")));
             }
-            _ => None,
-        })
-        .collect()
+            _ => {}
+        }
+    }
+    counters.sort();
+    (samples, counters)
 }
 
 fn print_history_run(title: &str, run: &HistoryRun, requests: usize) {
@@ -1109,9 +1121,13 @@ fn print_history_run(title: &str, run: &HistoryRun, requests: usize) {
         std::env::consts::ARCH,
         profile(),
     );
-    println!("{title}: events read per hold: mean {}, min {}, max {}", run.window.0, run.window.1, run.window.2);
+    println!(
+        "{title}: events read per hold: mean {}, min {}, max {} over {} successful reserves",
+        run.window.0, run.window.1, run.window.2, run.window.3
+    );
     println!("{title}: first answer status {}, tool calls kept {} (requests {requests})", run.first.0, run.first.1);
-    println!("{title}: history counters above zero (first request included): {:?}", run.counters);
+    println!("{title}: history counters above zero, first request: {:?}", run.first_counters);
+    println!("{title}: history counters above zero, measured requests: {:?}", run.counters);
 }
 
 /// SMA-753 P15: a principal history of 1,000 events of `send` and `search`, a hold of three calls,
@@ -1165,9 +1181,19 @@ async fn p99_policy_overhead_with_history_conditions() {
     assert_eq!(run.first, (StatusCode::OK, 3), "the three calls of the hold are allowed");
     print_history_run("history conditions, 1,000 events", &run, HISTORY_REQUESTS);
     // Every hold reads the 1,000 seeded events, plus 3 events for each hold that runs now or has
-    // not yet been trimmed: at most the 8 slots and one more (measured: at most 27).
-    let inflight = 3 * (CONCURRENCY as u64 + 2);
+    // not yet been trimmed: at most 8 running and 8 in the trim (about 27 were measured).
+    let inflight = 3 * 2 * CONCURRENCY as u64;
     assert!(run.window.1 >= 1000 && run.window.2 <= 1000 + inflight, "each hold reads the 1,000 seeded events: {:?}", run.window);
+    assert_eq!(run.window.3, run.reserves, "every reserve succeeded: a failed reserve has no window");
+    assert!(
+        run.first_counters
+            .iter()
+            .chain(&run.counters)
+            .all(|c| !c.starts_with(names::GATEWAY_TOOL_HISTORY_SLOTS_MISSING_TOTAL) && !c.starts_with(names::GATEWAY_TOOL_HISTORY_EVENTS_MISSING_TOTAL)),
+        "no slot and no event is missing: {:?} {:?}",
+        run.first_counters,
+        run.counters
+    );
     let p99 = percentile(&run.samples, 0.99);
     assert!(p99 < 0.015, "p99 {p99}");
 }
