@@ -185,7 +185,9 @@ async fn metrics_count_requests_with_the_agent_host_prefix() {
         support::http_status(port, "/readyz").await.expect("readyz");
     }
     let (_, after_probes) = support::http_status(port, "/metrics").await.expect("metrics");
-    assert_eq!(agent_host_samples(&before), agent_host_samples(&after_probes), "probes must not add an agent_host_* sample");
+    // The scheduler's first pass runs at boot and can end between the snapshots, so skip its series.
+    let probe_samples = |text: &str| -> Vec<String> { agent_host_samples(text).into_iter().filter(|l| !l.starts_with("agent_host_scheduler_")).map(str::to_owned).collect() };
+    assert_eq!(probe_samples(&before), probe_samples(&after_probes), "probes must not add an agent_host_* sample");
 
     let base = request_total(&after_probes);
     let (status, _) = support::http_status(port, "/v1/x").await.expect("app route");
