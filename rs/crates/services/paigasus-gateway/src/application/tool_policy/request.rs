@@ -46,10 +46,10 @@ fn carried(history: Arc<HistoryPolicy>) -> Option<Arc<HistoryPolicy>> {
 fn policies_of(cache: &PolicyCache, org: Uuid, floor: &FloorEntry, tenant: Option<Lookup<CompiledTenant>>) -> (Arc<ToolPolicies>, TenantPart, Option<Arc<HistoryPolicy>>) {
     let (policies, part, history) = match tenant {
         None => (Arc::clone(&floor.floor_only), TenantPart::Off, cache.floor_history(org, floor)),
-        Some(Lookup::Ready(t)) => (t.policies, TenantPart::Evaluated, t.history),
+        Some(Lookup::Ready(t)) => (t.policies, TenantPart::Evaluated, Some(t.history)),
         Some(Lookup::Unavailable) => (Arc::clone(&floor.floor_only), TenantPart::Unavailable, cache.floor_history(org, floor)),
     };
-    (policies, part, carried(history))
+    (policies, part, history.and_then(carried))
 }
 
 /// Why the request side refuses a request. Each refusal is a 400 (P-10, SMA-776).

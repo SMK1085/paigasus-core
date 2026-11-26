@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -239,6 +239,9 @@ pub struct PolicyCache {
     /// Binds the digest literals of the history conditions to an org (plan decision D-A).
     digester: Arc<dyn HistoryDigester>,
     inner: Mutex<Inner>,
+    /// The size of `Inner::last_known`, written under the lock. With no floor condition and no
+    /// known org, [`Self::floor_history`] returns at once and takes no lock.
+    known_orgs: AtomicUsize,
 }
 
 impl PolicyCache {
@@ -258,6 +261,7 @@ impl PolicyCache {
                 tenants: HashMap::new(),
                 last_known: HashMap::new(),
             }),
+            known_orgs: AtomicUsize::new(0),
         })
     }
 
@@ -345,7 +349,7 @@ impl PolicyCache {
                 stored_it = true;
             }
             if stored_it && let Some(c) = &compiled {
-                Self::remember(&mut inner, org, &data.source, c);
+                self.remember(&mut inner, org, &data.source, c);
             }
         }
         compiled.map_or(Lookup::Unavailable, Lookup::Ready)
@@ -365,7 +369,7 @@ impl PolicyCache {
     }
 
     /// Keep the catalog and the field plan of a good tenant compile (plan decision D-F).
-    fn remember(inner: &mut Inner, org: Uuid, source: &TenantPolicies, compiled: &CompiledTenant) {
+    fn remember(&self, inner: &mut Inner, org: Uuid, source: &TenantPolicies, compiled: &CompiledTenant) {
         inner.last_known.insert(
             org,
             LastKnown {
@@ -373,6 +377,7 @@ impl PolicyCache {
                 fields: Arc::clone(compiled.history.fields()),
             },
         );
+        self.known_orgs.store(inner.last_known.len(), Ordering::Release);
     }
 
     /// The floor conditions alone, bound to `org`, for tenant mode `off` and an unavailable tenant
@@ -380,14 +385,22 @@ impl PolicyCache {
     /// the org, so a floor `any_catalog_tool` condition still knows the catalog, and the history
     /// still stores the fields of the tenant conditions. With no good load of the org, the catalog
     /// is unknown.
+    ///
+    /// `None` when the floor has no condition and the org has no last known entry: there is
+    /// nothing to evaluate and no field to store. Then no `HistoryPolicy` is built, and with no
+    /// known org at all no lock is taken.
     #[must_use]
-    pub fn floor_history(&self, org: Uuid, floor: &FloorEntry) -> Arc<HistoryPolicy> {
+    pub fn floor_history(&self, org: Uuid, floor: &FloorEntry) -> Option<Arc<HistoryPolicy>> {
+        if !floor.has_conditions() && self.known_orgs.load(Ordering::Acquire) == 0 {
+            return None;
+        }
         let known = self.lock().last_known.get(&org).cloned();
         let (catalog, stored) = match known {
             Some(k) => (k.catalog, Some(k.fields)),
+            None if !floor.has_conditions() => return None,
             None => (Catalog::unknown(), None),
         };
-        Arc::new(HistoryPolicy::build(&floor.conditions, &[], org, catalog, stored.as_deref(), self.digester.as_ref()))
+        Some(Arc::new(HistoryPolicy::build(&floor.conditions, &[], org, catalog, stored.as_deref(), self.digester.as_ref())))
     }
 
     /// The settings of the last stored answer for this tenant, whatever its age and its `stale`
@@ -600,7 +613,7 @@ impl PolicyCache {
                 if let Some(entry) = inner.existing(key) {
                     entry.good = Some(good);
                     if let Some((org, source, compiled)) = known {
-                        Self::remember(&mut inner, org, &source, &compiled);
+                        self.remember(&mut inner, org, &source, &compiled);
                     }
                 }
                 counter!(names::GATEWAY_TOOL_POLICY_CACHE_LOADS_TOTAL, "result" => "ok").increment(1);
@@ -745,6 +758,7 @@ impl PolicyCache {
         // The last known catalog and plan of an evicted org go with it (plan decision D-F).
         let Inner { tenants, last_known, .. } = &mut *inner;
         last_known.retain(|org, _| tenants.contains_key(org));
+        self.known_orgs.store(last_known.len(), Ordering::Release);
         let evicted = (before - inner.tenants.len()) as u64;
         if evicted > 0 {
             counter!(names::GATEWAY_TOOL_POLICY_EVICTIONS_TOTAL).increment(evicted);
@@ -1605,7 +1619,7 @@ mod tests {
         src.set_fail(true);
         cache.invalidate_all();
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
-        let history = cache.floor_history(ORG, &floor);
+        let history = cache.floor_history(ORG, &floor).expect("a floor condition");
         assert_eq!(history.catalog(), &Catalog::known(["send".to_owned()]), "the last known catalog of the org");
         assert_eq!(history.fields().paths_for("send"), [path("amount")].into_iter().collect(), "the last known paths still store");
         let slots: Vec<&str> = history.conditions().iter().map(|c| c.slot.as_str()).collect();
@@ -1614,7 +1628,7 @@ mod tests {
         // An idle eviction forgets the org: the catalog is unknown again.
         tokio::time::advance(secs(3601)).await;
         cache.refresh_once().await;
-        assert_eq!(cache.floor_history(ORG, &floor).catalog(), &Catalog::unknown());
+        assert_eq!(cache.floor_history(ORG, &floor).expect("a floor condition").catalog(), &Catalog::unknown());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1624,12 +1638,34 @@ mod tests {
         src.set_tenant_conditions(vec![malformed("t_a")], &["send"]);
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
-        assert_eq!(cache.floor_history(ORG, &floor).catalog(), &Catalog::unknown(), "never loaded");
+        assert_eq!(cache.floor_history(ORG, &floor).expect("a floor condition").catalog(), &Catalog::unknown(), "never loaded");
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
-        let history = cache.floor_history(ORG, &floor);
+        let history = cache.floor_history(ORG, &floor).expect("a floor condition");
         assert_eq!(history.catalog(), &Catalog::unknown(), "a set that does not compile is not a good load");
         assert!(history.fields().paths_for("send").is_empty(), "no tenant path is known");
         assert_eq!(history.fields().paths_for("rm"), [path("force")].into_iter().collect(), "the floor paths");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_floor_history_is_none_with_no_floor_condition_and_no_known_org() {
+        let src = FakeSource::new();
+        src.set_tenant_conditions(vec![formerly("t_a", "send", "amount")], &["send"]);
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(!floor.has_conditions());
+        assert!(cache.floor_history(ORG, &floor).is_none(), "nothing to evaluate and nothing to store");
+        // A good tenant load makes the org known: its field plan still stores with no floor condition.
+        ready_compiled(&cache, &floor, OnUnavailable::Closed).await;
+        let history = cache.floor_history(ORG, &floor).expect("the last known field plan");
+        assert_eq!(history.fields().paths_for("send"), [path("amount")].into_iter().collect());
+        assert!(history.conditions().is_empty());
+        // Another org is not known, so it gets none.
+        let other = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000b2);
+        assert!(cache.floor_history(other, &floor).is_none());
+        // An idle eviction forgets the org again.
+        tokio::time::advance(secs(3601)).await;
+        cache.refresh_once().await;
+        assert!(cache.floor_history(ORG, &floor).is_none());
     }
 
     /// `formerly` with the string literal `"x"` in place of the Long literal.
@@ -1682,6 +1718,10 @@ mod tests {
         let bound = literals(&ready_compiled(&keyed, &floor, OnUnavailable::Closed).await.history);
         assert_eq!(bound.len(), 2);
         assert!(bound.iter().all(|l| matches!(l, Literal::Digests(d) if d.len() == 1)), "{bound:?}");
-        assert!(literals(&keyed.floor_history(ORG, &floor)).iter().all(|l| matches!(l, Literal::Digests(d) if d.len() == 1)));
+        assert!(
+            literals(&keyed.floor_history(ORG, &floor).expect("a floor condition"))
+                .iter()
+                .all(|l| matches!(l, Literal::Digests(d) if d.len() == 1))
+        );
     }
 }
