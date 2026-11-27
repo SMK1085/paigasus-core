@@ -21,12 +21,18 @@ use paigasus_observability::Retryable;
 use paigasus_observability::correlation::RETRYABLE_HEADER;
 use serde::Serialize;
 
-use crate::adapters::openai::OpenAiError;
+use crate::adapters::upstream::UpstreamError;
 use crate::domain::limits::{BudgetPeriod, LimitRefusal};
 
 /// D8: the OpenAI SDKs retry a 429 twice unless this header says `false`, and they ignore
 /// `paigasus-retryable`. Sent only on the two limit refusals.
 pub const SHOULD_RETRY_HEADER: &str = "x-should-retry";
+
+/// Rides in the extensions of every rendered `GatewayError` response. The Anthropic route
+/// group reads it to re-render the body in its own envelope and to keep every header. An
+/// upstream body never carries it, so the re-render layer never touches one (SMA-750 R5).
+#[derive(Clone, Copy, Debug)]
+pub struct RenderedError(pub GatewayError);
 
 /// The OpenAI-compatible error envelope: a single `error` object. `#[derive(Serialize)]` only —
 /// the gateway never deserializes its own error bodies.
@@ -100,6 +106,9 @@ pub enum GatewayError {
     RequestTooLarge,
     /// The OpenAI upstream could not be reached (connect/transport/build failure) → 502.
     UpstreamUnavailable,
+    /// The upstream answered with a redirect, which the gateway never follows (D16) → 502. It has
+    /// the wire body of `UpstreamUnavailable`. Not retryable: the same request meets the same redirect.
+    UpstreamRedirected,
     /// The OpenAI upstream did not respond within a configured timeout → 504.
     UpstreamTimeout,
     /// Streaming is disabled by configuration and the request asked for it → 400. Carries
@@ -118,7 +127,12 @@ pub enum GatewayError {
     /// The org used its token budget for the current period (D6) → 429,
     /// `type: "insufficient_quota"`, `x-should-retry: false`. Not retryable: a retry in seconds
     /// cannot succeed, and each retry costs 2-3 IAM RPCs before the refusal.
-    BudgetExhausted { resets_at_unix: i64, period: BudgetPeriod },
+    BudgetExhausted {
+        resets_at_unix: i64,
+        period: BudgetPeriod,
+        /// The seconds until `resets_at_unix`. Only the Anthropic rendering sends it.
+        retry_after_secs: u32,
+    },
 
     // ---- tool interception (SMA-749) ---------------------------------------------------------
     /// Interception is on with `on_failure = "block"`, and a 2xx non-stream answer could not be
@@ -157,23 +171,34 @@ impl From<LimitRefusal> for GatewayError {
     fn from(refusal: LimitRefusal) -> Self {
         match refusal {
             LimitRefusal::RateLimited { retry_after_secs, .. } => GatewayError::RateLimited { retry_after_secs },
-            LimitRefusal::BudgetExhausted { period, resets_at_unix } => GatewayError::BudgetExhausted { resets_at_unix, period },
+            LimitRefusal::BudgetExhausted {
+                period,
+                resets_at_unix,
+                retry_after_secs,
+            } => GatewayError::BudgetExhausted {
+                resets_at_unix,
+                period,
+                retry_after_secs,
+            },
             LimitRefusal::Unscoped => GatewayError::Internal,
         }
     }
 }
 
-/// Map an [`OpenAiError`] (egress send/connect/timeout/build/CA-bundle failure) to its
+/// Map an [`UpstreamError`] (egress send/connect/timeout/build/CA-bundle failure) to its
 /// client-facing [`GatewayError`]: a fired timeout is a `504`; every other transport/connect/
 /// build/CA-bundle failure is a `502` (upstream unreachable/misbuilt — a bad
 /// `upstream.openai.extra_ca_bundle_path` prevents the client from ever being built, same as a
-/// `Build` failure). A non-2xx upstream is NOT an `OpenAiError` (G6 returns it as a
-/// `ChatResponse::Full` for verbatim passthrough), so it never reaches this mapping.
-impl From<OpenAiError> for GatewayError {
-    fn from(err: OpenAiError) -> Self {
+/// `Build` failure). A non-2xx upstream is NOT an `UpstreamError` (G6 returns it as a
+/// `UpstreamResponse::Full` for verbatim passthrough), so it never reaches this mapping.
+impl From<UpstreamError> for GatewayError {
+    fn from(err: UpstreamError) -> Self {
         match err {
-            OpenAiError::Timeout(_) => GatewayError::UpstreamTimeout,
-            OpenAiError::Connect(_) | OpenAiError::Transport(_) | OpenAiError::Build(_) | OpenAiError::CaBundle { .. } => GatewayError::UpstreamUnavailable,
+            UpstreamError::Timeout { .. } => GatewayError::UpstreamTimeout,
+            UpstreamError::Redirect { .. } => GatewayError::UpstreamRedirected,
+            UpstreamError::Connect { .. } | UpstreamError::Transport { .. } | UpstreamError::Build { .. } | UpstreamError::CaBundle { .. } | UpstreamError::InvalidHeaderValue { .. } => {
+                GatewayError::UpstreamUnavailable
+            }
         }
     }
 }
@@ -193,7 +218,7 @@ impl GatewayError {
     /// `type` is one of OpenAI's coarse error kinds (SDKs read it); `code` is the canonical
     /// registry spelling every case now emits (SMA-504 — `Internal` no longer emits `None`);
     /// `param` names the request field at fault, or `None`.
-    fn parts(self) -> (StatusCode, &'static str, Option<&'static str>, Option<&'static str>, &'static str) {
+    pub(crate) fn parts(self) -> (StatusCode, &'static str, Option<&'static str>, Option<&'static str>, &'static str) {
         match self {
             GatewayError::MissingBearer => (
                 StatusCode::UNAUTHORIZED,
@@ -235,7 +260,7 @@ impl GatewayError {
                 None,
                 "The request body is too large.",
             ),
-            GatewayError::UpstreamUnavailable => (
+            GatewayError::UpstreamUnavailable | GatewayError::UpstreamRedirected => (
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 Some("upstream-unavailable"),
@@ -304,9 +329,9 @@ impl GatewayError {
 
     /// The caller-safe message. Static for every case except the budget refusal, which names the
     /// period and the reset instant (D8) — never a count and never the org id.
-    fn message(self) -> String {
+    pub(crate) fn message(self) -> String {
         match self {
-            GatewayError::BudgetExhausted { resets_at_unix, period } => match DateTime::<Utc>::from_timestamp(resets_at_unix, 0) {
+            GatewayError::BudgetExhausted { resets_at_unix, period, .. } => match DateTime::<Utc>::from_timestamp(resets_at_unix, 0) {
                 Some(instant) => format!(
                     "The organization token budget for {} is used up. It resets at {}.",
                     period.label_at_reset(resets_at_unix),
@@ -335,6 +360,7 @@ impl GatewayError {
             | Self::InvalidRequestSchema
             | Self::RequestTooLarge
             | Self::StreamingDisabled
+            | Self::UpstreamRedirected
             | Self::InvalidOrgHeader
             | Self::OrgRequired
             | Self::ResponsesStatefulNotSupported { .. }
@@ -362,6 +388,7 @@ impl IntoResponse for GatewayError {
             },
         };
         let mut response = (status, Json(envelope)).into_response();
+        response.extensions_mut().insert(RenderedError(self));
         let headers = response.headers_mut();
         headers.insert(RETRYABLE_HEADER, HeaderValue::from_static(self.retryable().as_wire()));
         match self {
@@ -383,6 +410,7 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    use crate::adapters::upstream::Provider;
     use crate::domain::limits::{BudgetPeriod, LimitRefusal, RefusalReason};
 
     /// 2026-11-01T00:00:00Z.
@@ -417,6 +445,7 @@ mod tests {
         let resp = GatewayError::BudgetExhausted {
             resets_at_unix: NOV_1,
             period: BudgetPeriod::Monthly,
+            retry_after_secs: 100,
         }
         .into_response();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -435,6 +464,7 @@ mod tests {
             let resp = GatewayError::BudgetExhausted {
                 resets_at_unix,
                 period: BudgetPeriod::Monthly,
+                retry_after_secs: 100,
             }
             .into_response();
             assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -451,6 +481,7 @@ mod tests {
             GatewayError::BudgetExhausted {
                 resets_at_unix: 1_791_158_400,
                 period: BudgetPeriod::Weekly,
+                retry_after_secs: 100,
             }
             .into_response(),
         )
@@ -460,6 +491,7 @@ mod tests {
             GatewayError::BudgetExhausted {
                 resets_at_unix: 1_790_985_600,
                 period: BudgetPeriod::Daily,
+                retry_after_secs: 100,
             }
             .into_response(),
         )
@@ -479,11 +511,13 @@ mod tests {
         assert_eq!(
             GatewayError::from(LimitRefusal::BudgetExhausted {
                 period: BudgetPeriod::Daily,
-                resets_at_unix: NOV_1
+                resets_at_unix: NOV_1,
+                retry_after_secs: 42
             }),
             GatewayError::BudgetExhausted {
                 resets_at_unix: NOV_1,
-                period: BudgetPeriod::Daily
+                period: BudgetPeriod::Daily,
+                retry_after_secs: 42
             }
         );
         assert_eq!(GatewayError::from(LimitRefusal::Unscoped), GatewayError::Internal, "D2/Q11: fail-closed as 500 internal");
@@ -539,7 +573,8 @@ mod tests {
         assert_eq!(
             GatewayError::BudgetExhausted {
                 resets_at_unix: 0,
-                period: BudgetPeriod::Monthly
+                period: BudgetPeriod::Monthly,
+                retry_after_secs: 1
             }
             .into_response()
             .status(),
@@ -552,17 +587,57 @@ mod tests {
         // A real `reqwest::Error` has no public constructor; wrap a genuine one (fresh per variant,
         // since `reqwest::Error` is not `Clone`) and assert the mapping. The request-time
         // classification INTO these variants is G6's concern.
-        assert_eq!(GatewayError::from(OpenAiError::Timeout(dead_port_error().await)), GatewayError::UpstreamTimeout);
-        assert_eq!(GatewayError::from(OpenAiError::Connect(dead_port_error().await)), GatewayError::UpstreamUnavailable);
-        assert_eq!(GatewayError::from(OpenAiError::Transport(dead_port_error().await)), GatewayError::UpstreamUnavailable);
-        assert_eq!(GatewayError::from(OpenAiError::Build(dead_port_error().await)), GatewayError::UpstreamUnavailable);
         assert_eq!(
-            GatewayError::from(OpenAiError::CaBundle {
+            GatewayError::from(UpstreamError::Timeout {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamTimeout
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::Connect {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamUnavailable
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::Transport {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamUnavailable
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::Build {
+                provider: Provider::OpenAi,
+                source: dead_port_error().await
+            }),
+            GatewayError::UpstreamUnavailable
+        );
+        assert_eq!(
+            GatewayError::from(UpstreamError::CaBundle {
+                provider: Provider::OpenAi,
                 path: "/x".to_string(),
                 source: "boom".into()
             }),
             GatewayError::UpstreamUnavailable
         );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_maps_to_502_and_is_not_retryable() {
+        assert_eq!(
+            GatewayError::from(UpstreamError::Redirect {
+                provider: Provider::Anthropic,
+                status: StatusCode::TEMPORARY_REDIRECT
+            }),
+            GatewayError::UpstreamRedirected
+        );
+        let resp = GatewayError::UpstreamRedirected.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers()["paigasus-retryable"], "false");
+        assert_eq!(body_json(resp).await["error"]["code"], "upstream-unavailable");
     }
 
     /// Produce a genuine `reqwest::Error` (no public constructor) by dialing an unroutable port.

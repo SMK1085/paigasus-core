@@ -820,3 +820,83 @@ fn recorded_responses_cut_streams_are_rewritten() {
         }
     }
 }
+
+// ---- Anthropic recordings (SMA-750 spec § 10.1, D15, D21) -------------------------------------------
+
+/// What one recorded Anthropic stream must give: the number of decided tool calls, and whether the
+/// stream is a cut call (`max_tokens` inside a `tool_use` block), which the interceptor blocks as
+/// incomplete arguments whatever the decider says.
+struct Recorded {
+    calls: usize,
+    cut: bool,
+}
+
+fn expected_recording(name: &str) -> Recorded {
+    match name {
+        "text_stream" => Recorded { calls: 0, cut: false },
+        "parallel_tool_use" => Recorded { calls: 4, cut: false },
+        "thinking_then_tool_use" => Recorded { calls: 1, cut: false },
+        "large_tool_input" => Recorded { calls: 1, cut: false },
+        // A server tool runs at Anthropic: the gateway reports it, it never decides it.
+        "server_tool_web_fetch" | "server_tool_web_search" => Recorded { calls: 0, cut: false },
+        "max_tokens_in_tool_use" => Recorded { calls: 0, cut: true },
+        other => panic!("anthropic/recorded/{other}.sse has no expectation in `expected_recording`"),
+    }
+}
+
+/// The real Anthropic streams pass through the interceptor under the D15 limits (8 MiB per record,
+/// 32 MiB held). Every `mid_stream_error*` stream is skipped until the D17 change (Task 12).
+#[test]
+fn anthropic_recorded_streams_replay() {
+    let limits = |on_failure| paigasus_gateway_core::Limits {
+        max_record_bytes: 8_388_608,
+        max_held_bytes: 33_554_432,
+        on_failure,
+        ..paigasus_gateway_core::Limits::defaults()
+    };
+    let clean = |o: &Outcome| !o.metrics.iter().any(|m| matches!(m, Metric::RecordDropped(_) | Metric::OnFailure(_)));
+    for (name, bytes) in files("anthropic/recorded") {
+        if name.starts_with("mid_stream_error") {
+            continue;
+        }
+        let want = expected_recording(&name);
+        for (decider, decide) in DECIDERS {
+            let o = drive(Format::AnthropicMessages, limits(OnFailure::Block), &[&bytes], decide);
+            let ctx = format!("anthropic/recorded/{name} ({decider})");
+            assert!(o.finished, "{ctx} never ended");
+            assert_eq!(o.decided.len(), want.calls, "{ctx}: decided calls");
+            if want.cut {
+                assert!(o.metrics.iter().any(|m| matches!(m, Metric::OnFailure("truncated"))), "{ctx}: {:?}", o.metrics);
+            } else {
+                assert!(clean(&o), "{ctx}: {:?}", o.metrics);
+            }
+            check_i1(Format::AnthropicMessages, &bytes, &o.out, &o.decided, o.core_failed()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+            if *decider == "allow-all" && !want.cut {
+                assert_eq!(payloads(&o.out), payloads(&bytes), "{ctx}");
+            }
+        }
+        // One split in the middle of the stream gives the one-push output.
+        let whole = drive(Format::AnthropicMessages, limits(OnFailure::Block), &[&bytes], &allow_all).out;
+        let mid = bytes.len() / 2;
+        let o = drive(Format::AnthropicMessages, limits(OnFailure::Block), &[&bytes[..mid], &bytes[mid..]], &allow_all);
+        assert!(o.out == whole, "anthropic/recorded/{name}: split at {mid}");
+    }
+}
+
+/// D21: a recorded data file never holds the Anthropic key prefix. The prefix is built from two
+/// parts, so that this file does not hold it.
+#[test]
+fn anthropic_recordings_hold_no_key() {
+    let prefix = format!("{}-", "sk-ant");
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir("anthropic/recorded")).unwrap() {
+        let p = e.unwrap().path();
+        if !p.extension().is_some_and(|x| x == "sse" || x == "json") {
+            continue;
+        }
+        seen += 1;
+        let bytes = std::fs::read(&p).unwrap();
+        assert!(!bytes.windows(prefix.len()).any(|w| w == prefix.as_bytes()), "{} holds the key prefix", p.display());
+    }
+    assert!(seen > 0, "no recorded data file was scanned");
+}

@@ -71,12 +71,18 @@ const INVOKE_MODEL_ACTION: &str = "InvokeModel";
 /// UUID in the 36-character form.
 pub const ORG_HEADER: &str = "paigasus-org";
 
+/// The header an Anthropic client sends its credential in (SMA-750 D6).
+pub const X_API_KEY_HEADER: &str = "x-api-key";
+
 /// The auth middlewares' state (SMA-700 § 4.10): the IAM port and the DPoP switch. Independent of
 /// the handler's `AppState`, as before.
 #[derive(Clone)]
 pub struct AuthState {
     pub iam: Arc<dyn Iam>,
     pub dpop_enabled: bool,
+    /// SMA-750 D6: read the credential from `x-api-key` (the Anthropic route group). `false` on
+    /// the OpenAI routes, which ignore the header.
+    pub accept_x_api_key: bool,
 }
 
 /// Which `Authorization` scheme the client used, for the challenge (SMA-700 § 4.10).
@@ -154,7 +160,7 @@ fn dpop_context(req: &Request, proof: &str) -> DpopContext {
 /// carries a [`CallerContext`] extension; on any failure it returns the mapped [`GatewayError`],
 /// with the DPoP challenge when gateway DPoP is on.
 pub async fn require_iam_auth(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
-    let credentials = credentials(req.headers(), auth.dpop_enabled);
+    let credentials = credentials(req.headers(), auth.dpop_enabled, auth.accept_x_api_key);
     let scheme = SchemeUsed::of(credentials.as_ref());
     match iam_auth(auth.iam.as_ref(), credentials, req, next).await {
         Ok(response) => response,
@@ -366,7 +372,7 @@ fn org_header(headers: &HeaderMap) -> Result<OrgHeader<'_>, GatewayError> {
 /// rejected, as is a `Status` carrying no details at all. This replaces the blanket
 /// code-only accept, which was correct only by reachability accident.
 pub async fn require_authenticated(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
-    let credentials = credentials(req.headers(), auth.dpop_enabled);
+    let credentials = credentials(req.headers(), auth.dpop_enabled, auth.accept_x_api_key);
     let scheme = SchemeUsed::of(credentials.as_ref());
     match authenticated(auth.iam.as_ref(), credentials, req, next).await {
         Ok(response) => response,
@@ -624,7 +630,23 @@ impl std::fmt::Debug for Credentials {
 /// (`adapters/auth.rs`): split on the first space, an ASCII-case-insensitive scheme, the token
 /// trimmed and not empty. `Bearer` ignores a `DPoP` header. The `DPoP` scheme counts only when
 /// gateway DPoP is on; else it is `None`, as today (D11).
-pub fn credentials(headers: &HeaderMap, dpop_enabled: bool) -> Option<Credentials> {
+///
+/// SMA-750 D6: with `accept_x_api_key` on and any `x-api-key` header present, exactly one
+/// non-empty value is a `Bearer` credential (so a DPoP-bound token there takes the Bearer leg,
+/// with no proof). Any other `x-api-key` shape is `None`. `Authorization` is then not read, so an
+/// empty `x-api-key` next to a valid Bearer is still missing. With no `x-api-key`, the rules above
+/// apply.
+pub fn credentials(headers: &HeaderMap, dpop_enabled: bool, accept_x_api_key: bool) -> Option<Credentials> {
+    if accept_x_api_key {
+        let mut values = headers.get_all(X_API_KEY_HEADER).iter();
+        if let Some(first) = values.next() {
+            if values.next().is_some() {
+                return None;
+            }
+            let value = first.to_str().ok()?.trim();
+            return (!value.is_empty()).then(|| Credentials::Bearer(value.to_owned()));
+        }
+    }
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     let token = token.trim();
@@ -899,7 +921,11 @@ mod tests {
     }
 
     fn build_app_with(fake: FakeIam, dpop_enabled: bool) -> Router {
-        let state = AuthState { iam: Arc::new(fake), dpop_enabled };
+        let state = AuthState {
+            iam: Arc::new(fake),
+            dpop_enabled,
+            accept_x_api_key: false,
+        };
         Router::new().route("/x", get(probe)).layer(from_fn_with_state(state, require_iam_auth))
     }
 
@@ -957,7 +983,11 @@ mod tests {
     }
 
     fn build_discovery_app_with(fake: FakeIam, dpop_enabled: bool) -> Router {
-        let state = AuthState { iam: Arc::new(fake), dpop_enabled };
+        let state = AuthState {
+            iam: Arc::new(fake),
+            dpop_enabled,
+            accept_x_api_key: false,
+        };
         Router::new().route("/x", get(discovery_probe)).layer(from_fn_with_state(state, require_authenticated))
     }
 
@@ -1388,13 +1418,82 @@ mod tests {
         headers
     }
 
+    fn with_x_api_key(mut headers: HeaderMap, values: &[&str]) -> HeaderMap {
+        for value in values {
+            headers.append("x-api-key", HeaderValue::from_str(value).unwrap());
+        }
+        headers
+    }
+
+    // ---- SMA-750 D6: `x-api-key` on the Anthropic route group --------------------------------
+
+    #[test]
+    fn x_api_key_is_read_as_bearer_only_when_the_flag_is_on() {
+        let headers = with_x_api_key(headers_of(None, &[]), &["k1"]);
+        assert_eq!(credentials(&headers, false, true), Some(Credentials::Bearer("k1".into())));
+        assert_eq!(credentials(&headers, true, true), Some(Credentials::Bearer("k1".into())));
+    }
+
+    #[test]
+    fn x_api_key_wins_over_authorization() {
+        let headers = with_x_api_key(headers_of(Some("Bearer other"), &[]), &["k1"]);
+        assert_eq!(credentials(&headers, false, true), Some(Credentials::Bearer("k1".into())));
+        let dpop = with_x_api_key(headers_of(Some("DPoP other"), &[b"a.b.c"]), &["k1"]);
+        assert_eq!(credentials(&dpop, true, true), Some(Credentials::Bearer("k1".into())));
+    }
+
+    #[test]
+    fn an_empty_x_api_key_is_missing_even_with_a_bearer() {
+        let headers = with_x_api_key(headers_of(Some("Bearer valid"), &[]), &[""]);
+        assert_eq!(credentials(&headers, false, true), None, "the bearer is not used");
+    }
+
+    #[test]
+    fn two_x_api_key_headers_are_missing() {
+        let headers = with_x_api_key(headers_of(Some("Bearer valid"), &[]), &["k1", "k2"]);
+        assert_eq!(credentials(&headers, false, true), None);
+        let same = with_x_api_key(headers_of(None, &[]), &["k1", "k1"]);
+        assert_eq!(credentials(&same, false, true), None);
+    }
+
+    #[test]
+    fn the_openai_routes_ignore_x_api_key() {
+        let alone = with_x_api_key(headers_of(None, &[]), &["k1"]);
+        assert_eq!(credentials(&alone, false, false), None);
+        let with_bearer = with_x_api_key(headers_of(Some("Bearer b"), &[]), &["k1"]);
+        assert_eq!(credentials(&with_bearer, false, false), Some(Credentials::Bearer("b".into())));
+    }
+
+    #[test]
+    fn without_x_api_key_the_flag_changes_nothing() {
+        let headers = headers_of(Some("Bearer b"), &[]);
+        assert_eq!(credentials(&headers, false, true), Some(Credentials::Bearer("b".into())));
+        assert_eq!(credentials(&headers_of(None, &[]), false, true), None);
+    }
+
+    #[tokio::test]
+    async fn a_dpop_bound_token_in_x_api_key_goes_the_bearer_leg() {
+        let fake = FakeIam::new(rejected_key(), AuthzOutcome::Unreachable).with_token_introspect(rejected_token());
+        let token_dpop = fake.token_dpop.clone();
+        let state = AuthState {
+            iam: Arc::new(fake),
+            dpop_enabled: true,
+            accept_x_api_key: true,
+        };
+        let app = Router::new().route("/x", get(discovery_probe)).layer(from_fn_with_state(state, require_iam_auth));
+        let req = HttpRequest::builder().uri("/x").header("x-api-key", USER_TOKEN).header(DPOP_HEADER, PROOF).body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(*token_dpop.lock().unwrap(), Some(None), "introspect_token(token, None): no proof context");
+    }
+
     #[test]
     fn the_parser_reads_both_schemes_in_any_case() {
-        assert_eq!(credentials(&headers_of(Some("Bearer t"), &[]), true), Some(Credentials::Bearer("t".into())));
-        assert_eq!(credentials(&headers_of(Some("bearer t"), &[]), false), Some(Credentials::Bearer("t".into())));
+        assert_eq!(credentials(&headers_of(Some("Bearer t"), &[]), true, false), Some(Credentials::Bearer("t".into())));
+        assert_eq!(credentials(&headers_of(Some("bearer t"), &[]), false, false), Some(Credentials::Bearer("t".into())));
         for scheme in ["DPoP", "dpop", "DPOP"] {
             assert_eq!(
-                credentials(&headers_of(Some(&format!("{scheme} t")), &[b"a.b.c"]), true),
+                credentials(&headers_of(Some(&format!("{scheme} t")), &[b"a.b.c"]), true, false),
                 Some(Credentials::Dpop {
                     token: "t".into(),
                     proof: ProofHeader::One("a.b.c".into())
@@ -1406,7 +1505,7 @@ mod tests {
 
     #[test]
     fn the_proof_header_is_one_visible_ascii_value() {
-        let dpop = |proofs: &[&[u8]]| credentials(&headers_of(Some("DPoP t"), proofs), true);
+        let dpop = |proofs: &[&[u8]]| credentials(&headers_of(Some("DPoP t"), proofs), true, false);
         assert_eq!(
             dpop(&[]),
             Some(Credentials::Dpop {
@@ -1442,11 +1541,11 @@ mod tests {
 
     #[test]
     fn the_bearer_scheme_ignores_a_dpop_header_and_dpop_off_ignores_the_scheme() {
-        assert_eq!(credentials(&headers_of(Some("Bearer t"), &[b"a.b.c"]), true), Some(Credentials::Bearer("t".into())));
-        assert_eq!(credentials(&headers_of(Some("DPoP t"), &[b"a.b.c"]), false), None, "D11: DPoP off is as today");
-        assert_eq!(credentials(&headers_of(Some("DPoP "), &[b"a.b.c"]), true), None, "an empty token");
-        assert_eq!(credentials(&headers_of(Some("Basic t"), &[]), true), None);
-        assert_eq!(credentials(&headers_of(None, &[b"a.b.c"]), true), None);
+        assert_eq!(credentials(&headers_of(Some("Bearer t"), &[b"a.b.c"]), true, false), Some(Credentials::Bearer("t".into())));
+        assert_eq!(credentials(&headers_of(Some("DPoP t"), &[b"a.b.c"]), false, false), None, "D11: DPoP off is as today");
+        assert_eq!(credentials(&headers_of(Some("DPoP "), &[b"a.b.c"]), true, false), None, "an empty token");
+        assert_eq!(credentials(&headers_of(Some("Basic t"), &[]), true, false), None);
+        assert_eq!(credentials(&headers_of(None, &[b"a.b.c"]), true, false), None);
     }
 
     #[test]

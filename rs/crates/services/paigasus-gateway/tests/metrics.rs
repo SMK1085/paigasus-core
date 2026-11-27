@@ -110,6 +110,8 @@ fn unused_state() -> AppState {
         tool_interception: None,
         tool_policy: None,
         responses: None,
+        anthropic: None,
+        messages: None,
     }
 }
 
@@ -167,6 +169,8 @@ async fn successful_proxied_request_records_iam_and_upstream_metrics() {
         tool_interception: None,
         tool_policy: None,
         responses: None,
+        anthropic: None,
+        messages: None,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
 
@@ -244,6 +248,8 @@ async fn an_oidc_request_records_a_denied_key_leg_and_an_ok_token_leg() {
         tool_interception: None,
         tool_policy: None,
         responses: None,
+        anthropic: None,
+        messages: None,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
     let req = Request::builder()
@@ -301,6 +307,8 @@ async fn the_upstream_counter_carries_the_endpoint() {
             max_record_bytes: 1_048_576,
             max_held_bytes: 2_097_152,
         })),
+        anthropic: None,
+        messages: None,
     };
     let app: Router = router(state).merge(paigasus_observability::metrics_router(handle.clone()));
 

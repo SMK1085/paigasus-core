@@ -291,6 +291,7 @@ pub struct ToolPolicyRuntime {
 pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Option<Arc<ToolInterception>> {
     config.tool_interception.enabled.then(|| {
         tracing::info!("tool-call interception is on (SMA-749): tool calls in chat completions are held, checked and may be rewritten");
+        crate::adapters::http::interception::prime_interception_metrics();
         // SMA-752: the Cedar decider only with the tool policy on (`build_tool_policy`).
         Arc::new(ToolInterception {
             limits: config.tool_interception.limits(),
@@ -360,9 +361,14 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
     let detectors = build_detectors(config);
     let mut cedar = CedarDecider::new(Arc::clone(&recorder));
     if let Some(pipeline) = &detectors {
-        cedar = cedar.with_detectors(Arc::clone(pipeline), config.tool_interception.limits().decide_timeout, config.tool_policy.detector_settings());
+        cedar = cedar.with_detectors(
+            Arc::clone(pipeline),
+            config.tool_interception.limits().decide_timeout,
+            config.tool_policy.detector_settings(config.default_detector_scan_bytes()),
+        );
     }
-    let mut request_side = RequestToolPolicy::new(Arc::clone(&cache), settings, Arc::clone(&recorder)).with_detectors(detectors.clone(), config.tool_policy.detector_settings());
+    let mut request_side =
+        RequestToolPolicy::new(Arc::clone(&cache), settings, Arc::clone(&recorder)).with_detectors(detectors.clone(), config.tool_policy.detector_settings(config.default_detector_scan_bytes()));
     if let Some(h) = &history {
         cedar = cedar.with_history(Arc::clone(h));
         request_side = request_side.with_history(Arc::clone(h));
@@ -400,7 +406,7 @@ pub fn history_digester(config: Option<&ToolHistoryConfig>) -> anyhow::Result<Ar
 /// and no judge yet. With `[tool_policy.detectors] enabled = false` there is none, and one info
 /// line says so at boot.
 fn build_detectors(config: &GatewayConfig) -> Option<Arc<DetectorPipeline>> {
-    let settings = config.tool_policy.detector_settings();
+    let settings = config.tool_policy.detector_settings(config.default_detector_scan_bytes());
     if !settings.enabled {
         tracing::info!("tool-policy detectors are off: findings come only from the kernel");
         return None;

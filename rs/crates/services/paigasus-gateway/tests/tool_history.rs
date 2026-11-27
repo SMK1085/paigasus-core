@@ -3,9 +3,7 @@
 //! request, reads the answer, builds the next request from the answer as a client does, and reads
 //! the memory store, the decision records and the metrics.
 //!
-//! The gateway has no Anthropic Messages route yet (SMA-750), so the Anthropic format has no
-//! HTTP test here. The brief row `anthropic_a_forwarded_call_and_its_result_stay_in_one_session`
-//! cannot run through the router.
+//! The Anthropic Messages route (`/v1/messages`, SMA-750) has its own test at the end of this file.
 
 mod support;
 
@@ -202,6 +200,8 @@ impl Rig {
                 max_record_bytes: 16 * MIB,
                 max_held_bytes: 32 * MIB,
             })),
+            anthropic: None,
+            messages: None,
         })
     }
 
@@ -607,6 +607,87 @@ async fn responses_a_local_shell_result_by_item_id_stays_in_the_session() {
     assert_eq!(read[0].0, shell[0].0, "request 2 joins the session of the local shell call");
     let events = rig.events(&shell[0].0, "local_shell");
     assert_eq!(result_events(&events).len(), 1, "{events:?}");
+}
+
+// --- SMA-750: the Anthropic route ------------------------------------------------------------
+
+impl Rig {
+    /// `send` for `POST /v1/messages`: the answer `body` is an Anthropic message.
+    async fn send_messages(&self, principal: &str, body: &Value, answer: String) -> Sent {
+        use paigasus_gateway::adapters::anthropic::AnthropicClient;
+        use paigasus_gateway::adapters::http::MessagesSettings;
+        use paigasus_gateway::config::AnthropicConfig;
+
+        let mock = MockOpenAi::spawn_json(StatusCode::OK, answer).await;
+        let cfg = AnthropicConfig {
+            base_url: mock.base_url.clone(),
+            api_key: secrecy::SecretString::from("operator-anthropic-test-key".to_owned()),
+            extra_ca_bundle_path: None,
+            default_version: "2023-06-01".to_owned(),
+            non_stream_timeout_secs: 600,
+        };
+        let app = router(AppState {
+            iam: ScopedIam::arc(principal, ORG_A_PRN),
+            openai: Arc::new(openai(&mock.base_url, Duration::from_secs(30))),
+            max_request_bytes: MIB,
+            capabilities: Capabilities { chat_stream: true },
+            limits: None,
+            dpop_enabled: false,
+            tool_interception: Some(Arc::clone(&self.ti)),
+            tool_policy: Some(Arc::clone(&self.tp)),
+            responses: None,
+            anthropic: Some(Arc::new(AnthropicClient::new(&cfg, Duration::from_secs(10), Duration::from_secs(300)).expect("client builds"))),
+            messages: Some(Arc::new(MessagesSettings {
+                max_request_bytes: 32 * MIB,
+                max_record_bytes: 8 * MIB,
+                max_held_bytes: 32 * MIB,
+                max_hold: Duration::from_secs(600),
+            })),
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {CALLER_KEY}"))
+            .body(Body::from(body.to_string()))
+            .expect("build request");
+        let resp = app.oneshot(req).await.expect("the router answers");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("the body reads");
+        self.history.tasks().close();
+        self.history.tasks().wait().await;
+        self.history.tasks().reopen();
+        Sent { status, headers, body }
+    }
+}
+
+/// An Anthropic message that calls `read_file` with the id `toolu_<prefix>`.
+fn messages_answer(prefix: &str) -> String {
+    json!({"id":"msg_1","type":"message","role":"assistant","model":"claude-x",
+        "content":[{"type":"tool_use","id":format!("toolu_{prefix}"),"name":"read_file","input":{}}],
+        "stop_reason":"tool_use","usage":{"input_tokens":3,"output_tokens":5}})
+    .to_string()
+}
+
+/// SMA-750 D9, SMA-753: a forwarded `tool_use` and its `tool_result` stay in one session through
+/// `/v1/messages`. Request 2 joins the session of request 1 as turn 2.
+#[tokio::test]
+async fn the_anthropic_route_records_history() {
+    let rig = rig();
+    let tools = json!([{"name":"read_file","description":"d","input_schema":{"type":"object"}}]);
+    let first = json!({"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":tools});
+    let one = rig.send_messages(PRINCIPAL_1, &first, messages_answer("c")).await;
+    assert_eq!(one.status, StatusCode::OK, "{}", one.text());
+    let call = one.json()["content"][0].clone();
+    assert_eq!(call["id"], "toolu_c", "{call}");
+    let second = json!({"model":"claude-x","max_tokens":16,"tools":tools,"messages":[
+        {"role":"user","content":"hi"},
+        {"role":"assistant","content":[call]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_c","content":"out"}]}]});
+    let two = rig.send_messages(PRINCIPAL_1, &second, messages_answer("d")).await;
+    assert_eq!(two.status, StatusCode::OK, "{}", two.text());
+    assert_one_session(&rig, "read_file");
 }
 
 // --- SMA-753 PR 2: the history conditions --------------------------------------------------------

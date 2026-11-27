@@ -6,6 +6,7 @@
 //! writes the tool decision records to a Redis stream (SMA-755); `history` holds the session history
 //! store adapters (SMA-753).
 
+pub mod anthropic;
 pub mod decision_log;
 pub mod detectors;
 pub mod history;
@@ -15,3 +16,4 @@ pub mod limits;
 pub mod nats;
 pub mod openai;
 pub mod policy_source;
+pub mod upstream;

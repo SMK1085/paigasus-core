@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6bea4860c0a4663ae3f9b8ae34cb0d62a0bc6d1f17f852c80bffb07fe33b9898 # shrinks to a = AnthropicScenario { blocks: [], quirks: [(IndexReuse, 0), (DeltaAfterStop, 0)], cuts: [] }

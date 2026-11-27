@@ -258,7 +258,7 @@ impl RequestToolPolicy {
             detectors: DetectorSettings {
                 enabled: defaults.enabled,
                 timeout: Duration::from_millis(defaults.timeout_ms),
-                max_scan_bytes: defaults.max_scan_bytes,
+                max_scan_bytes: defaults.max_scan_bytes.unwrap_or(16_777_216),
                 margin: Duration::from_millis(crate::config::DETECTOR_MARGIN_MS),
             },
             history: None,

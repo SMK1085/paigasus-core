@@ -1,0 +1,55 @@
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 4096,
+  "stream": true,
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the weather for a city.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "c",
+              "f"
+            ]
+          }
+        },
+        "required": [
+          "city",
+          "unit"
+        ]
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a file from the workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  ],
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 1024
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Think about which tool you need, then call get_weather for Oslo (unit c)."
+    }
+  ]
+}

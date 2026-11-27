@@ -17,7 +17,8 @@ use paigasus_gateway_core::Format;
 
 use super::AppState;
 use super::error::GatewayError;
-use super::pipeline::{self, Endpoint, RequestFacts};
+use super::pipeline::{self, Endpoint, RequestFacts, Upstream};
+use crate::adapters::anthropic::Forward;
 use crate::adapters::http::bytes::EnvelopeBytes;
 use crate::adapters::http::dto::ChatCompletionRequest;
 use crate::adapters::http::usage::{self, StreamUsage, UsageScanner};
@@ -63,15 +64,16 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, caller: Opti
         // Unreachable in practice — the auth middleware always attaches a CallerContext.
         return GatewayError::Internal.into_response();
     };
-    pipeline::proxy(&CHAT, state, caller, body).await
+    pipeline::proxy(&CHAT, state, caller, Forward::default(), body).await
 }
 
 /// The descriptor of `POST /v1/chat/completions`.
 pub static CHAT: Endpoint = Endpoint {
     name: "chat_completions",
-    route: UpstreamRoute::ChatCompletions,
+    upstream: Upstream::OpenAi(UpstreamRoute::ChatCompletions),
     format: Format::OpenAiChat,
     parse: parse_chat,
+    strict_with_policy: false,
     non_stream_usage: usage::non_stream_usage,
     stream_usage: || StreamUsage::Chat(UsageScanner::new()),
     terminal: TERMINAL_SSE_ERROR,
@@ -109,10 +111,10 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::adapters::http::relay::terminal_sse_error_stream;
-    use crate::adapters::openai::OpenAiByteStream;
+    use crate::adapters::upstream::UpstreamByteStream;
 
     /// The plain relay as the pipeline builds it for chat (no interception).
-    fn plain_relay(inner: OpenAiByteStream, guard: Option<ChargeGuard>) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
+    fn plain_relay(inner: UpstreamByteStream, guard: Option<ChargeGuard>) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
         terminal_sse_error_stream(inner, guard, StreamUsage::Chat(UsageScanner::new()), TERMINAL_SSE_ERROR)
     }
 
@@ -138,7 +140,7 @@ pub(crate) mod tests {
         // After the first upstream error the adapter emits exactly one terminal event and ends —
         // any items the upstream would have produced afterwards are never observed.
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: a\n\n"))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let out: Vec<Bytes> = plain_relay(inner, None).map(|r| r.unwrap()).collect().await;
         let assembled: Vec<u8> = out.iter().flat_map(|b| b.to_vec()).collect();
@@ -154,7 +156,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_terminal_frame_is_its_own_record_after_a_partial_one() {
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"par"))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let out: Vec<Bytes> = plain_relay(inner, None).map(|r| r.unwrap()).collect().await;
         let text = String::from_utf8(out.iter().flat_map(|b| b.to_vec()).collect()).unwrap();
@@ -211,7 +213,7 @@ pub(crate) mod tests {
     async fn an_error_after_an_unterminated_usage_record_charges_the_reported_tokens() {
         let store = ScriptedStore::new(admit);
         let inner = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let out: Vec<Bytes> = plain_relay(inner, Some(sent_guard(&store))).map(|r| r.unwrap()).collect().await;
         assert!(out.concat().ends_with(TERMINAL_SSE_ERROR.as_bytes()));

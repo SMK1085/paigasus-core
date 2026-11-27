@@ -171,6 +171,8 @@ fn app_for_with_streaming(fake: FakeIam, base_url: String, max_request_bytes: us
         tool_interception: None,
         tool_policy: None,
         responses: None,
+        anthropic: None,
+        messages: None,
     };
     router(state)
 }
@@ -693,6 +695,8 @@ async fn one_dpop_request_end_to_end() {
         tool_interception: None,
         tool_policy: None,
         responses: None,
+        anthropic: None,
+        messages: None,
     });
     let req = Request::builder()
         .method("POST")

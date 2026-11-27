@@ -1,0 +1,36 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 24000,
+  "stream": true,
+  "tools": [
+    {
+      "name": "write_file",
+      "description": "Write a file to the workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "tool",
+    "name": "write_file"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Call write_file with path /workspace/long.txt. The content must be exactly 1400 lines. Line N reads 'line NNNN: lorem ipsum dolor sit amet', with NNNN the line number padded to 4 digits. Write all 1400 lines. Do not stop early."
+    }
+  ]
+}

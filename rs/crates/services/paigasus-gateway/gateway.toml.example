@@ -68,6 +68,25 @@
 # more than one host is involved.
 # extra_ca_bundle_path = "/etc/paigasus/corp-ca.pem"
 
+# --- Anthropic upstream (SMA-750: POST /v1/messages forwards here) ---
+# Required only when [messages] enabled = true.
+
+# [upstream.anthropic]
+# base_url                = "https://api.anthropic.com"  # default shown; env GATEWAY_UPSTREAM__ANTHROPIC__BASE_URL
+#
+# REQUIRED when the table is present. Source it from the environment only, never from this file:
+# GATEWAY_UPSTREAM__ANTHROPIC__API_KEY=sk-ant-...
+#
+# extra_ca_bundle_path    = "/etc/paigasus/corp-ca.pem"  # env GATEWAY_UPSTREAM__ANTHROPIC__EXTRA_CA_BUNDLE_PATH;
+#                                                         # ADDS to the trust store, never replaces it
+# default_version         = "2023-06-01"                 # env GATEWAY_UPSTREAM__ANTHROPIC__DEFAULT_VERSION; sent when the caller sends no anthropic-version
+# non_stream_timeout_secs = 600                          # env GATEWAY_UPSTREAM__ANTHROPIC__NON_STREAM_TIMEOUT_SECS; time limit of one non-stream call
+#
+# For a stream request, the wait for a response head is the larger of stream_idle_timeout_secs
+# and non_stream_timeout_secs. A non-stream call has one limit for the whole call, response head
+# included: non_stream_timeout_secs. In a stream body, a per-chunk timer applies stream_idle_timeout_secs
+# to each next chunk.
+
 # --- Metrics (SMA-446 Unit 2: Prometheus `GET /metrics`) ---
 
 # [metrics]
@@ -186,6 +205,23 @@
 #   #    switches to pass-through. A completed call that the policy blocks, in the same
 #   #    response, can then reach the client. A stream and a body behave the same.
 #   # 6. Rollback: set "enabled" = false. The route then answers 404.
+
+# SMA-750: the Anthropic Messages route, POST /v1/messages. Off by default; with
+# enabled = false the route answers 404. It needs [upstream.anthropic] above.
+# Operator notes (docs/ops/RUNBOOK-anthropic-messages.md):
+# - The routes are POST /v1/messages, POST /v1/messages/count_tokens and GET /v1/models.
+# - x-api-key is read as a Bearer token. If both headers exist, x-api-key wins.
+# - Server tools and the MCP connector are not enforceable by the tool policy.
+# - GET /v1/models lists every model of the operator account. It needs the anthropic-version
+#   header. Without that header the route answers 404.
+# - To roll back, set enabled = false and restart. The routes then answer 404.
+#
+# [messages]
+# enabled           = false      # env GATEWAY_MESSAGES__ENABLED
+# max_request_bytes = 33554432   # env GATEWAY_MESSAGES__MAX_REQUEST_BYTES; over this is a 413
+# max_record_bytes  = 8388608    # env GATEWAY_MESSAGES__MAX_RECORD_BYTES; one SSE record
+# max_held_bytes    = 33554432   # env GATEWAY_MESSAGES__MAX_HELD_BYTES; all held bytes of one stream
+# max_hold_secs     = 600        # env GATEWAY_MESSAGES__MAX_HOLD_SECS; longest hold of one tool call, at most 86400
 #
 # SMA-752: Cedar tool-call decisions (spec 6.4). Off by default; with enabled = false the
 # gateway behaves as before. A misspelt key fails at start. Needs [tool_interception] enabled.

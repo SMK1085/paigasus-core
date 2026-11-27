@@ -98,13 +98,13 @@ The root CLAUDE.md holds the repo-wide rules and the two gate-checked blocks. --
 - The gateway also has Docker-backed suites now (SMA-677). It has a `docker_preflight` canary.
   It has two Redis test binaries in the nextest `docker-containers` group. Its Moon task
   `paigasus-gateway-rs:test` runs on the `heavy-integration` mutex.
-- This repo now has **five** CA-bundle config knobs and they do NOT share semantics. `authn.extra_ca_bundle_path`,
-  `upstream.openai.extra_ca_bundle_path` (SMA-558) and `memory.s3.extra_ca_bundle_path` (SMA-829) **ADD** to the trust store — reqwest 0.13 (SMA-809)
+- This repo now has **six** CA-bundle config knobs and they do NOT share semantics. `authn.extra_ca_bundle_path`,
+  `upstream.openai.extra_ca_bundle_path` (SMA-558), `upstream.anthropic.extra_ca_bundle_path` (SMA-750) and `memory.s3.extra_ca_bundle_path` (SMA-829) **ADD** to the trust store — reqwest 0.13 (SMA-809)
   verifies through `rustls-platform-verifier`: `add_root_certificate` calls are ADDED to the OS store, there is
   no compiled-in webpki floor, and on Linux an empty system store with no extra bundle is a client BUILD error.
   The workspace uses `rustls-no-provider` and installs `ring` explicitly before each `Client` build (reqwest
   panics without an installed provider). `outbox.publisher.root_ca_bundle` and the gateway's
-  `iam.tls.ca_cert_path` **REPLACE** it. The `extra_` prefix is the marker — a sixth knob must pick a side
+  `iam.tls.ca_cert_path` **REPLACE** it. The `extra_` prefix is the marker — a seventh knob must pick a side
   and say which in its doc. Anything in an added bundle becomes an **unconstrained** anchor (no `cA` check),
   so it must contain roots only; a self-signed LEAF works too (put its own cert in the bundle) since rustls
   applies no `cA` check to a trust anchor.

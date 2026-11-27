@@ -3,12 +3,15 @@
 
 mod support;
 
-use paigasus_gateway_core::{Format, Metric, OnFailure, ToolCall, ToolCallKind};
+use paigasus_gateway_core::{Basis, Decision, Format, Metric, OnFailure, ToolCall, ToolCallKind};
 use proptest::prelude::*;
 use support::driver::{DECIDERS, Outcome, allow_all, block_named, cut, drive, limits};
 use support::oracle::{Run, check_i1, runners};
 use support::responses_oracle::{run_node, run_python_stream};
-use support::streams::{AQuirk, Quirk, RKind, RQUIRKS, RQuirk, anthropic_scenario, every_kind_scenario, openai_scenario, render_anthropic, render_openai, render_responses, responses_scenario};
+use support::streams::{
+    AQuirk, AnthropicScenario, Block, Quirk, RKind, RQUIRKS, RQuirk, anthropic_scenario, anthropic_scenario_with_quirks, every_kind_scenario, openai_scenario, render_anthropic, render_openai,
+    render_responses, responses_scenario,
+};
 
 fn show(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -91,6 +94,69 @@ proptest! {
                     let r = run(&o.out);
                     prop_assert!(r.error.is_none() || o.core_failed() || run(&bytes).error.is_some(), "{model} failed in observe mode: {:?}\n{}", r.error, show(&o.out));
                 }
+            }
+        }
+    }
+
+    /// SMA-758: observe mode over the wide Anthropic generator with two or three quirks. It ends,
+    /// stays bounded, never forwards a blocked call's arguments, and keeps the order of the
+    /// upstream data payloads it forwards.
+    #[test]
+    fn anthropic_observe_mode_holds_for_many_quirks(a in anthropic_scenario_with_quirks(2..4)) {
+        let bytes = render_anthropic(&a);
+        let l = limits(OnFailure::Allow);
+        let o = drive(Format::AnthropicMessages, l, &cut(&bytes, &a.cuts), &block_named);
+        prop_assert!(o.finished, "observe mode never ended:\n{}", show(&o.out));
+        prop_assert!(o.max_queued <= l.max_held_bytes + l.max_record_bytes, "queue {} over the bound", o.max_queued);
+        let out = show(&o.out);
+        // A malformed record switches the stream to pass-through, which releases the hold and
+        // forwards unclassified bytes (§ 5.3, ruling D9 (a)), so the check holds without it only.
+        let passed_through = out.contains("paigasus-interception pass-through");
+        for (call, d) in o.decided.iter().filter(|_| !passed_through) {
+            if matches!(d, Decision::Block { .. }) && !call.arguments.is_empty() {
+                let escaped = serde_json::to_string(&call.arguments).expect("a string serialises");
+                prop_assert!(!out.contains(&call.arguments), "blocked arguments forwarded:\n{out}");
+                prop_assert!(!out.contains(&escaped[1..escaped.len() - 1]), "blocked arguments forwarded (escaped):\n{out}");
+            }
+        }
+        // The substring checks above miss a call split over two or more `input_json_delta`
+        // records. Rebuild the calls the client derives from the output and compare them with the
+        // decisions (I1). Pass-through is excepted for the same reason as above.
+        // The `on_failure = allow` path (a dropped record, a truncated stream) releases held bytes
+        // with no decision by design, so a failed core is excepted too.
+        if !passed_through && !o.core_failed() {
+            check_i1(Format::AnthropicMessages, &bytes, &o.out, &o.decided, o.core_failed()).map_err(TestCaseError::fail)?;
+        }
+        // The excepted branch must still record the failure precisely. Observe mode counts each
+        // failure with a known code, never sends the terminal frame, and releases every call on
+        // the `on_failure` basis as `allow`, never as `block`.
+        if o.core_failed() {
+            for m in &o.metrics {
+                match m {
+                    Metric::OnFailure(code) => prop_assert!(["hold_limit", "truncated", "decider_error", "malformed"].contains(code), "unknown on_failure code {code}"),
+                    Metric::RecordDropped(reason) => prop_assert!(["malformed", "oversized", "after_done", "late_fragment"].contains(reason), "unknown drop reason {reason}"),
+                    Metric::Decision { decision, basis } if *basis == Basis::OnFailure.as_str() => prop_assert_eq!(*decision, "allow", "observe mode blocked on the on_failure basis:\n{}", out),
+                    _ => {}
+                }
+            }
+            prop_assert!(!o.aborted, "observe mode sent the terminal frame:\n{out}");
+            if o.metrics.contains(&Metric::OnFailure("malformed")) {
+                prop_assert!(passed_through, "a malformed stream in observe mode must switch to pass-through:\n{out}");
+            }
+        }
+        let payloads = |b: &str| b.lines().filter_map(|l| l.strip_prefix("data: ").map(str::to_owned)).collect::<Vec<_>>();
+        let input = payloads(&show(&bytes));
+        // Each forwarded payload maps to the first input index after the previous one. A record
+        // the interceptor dropped can leave an identical later record, so the first unused index
+        // would map it too early.
+        let mut next = 0;
+        for p in payloads(&out) {
+            if !input.contains(&p) {
+                continue;
+            }
+            match input[next..].iter().position(|i| *i == p) {
+                Some(k) => next += k + 1,
+                None => prop_assert!(false, "payload {p} out of order:\n{out}"),
             }
         }
     }
@@ -184,6 +250,66 @@ proptest! {
             }
         }
     }
+}
+
+/// SMA-758: the P1 oracle sees a pass-through that forwards the hidden call.
+#[test]
+fn a_pass_through_interceptor_fails_anthropic_p1() {
+    let s = AnthropicScenario {
+        blocks: vec![Block::Tool {
+            name: "blocked_rm",
+            args: "{\"v\":\"CANARY-x\",\"n\":10.5}".to_owned(),
+            pieces: 2,
+        }],
+        quirks: vec![],
+        cuts: vec![],
+    };
+    let input = render_anthropic(&s);
+    let o = Outcome {
+        out: input.clone(),
+        decided: vec![],
+        max_queued: 0,
+        finished: true,
+        metrics: vec![],
+        aborted: false,
+    };
+    assert!(check_p1(Format::AnthropicMessages, &input, &o).is_err());
+}
+
+/// SMA-758: the observe-mode leak check sees a blocked call split over several
+/// `input_json_delta` records, which a contiguous substring check does not.
+#[test]
+fn the_observe_leak_check_rejects_a_blocked_call_split_across_records() {
+    let s = AnthropicScenario {
+        blocks: vec![Block::Tool {
+            name: "blocked_rm",
+            args: "{\"v\":\"CANARY-x\",\"n\":10.5}".to_owned(),
+            pieces: 3,
+        }],
+        quirks: vec![],
+        cuts: vec![],
+    };
+    let input = render_anthropic(&s);
+    let decided = drive(Format::AnthropicMessages, limits(OnFailure::Allow), &[&input], &allow_all).decided;
+    assert_eq!(decided.len(), 1, "the call is decided");
+    let args = decided[0].0.arguments.clone();
+    assert!(!show(&input).contains(&args), "the call is split, so the substring check sees nothing");
+    let blocked: Vec<(ToolCall, Decision)> = decided
+        .into_iter()
+        .map(|(c, _)| {
+            (
+                c,
+                Decision::Block {
+                    code: paigasus_gateway_core::BlockCode::Policy,
+                },
+            )
+        })
+        .collect();
+    // An output that leaks the whole call, split across records: the decision says Block.
+    assert!(check_i1(Format::AnthropicMessages, &input, &input, &blocked, false).is_err());
+    // The same output is fine when the call was allowed.
+    let allowed: Vec<(ToolCall, Decision)> = blocked.into_iter().map(|(c, _)| (c, Decision::Allow)).collect();
+    check_i1(Format::AnthropicMessages, &input, &input, &allowed, false).expect("an allowed call may reach the client");
 }
 
 /// What the core does with a stream that has one quirk (allow-all, `on_failure = block`).

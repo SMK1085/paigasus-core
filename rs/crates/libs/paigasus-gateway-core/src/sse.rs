@@ -32,6 +32,9 @@ const BOM: &[u8] = b"\xEF\xBB\xBF";
 /// The SSE comment sent while anything is held (D15).
 pub(crate) const KEEP_ALIVE: &[u8] = b": keep-alive\n\n";
 
+/// The keep-alive of an Anthropic stream (spec D12): a `ping` event, the type the SDKs ignore.
+pub(crate) const ANTHROPIC_PING: &[u8] = b"event: ping\ndata: {\"type\":\"ping\"}\n\n";
+
 enum BomState {
     /// Bytes seen so far that could still be a BOM.
     Pending(Vec<u8>),

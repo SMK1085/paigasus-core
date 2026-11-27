@@ -40,8 +40,9 @@
 //! Under `on_failure = "block"`, the gateway only forwards a call that it has assembled in the one
 //! canonical form that every client SDK agrees on. Anything else is a deviation and is blocked.
 //! Under `on_failure = "allow"` (observe mode) deviations are forwarded as received and not
-//! enforced. Only `/v1/chat/completions` (OpenAI) is wired; the Anthropic rules below live in
-//! `paigasus-gateway-core` only and wait for SMA-750. Rules a reader might not expect:
+//! enforced. The routes are `/v1/chat/completions` and `/v1/responses` (OpenAI), and `/v1/messages`
+//! (Anthropic, SMA-750), with `/v1/messages/count_tokens` and `/v1/models` as pass-through routes.
+//! Rules a reader might not expect:
 //! - A choice index must first appear in order (0, 1, 2, ...). Tool-call data is accepted only in
 //!   the choice at array position 0 of a chunk (`multi_choice_tool_calls`, `choice_position`),
 //!   because LangChain reads `choices[0]` only. So `n > 1` requests whose later choices call tools
@@ -51,9 +52,8 @@
 //! - An unknown `type` with a function or custom body is a deviation (`type_shape_mismatch`).
 //! - Function arguments must be one complete JSON value when the call completes (empty means
 //!   `{}`), else `incomplete_arguments`. Custom-tool input is free-form and exempt.
-//! - Core only (Anthropic, not wired until SMA-750): a `content_block_start` while an earlier
-//!   block is open is `block_interleave`, and a `tool_use` body input integer beyond 2^53 is
-//!   `lossy_number`.
+//! - Anthropic: a `content_block_start` while an earlier block is open is `block_interleave`, and
+//!   a `tool_use` body input integer beyond 2^53 is `lossy_number`.
 //! - A decider that returns the wrong number of decisions blocks every call of the hold.
 //! - Every `*_secs` interception limit is capped at 86 400 s.
 

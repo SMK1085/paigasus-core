@@ -494,3 +494,33 @@ tests:
       - eval_time: 4m
         alertname: GatewayDecisionLogTaskRestarts
         exp_alerts: []
+
+  # GatewayToolInterceptionMalformedRecords: a malformed drop rises after a series primed at 0. Fires at once.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_tool_interception_records_dropped_total{reason="malformed"}'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayToolInterceptionMalformedRecords
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayToolInterceptionMalformedRecords
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Gateway tool interception dropped malformed upstream records"
+              description: "The tool-call interceptor dropped malformed upstream SSE records in the last 15m. The metric has no endpoint label, so this covers every route with interception, not only /v1/messages. A new upstream event or block type is the usual cause. See RUNBOOK-anthropic-messages.md, section 5."
+              runbook_url: "docs/ops/RUNBOOK-anthropic-messages.md#5-malformed-records-alert"
+
+  # GatewayToolInterceptionMalformedRecords quiet: an oversized rise does not fire. The malformed control series stays at 0.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_tool_interception_records_dropped_total{reason="oversized"}'
+        values: '0 0 0 5 5 5 5'
+      - series: 'gateway_tool_interception_records_dropped_total{reason="malformed"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayToolInterceptionMalformedRecords
+        exp_alerts: []

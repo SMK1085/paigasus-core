@@ -135,6 +135,15 @@ pub(crate) trait Protocol: Send {
     fn closing_on_abort(&mut self, _verdicts: &Verdicts) -> Vec<Bytes> {
         Vec::new()
     }
+    /// The bytes sent while a hold is open and nothing else was sent for a while (spec D12).
+    fn keep_alive(&self) -> &'static [u8] {
+        crate::sse::KEEP_ALIVE
+    }
+    /// Whether an upstream `error` record is itself the terminal frame of an aborted stream
+    /// (spec D17), instead of the configured terminal frame.
+    fn upstream_error_is_terminal(&self) -> bool {
+        false
+    }
     /// (position, name) of the calls known so far for a hold, for reports of a `BlockAll` hold.
     fn known_calls(&self, hold: HoldKey) -> Vec<(u32, String)>;
     /// Pass-through framing, with no classification (P-4).

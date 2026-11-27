@@ -20,13 +20,13 @@ use axum::body::Bytes;
 use futures::{Stream, StreamExt};
 
 use crate::adapters::http::usage::StreamUsage;
-use crate::adapters::openai::OpenAiByteStream;
+use crate::adapters::upstream::UpstreamByteStream;
 use crate::application::charge_guard::ChargeGuard;
 
 /// The small state machine [`terminal_sse_error_stream`] unfolds over: still forwarding upstream
 /// chunks, or terminated (after emitting the terminal error event, or after the upstream ended).
 enum StreamState {
-    Streaming(OpenAiByteStream),
+    Streaming(UpstreamByteStream),
     Done,
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn finish_scan(scan: &mut StreamUsage, guard: &mut Option<ChargeGuard
     }
 }
 
-/// Adapt an [`OpenAiByteStream`] into a body stream that forwards each upstream chunk UNBUFFERED
+/// Adapt an [`UpstreamByteStream`] into a body stream that forwards each upstream chunk UNBUFFERED
 /// and, on the FIRST upstream error, emits one `terminal` event and ends.
 ///
 /// Items are `Result<Bytes, Infallible>`: the outgoing stream never errors (a mid-stream upstream
@@ -73,7 +73,7 @@ pub(crate) fn finish_scan(scan: &mut StreamUsage, guard: &mut Option<ChargeGuard
 /// `CorrelationLayer` task-local scope covers — has already resolved. See the call site's
 /// comment in [`pipeline::proxy`](super::pipeline::proxy).
 pub(crate) fn terminal_sse_error_stream(
-    inner: OpenAiByteStream,
+    inner: UpstreamByteStream,
     guard: Option<ChargeGuard>,
     usage: StreamUsage,
     terminal: &'static str,

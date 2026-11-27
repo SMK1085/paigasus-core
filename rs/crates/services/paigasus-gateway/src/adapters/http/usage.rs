@@ -6,6 +6,7 @@
 
 use serde_json::Value;
 
+use super::anthropic_usage::AnthropicUsageScanner;
 use super::responses_usage::ResponsesUsageScanner;
 
 /// § 4.6: the bound on one partial SSE record. A larger record is skipped, not buffered, and
@@ -83,6 +84,8 @@ pub enum StreamUsage {
     Chat(UsageScanner),
     /// § 8.2: the Responses reader, with no record size limit.
     Responses(ResponsesUsageScanner),
+    /// SMA-750 § 7.2: the Anthropic Messages reader.
+    Anthropic(AnthropicUsageScanner),
 }
 
 impl StreamUsage {
@@ -90,6 +93,7 @@ impl StreamUsage {
         match self {
             StreamUsage::Chat(s) => s.feed(chunk),
             StreamUsage::Responses(s) => s.feed(chunk),
+            StreamUsage::Anthropic(s) => s.feed(chunk),
         }
     }
 
@@ -97,6 +101,7 @@ impl StreamUsage {
         match self {
             StreamUsage::Chat(s) => s.finish(),
             StreamUsage::Responses(s) => s.finish(),
+            StreamUsage::Anthropic(s) => s.finish(),
         }
     }
 
@@ -104,6 +109,7 @@ impl StreamUsage {
         match self {
             StreamUsage::Chat(s) => s.completion_records(),
             StreamUsage::Responses(s) => s.completion_records(),
+            StreamUsage::Anthropic(s) => s.completion_records(),
         }
     }
 
@@ -111,6 +117,7 @@ impl StreamUsage {
         match self {
             StreamUsage::Chat(s) => s.reported_total(),
             StreamUsage::Responses(s) => s.reported_total(),
+            StreamUsage::Anthropic(s) => s.reported_total(),
         }
     }
 }

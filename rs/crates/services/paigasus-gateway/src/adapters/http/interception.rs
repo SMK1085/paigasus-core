@@ -36,7 +36,7 @@ use paigasus_observability::names;
 
 use crate::adapters::http::relay::{feed_scan, finish_scan};
 use crate::adapters::http::usage::StreamUsage;
-use crate::adapters::openai::OpenAiByteStream;
+use crate::adapters::upstream::{StreamReadError, UpstreamByteStream};
 use crate::application::charge_guard::ChargeGuard;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::tool_history::ToolHistory;
@@ -66,6 +66,17 @@ impl ToolInterception {
         {
             history.settle(ctx, reported);
         }
+    }
+}
+
+/// The `reason` values of `Metric::RecordDropped` (core `interceptor.rs`).
+pub(crate) const RECORD_DROP_REASONS: [&str; 4] = ["after_done", "oversized", "malformed", "late_fragment"];
+
+/// Register the record-dropped counter at zero for every reason, so that `increase()` sees the
+/// first drop.
+pub(crate) fn prime_interception_metrics() {
+    for reason in RECORD_DROP_REASONS {
+        counter!(names::GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL, "reason" => reason).increment(0);
     }
 }
 
@@ -184,7 +195,7 @@ pub(crate) async fn intercept_body(ti: &ToolInterception, limits: Limits, format
 /// client disconnect drops all three (D25), exactly as the plain relay drops the first two.
 struct Relay {
     /// `None` once the upstream has ended, failed, or been drained.
-    inner: Option<OpenAiByteStream>,
+    inner: Option<UpstreamByteStream>,
     scan: StreamUsage,
     guard: Option<ChargeGuard>,
     icpt: Interceptor,
@@ -203,7 +214,7 @@ struct Relay {
 enum Event {
     Decided(Result<Vec<DecidedCall>, DeciderError>),
     Wake,
-    Upstream(Option<Result<Bytes, reqwest::Error>>),
+    Upstream(Option<Result<Bytes, StreamReadError>>),
 }
 
 impl Relay {
@@ -306,7 +317,7 @@ impl Relay {
 pub(crate) fn intercepted_stream(
     format: Format,
     limits: Limits,
-    inner: OpenAiByteStream,
+    inner: UpstreamByteStream,
     guard: Option<ChargeGuard>,
     usage: StreamUsage,
     ti: Arc<ToolInterception>,
@@ -326,7 +337,7 @@ pub(crate) fn intercepted_stream(
 fn relay(
     format: Format,
     limits: Limits,
-    inner: OpenAiByteStream,
+    inner: UpstreamByteStream,
     guard: Option<ChargeGuard>,
     usage: StreamUsage,
     ti: Arc<ToolInterception>,
@@ -441,16 +452,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prime_primes_every_reason_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        prime_interception_metrics();
+        for reason in RECORD_DROP_REASONS {
+            let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_INTERCEPTION_RECORDS_DROPPED_TOTAL, &[("reason", reason)]);
+            assert_eq!(v, Some(0), "{reason} is primed at 0");
+        }
+        assert_eq!(snapshotter.snapshot().into_vec().len(), RECORD_DROP_REASONS.len());
+    }
+
     const TERMINAL: &[u8] = b"\n\ndata: {\"error\":\"terminal\"}\n\n";
 
     /// Two complete `tool_use` blocks: two holds, `Block(0)` and `Block(1)`, completed in order,
     /// with `gap` between the first block's end and the second block's start.
-    fn two_tool_blocks(first: &str, second: &str, gap: Duration) -> OpenAiByteStream {
+    fn two_tool_blocks(first: &str, second: &str, gap: Duration) -> UpstreamByteStream {
         tool_blocks(&[first, second], gap)
     }
 
     /// One complete `tool_use` block per name, with `gap` before the second one starts.
-    fn tool_blocks(names: &[&str], gap: Duration) -> OpenAiByteStream {
+    fn tool_blocks(names: &[&str], gap: Duration) -> UpstreamByteStream {
         let ev = |name: &str, data: String| Ok(Bytes::from(format!("event: {name}\ndata: {data}\n\n")));
         let block = |i: u32, name: &str| {
             vec![
@@ -491,7 +515,7 @@ mod tests {
             .boxed()
     }
 
-    async fn run(decider: Arc<dyn ToolCallDecider>, limits: Limits, upstream: OpenAiByteStream) -> String {
+    async fn run(decider: Arc<dyn ToolCallDecider>, limits: Limits, upstream: UpstreamByteStream) -> String {
         let ti = Arc::new(ToolInterception {
             limits,
             decider,
@@ -502,7 +526,7 @@ mod tests {
         run_ctx(ti, ctx, upstream).await
     }
 
-    async fn run_ctx(ti: Arc<ToolInterception>, ctx: Arc<DecisionContext>, upstream: OpenAiByteStream) -> String {
+    async fn run_ctx(ti: Arc<ToolInterception>, ctx: Arc<DecisionContext>, upstream: UpstreamByteStream) -> String {
         let turn = Arc::new(ToolTurn::Unavailable("unit test"));
         let out: Vec<Bytes> = relay(
             Format::AnthropicMessages,
@@ -566,7 +590,7 @@ mod tests {
         use crate::test_support::ScriptedStore;
         let store = ScriptedStore::new(admit);
         let upstream = futures::stream::iter(vec![Ok(Bytes::from_static(UNTERMINATED_USAGE))])
-            .chain(futures::stream::once(async { Err(make_reqwest_error().await) }))
+            .chain(futures::stream::once(async { Err(make_reqwest_error().await.into()) }))
             .boxed();
         let ti = Arc::new(ToolInterception {
             limits: Limits::defaults(),
@@ -1025,8 +1049,8 @@ mod tests {
 
     /// SMA-855 D35, S3 (Task 23, the Task 21 carry), end to end through the relay: two holds, the
     /// real Cedar decider with the detector pipeline, and a slow webhook that takes most of the
-    /// hold budget. Only an Anthropic stream has two holds, and the gateway has no Anthropic route
-    /// yet, so this test drives the relay itself. Time is paused, so the values are exact.
+    /// hold budget. Only an Anthropic stream has two holds. The test stays a unit test because it
+    /// pins the relay timing: it drives the relay itself, and time is paused, so the values are exact.
     ///
     /// Both holds complete at t = 0. The first run ends at 600 ms, inside its deadline of 750 ms.
     /// The second run starts at 600 ms and ends at the absolute deadline `hold start +
@@ -1077,7 +1101,7 @@ mod tests {
         assert!(has_error(&records[1]), "the absolute deadline cut the second hold: {:?}", records[1]);
         assert!(text.contains(r#""name":"fetch_b","input":{}"#), "the second call is allowed and forwarded: {text}");
         assert!(!text.contains(r#""basis":"on_failure""#), "{text}");
-        assert!(text.matches(": keep-alive\n\n").count() >= 2, "keep-alives while the holds wait: {text}");
+        assert!(text.matches("event: ping\ndata: {\"type\":\"ping\"}\n\n").count() >= 2, "ping keep-alives while the holds wait: {text}");
         let on_failure = snapshotter
             .snapshot()
             .into_vec()

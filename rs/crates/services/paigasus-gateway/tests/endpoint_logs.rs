@@ -39,6 +39,8 @@ fn app_for(base_url: &str) -> Router {
             max_record_bytes: 1_048_576,
             max_held_bytes: 2_097_152,
         })),
+        anthropic: None,
+        messages: None,
     })
 }
 

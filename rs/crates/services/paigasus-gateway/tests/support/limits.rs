@@ -239,6 +239,8 @@ fn build(
         tool_interception,
         tool_policy,
         responses: None,
+        anthropic: None,
+        messages: None,
     })
 }
 

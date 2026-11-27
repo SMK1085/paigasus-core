@@ -434,8 +434,14 @@ pub fn render_openai(s: &Scenario) -> Vec<u8> {
 #[derive(Debug, Clone)]
 pub enum Block {
     Text(String),
-    Tool { name: &'static str, args: String, pieces: usize },
+    Tool {
+        name: &'static str,
+        args: String,
+        pieces: usize,
+    },
     Server,
+    /// A `thinking` block: one `thinking_delta`, one `signature_delta`, then the stop (SMA-758).
+    Thinking(String),
 }
 
 #[derive(Debug, Clone)]
@@ -447,14 +453,23 @@ pub struct AnthropicScenario {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AQuirk {
+    /// A `ping` event whose data is a hidden `tool_use` start (`event_type_mismatch`).
     EventMismatch,
+    /// A hidden `tool_use` start with a non-empty `input` (`prefilled_input`).
     PrefilledInput,
+    /// `message_start` carries a prefilled `tool_use` in `message.content` (`prefilled_message`).
     PrefilledMessage,
+    /// A second `content_block_start` reuses index 0 (`index_reuse`).
     IndexReuse,
+    /// No `event:` lines, only `data:` lines (the type is read from the payload).
     NoEventLines,
+    /// A BOM starts the stream.
     Bom,
+    /// A hidden `content_block_start` follows `message_stop` (`after_done`).
     AfterStop,
+    /// A delta record with a duplicate `delta` key (`duplicate_key`).
     DuplicateKey,
+    /// A record over `max_record_bytes` (`oversized`).
     Oversized,
     /// The next block starts before the previous one stops (`block_interleave`).
     Interleave,
@@ -462,16 +477,24 @@ pub enum AQuirk {
     TruncatedArgs,
     /// A delta with index -1 (anthropic-python's `content[-1]` is the last block).
     NegativeIndex,
-    /// A delta for a block after its stop.
+    /// A delta for block 0 right after the last block stop.
     DeltaAfterStop,
     /// Every tool's input gains PascalCase, `constructor` and `prototype` keys (application data,
     /// so conforming; I-1).
     CapitalisedArgKeys,
+    /// SMA-758: each `input_json_delta` of every tool is cut at odd byte offsets, inside a JSON
+    /// string escape (`\"`) and next to `é`. The joined input is unchanged (and conforming).
+    SplitPartialJson,
+    /// SMA-758: a `ping` event between two deltas of the first `Tool` block (conforming).
+    PingInHeldBlock,
+    /// SMA-758: the `message_delta` frame moves to just before the last `content_block_stop`.
+    MessageDeltaBeforeLastStop,
 }
 
-pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
-    let block = prop_oneof![
+fn anthropic_block() -> impl Strategy<Value = Block> {
+    prop_oneof![
         "[a-z ]{1,10}".prop_map(Block::Text),
+        "[a-z ]{0,10}".prop_map(Block::Thinking),
         (prop::bool::ANY, 0usize..2, "[a-z]{0,10}", 1usize..4).prop_map(|(b, n, s, pieces)| if b {
             Block::Tool {
                 name: BLOCKED[n],
@@ -486,8 +509,11 @@ pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
             }
         }),
         Just(Block::Server),
-    ];
-    let quirk = prop_oneof![
+    ]
+}
+
+fn anthropic_quirk() -> impl Strategy<Value = AQuirk> {
+    prop_oneof![
         Just(AQuirk::EventMismatch),
         Just(AQuirk::PrefilledInput),
         Just(AQuirk::PrefilledMessage),
@@ -502,13 +528,41 @@ pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
         Just(AQuirk::NegativeIndex),
         Just(AQuirk::DeltaAfterStop),
         Just(AQuirk::CapitalisedArgKeys),
-    ];
+        Just(AQuirk::SplitPartialJson),
+        Just(AQuirk::PingInHeldBlock),
+        Just(AQuirk::MessageDeltaBeforeLastStop),
+    ]
+}
+
+pub fn anthropic_scenario() -> impl Strategy<Value = AnthropicScenario> {
+    anthropic_scenario_with_quirks(0..3)
+}
+
+/// The Anthropic generator with a chosen number of quirks per scenario (SMA-758).
+pub fn anthropic_scenario_with_quirks(n: std::ops::Range<usize>) -> impl Strategy<Value = AnthropicScenario> {
     (
-        prop::collection::vec(block, 0..5),
-        prop::collection::vec((quirk, 0usize..64), 0..3),
+        prop::collection::vec(anthropic_block(), 0..7),
+        prop::collection::vec((anthropic_quirk(), 0usize..64), n),
         prop::collection::vec(0usize..100_000, 0..6),
     )
         .prop_map(|(blocks, quirks, cuts)| AnthropicScenario { blocks, quirks, cuts })
+}
+
+/// Cuts a tool's JSON at every odd byte offset that is a character boundary, and after every
+/// backslash, so a cut falls inside an escape such as `\"` (SMA-758).
+fn split_odd(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut prev = ' ';
+    for (i, c) in s.char_indices() {
+        if i > start && (i % 2 == 1 || prev == '\\') {
+            out.push(s[start..i].to_owned());
+            start = i;
+        }
+        prev = c;
+    }
+    out.push(s[start..].to_owned());
+    out
 }
 
 fn ahas(s: &AnthropicScenario, q: AQuirk) -> Option<usize> {
@@ -522,6 +576,7 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
     // With Interleave, block k's stop is deferred until after block k+1's start.
     let interleave_at = ahas(s, AQuirk::Interleave).filter(|_| s.blocks.len() > 1).map(|k| k % (s.blocks.len() - 1));
     let mut deferred: Option<Value> = None;
+    let ping_at = ahas(s, AQuirk::PingInHeldBlock).and_then(|_| tools.first().copied());
     for (i, b) in s.blocks.iter().enumerate() {
         match b {
             Block::Text(t) => {
@@ -537,14 +592,30 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
                     evs.push(d);
                 }
                 let args = if ahas(s, AQuirk::CapitalisedArgKeys).is_some() { capitalise_args(args) } else { args.clone() };
-                let mut parts = split(&args, *pieces);
+                let mut parts = if ahas(s, AQuirk::SplitPartialJson).is_some() {
+                    // The string value gains an escaped quote and `é`, so cuts land inside them.
+                    split_odd(&args.replacen("\"v\":\"", "\"v\":\"\\\"é", 1))
+                } else {
+                    split(&args, *pieces)
+                };
                 if truncated == Some(i) {
                     let last = parts.pop().unwrap_or_default();
                     parts.push(last[..last.len().saturating_sub(1)].to_owned());
                 }
-                for p in parts {
+                for (k, p) in parts.into_iter().enumerate() {
                     evs.push(json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":p}}));
+                    if k == 0 && ping_at == Some(i) {
+                        evs.push(json!({"type":"ping"}));
+                    }
                 }
+            }
+            Block::Thinking(t) => {
+                evs.push(json!({"type":"content_block_start","index":i,"content_block":{"type":"thinking","thinking":""}}));
+                if let Some(d) = deferred.take() {
+                    evs.push(d);
+                }
+                evs.push(json!({"type":"content_block_delta","index":i,"delta":{"type":"thinking_delta","thinking":t}}));
+                evs.push(json!({"type":"content_block_delta","index":i,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMDdv"}}));
             }
             Block::Server => {
                 evs.push(json!({"type":"content_block_start","index":i,"content_block":{"type":"server_tool_use","id":format!("srv_{i}"),"name":"web_search","input":{}}}));
@@ -562,7 +633,15 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
         }
     }
     let any_tool = !tools.is_empty();
-    evs.push(json!({"type":"message_delta","delta":{"stop_reason": if any_tool { "tool_use" } else { "end_turn" },"stop_sequence":null},"usage":{"output_tokens":1}}));
+    let message_delta = json!({"type":"message_delta","delta":{"stop_reason": if any_tool { "tool_use" } else { "end_turn" },"stop_sequence":null},"usage":{"output_tokens":1}});
+    match evs
+        .iter()
+        .rposition(|e| e["type"] == "content_block_stop")
+        .filter(|_| ahas(s, AQuirk::MessageDeltaBeforeLastStop).is_some())
+    {
+        Some(at) => evs.insert(at, message_delta),
+        None => evs.push(message_delta),
+    }
     evs.push(json!({"type":"message_stop"}));
     let no_events = ahas(s, AQuirk::NoEventLines).is_some();
     let mut frames: Vec<String> = evs
@@ -619,7 +698,11 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
                 ),
             ),
             AQuirk::DeltaAfterStop => frames.insert(
-                frames.len().saturating_sub(2).max(1),
+                // Right after the last block stop, so the delta follows a stop whatever else moved.
+                frames
+                    .iter()
+                    .rposition(|f| f.contains("\"content_block_stop\""))
+                    .map_or(frames.len().saturating_sub(2).max(1), |p| p + 1),
                 format!(
                     "event: content_block_delta\ndata: {}\n\n",
                     json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"CANARY-late\""}})
@@ -627,7 +710,13 @@ pub fn render_anthropic(s: &AnthropicScenario) -> Vec<u8> {
             ),
             AQuirk::Bom => prefix = "\u{feff}".to_owned(),
             AQuirk::AfterStop => suffix = format!("event: content_block_start\ndata: {}\n\n", hidden_start(s.blocks.len(), json!({}))),
-            AQuirk::NoEventLines | AQuirk::Interleave | AQuirk::TruncatedArgs | AQuirk::CapitalisedArgKeys => {}
+            AQuirk::NoEventLines
+            | AQuirk::Interleave
+            | AQuirk::TruncatedArgs
+            | AQuirk::CapitalisedArgKeys
+            | AQuirk::SplitPartialJson
+            | AQuirk::PingInHeldBlock
+            | AQuirk::MessageDeltaBeforeLastStop => {}
         }
     }
     format!("{prefix}{}{suffix}", frames.concat()).into_bytes()
