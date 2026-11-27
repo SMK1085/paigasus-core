@@ -189,7 +189,10 @@ crates.io release. It uses no `[patch]` and no path or git dependency.
 New module `adapters/helikon/gateway_model.rs` in the library crate `paigasus-agent-host`.
 
 - Dependency: `paigasus-helikon-providers-anthropic = { version = "=0.4.<n>", default-features =
-  false }`. The workspace `reqwest` line supplies `rustls-no-provider`.
+  false, features = ["rustls-no-provider"] }`. The provider feature is required: with both
+  provider TLS features off, `build()` without `http_client` always returns `NoCryptoProvider`,
+  even when the workspace `reqwest` line supplies reqwest's `rustls-no-provider` (SMA-868 final
+  review, measured).
 - `pub fn register(models: &mut ModelRegistry, gateway: &GatewayConfig, entries: &[ModelConfig])
   -> anyhow::Result<()>`. `main.rs`'s `model_registry(&Config)` calls it. The `test-model`
   registration stays.
