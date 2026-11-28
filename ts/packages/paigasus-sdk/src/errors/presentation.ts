@@ -124,6 +124,7 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.TOOL_POLICY_MODE_TRANSITION_INVALID]: 'from-transport',
   [ErrorReason.TOOL_POLICY_HISTORY_UNSUPPORTED]: 'from-transport',
   [ErrorReason.TOOL_POLICY_HELD_NOT_ACCEPTABLE]: 'from-transport',
+  [ErrorReason.INVALID_WEBHOOK_OPT_IN]: 'from-transport',
   // SMA-752. The tool-policy reasons appear in decision reports and notices, never as an HTTP
   // error (D11), so the transport table's answer applies if one ever reaches a console.
   [ErrorReason.TOOL_CALL_DENIED]: 'from-transport',

@@ -1213,6 +1213,13 @@ message ToolPolicySettings {
   ToolPolicyFailMode fail_mode = 2;
   google.protobuf.Timestamp updated_at = 3;
   string updated_by = 4;
+  // SMA-856: the webhook providers that this tenant opts in to, sorted, unique. The gateway
+  // decides which of them may run for this org (the provider's `orgs`).
+  repeated string webhooks = 5;
+}
+
+message WebhookOptIn {
+  repeated string names = 1;
 }
 
 message GetToolPolicySettingsRequest {
@@ -1231,6 +1238,8 @@ message PutToolPolicySettingsRequest {
   string org_prn = 1;
   ToolPolicyMode mode = 2;
   ToolPolicyFailMode fail_mode = 3;
+  // SMA-856: absent keeps the current list; present replaces it; an empty list clears it.
+  WebhookOptIn webhooks = 4;
 }
 
 // starter_version is 0 when the write did not save the starter.

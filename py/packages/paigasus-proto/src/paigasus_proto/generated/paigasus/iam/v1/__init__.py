@@ -198,6 +198,7 @@ __all__ = (
     "UnlinkExternalIdentityResponse",
     "User",
     "UserServiceStub",
+    "WebhookOptIn",
     "WhoAmIRequest",
     "WhoAmIResponse",
 )
@@ -3064,6 +3065,13 @@ class PutToolPolicySettingsRequest(betterproto2.Message):
         3, betterproto2.TYPE_ENUM, default_factory=lambda: ToolPolicyFailMode(0)
     )
 
+    webhooks: "WebhookOptIn | None" = betterproto2.field(
+        4, betterproto2.TYPE_MESSAGE, optional=True
+    )
+    """
+    SMA-856: absent keeps the current list; present replaces it; an empty list clears it.
+    """
+
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "PutToolPolicySettingsRequest", PutToolPolicySettingsRequest
@@ -3827,6 +3835,14 @@ class ToolPolicySettings(betterproto2.Message):
 
     updated_by: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
 
+    webhooks: "list[str]" = betterproto2.field(
+        5, betterproto2.TYPE_STRING, repeated=True
+    )
+    """
+    SMA-856: the webhook providers that this tenant opts in to, sorted, unique. The gateway
+    decides which of them may run for this org (the provider's `orgs`).
+    """
+
 
 default_message_pool.register_message(
     "paigasus.iam.v1", "ToolPolicySettings", ToolPolicySettings
@@ -3934,6 +3950,14 @@ class User(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.iam.v1", "User", User)
+
+
+@dataclass(eq=False, repr=False)
+class WebhookOptIn(betterproto2.Message):
+    names: "list[str]" = betterproto2.field(1, betterproto2.TYPE_STRING, repeated=True)
+
+
+default_message_pool.register_message("paigasus.iam.v1", "WebhookOptIn", WebhookOptIn)
 
 
 @dataclass(eq=False, repr=False)

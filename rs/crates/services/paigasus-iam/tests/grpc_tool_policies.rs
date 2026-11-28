@@ -697,6 +697,7 @@ fn put_settings(org: &str, mode: ToolPolicyMode, fail_mode: ToolPolicyFailMode) 
         org_prn: org.to_string(),
         mode: mode as i32,
         fail_mode: fail_mode as i32,
+        webhooks: None,
     }
 }
 

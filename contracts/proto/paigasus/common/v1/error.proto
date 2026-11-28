@@ -271,6 +271,9 @@ enum ErrorReason {
   // "tool-policy-held-not-acceptable" — the held version has no compiled output, because its
   // compile failed. Discard it, or save the set again. gRPC FAILED_PRECONDITION, HTTP 409.
   ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE = 63;
+  // "invalid-webhook-opt-in" — a webhook opt-in name breaks [a-z0-9_]{1,64}, or the list holds
+  // more than 16 distinct names (SMA-856). The field is "webhooks". gRPC INVALID_ARGUMENT, HTTP 400.
+  ERROR_REASON_INVALID_WEBHOOK_OPT_IN = 64;
 
   // ---- Gateway (300-599) ---------------------------------------------------
   // Emitted snake_case today; SMA-504 recases them. `type` is untouched and

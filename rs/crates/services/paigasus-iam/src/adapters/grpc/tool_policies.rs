@@ -129,6 +129,7 @@ fn settings_to_pb(s: &ToolPolicySettings) -> pb::ToolPolicySettings {
         } as i32,
         updated_at: s.updated_at.map(convert::ts),
         updated_by: s.updated_by.clone().unwrap_or_default(),
+        webhooks: Vec::new(),
     }
 }
 

@@ -164,6 +164,7 @@ async fn enable_log_only(env: &Env, org: &str) {
                 org_prn: org.to_string(),
                 mode: ToolPolicyMode::LogOnly as i32,
                 fail_mode: ToolPolicyFailMode::Closed as i32,
+                webhooks: None,
             },
             &env.admin,
         ))

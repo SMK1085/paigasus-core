@@ -223,6 +223,7 @@ mod tests {
         "tool-policy-mode-transition-invalid",
         "tool-policy-history-unsupported",
         "tool-policy-held-not-acceptable",
+        "invalid-webhook-opt-in",
         // Gateway
         "missing-authorization",
         "invalid-api-key",
@@ -271,7 +272,7 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 93, "the registry should hold 93 reasons");
+        assert_eq!(actual.len(), 94, "the registry should hold 94 reasons");
     }
 
     #[test]
@@ -459,5 +460,7 @@ mod tests {
         assert_eq!(ErrorReason::ToolPolicyHistoryUnsupported as i32, 62);
         assert_eq!(ErrorReason::from_wire_reason("tool-policy-held-not-acceptable"), Some(ErrorReason::ToolPolicyHeldNotAcceptable));
         assert_eq!(ErrorReason::ToolPolicyHeldNotAcceptable as i32, 63);
+        assert_eq!(ErrorReason::from_wire_reason("invalid-webhook-opt-in"), Some(ErrorReason::InvalidWebhookOptIn));
+        assert_eq!(ErrorReason::InvalidWebhookOptIn as i32, 64);
     }
 }
