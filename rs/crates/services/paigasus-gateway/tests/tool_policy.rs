@@ -2301,17 +2301,23 @@ mod detectors {
         };
         let s = stack(&dir, TenantMode::Enforce, det);
         s.run(Ep::ChatJson, &Ep::ChatJson.tools_body(&["fetch"]), &[("fetch", "{}")]).await;
-        let samples: Vec<f64> = snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(k, _, _, _)| k.key().name() == names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS)
-            .flat_map(|(_, _, _, v)| match v {
-                DebugValue::Histogram(h) => h.into_iter().map(|x| x.into_inner()).collect(),
-                _ => Vec::new(),
-            })
-            .collect();
+        // One snapshot: a snapshot drains the histograms.
+        let snap = snapshotter.snapshot().into_vec();
+        let histogram = |pick: &dyn Fn(&metrics::Key) -> bool| -> Vec<f64> {
+            snap.iter()
+                .filter(|(k, _, _, _)| pick(k.key()))
+                .flat_map(|(_, _, _, v)| match v {
+                    DebugValue::Histogram(h) => h.iter().map(|x| x.into_inner()).collect(),
+                    _ => Vec::new(),
+                })
+                .collect()
+        };
+        let samples = histogram(&|k| k.name() == names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS);
         assert_eq!(samples.len(), 1, "{samples:?}");
+        // The slow webhook ran: the webhook stage has one sample of about the wait.
+        let stage = histogram(&|k| k.name() == names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS && k.labels().any(|l| l.key() == "stage" && l.value() == "webhook"));
+        assert_eq!(stage.len(), 1, "{stage:?}");
+        assert!(stage[0] >= 0.29 && stage[0] < 2.0, "the webhook stage took about 300 ms: {stage:?}");
         assert!(samples[0] < 0.3, "the overhead leaves out the 300 ms of the webhook: {samples:?}");
     }
 
@@ -2522,10 +2528,33 @@ mod detectors {
             )
         }
 
-        /// A closed loopback port.
-        fn closed_url() -> String {
-            let port = std::net::TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("addr").port();
-            format!("http://127.0.0.1:{port}/hook")
+        /// A loopback listener that owns its port until the guard drops. It closes each accepted
+        /// connection with no response, so the provider call fails with `transport`.
+        struct HangUp {
+            url: String,
+            task: tokio::task::JoinHandle<()>,
+        }
+
+        impl Drop for HangUp {
+            fn drop(&mut self) {
+                self.task.abort();
+            }
+        }
+
+        async fn hang_up_url() -> HangUp {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let task = tokio::spawn(async move {
+                loop {
+                    if let Ok((conn, _)) = listener.accept().await {
+                        drop(conn);
+                    }
+                }
+            });
+            HangUp {
+                url: format!("http://127.0.0.1:{port}/hook"),
+                task,
+            }
         }
 
         // --- the provider answers ----------------------------------------------------------------
@@ -2712,7 +2741,8 @@ mod detectors {
                 let snapshotter = recorder.snapshotter();
                 let _local = metrics::set_default_local_recorder(&recorder);
                 let mock = MockProvider::spawn("acme_dlp", SECRET, move |_, _| reply.clone());
-                let url = if reason == "transport" { closed_url() } else { mock.url.clone() };
+                let hang_up = if reason == "transport" { Some(hang_up_url().await) } else { None };
+                let url = hang_up.as_ref().map_or_else(|| mock.url.clone(), |h| h.url.clone());
                 let dir = policy_dir(SHIPPED_FLOOR, &tenant());
                 let s = Wh::one(&url).with_extra(extra).boot(&dir);
                 let ex = fetch(&s, Ep::ChatJson, "{}").await;

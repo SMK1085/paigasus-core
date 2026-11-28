@@ -233,7 +233,7 @@ Your policies read the findings in three context attributes:
 | `unseen_host` | `unseen_host` | medium | A host in the arguments is not in the history of the request. |
 | `secret_in_args` | `secret_in_args` | high | The arguments hold a credential, for example a cloud access key. |
 | `injection_markers` | `injection_markers` | high or medium | A tool result holds a marker of a prompt injection. Only hidden Unicode tag text is `high`. |
-| `detector_error` | the detector that failed, `built_in` or `kernel` | high | A detector failed, or a scan limit stopped it. |
+| `detector_error` | the detector that failed: `built_in`, `kernel` or `webhook` | high, or the `failure_severity` of a webhook provider | A detector failed, or a scan limit stopped it. For a webhook provider, the severity is the `failure_severity` of that provider. |
 | `forged_history` | `kernel` | high | The request has a tool result for a call that the gateway did not forward. This kind needs the session history. |
 | `mixed_sessions` | `kernel` | medium | The calls and the tool results of the request belong to more than one session. This kind needs the session history. |
 | `history_truncated` | `kernel` | low | The history store removed events of the session at a limit. This kind needs the session history. |
@@ -269,8 +269,9 @@ What the policy blocks:
   previous instructions". These markers occur in normal source code, tests and documentation, and
   a coding agent reads such files as tool results. So they are signals only. The meaning of a text
   is the job of a judge (SMA-857).
-- `detector_error`. It is `high`, so a detector error blocks under this policy. That is fail
-  closed. These are the causes of a detector error:
+- `detector_error`. A built-in or kernel error is `high`, so it blocks under this policy. That is fail
+  closed. A webhook failure has the `failure_severity` of its provider. Under this policy, a `high`
+  failure blocks and a `low` failure does not. These are the causes of a detector error:
   - A detector fails.
   - A scan limit stops a scan.
   - The scan of the request fails.

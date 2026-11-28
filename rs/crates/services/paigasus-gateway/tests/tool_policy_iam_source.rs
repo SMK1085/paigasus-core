@@ -673,8 +673,8 @@ async fn an_opt_in_from_iam_reaches_the_provider_and_an_empty_list_stops_it() {
     assert_eq!(seen.len(), 1, "the opt-in from IAM runs the provider once");
     assert!(seen[0].signature_ok);
 
-    // IAM drops the opt-in. The token changes, so the next load takes the empty list.
-    s.script_tenant(Ok(tenant_with_webhooks(2, &[])));
+    // IAM drops the opt-in. The set version stays 1, so the list is the only change in the cache identity. The token changes, so the next load takes the empty list.
+    s.script_tenant(Ok(tenant_with_webhooks(1, &[])));
     cache.invalidate_all();
     hold("req-2").await;
     assert_eq!(mock.requests().len(), 1, "an empty opt-in list stops the provider");
