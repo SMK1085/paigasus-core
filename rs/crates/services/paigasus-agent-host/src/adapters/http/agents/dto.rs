@@ -92,12 +92,13 @@ pub fn page_size(raw: Option<&str>) -> Result<u32, AgentApiError> {
     raw.map_or(Ok(0), |v| v.parse::<u32>().map_err(|_| AgentApiError(AdminError::InvalidPagination)))
 }
 
-/// The `include_archived` flag of a query. Absent is `false`.
+/// The `include_archived` flag of a query. Absent is `false`. Any other value than `true` or
+/// `false` is [`AdminError::InvalidQueryParameter`], as a duplicate key is.
 pub fn include_archived(raw: Option<&str>) -> Result<bool, AgentApiError> {
     match raw {
         None | Some("false") => Ok(false),
         Some("true") => Ok(true),
-        Some(_) => Err(AgentApiError(AdminError::InvalidRequestSchema)),
+        Some(_) => Err(AgentApiError(AdminError::InvalidQueryParameter)),
     }
 }
 
@@ -112,7 +113,7 @@ pub fn parse_org_prn(raw: &str) -> Result<Uuid, AgentApiError> {
 }
 
 /// The PRN of an org.
-fn org_prn(org: Uuid) -> String {
+pub(crate) fn org_prn(org: Uuid) -> String {
     Prn::build(IAM_SERVICE, "", None, ORGANIZATION, org).expect("static organization PRN parts are valid").canonical()
 }
 

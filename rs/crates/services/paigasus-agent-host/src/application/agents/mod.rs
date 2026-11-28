@@ -11,8 +11,11 @@
 //! 5. The field rules, then the model, then the tools.
 //! 6. The registry call.
 //!
-//! So a caller without the right gets `Forbidden` also for a request with bad fields, and an
+//! So a caller without the right gets `Forbidden` also for a request with bad field values, and an
 //! unknown id, an id of another org, a key of another org and a missing right give the same answer.
+//! This holds for the rules of `AgentAdmin`. The transports parse the org PRN, the principal PRN,
+//! the ids and the JSON body of the caller before `AgentAdmin` runs, so a field that does not
+//! parse gives a 400 first. That parse reads only the input of the caller.
 
 pub mod error;
 pub mod page_token;

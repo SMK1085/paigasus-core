@@ -51,7 +51,7 @@ pub enum InsertOutcome {
         /// True when the stored payload equals the new payload.
         payload_matches: bool,
     },
-    /// The agent of the inbox is archived. The store wrote no event.
+    /// The inbox has no active agent (the agent is archived). The store wrote no event.
     AgentArchived,
 }
 

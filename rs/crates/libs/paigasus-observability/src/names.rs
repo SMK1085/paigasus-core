@@ -181,7 +181,7 @@ pub const AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL: &str = "agent_host_commit_out
 /// Restarts of a worker of the pool. No label.
 pub const AGENT_HOST_WORKER_RESTARTS_TOTAL: &str = "agent_host_worker_restarts_total";
 /// The age in seconds of the oldest due pending event (`status = 'pending'`, `not_before <= now()`)
-/// of every inbox of an agent that this host serves, on the database clock, or 0 when there is
+/// of every inbox of an active agent with a model this binary has, on the database clock, or 0 when there is
 /// none. An event in a leased or locked inbox counts too. Read in each poll of `acquire_next`.
 /// No label.
 pub const AGENT_HOST_INBOX_LAG_SECONDS: &str = "agent_host_inbox_lag_seconds";

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{Next, from_fn_with_state};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use paigasus_agent_host_core::ids::PrincipalId;
@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use self::dto::{BindBody, CreateBody, JsonBody, ListQuery, PageQuery, UpdateBody, agent_json, inbox_json, include_archived, page_json, page_size, parse_org_prn};
 use self::error::AgentApiError;
-use super::auth::{authenticate, bearer_token};
+use super::auth::authenticate_request;
 use super::path::{AgentIdField, InboxIdField, UuidPath};
 use super::query::EnvelopeQuery;
 use crate::application::agents::{AdminError, AgentAdmin, ResourceKey};
@@ -50,18 +50,8 @@ pub fn agent_routes(admin: Arc<AgentAdmin>) -> Router {
 
 /// Authenticate through IAM and put the [`Caller`] in the request extensions. It runs before any
 /// extractor of the handler, so an unauthenticated call reads nothing.
-async fn authenticate_middleware(State(admin): Admin, mut req: Request, next: Next) -> Response {
-    let token = match bearer_token(req.headers()) {
-        Ok(token) => token,
-        Err(e) => return e.into_response(),
-    };
-    match authenticate(admin.iam().as_ref(), &token).await {
-        Ok(caller) => {
-            req.extensions_mut().insert(caller);
-            next.run(req).await
-        }
-        Err(e) => e.into_response(),
-    }
+async fn authenticate_middleware(State(admin): Admin, req: Request, next: Next) -> Response {
+    authenticate_request(admin.iam().as_ref(), req, next).await
 }
 
 /// A row that the path names. A REST path holds a bare uuid, so the key has no org.

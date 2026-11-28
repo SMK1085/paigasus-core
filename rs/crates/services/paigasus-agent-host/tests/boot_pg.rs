@@ -453,6 +453,13 @@ async fn a_boot_with_grpc_addr_serves_agent_service() {
         .list_agents(request)
         .await
         .unwrap_or_else(|e| panic!("ListAgents must get a verdict, not {e:?}; log:\n{}", child.tail()));
+    // The answer carries the correlation id: the process wires the `CorrelationLayer` on this listener.
+    let correlation = answer
+        .metadata()
+        .get(paigasus_observability::correlation::CORRELATION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    assert!(correlation.is_some_and(|v| uuid::Uuid::parse_str(&v).is_ok()), "the gRPC answer has a correlation id header");
     assert!(answer.into_inner().agents.is_empty());
 
     // A call without a credential is a verdict too: UNAUTHENTICATED.

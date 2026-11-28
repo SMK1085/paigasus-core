@@ -22,7 +22,7 @@ use paigasus_cloudevents::{ExtensionValue, ParseError};
 use serde_json::json;
 
 use super::Ingress;
-use super::auth::{Caller, authenticate, authorize_write, bearer_token, deny_unknown_inbox};
+use super::auth::{Caller, authenticate_request, authorize_write, deny_unknown_inbox};
 use super::bytes::EnvelopeBytes;
 use super::error::ApiError;
 use super::path::{InboxIdField, UuidPath};
@@ -66,18 +66,8 @@ pub async fn precheck(State(ingress): State<Arc<Ingress>>, req: Request, next: N
 }
 
 /// Step 3 of §5.2: authenticate through IAM and put the [`Caller`] in the request extensions.
-pub async fn authenticate_middleware(State(ingress): State<Arc<Ingress>>, mut req: Request, next: Next) -> Response {
-    let token = match bearer_token(req.headers()) {
-        Ok(token) => token,
-        Err(e) => return e.into_response(),
-    };
-    match authenticate(&*ingress.iam, &token).await {
-        Ok(caller) => {
-            req.extensions_mut().insert(caller);
-            next.run(req).await
-        }
-        Err(e) => e.into_response(),
-    }
+pub async fn authenticate_middleware(State(ingress): State<Arc<Ingress>>, req: Request, next: Next) -> Response {
+    authenticate_request(&*ingress.iam, req, next).await
 }
 
 /// Steps 4 to 8 of §5.2.
@@ -131,8 +121,10 @@ pub async fn post_event(
         tracing::error!(error = %e, "the event insert failed");
         ApiError::StoreUnavailable
     })?;
-    let (InsertOutcome::Inserted { id } | InsertOutcome::Duplicate { id, .. }) = outcome else {
-        return Err(ApiError::AgentArchived);
+    let id = match outcome {
+        InsertOutcome::Inserted { id } | InsertOutcome::Duplicate { id, .. } => id,
+        // The inbox has no active agent: the agent is archived.
+        InsertOutcome::AgentArchived => return Err(ApiError::AgentArchived),
     };
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": id.uuid().to_string() }))))
 }

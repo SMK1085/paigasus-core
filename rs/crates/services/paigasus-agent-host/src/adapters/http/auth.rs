@@ -60,6 +60,24 @@ pub fn bearer_token(headers: &HeaderMap) -> Result<String, ApiError> {
     Ok(token.to_owned())
 }
 
+/// The shared authentication middleware body: read the bearer token, authenticate through IAM and
+/// put the [`Caller`] in the request extensions. Every transport that authenticates with a bearer
+/// token calls this one function, so the order and the answers cannot drift apart.
+pub async fn authenticate_request(iam: &dyn Iam, mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let token = match bearer_token(req.headers()) {
+        Ok(token) => token,
+        Err(e) => return e.into_response(),
+    };
+    match authenticate(iam, &token).await {
+        Ok(caller) => {
+            req.extensions_mut().insert(caller);
+            next.run(req).await
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
 /// Authenticate a write request: the key leg, then the token leg (§6.2).
 ///
 /// An inactive key or a key-leg refusal falls through to the token leg. An unprovisioned OIDC

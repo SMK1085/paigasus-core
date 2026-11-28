@@ -46,6 +46,8 @@ pub enum AdminError {
     InvalidRequestSchema,
     /// A path segment or an id is not a valid UUID (a transport sets this).
     InvalidUuid,
+    /// A query parameter is not valid (the REST transport sets this).
+    InvalidQueryParameter,
 }
 
 impl From<AuthError> for AdminError {

@@ -59,7 +59,7 @@ pub enum Action {
     /// roles, only the dedicated `agent_event_writer` grants it directly; `org_admin` never holds
     /// it. `platform_admin` permits every action, so it permits this one too.
     WriteInboxEvent,
-    /// Create, update, archive and restore agent definitions and manage the agent inboxes of an
+    /// Create, update and archive agent definitions and manage the agent inboxes of an
     /// organization (SMA-852). A non-restore write. Held by the `agent_admin` role.
     ManageAgents,
     /// Read the agent definitions and the agent inboxes of an organization (SMA-852). Held by

@@ -30,9 +30,9 @@ pub const MANAGE_AGENTS_ACTION: &str = "ManageAgents";
 pub const READ_AGENTS_ACTION: &str = "ReadAgents";
 
 /// The PRN parts of the IAM tenancy nodes.
-pub const IAM_SERVICE: &str = "iam";
-pub const ORGANIZATION: &str = "organization";
-pub const ROOT: &str = "root";
+pub(crate) const IAM_SERVICE: &str = "iam";
+pub(crate) const ORGANIZATION: &str = "organization";
+pub(crate) const ROOT: &str = "root";
 
 /// What the credential is, with the data that authorisation needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub enum AuthError {
 
 /// Spec §6.5 steps 3 and 4: the key scope (the probe on a refusal), then the self-query with
 /// `action` against `org`. There is no owner path.
-pub async fn authorize_org(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'static str) -> Result<(), AuthError> {
+pub(crate) async fn authorize_org(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'static str) -> Result<(), AuthError> {
     if let CallerKind::ApiKey { scope_prn } = &caller.kind
         && !key_scope_allows(scope_prn, org)
     {
@@ -80,13 +80,13 @@ pub async fn authorize_org(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'
 /// against the nil org and returns [`AuthError::Forbidden`], or [`AuthError::IamUnavailable`]
 /// during an outage. So an unknown id costs the same IAM calls as a refused caller on a row that
 /// exists, and an outage gives the same answer for both.
-pub async fn deny_unknown(iam: &dyn Iam, caller: &Caller, action: &'static str) -> AuthError {
+pub(crate) async fn deny_unknown(iam: &dyn Iam, caller: &Caller, action: &'static str) -> AuthError {
     refusal_after_probe(iam, caller, Uuid::nil(), action).await
 }
 
 /// The self-query `IsAuthorized(caller principal, action, org PRN)` with the caller's own
 /// credential. Denied gives [`AuthError::Forbidden`]. An error maps through [`authz_error`].
-pub async fn self_query(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'static str) -> Result<(), AuthError> {
+pub(crate) async fn self_query(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'static str) -> Result<(), AuthError> {
     let (org_prn, principal_prn) = self_query_prns(caller, org);
     match iam.is_authorized_self(&caller.credential, &principal_prn, action, &org_prn).await {
         Ok(true) => Ok(()),
@@ -105,7 +105,7 @@ pub async fn self_query(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'sta
 /// Run a self-query with `action` for its outage only. The verdict and every other error are
 /// ignored: the refusal is already decided. A probe can fail in ways that a real self-query
 /// cannot (a key of another org), and these failures must not change the answer.
-pub async fn refusal_after_probe(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'static str) -> AuthError {
+pub(crate) async fn refusal_after_probe(iam: &dyn Iam, caller: &Caller, org: Uuid, action: &'static str) -> AuthError {
     let (org_prn, principal_prn) = self_query_prns(caller, org);
     let outage = match iam.is_authorized_self(&caller.credential, &principal_prn, action, &org_prn).await {
         Err(err) => authz_error(err) == AuthError::IamUnavailable,
@@ -123,7 +123,7 @@ fn self_query_prns(caller: &Caller, org: Uuid) -> (String, String) {
 /// The scope of a key is the Root node, or exactly the organization `org`. A team, a project,
 /// another org, and a scope that does not parse are all refused. UUIDs are compared.
 #[must_use]
-pub fn key_scope_allows(scope_prn: &str, org: Uuid) -> bool {
+pub(crate) fn key_scope_allows(scope_prn: &str, org: Uuid) -> bool {
     let Ok(prn) = Prn::parse(scope_prn) else {
         return false;
     };
@@ -146,7 +146,7 @@ static PROVISIONING_FAILED: LazyLock<String> = LazyLock::new(|| ErrorReason::Pro
 /// The `ErrorInfo` reason of an IAM `Status`, read on the IAM domain only, never from the
 /// message. A `PermissionDenied` with no `ErrorInfo` is version skew, so it writes one warning.
 #[must_use]
-pub fn iam_reason(status: &Status) -> Option<String> {
+pub(crate) fn iam_reason(status: &Status) -> Option<String> {
     let details = status.get_error_details();
     let Some(info) = details.error_info() else {
         tracing::warn!("IAM returned a PermissionDenied with no ErrorInfo; rolling-upgrade skew?");

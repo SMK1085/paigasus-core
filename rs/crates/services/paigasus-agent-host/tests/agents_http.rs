@@ -375,6 +375,8 @@ async fn a_list_answers_a_page_and_the_token_continues_it() {
     assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid-query-parameter"));
     let (status, body) = send(&app, Method::GET, &format!("/v1/agents/{}/inboxes?page_size=1&page_size=2", agent_uuid()), None, Some(TOKEN)).await;
     assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid-query-parameter"));
+    let (status, body) = send(&app, Method::GET, &format!("/v1/agents?org={}&include_archived=yes", org_prn(org())), None, Some(TOKEN)).await;
+    assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid-query-parameter"));
     let (status, body) = send(&app, Method::GET, &format!("/v1/agents?org={}&page_size=101", org_prn(org())), None, Some(TOKEN)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(code(&body), "invalid-pagination");

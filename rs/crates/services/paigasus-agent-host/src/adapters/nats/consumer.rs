@@ -403,6 +403,7 @@ mod tests {
     /// An in-memory repository: a dedup on `(inbox, source, ce_id)`, or a store error.
     struct Memory {
         fail: bool,
+        archived: bool,
         rows: Mutex<Vec<NewInboxEvent>>,
     }
 
@@ -410,12 +411,22 @@ mod tests {
         fn new() -> Self {
             Memory {
                 fail: false,
+                archived: false,
                 rows: Mutex::new(Vec::new()),
             }
         }
         fn failing() -> Self {
             Memory {
                 fail: true,
+                archived: false,
+                rows: Mutex::new(Vec::new()),
+            }
+        }
+        /// A repository whose inbox has no active agent.
+        fn archived() -> Self {
+            Memory {
+                fail: false,
+                archived: true,
                 rows: Mutex::new(Vec::new()),
             }
         }
@@ -432,6 +443,9 @@ mod tests {
         async fn insert_event(&self, event: NewInboxEvent) -> Result<InsertOutcome, RepositoryError> {
             if self.fail {
                 return Err(RepositoryError::Store("down".into()));
+            }
+            if self.archived {
+                return Ok(InsertOutcome::AgentArchived);
             }
             let mut rows = self.rows.lock().unwrap();
             if let Some(row) = rows.iter().find(|r| r.inbox == event.inbox && r.source == event.source && r.ce_id == event.ce_id) {
@@ -493,6 +507,16 @@ mod tests {
         assert_eq!(env["time"], "2026-08-07T12:30:45.100000Z");
         assert_eq!(env["subject"], format!("prn:pgs:iam:::organization/{}", u(0x500)));
         assert_eq!(env["data"], serde_json::json!({"slug": "acme"}));
+    }
+
+    /// An event for an inbox without an active agent is terminated, not acked: it is never stored
+    /// and it is not redelivered.
+    #[tokio::test]
+    async fn an_event_for_an_archived_agent_is_terminated() {
+        let repo = Memory::archived();
+        let d = handle_message(&[channel(0x500)], &repo, "iam.organization.created", FIX_ORG, 1).await;
+        assert_eq!(d, Disposition::Term);
+        assert!(repo.rows().is_empty());
     }
 
     #[tokio::test]

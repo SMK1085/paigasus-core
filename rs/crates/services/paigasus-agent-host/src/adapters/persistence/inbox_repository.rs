@@ -137,7 +137,7 @@ pub async fn insert_event_in<C: ConnectionTrait>(conn: &C, event: &NewInboxEvent
         STORED_SQL,
         [inbox.into(), event.source.clone().into(), event.ce_id.clone().into(), new_data.into()],
     );
-    // No stored row either: the `EXISTS` refused the insert, so the agent is archived.
+    // No stored row either: the `EXISTS` refused the insert, so the inbox has no active agent.
     let Some(row) = conn.query_one_raw(stmt).await? else {
         return Ok(InsertOutcome::AgentArchived);
     };

@@ -23,10 +23,10 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use super::status::{from_api_error, migrating, to_status};
-use crate::adapters::http::agents::dto::parse_org_prn;
+use crate::adapters::http::agents::dto::{org_prn, parse_org_prn};
 use crate::adapters::http::auth::{authenticate, bearer_token};
 use crate::application::agents::{AdminError, AgentAdmin, ResourceKey};
-use crate::application::auth::{Caller, IAM_SERVICE, ORGANIZATION};
+use crate::application::auth::Caller;
 
 /// The service name of the metrics.
 const SERVICE: &str = "AgentService";
@@ -121,9 +121,7 @@ fn agent_message(record: &AgentRecord) -> Agent {
     let def = &record.definition;
     let mut agent = Agent {
         agent_prn: def.id.as_prn().canonical(),
-        org_prn: paigasus_kernel::resource_name::Prn::build(IAM_SERVICE, "", None, ORGANIZATION, def.id.org())
-            .expect("static organization PRN parts are valid")
-            .canonical(),
+        org_prn: org_prn(def.id.org()),
         name: def.name.clone(),
         model: def.model_id.clone(),
         instructions: def.instructions.clone(),

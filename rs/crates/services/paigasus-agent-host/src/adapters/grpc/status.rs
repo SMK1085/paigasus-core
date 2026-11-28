@@ -34,6 +34,7 @@ fn code_of(reason: ErrorReason) -> Code {
         | ErrorReason::InvalidPagination
         | ErrorReason::InvalidRequestBody
         | ErrorReason::InvalidRequestSchema
+        | ErrorReason::InvalidQueryParameter
         | ErrorReason::InvalidUuid => Code::InvalidArgument,
         _ => Code::Internal,
     }
@@ -101,6 +102,7 @@ mod tests {
             AdminError::InvalidRequestBody,
             AdminError::InvalidRequestSchema,
             AdminError::InvalidUuid,
+            AdminError::InvalidQueryParameter,
         ]
     }
 
@@ -130,6 +132,7 @@ mod tests {
             Code::AlreadyExists,
             Code::Aborted,
             Code::FailedPrecondition,
+            Code::InvalidArgument,
             Code::InvalidArgument,
             Code::InvalidArgument,
             Code::InvalidArgument,

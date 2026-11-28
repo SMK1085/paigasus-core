@@ -41,6 +41,7 @@ impl AgentApiError {
             AdminError::InvalidRequestBody => shared(ApiError::BadRequestBody),
             AdminError::InvalidRequestSchema => shared(ApiError::InvalidRequestSchema),
             AdminError::InvalidUuid => shared(ApiError::InvalidUuid),
+            AdminError::InvalidQueryParameter => shared(ApiError::InvalidQueryParameter),
             AdminError::NameTaken => (StatusCode::CONFLICT, "agent-name-taken", "an active agent of the organization has this name", Vec::new()),
             AdminError::InboxExists(inbox) => (
                 StatusCode::CONFLICT,
@@ -114,6 +115,7 @@ mod tests {
             (AdminError::InvalidRequestBody, ErrorReason::InvalidRequestBody),
             (AdminError::InvalidRequestSchema, ErrorReason::InvalidRequestSchema),
             (AdminError::InvalidUuid, ErrorReason::InvalidUuid),
+            (AdminError::InvalidQueryParameter, ErrorReason::InvalidQueryParameter),
         ] {
             let (_status, code, _message, _metadata) = AgentApiError(error).parts();
             assert_eq!(ErrorReason::from_wire_reason(code), Some(reason), "{code} is not declared in common/v1/error.proto");
