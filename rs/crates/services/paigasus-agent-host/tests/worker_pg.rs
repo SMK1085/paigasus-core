@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `RunWorker` on the real adapters (spec §6.1, §6.4, §6.8): `PgLeaseStore`, `PgRunCommitter`,
-//! `ConfigAgentResolver`, `HelikonAgentRunner` with the scripted model, and `PgMemoryStore`.
+//! `PgAgentResolver`, `HelikonAgentRunner` with the scripted model, and `PgMemoryStore`.
 
 mod support;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use paigasus_agent_host::adapters::agents::ConfigAgentResolver;
+use paigasus_agent_host::adapters::agents::PgAgentResolver;
 use paigasus_agent_host::adapters::helikon::memory_tool::run_nonce;
 use paigasus_agent_host::adapters::helikon::model_registry::{ModelRegistry, SharedModel};
 use paigasus_agent_host::adapters::helikon::runner::HelikonAgentRunner;
@@ -18,10 +18,9 @@ use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::application::lease_keeper::KeeperTiming;
 use paigasus_agent_host::application::worker::ports::RunLimits;
 use paigasus_agent_host::application::worker::run::{LeaseEnd, RunWorker, WorkerPorts, WorkerSettings};
-use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::fault::NoFaults;
-use paigasus_agent_host_core::ids::{AgentId, InboxId};
+use paigasus_agent_host_core::ids::InboxId;
 use paigasus_agent_host_core::memory::{Expected, MemoryCaps, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryPath};
 use paigasus_agent_host_core::ports::{LeaseRepository, MemoryStore};
 use paigasus_agent_host_core::retry::RetryPolicy;
@@ -29,7 +28,7 @@ use paigasus_agent_host_core::screen::AllowAll;
 use sea_orm::DatabaseConnection;
 use serde_json::json;
 use support::commit::{committer, scope_of};
-use support::inbox::{insert_inbox, migrated_postgres};
+use support::inbox::{insert_agent, insert_inbox, migrated_postgres};
 use support::lease::insert_pending_event;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -53,6 +52,7 @@ async fn fixture(db: &DatabaseConnection) -> Fixture {
         principal: Uuid::new_v4(),
         event: Uuid::new_v4(),
     };
+    insert_agent(db, f.org, f.agent, "scripted", "Use the memory tool.", &["memory"]).await;
     insert_inbox(db, f.org, f.inbox, f.agent, f.principal).await;
     insert_pending_event(db, f.inbox, f.event, 5).await;
     f
@@ -71,7 +71,7 @@ async fn seed_instructions(db: &DatabaseConnection, f: &Fixture) {
 }
 
 /// A worker on the real adapters. The scripted model makes one memory create, then says `done`.
-fn worker(db: &DatabaseConnection, store: Arc<PgLeaseStore>, f: &Fixture) -> RunWorker {
+fn worker(db: &DatabaseConnection, store: Arc<PgLeaseStore>) -> RunWorker {
     let model = ScriptedModel::new(vec![vec![(
         "c1".into(),
         "memory".into(),
@@ -79,18 +79,11 @@ fn worker(db: &DatabaseConnection, store: Arc<PgLeaseStore>, f: &Fixture) -> Run
     )]]);
     let mut models = ModelRegistry::default();
     models.register("scripted", SharedModel::new(model));
-    let agent = AgentDefinition {
-        id: AgentId::new(f.org, f.agent),
-        name: "worker".to_owned(),
-        model_id: "scripted".to_owned(),
-        instructions: "Use the memory tool.".to_owned(),
-        tool_names: vec!["memory".to_owned()],
-    };
     let ports = WorkerPorts {
         leases: store.clone(),
         claims: store,
         committer: committer(db),
-        resolver: Arc::new(ConfigAgentResolver::new(db.clone(), vec![agent])),
+        resolver: Arc::new(PgAgentResolver::new(db.clone())),
         screen: Arc::new(AllowAll),
         runner: Arc::new(HelikonAgentRunner::new(db.clone(), Arc::new(models))),
         memory: Arc::new(PgMemoryStore::new(db.clone())),
@@ -126,7 +119,7 @@ async fn serve_once(db: &DatabaseConnection, f: &Fixture) -> LeaseEnd {
         .await
         .expect("acquire")
         .expect("the lease is free");
-    worker(db, store, f).serve(handle, &CancellationToken::new()).await
+    worker(db, store).serve(handle, &CancellationToken::new()).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

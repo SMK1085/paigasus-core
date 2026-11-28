@@ -7,7 +7,7 @@ use jiff::Timestamp;
 use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::ids::{AgentId, InboxId, PrincipalId};
 use paigasus_agent_host_core::inbox::Inbox;
-use paigasus_agent_host_core::ports::AgentRegistry;
+use paigasus_agent_host_core::ports::{AgentRegistry, RunCapabilities};
 use paigasus_agent_host_core::registry::{AgentFields, AgentRecord, InboxRecord, PAGE_SIZE_DEFAULT, Page, PageRequest, RegistryError};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, QueryResult, SqlErr, Statement, TransactionTrait, Value};
 use uuid::Uuid;
@@ -104,6 +104,20 @@ impl PgAgentRegistry {
             })
             .collect()
     }
+}
+
+/// The boot warning (SMA-852 spec §6.7): one `warn!` for each active agent whose model is not in
+/// `caps`. The boot goes on: such an agent is not served until a host binds its model. It returns
+/// the number of warnings.
+pub async fn warn_unknown_models(registry: &PgAgentRegistry, caps: &dyn RunCapabilities) -> Result<usize, RegistryError> {
+    let mut warned = 0;
+    for (id, model) in registry.active_models().await? {
+        if !caps.has_model(&model) {
+            tracing::warn!(agent = %id.as_prn().canonical(), model = %model, "an active agent names a model that this host does not serve; its events wait");
+            warned += 1;
+        }
+    }
+    Ok(warned)
 }
 
 fn store(e: impl std::fmt::Display) -> RegistryError {

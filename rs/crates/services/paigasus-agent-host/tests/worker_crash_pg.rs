@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use metrics_util::debugging::DebuggingRecorder;
-use paigasus_agent_host::adapters::agents::ConfigAgentResolver;
+use paigasus_agent_host::adapters::agents::PgAgentResolver;
 use paigasus_agent_host::adapters::helikon::memory_tool::run_nonce;
 use paigasus_agent_host::adapters::helikon::model_registry::{ModelRegistry, SharedModel};
 use paigasus_agent_host::adapters::helikon::runner::HelikonAgentRunner;
@@ -29,10 +29,9 @@ use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
 use paigasus_agent_host::application::lease_keeper::KeeperTiming;
 use paigasus_agent_host::application::worker::ports::RunLimits;
 use paigasus_agent_host::application::worker::run::{LeaseEnd, RunWorker, WorkerPorts, WorkerSettings};
-use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::fault::{FaultPoint, FaultStage, NoFaults};
-use paigasus_agent_host_core::ids::{AgentId, EventId, InboxId, RunId};
+use paigasus_agent_host_core::ids::{EventId, InboxId, RunId};
 use paigasus_agent_host_core::lease::LeaseHandle;
 use paigasus_agent_host_core::memory::{Expected, MemoryCaps, MemoryChange, MemoryChangeSet, MemoryCommitSet, MemoryPath};
 use paigasus_agent_host_core::ports::{ClaimRepository, LeaseRepository, RunCommitter};
@@ -43,7 +42,7 @@ use paigasus_observability::names;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use serde_json::json;
 use support::commit::{committer, inbox_scope};
-use support::inbox::{insert_inbox, migrated_postgres};
+use support::inbox::{insert_agent, insert_inbox, migrated_postgres};
 use support::lease::{counter, expire, expires_us, insert_pending_event, snapshot};
 use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres;
@@ -144,6 +143,7 @@ async fn world() -> Option<World> {
         principal: Uuid::new_v4(),
         events: [Uuid::new_v4(), Uuid::new_v4()],
     };
+    insert_agent(&w.db, w.org, w.agent, "scripted", "Use the memory tool.", &["memory"]).await;
     insert_inbox(&w.db, w.org, w.inbox, w.agent, w.principal).await;
     insert_pending_event(&w.db, w.inbox, w.events[0], 20).await;
     insert_pending_event(&w.db, w.inbox, w.events[1], 10).await;
@@ -227,18 +227,11 @@ fn worker(w: &World, store: Arc<PgLeaseStore>, committer: Arc<dyn RunCommitter>,
     )]]);
     let mut models = ModelRegistry::default();
     models.register("scripted", SharedModel::new(model));
-    let agent = AgentDefinition {
-        id: AgentId::new(w.org, w.agent),
-        name: "crash".to_owned(),
-        model_id: "scripted".to_owned(),
-        instructions: "Use the memory tool.".to_owned(),
-        tool_names: vec!["memory".to_owned()],
-    };
     let ports = WorkerPorts {
         leases: store.clone(),
         claims: store,
         committer,
-        resolver: Arc::new(ConfigAgentResolver::new(w.db.clone(), vec![agent])),
+        resolver: Arc::new(PgAgentResolver::new(w.db.clone())),
         screen: Arc::new(AllowAll),
         runner: Arc::new(HelikonAgentRunner::new(w.db.clone(), Arc::new(models))),
         memory: Arc::new(PgMemoryStore::new(w.db.clone())),

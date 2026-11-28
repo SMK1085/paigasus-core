@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The agent resolver of the worker (spec §6.2): the `[[agents]]` list of the configuration.
-//! The inbox row gives the agent UUID and the principal. The full `AgentId` (the organization
-//! and the UUID) then selects the definition.
-
-use std::collections::HashMap;
+//! The agent resolver of the worker (SMA-852 spec §6.2, §6.8): one query joins the inbox row to
+//! its `agent` row. The row of an archived agent does not join, so the answer is `NotFound`.
 
 use async_trait::async_trait;
 use paigasus_agent_host_core::agent::{AgentDefinition, ResolvedAgent};
@@ -13,43 +10,43 @@ use paigasus_agent_host_core::ports::{AgentResolver, RepositoryError};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use uuid::Uuid;
 
-/// Resolve an inbox to a configured agent.
-pub struct ConfigAgentResolver {
+/// The inbox, joined to the active agent of the same org. The join holds the org, so the same
+/// UUID in another org is another agent.
+const RESOLVE_SQL: &str = "SELECT a.id AS agent_id, a.name, a.model, a.instructions, a.tools, i.principal_id \
+     FROM inbox i JOIN agent a ON a.org_id = i.org_id AND a.id = i.agent_id AND a.archived_at IS NULL \
+     WHERE i.id = $1 AND i.org_id = $2";
+
+/// Resolve an inbox to the stored definition of its agent.
+pub struct PgAgentResolver {
     db: DatabaseConnection,
-    agents: HashMap<AgentId, AgentDefinition>,
 }
 
-impl ConfigAgentResolver {
+impl PgAgentResolver {
     #[must_use]
-    pub fn new(db: DatabaseConnection, agents: Vec<AgentDefinition>) -> Self {
-        Self {
-            db,
-            agents: agents.into_iter().map(|def| (def.id.clone(), def)).collect(),
-        }
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db }
     }
+}
 
-    /// The agents that this host serves.
-    #[must_use]
-    pub fn served(&self) -> Vec<AgentId> {
-        self.agents.keys().cloned().collect()
-    }
+fn store(e: impl std::fmt::Display) -> RepositoryError {
+    RepositoryError::Store(e.to_string())
 }
 
 #[async_trait]
-impl AgentResolver for ConfigAgentResolver {
+impl AgentResolver for PgAgentResolver {
     async fn resolve(&self, inbox: &InboxId) -> Result<ResolvedAgent, RepositoryError> {
-        let stmt = Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "SELECT agent_id, principal_id FROM inbox WHERE id = $1 AND org_id = $2",
-            [inbox.uuid().into(), inbox.org().into()],
-        );
-        let row = self.db.query_one_raw(stmt).await.map_err(|e| RepositoryError::Store(e.to_string()))?.ok_or(RepositoryError::NotFound)?;
-        let agent: Uuid = row.try_get("", "agent_id").map_err(|e| RepositoryError::Store(e.to_string()))?;
-        let principal: Uuid = row.try_get("", "principal_id").map_err(|e| RepositoryError::Store(e.to_string()))?;
-        // The key holds the organization too: the same UUID in another organization is another agent.
-        let definition = self.agents.get(&AgentId::new(inbox.org(), agent)).ok_or(RepositoryError::NotFound)?.clone();
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, RESOLVE_SQL, [inbox.uuid().into(), inbox.org().into()]);
+        let row = self.db.query_one_raw(stmt).await.map_err(store)?.ok_or(RepositoryError::NotFound)?;
+        let agent: Uuid = row.try_get("", "agent_id").map_err(store)?;
+        let principal: Uuid = row.try_get("", "principal_id").map_err(store)?;
         Ok(ResolvedAgent {
-            definition,
+            definition: AgentDefinition {
+                id: AgentId::new(inbox.org(), agent),
+                name: row.try_get("", "name").map_err(store)?,
+                model_id: row.try_get("", "model").map_err(store)?,
+                instructions: row.try_get("", "instructions").map_err(store)?,
+                tool_names: row.try_get("", "tools").map_err(store)?,
+            },
             principal: PrincipalId::from_uuid(principal),
         })
     }

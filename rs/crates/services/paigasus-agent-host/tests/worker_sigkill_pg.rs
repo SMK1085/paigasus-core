@@ -38,7 +38,7 @@ use sea_orm::DatabaseConnection;
 #[cfg(feature = "test-model")]
 use support::fake_iam::{FakeIam, serve_grpc};
 #[cfg(feature = "test-model")]
-use support::inbox::insert_inbox;
+use support::inbox::{insert_agent, insert_inbox};
 #[cfg(feature = "test-model")]
 use uuid::Uuid;
 
@@ -115,16 +115,11 @@ async fn a_killed_worker_is_taken_over_and_the_event_is_done_once() {
     let (org, inbox, agent, owner) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     let (iam, server) = serve_grpc(FakeIam::new(TOKEN, owner)).await;
 
-    // Step 1: the config of one agent, a short lease and one worker.
+    // Step 1: the config of a short lease and one worker.
     let dir = TempDir::new();
-    let id = paigasus_agent_host_core::ids::AgentId::new(org, agent).as_prn().canonical();
     std::fs::write(
         dir.0.join("agent-host.toml"),
-        format!(
-            "[[agents]]\nid = \"{id}\"\nname = \"sigkill\"\nmodel = \"scripted\"\ninstructions = \"Use the memory tool.\"\ntools = [\"memory\"]\n\n\
-             [lease]\nttl_secs = 3\nheartbeat_interval_secs = 1\n\n\
-             [worker]\nconcurrency = 1\npoll_interval_ms = 200\n"
-        ),
+        "[lease]\nttl_secs = 3\nheartbeat_interval_secs = 1\n\n[worker]\nconcurrency = 1\npoll_interval_ms = 200\n",
     )
     .expect("write agent-host.toml");
 
@@ -138,6 +133,7 @@ async fn a_killed_worker_is_taken_over_and_the_event_is_done_once() {
     let (mut first, port) = support::spawn_service_in(&url, Some(&dir.0), &first_env);
     support::wait_for_status(&mut first, port, "/readyz", 200, READY_BUDGET).await;
     let db = support::connect(&url).await;
+    insert_agent(&db, org, agent, "scripted", "Use the memory tool.", &["memory"]).await;
     insert_inbox(&db, org, inbox, agent, owner).await;
 
     // Step 3: one CloudEvent through the HTTP ingress.
