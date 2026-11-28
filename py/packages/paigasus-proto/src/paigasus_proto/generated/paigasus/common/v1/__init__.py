@@ -787,7 +787,9 @@ class ErrorReason(betterproto2.Enum):
     """
     "invalid-query-parameter" — a query-string parameter could not be
     deserialized into its target type, or was supplied more than once.
-    Emitted by IAM's EnvelopeQuery extractor before any handler runs.
+    Emitted by the EnvelopeQuery extractor of IAM and of the agent host
+    before any handler runs. The agent host also emits it for an
+    include_archived value that is not true or false.
     HTTP-only: gRPC has no query string. Unlike 905/906, that property is
     NOT enforced by the transport — this reason is a TenancyError variant,
     which the gRPC surface also maps — so it is held by a source scan in
