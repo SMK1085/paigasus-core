@@ -10,6 +10,27 @@ policy settings (spec `2026-11-15-iam-tool-policy-sets-design.md` § 9.2). Later
 Status: revision 2, after the builder check ("nothing important left") and the first challenge
 (NEEDS REWORK, 2 blockers). The revision 2 changelog lists what changed.
 
+## Revision 3 (plan) amendments
+
+The plan (`docs/superpowers/plans/2026-11-28-sma-856-webhook-detector.md`) found these points
+against the code. They change the spec as follows.
+
+- P1. § 7.1: a 25-digit number passes the strict parse. The kernel keeps a big integer as text
+  (`paigasus-kernel/src/tool_policy/input.rs:76-83`). The test asserts that such an input is
+  embedded byte-equal. A duplicate key and invalid JSON still go as `args_text`.
+- P2. § 7.5: no test can observe that a client trusts a CA, because reqwest has no trust-store
+  accessor and the gateway has no TLS listener (C18). The tests cover the build, the boot
+  failures that name the provider and the path, and the control-build attribution.
+- P3. D30: the new error reason also needs the TS SDK `presentation.ts` entry and the count
+  changes in `presentation.test.ts` and `paigasus-proto/src/error.rs` (93 → 94). Its proto
+  number is 64.
+- P4. D7 and D25: the policy cache does not know the providers. A shared `WebhookRegistry` is
+  injected into the cache, so that the cache load can write the warn.
+- P5. § 6.8: the failure counter is primed for each provider and each of the 9 adapter reasons.
+  The "8 × 15 + 3" count in § 6.8 is replaced by this rule.
+- P6. D8: when the tenant part is unavailable for one hold (SMA-753 P7), that hold sends no
+  webhook request.
+
 ## Revision 2 changelog
 
 Each line gives the finding of the first challenge and the change.
