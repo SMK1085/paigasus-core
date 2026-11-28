@@ -54,8 +54,9 @@ describe('the reason codec round-trips the whole registry', () => {
   it('covers every non-sentinel value declared in error.proto', () => {
     const values = ErrorReasonSchema.values.filter((v) => v.name !== 'ERROR_REASON_UNSPECIFIED');
 
-    // Cardinality guard. The Rust mirror asserts 100 at
-    // rs/crates/libs/paigasus-proto/src/error.rs:270; the two must agree,
+    // Cardinality guard. The Rust mirror is the test
+    // `the_registry_contains_exactly_the_expected_reasons` in
+    // rs/crates/libs/paigasus-proto/src/error.rs; the two must agree,
     // because both derive from the same proto.
     expect(values).toHaveLength(100);
 
