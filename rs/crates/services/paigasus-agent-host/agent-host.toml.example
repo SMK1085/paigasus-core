@@ -1,6 +1,7 @@
 # The agent host needs its own database. A separate schema in a shared database is not supported.
 
 # http_addr = "0.0.0.0:8086"
+# grpc_addr = "0.0.0.0:8087"   # the gRPC AgentService. Needs [iam]. The port must differ from http_addr and metrics.addr
 # database_url = "postgres://user:password@localhost/agent_host"   # required
 # log_level = "info"
 
@@ -73,7 +74,7 @@
 
 # [memory]
 # backend = "postgres"      # "postgres" or "s3". A backend switch does not move data. "s3" needs [memory.s3]
-#                           # "s3" with worker.enabled = true stops the boot: the worker supports only "postgres" for now
+#                           # "s3" needs worker.enabled = false: the worker supports only "postgres" for now
 # [memory.caps]
 # max_file_bytes = 65536          # greater than 0
 # max_store_bytes = 1048576       # greater than 0
