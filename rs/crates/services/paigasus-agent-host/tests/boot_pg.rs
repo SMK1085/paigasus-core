@@ -72,8 +72,17 @@ async fn the_inbox_unique_constraint_holds() {
     support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
 
     let insert = "INSERT INTO inbox (id, org_id, agent_id, principal_id) VALUES \
-                  (gen_random_uuid(), gen_random_uuid(), '11111111-1111-1111-1111-111111111111', \
+                  (gen_random_uuid(), '33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111', \
                   '22222222-2222-2222-2222-222222222222')";
+    // Without an agent row the foreign key refuses the inbox (SQLSTATE 23503).
+    let err = db.execute_unprepared(insert).await.expect_err("an inbox without an agent must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected SQLSTATE 23503, got {err:?}");
+    db.execute_unprepared(
+        "INSERT INTO agent (id, org_id, name, model, instructions) VALUES \
+         ('11111111-1111-1111-1111-111111111111', '33333333-3333-3333-3333-333333333333', 'a', 'scripted', 'test')",
+    )
+    .await
+    .expect("insert the agent");
     db.execute_unprepared(insert).await.expect("the first insert");
     let err = db.execute_unprepared(insert).await.expect_err("the second insert must fail");
     // `sql_err` maps SQLSTATE 23505 (unique_violation) to this variant.

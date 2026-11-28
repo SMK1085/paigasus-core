@@ -402,7 +402,7 @@ async fn m0002_down_drops_its_objects() {
         eprintln!("skipping memory_pg: Docker unavailable");
         return;
     };
-    Migrator::down(&db, Some(4)).await.expect("down m0005, m0004, m0003 and m0002");
+    Migrator::down(&db, Some(5)).await.expect("down m0006, m0005, m0004, m0003 and m0002");
     for object in ["memory_file", "memory_scope", "memory_file_version_seq"] {
         let sql = format!("SELECT to_regclass('{object}') IS NULL AS v");
         assert!(support::scalar_bool(&db, &sql).await, "{object} must be dropped");

@@ -1143,9 +1143,13 @@ smoke_agent_host() {
     return "$q_rc"
   }
   "${ah_psql[@]}" -c "
-    WITH i AS (
+    WITH a AS (
+      INSERT INTO agent (id, org_id, name, model, instructions)
+      VALUES (gen_random_uuid(), gen_random_uuid(), 'smoke', 'scripted', 'smoke')
+      RETURNING id, org_id),
+    i AS (
       INSERT INTO inbox (id, org_id, agent_id, principal_id)
-      VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid())
+      SELECT gen_random_uuid(), a.org_id, a.id, gen_random_uuid() FROM a
       RETURNING id)
     INSERT INTO timer (id, inbox_id, kind, origin, status, note, cron, tz, next_slot, next_slot_second, scheduled_at, next_fire_at)
     SELECT gen_random_uuid(), i.id, 'schedule', 'agent', 'active', '', '0 9 * * *', 'Europe/Berlin',
