@@ -432,4 +432,6 @@ Not folded in:
 - **Stale faults (§7.5).** A host fault of a run that started before the current pause began does
   not count. It does not double the pause.
 - **Pause check (§7.5).** The pause check runs before every claim, also between claims inside one lease.
+- **404 text (§6).** The host-fault text of a 404 says "the gateway route is off, or the gateway
+  does not know the model". A wrong `[[models]].model` id gives a 404 from the upstream.
 - **Run duration metric.** `agent_host_run_duration_seconds` now starts just before the claim.

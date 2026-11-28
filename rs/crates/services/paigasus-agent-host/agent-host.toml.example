@@ -55,7 +55,7 @@
 # [[models]]
 # name = "claude"
 # provider = "anthropic"
-# model = "claude-sonnet-4-5"   # the model id that the gateway gets
+# model = "claude-sonnet-5-5"   # the model id that the gateway gets
 # max_output_tokens = 4096      # required. Range 1 to 128000
 
 # [lease]

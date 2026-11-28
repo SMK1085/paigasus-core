@@ -170,7 +170,7 @@ pub const AGENT_HOST_TIMER_TOOL_CALLS_TOTAL: &str = "agent_host_timer_tool_calls
 // Agent host worker run loop (SMA-790 spec §6.14). The names are provisional; SMA-798 owns them.
 /// Runs that ended. Label: `class` (`completed`, `stopped`, `deterministic`, `transient`, `host_fault`, `screened`, `discarded` or `shutdown`).
 pub const AGENT_HOST_RUNS_TOTAL: &str = "agent_host_runs_total";
-/// The duration of one run, from the claim to the end of the commit, in seconds. No label.
+/// The duration of one run, from just before the claim to the end of the commit, in seconds. No label.
 pub const AGENT_HOST_RUN_DURATION_SECONDS: &str = "agent_host_run_duration_seconds";
 /// Inbox events that the screen flagged. No label.
 pub const AGENT_HOST_EVENTS_SCREENED_TOTAL: &str = "agent_host_events_screened_total";

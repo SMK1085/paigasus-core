@@ -599,7 +599,7 @@ UPSTREAM_INPUT_TASKS = ("build", "test", "lint")
 
 # Consumer -> upstream pairs deliberately declared in `fileGroups.upstreams` WITHOUT being in the
 # crate's Moon closure. A6 is strict-equality (SMA-429's default-deny model), so an intentional
-# over-approximation needs an entry here with a non-empty reason. One entry today (SMA-787).
+# over-approximation needs an entry here with a non-empty reason. Three entries today (SMA-787 twice, SMA-851).
 #
 # MIND THE KEY SHAPE: it is (moon id, upstream SOURCE DIR) — e.g.
 # ("paigasus-iam-rs", "rs/crates/libs/paigasus-kernel") — NOT the (moon id, moon id) shape

@@ -134,6 +134,7 @@ Each `[[models]]` table has these keys:
 The `[gateway]` keys, their defaults and their ranges are in the configuration table above.
 The agent host sends no `cache_control` and no native tool types. A model call has 3 attempts: the first call and 2 retries.
 A retry obeys `retry_after_ms` when the gateway sends it.
+When `retry_after_ms` is more than 5 seconds, the run ends at once as a host fault. The event then waits at least `retry_after`.
 
 **Gateway prerequisites.** The gateway needs these settings.
 
@@ -152,7 +153,7 @@ When two such agents have different organizations, the service refuses the confi
 - The client follows no redirect. A redirect is an error of the link, so it is a host fault.
 
 **The key file.** The file holds one key on one line. The host reads it once at boot.
-The host removes a trailing newline. A byte order mark or a space inside the key stops the boot.
+The host removes a trailing newline. A byte order mark, or a space, a tab or another white-space character inside the key, stops the boot.
 The error text names the path and never the key. To rotate the key, issue the new key, restart every host, then revoke the old key.
 
 **Rollback.** The gateway model writes `provider_data` (signed thinking blocks) into the session rows.
@@ -168,7 +169,7 @@ The worker writes one `error` log line for each host fault. The line never holds
 | Error of the model call | Class |
 |---|---|
 | Status 401 or 403 (the gateway rejected the agent host credential) | host fault |
-| Status 404 (the route is off or missing) | host fault |
+| Status 404 (the route is off, or the model id is unknown) | host fault |
 | Rate limit or budget refusal, after the in-run retries | host fault, delay at least `retry_after` |
 | `Unavailable` or `Transport`, after the in-run retries (connect failure, read timeout, redirect) | host fault |
 | Status 400 or 413 | deterministic |
@@ -183,7 +184,7 @@ A host fault of a run that started before the current pause began does not doubl
 
 **Metrics.** The counter `agent_host_runs_total{class="host_fault"}` counts the host faults. The gauge `agent_host_worker_host_fault_paused` is 1 during a pause and 0 at other times.
 
-**The boot probe.** At boot, the host sends `GET <base_url>/v1/models` with the key. A status 401, 403 or 404, or a connect failure, writes one `warn` line.
+**The boot probe.** At boot, the host sends `GET <base_url>/v1/models` with the key. Any status that is not 2xx, or a connect failure, writes one `warn` line.
 The boot does not stop, because the gateway can be down for a short time during a deploy. A 404 means that `[messages] enabled = true` is missing on the gateway.
 
 ## Event ingress
@@ -263,8 +264,7 @@ kept, or null. From the first claim, it is the thread of the run that claimed th
 and `actorprn` from the envelope before the insert.
 
 An inbox has one lease row. The service takes the lease, claims a batch of events, and renews the
-lease with a heartbeat. SMA-787 starts no worker. `worker.enabled` is read and validated only.
-SMA-790 adds the worker.
+lease with a heartbeat. The worker (SMA-790) runs after it takes the lease.
 
 ## NATS source
 
