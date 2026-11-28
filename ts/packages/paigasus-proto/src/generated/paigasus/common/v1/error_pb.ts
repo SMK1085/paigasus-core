@@ -849,7 +849,7 @@ export enum ErrorReason {
 
   /**
    * In the shared range (900-999). Emitted by the agent host (SMA-852).
-   * "unknown-model" — the model of the agent is not one that the host serves. HTTP 422.
+   * "unknown-model" — the model of the agent is not one that the host serves. HTTP 400.
    * Metadata key `model`: the rejected value.
    *
    * @generated from enum value: ERROR_REASON_UNKNOWN_MODEL = 915;
@@ -858,7 +858,7 @@ export enum ErrorReason {
 
   /**
    * In the shared range (900-999). Emitted by the agent host (SMA-852).
-   * "unknown-tool" — a tool of the agent is not in the tool catalog. HTTP 422. Metadata key
+   * "unknown-tool" — a tool of the agent is not in the tool catalog. HTTP 400. Metadata key
    * `tool`: the rejected value.
    *
    * @generated from enum value: ERROR_REASON_UNKNOWN_TOOL = 916;
@@ -867,7 +867,7 @@ export enum ErrorReason {
 
   /**
    * In the shared range (900-999). Emitted by the agent host (SMA-852).
-   * "invalid-agent-field" — a field of the agent is empty, too long or malformed. HTTP 422.
+   * "invalid-agent-field" — a field of the agent is empty, too long or malformed. HTTP 400.
    * Metadata key `field`: the name of the field.
    *
    * @generated from enum value: ERROR_REASON_INVALID_AGENT_FIELD = 917;

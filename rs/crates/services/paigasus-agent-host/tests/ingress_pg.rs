@@ -141,7 +141,7 @@ async fn an_authorized_post_to_an_archived_agents_inbox_is_409_agent_archived_an
     let (status, body) = post(&app(&db), &event()).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "agent-archived");
-    assert_eq!(body["error"]["message"], "the agent of this inbox is archived");
+    assert_eq!(body["error"]["message"], "the agent is archived");
     let row = one_row(&db, "SELECT count(*) AS n FROM inbox_event").await;
     assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0);
 }
