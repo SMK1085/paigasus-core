@@ -59,6 +59,12 @@ pub enum Action {
     /// roles, only the dedicated `agent_event_writer` grants it directly; `org_admin` never holds
     /// it. `platform_admin` permits every action, so it permits this one too.
     WriteInboxEvent,
+    /// Create, update, archive and restore agent definitions and manage the agent inboxes of an
+    /// organization (SMA-852). A non-restore write. Held by the `agent_admin` role.
+    ManageAgents,
+    /// Read the agent definitions and the agent inboxes of an organization (SMA-852). Held by
+    /// `agent_admin` and `org_admin`.
+    ReadAgents,
     /// Mint a user principal (SMA-584). Authorized at `Root` only: a user principal has no
     /// owner tenancy node (users attach to orgs/teams later, via memberships), so there is no
     /// narrower resource to scope against. Checked in `adapters::http::users` and
@@ -141,6 +147,8 @@ impl Action {
         Action::RetireSystemPolicy,
         Action::InvokeModel,
         Action::WriteInboxEvent,
+        Action::ManageAgents,
+        Action::ReadAgents,
         Action::CreateUser,
         Action::GetUser,
         Action::LinkExternalIdentity,
@@ -203,6 +211,8 @@ impl Action {
             Action::RetireSystemPolicy => "RetireSystemPolicy",
             Action::InvokeModel => "InvokeModel",
             Action::WriteInboxEvent => "WriteInboxEvent",
+            Action::ManageAgents => "ManageAgents",
+            Action::ReadAgents => "ReadAgents",
             Action::CreateUser => "CreateUser",
             Action::GetUser => "GetUser",
             Action::LinkExternalIdentity => "LinkExternalIdentity",
@@ -256,7 +266,8 @@ impl Action {
             | Action::ReadToolCatalog
             | Action::ReadToolPolicies
             | Action::ReadToolPolicyFloor
-            | Action::ReadCompiledToolPolicies => false,
+            | Action::ReadCompiledToolPolicies
+            | Action::ReadAgents => false,
             Action::CreateOrganization
             | Action::RenameOrganization
             | Action::ArchiveOrganization
@@ -284,6 +295,7 @@ impl Action {
             | Action::RetireSystemPolicy
             | Action::InvokeModel
             | Action::WriteInboxEvent
+            | Action::ManageAgents
             | Action::CreateUser
             | Action::LinkExternalIdentity
             | Action::UnlinkExternalIdentity
@@ -390,7 +402,9 @@ mod tests {
                 | Action::ReadToolPolicyFloor
                 | Action::ManageToolPolicySettings
                 | Action::ReadCompiledToolPolicies
-                | Action::ManageToolPolicyRecompile => {}
+                | Action::ManageToolPolicyRecompile
+                | Action::ManageAgents
+                | Action::ReadAgents => {}
             }
         }
         for a in Action::ALL {
@@ -398,9 +412,16 @@ mod tests {
         }
         assert_eq!(
             Action::ALL.len(),
-            55,
-            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies + 2 SMA-775 tool policy settings + 1 SMA-781 tool policy re-compile + 1 SMA-787 WriteInboxEvent"
+            57,
+            "27 pre-existing + 7 M4 + 1 audit + 1 invoke-model + 3 outbox dead-letter + 1 SMA-481 RetireSystemPolicy + 1 SMA-584 CreateUser + 4 SMA-712 user identity + 6 SMA-774 tool policies + 2 SMA-775 tool policy settings + 1 SMA-781 tool policy re-compile + 1 SMA-787 WriteInboxEvent + 2 SMA-852 agent registry"
         );
+    }
+    #[test]
+    fn the_agent_registry_actions_are_classified_and_round_trip() {
+        assert_eq!(Action::parse("ManageAgents"), Some(Action::ManageAgents));
+        assert_eq!(Action::parse("ReadAgents"), Some(Action::ReadAgents));
+        assert!(Action::ManageAgents.is_write() && !Action::ManageAgents.is_restore());
+        assert!(!Action::ReadAgents.is_write());
     }
     #[test]
     fn write_inbox_event_is_a_write_action() {
