@@ -416,3 +416,64 @@ async fn with_an_agent_the_pool_serves_a_pending_event() {
         child.tail()
     );
 }
+
+/// SMA-852: the binary binds `grpc_addr`, serves `AgentService` after the boot, and drains the
+/// listener on SIGTERM within the drain timeout.
+#[tokio::test]
+async fn a_boot_with_grpc_addr_serves_agent_service() {
+    use paigasus_proto::paigasus::agents::v1::ListAgentsRequest;
+    use paigasus_proto::paigasus::agents::v1::agent_service_client::AgentServiceClient;
+    use support::fake_iam::{FakeIam, serve_grpc};
+
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    const TOKEN: &str = "boot-grpc-token";
+    let (iam, _server) = serve_grpc(FakeIam::new(TOKEN, uuid::Uuid::from_u128(4))).await;
+    let grpc_port = support::free_port();
+    let (mut child, port) = support::spawn_service_with(
+        &url,
+        &[
+            ("AGENT_HOST_IAM__GRPC_ADDR", format!("http://{iam}")),
+            ("AGENT_HOST_IAM__TLS__MODE", "loopback_insecure".to_owned()),
+            ("AGENT_HOST_GRPC_ADDR", format!("127.0.0.1:{grpc_port}")),
+            ("AGENT_HOST_WORKER__ENABLED", "false".to_owned()),
+        ],
+    );
+    support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
+
+    let mut client = AgentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}")).await.expect("connect to grpc_addr");
+    let mut request = tonic::Request::new(ListAgentsRequest {
+        org_prn: format!("prn:pgs:iam:::organization/{}", uuid::Uuid::from_u128(5)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
+    let answer = client
+        .list_agents(request)
+        .await
+        .unwrap_or_else(|e| panic!("ListAgents must get a verdict, not {e:?}; log:\n{}", child.tail()));
+    assert!(answer.into_inner().agents.is_empty());
+
+    // A call without a credential is a verdict too: UNAUTHENTICATED.
+    let status = client.list_agents(ListAgentsRequest::default()).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+
+    // SIGTERM: the listener stops accepting and the process ends inside the drain timeout.
+    let pid = child.child.id();
+    let killed = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status().expect("run kill(1)");
+    assert!(killed.success());
+    let started = std::time::Instant::now();
+    let exit = loop {
+        if let Some(exit) = child.child.try_wait().expect("try_wait") {
+            break exit;
+        }
+        assert!(started.elapsed() < Duration::from_secs(15), "the drain must end the gRPC listener; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(exit.success(), "exit after SIGTERM: {exit}; log:\n{}", child.tail());
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", grpc_port)).await.is_err(),
+        "the gRPC listener must be closed after the drain"
+    );
+}

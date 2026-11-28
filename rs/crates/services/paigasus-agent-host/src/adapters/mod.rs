@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod boot;
 pub mod clock;
+pub mod grpc;
 pub mod helikon;
 pub mod http;
 pub mod iam;

@@ -97,7 +97,7 @@ async fn deferred(State(slot): State<BootSlot>, req: Request) -> Response {
 /// The registered code of the 503 while migrations run, and its static message. The membership
 /// test below checks the code against the registry. The code is a literal because this router is
 /// all that serves during the migration, so no fallible step may stand in its way.
-const MIGRATING: (&str, &str) = ("service-migrating", "this replica is still applying its boot migration");
+pub(crate) const MIGRATING: (&str, &str) = ("service-migrating", "this replica is still applying its boot migration");
 
 async fn migrating_response(_req: Request) -> Result<Response, std::convert::Infallible> {
     let (code, message) = MIGRATING;

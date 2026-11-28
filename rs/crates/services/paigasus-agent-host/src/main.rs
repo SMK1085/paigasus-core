@@ -5,7 +5,7 @@
 //! 1. load and validate the configuration, 2. start logging, 3. build the model registry
 //!    (the agents live in the database, SMA-852), 4. install the metrics recorder,
 //! 5. connect to the database (and, when the worker pool starts, the lease pool), 6. bind the HTTP
-//!    listener (and the metrics listener), 7. serve the boot router, 8. start the Prometheus
+//!    listener (and the metrics and gRPC listeners), 7. serve the boot router, 8. start the Prometheus
 //!    upkeep task, 9. migrate under the advisory lock and warn about each active agent whose model
 //!    this host does not serve, 10. when `[nats]` is set, check each
 //!    channel inbox and the durable (spec §9.1), 11. install the application router in the boot
@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use paigasus_agent_host::adapters::agents::PgAgentResolver;
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
+use paigasus_agent_host::adapters::grpc::AgentGrpcSlot;
 use paigasus_agent_host::adapters::helikon::capabilities::HelikonCapabilities;
 use paigasus_agent_host::adapters::helikon::memory_tool::run_nonce;
 use paigasus_agent_host::adapters::helikon::model_registry::ModelRegistry;
@@ -46,6 +47,7 @@ use paigasus_agent_host_core::ports::{InboxRepository, LeaseRepository, RunCapab
 use paigasus_agent_host_core::screen::AllowAll;
 use paigasus_agent_host_core::timer::BundledTzResolver;
 use paigasus_observability::names;
+use paigasus_proto::paigasus::agents::v1::agent_service_server::AgentServiceServer;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tokio::task::JoinSet;
 
@@ -116,6 +118,11 @@ async fn serve() -> anyhow::Result<()> {
     // Bind here, before the migration, so a bind failure shows at once and the socket listens for
     // the whole migration window.
     let http_listener = tokio::net::TcpListener::bind(config.http_addr).await?;
+    // The gRPC `AgentService` listener (SMA-852). It answers `UNAVAILABLE` until boot installs the admin.
+    let grpc_listener = match config.grpc_addr {
+        Some(addr) => Some((tokio::net::TcpListener::bind(addr).await?, addr)),
+        None => None,
+    };
     let metrics_listener = match config.metrics.addr {
         Some(addr) if metrics_handle.is_some() => Some((tokio::net::TcpListener::bind(addr).await?, addr)),
         _ => None,
@@ -141,6 +148,22 @@ async fn serve() -> anyhow::Result<()> {
         servers.spawn(async move {
             axum::serve(http_listener, app)
                 .with_graceful_shutdown(async move {
+                    let _ = rx.changed().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        });
+    }
+    let grpc_slot = AgentGrpcSlot::default();
+    if let Some((listener, grpc_addr)) = grpc_listener {
+        let mut rx = rx.clone();
+        let service = AgentServiceServer::new(grpc_slot.clone());
+        servers.spawn(async move {
+            tracing::info!(%grpc_addr, "paigasus-agent-host gRPC listener started");
+            tonic::transport::Server::builder()
+                .layer(paigasus_observability::CorrelationLayer)
+                .add_service(service)
+                .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async move {
                     let _ = rx.changed().await;
                 })
                 .await
@@ -181,7 +204,7 @@ async fn serve() -> anyhow::Result<()> {
     // One signal registration for the whole life of the process. A second registration can lose a
     // signal that arrives in the gap between the two.
     let outcome: anyhow::Result<BootTasks> = tokio::select! {
-        r = boot(&db, lease_db, &config, &slot, models) => r,
+        r = boot(&db, lease_db, &config, &slot, &grpc_slot, models) => r,
         () = &mut shutdown => {
             tracing::info!("shutdown signal received during boot");
             interrupted = true;
@@ -354,7 +377,7 @@ fn worker_pool_task(db: &DatabaseConnection, lease_db: DatabaseConnection, confi
 /// Everything between the bind and ready: the migration, the NATS boot checks, the build of the
 /// worker pool (when `lease_db` is set) and the install of the application router. It returns an
 /// error and does not use `?` out of `serve`, so that `serve` always drains.
-async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, config: &Config, slot: &BootSlot, models: Arc<ModelRegistry>) -> anyhow::Result<BootTasks> {
+async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, config: &Config, slot: &BootSlot, grpc_slot: &AgentGrpcSlot, models: Arc<ModelRegistry>) -> anyhow::Result<BootTasks> {
     let migration = migrate_under_lock(db, config.migration.lock_wait()).await?;
     tracing::info!(
         waited = ?migration.waited,
@@ -421,6 +444,9 @@ async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, con
         Some(lease_db) => Some(worker_pool_task(db, lease_db, config, models, memory.clone())?),
         None => None,
     };
+    if let Some(admin) = &agents {
+        grpc_slot.install(Arc::clone(admin))?;
+    }
     let state = AppState {
         db: db.clone(),
         inboxes,
