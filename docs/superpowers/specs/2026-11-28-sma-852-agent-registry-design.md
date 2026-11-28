@@ -171,7 +171,7 @@ ALTER TABLE inbox
     `worker.max_runs_per_lease` before it is released, so more than one claim can see the archive.
     Each claimed event loses at most one attempt. The next take does not choose the inbox.
   - **No new events.** The event insert of HTTP ingress, NATS ingress and the timer scheduler
-    (`scheduler.rs:252`) writes the event only when the agent of the inbox is active, in the same
+    (`scheduler.rs:269`) writes the event only when the agent of the inbox is active, in the same
     statement (`INSERT … SELECT … WHERE EXISTS (… archived_at IS NULL)`). HTTP ingress then answers
     `AGENT_ARCHIVED` (409), after the authorization, so a caller without the right learns nothing.
     NATS ingress terminates the message (`Disposition::Term`) with a warning. The scheduler drops
@@ -384,7 +384,7 @@ Each test must fail when the code it targets is removed.
   the inbox through `AgentAdmin` while the pool runs, insert an event, and check that a worker
   runs it without a restart.
 - `AgentAdmin`: an unknown model, an unknown tool, each field limit, each name rule.
-- Authorization (a recording fake `Iam`, as `auth.rs:546-562`): for each route and each RPC, the
+- Authorization (a recording fake `Iam`; the existing `FakeIam` is at `auth.rs:388-421`): for each route and each RPC, the
   test checks the exact self-query (principal, action, org PRN) and both verdicts. It also checks
   an API key scoped to another org (403), an unknown id (403 after a probe against the nil org),
   an id of another org (403), and an IAM outage for each of these (503). An unauthenticated call
