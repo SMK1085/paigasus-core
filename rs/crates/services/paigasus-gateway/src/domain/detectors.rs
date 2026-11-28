@@ -414,21 +414,25 @@ impl WebhookRegistry {
         self.entries.iter()
     }
 
-    /// Resolve one opt-in name for a batch of `org`. A retired provider gives `Retired` whatever the
-    /// org. An `Only` scope permits `Some(org)` in the set and never `None`; `All` permits any batch.
+    /// Resolve one opt-in name for a batch of `org`. The scope is checked before `retired`. An `Only` scope permits `Some(org)` in the set and never `None`; `All` permits any batch.
     #[must_use]
     pub fn resolve(&self, name: &str, org: Option<Uuid>) -> OptIn<'_> {
         let Some(entry) = self.entries.iter().find(|e| e.detector.name() == name) else {
             return OptIn::Unknown;
         };
-        if entry.retired {
-            return OptIn::Retired(entry);
-        }
         let permitted = match &entry.orgs {
             OrgScope::All => true,
             OrgScope::Only(set) => org.is_some_and(|o| set.contains(&o)),
         };
-        if permitted { OptIn::Run(entry) } else { OptIn::NotPermitted }
+        // The scope comes first: an org outside the scope of a retired provider gets the High
+        // `not_permitted` finding, not the soft `retired` one.
+        if !permitted {
+            OptIn::NotPermitted
+        } else if entry.retired {
+            OptIn::Retired(entry)
+        } else {
+            OptIn::Run(entry)
+        }
     }
 }
 

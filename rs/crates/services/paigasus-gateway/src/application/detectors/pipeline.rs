@@ -1070,6 +1070,30 @@ mod tests {
         );
     }
 
+    /// The scope is checked before `retired`: an org outside a retired provider's scope gets the
+    /// High `not_permitted` finding. An org inside the scope gets `retired` at the failure severity.
+    #[tokio::test]
+    async fn a_retired_provider_gives_not_permitted_outside_its_scope_and_retired_inside() {
+        use crate::domain::detectors::{OrgScope, WebhookEntry};
+        let registry = WebhookRegistry::new(vec![WebhookEntry {
+            detector: Arc::new(DeclaredDetector {
+                name: "old_dlp",
+                kinds: Default::default(),
+                severity: Severity::Low,
+                found: vec![],
+            }),
+            orgs: OrgScope::Only([org_b()].into()),
+            retired: true,
+        }]);
+        assert!(matches!(registry.resolve("old_dlp", Some(org_a())), OptIn::NotPermitted));
+        assert!(matches!(registry.resolve("old_dlp", Some(org_b())), OptIn::Retired(_)));
+        let p = DetectorPipeline::new(built_ins(), registry, None, Duration::from_millis(500));
+        let out = p.run(opted(vec![call(0, "{}")], Some(org_a()), &["old_dlp"]), far()).await;
+        assert_eq!(out.findings[0], vec![failure_finding("old_dlp", Severity::High, WebhookFailure::NotPermitted)]);
+        let out = p.run(opted(vec![call(0, "{}")], Some(org_b()), &["old_dlp"]), far()).await;
+        assert_eq!(out.findings[0], vec![failure_finding("old_dlp", Severity::Low, WebhookFailure::Retired)]);
+    }
+
     #[tokio::test]
     async fn an_org_scope_permits_only_a_listed_org_and_never_a_missing_one() {
         use crate::domain::detectors::{OrgScope, WebhookEntry};

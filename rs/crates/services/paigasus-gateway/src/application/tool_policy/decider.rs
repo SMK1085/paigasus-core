@@ -851,14 +851,15 @@ mod tests {
     async fn the_call_batch_carries_the_caller() {
         let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
         let hook = recording("hook_a");
-        let session_id = uuid::Uuid::from_u128(0x5e55);
-        let ctx = opted(ctx, &["hook_a"]).with_session(session(Findings::new()));
+        let s = session(Findings::new());
+        let session_id = s.session_id;
+        let ctx = opted(ctx, &["hook_a"]).with_session(s);
         let decider = detecting(vec![hook.clone() as Arc<dyn Detector>]);
         decider.decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
         let batches = hook.batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].caller.principal.as_ref(), PRINCIPAL);
-        assert!(batches[0].caller.session.is_some(), "the session id travels (not {session_id})");
+        assert_eq!(batches[0].caller.session, Some(session_id), "the session id travels");
         assert_eq!(&*batches[0].caller.opt_in, ["hook_a"]);
         assert!(batches[0].webhook_bodies.is_some());
     }
