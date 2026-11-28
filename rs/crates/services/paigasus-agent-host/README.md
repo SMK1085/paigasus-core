@@ -26,8 +26,8 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `gateway.base_url` | `AGENT_HOST_GATEWAY__BASE_URL` | none (required in `[gateway]`) | URL of the AI Gateway. The scheme is `https`, or `http` for a loopback host. No user name, password, query or fragment. A path prefix is allowed. |
 | `gateway.api_key_file` | `AGENT_HOST_GATEWAY__API_KEY_FILE` | none (required in `[gateway]`) | Path of the file that holds the gateway API key. No config key holds the key. The path has no space at the start or end. |
 | `gateway.ca_file` | `AGENT_HOST_GATEWAY__CA_FILE` | none | PEM file of trust anchors. The file REPLACES the platform roots. It must hold every root that the gateway chain needs. |
-| `gateway.connect_timeout_ms` | `AGENT_HOST_GATEWAY__CONNECT_TIMEOUT_MS` | `5000` | Time limit to make the connection. Range 100 to 60000. |
-| `gateway.read_timeout_ms` | `AGENT_HOST_GATEWAY__READ_TIMEOUT_MS` | `60000` | Time limit of each read. Range 1000 to 600000. Three times this value plus two waits of 5000 ms must be less than `run.timeout_secs` in milliseconds. |
+| `gateway.connect_timeout_ms` | `AGENT_HOST_GATEWAY__CONNECT_TIMEOUT_MS` | `5000` | Time limit to make the connection. Range 100 to 60000. It counts in the run budget rule of `gateway.read_timeout_ms`. |
+| `gateway.read_timeout_ms` | `AGENT_HOST_GATEWAY__READ_TIMEOUT_MS` | `60000` | Time limit of each read. Range 1000 to 600000. Three times the sum of `gateway.connect_timeout_ms` and this value, plus two waits of 5000 ms, must be less than `run.timeout_secs` in milliseconds. This check is a lower bound, not a guarantee. See Known limit. |
 | `models` | none (TOML only) | none | List of `[[models]]` tables. See the Model gateway section. Each table has `name`, `provider`, `model` and `max_output_tokens`. |
 | `models.max_output_tokens` | none (TOML only) | none (required) | Most output tokens of one model call. Range 1 to 128000. |
 | `lease.ttl_secs` | `AGENT_HOST_LEASE__TTL_SECS` | `30` | Time to live of an inbox lease. Range 3 to 600, and at least 3 times `lease.heartbeat_interval_secs`. |
@@ -163,13 +163,16 @@ A rollback of the agent host to a build with Helikon core below 0.8 needs a data
 ### Host faults
 
 A host fault is a fault of the host or of the gateway link. It is not a fault of the event.
-A host fault gives the attempt back and never moves an event to `dead`. The run row gets `status = 'failed'` and `error_class = 'host_fault'`.
+A host fault gives the attempt back and never moves an event to `dead`, with one exception. See Known limit. The run row gets `status = 'failed'` and `error_class = 'host_fault'`.
 The event gets a delay of at least `retry_after`, up to 86400 seconds. No memory commit happens.
 The worker writes one `error` log line for each host fault. The line never holds the key.
 
 **Known limit.** A gateway stall on a later model turn can last until the outer run timeout. The read timeout does not shrink to the time left in the run.
 The run then ends as `RunError::Timeout`. This error stays deterministic and costs an attempt. A long gateway outage can so move an event to `dead`.
-The author chose to keep this behavior for this release.
+This is an explicit exception to the host-fault rule: after repeated outages of this kind, an event can reach `dead`.
+The author chose to keep this behavior for this release. The follow-up sweep covers it.
+The read timeout bounds one read, not one attempt: a stream that keeps sending data resets the read timer.
+So the boot budget check is a lower bound, not a guarantee. A total deadline for each attempt is part of the same follow-up.
 
 | Error of the model call | Class |
 |---|---|

@@ -49,7 +49,7 @@
 # api_key_file = "/etc/agent-host/gateway.key"        # one line, read once at boot. No config key holds the key
 # ca_file = "/etc/agent-host/gateway-ca.pem"          # optional; REPLACES the platform roots, so it must hold every root the gateway chain needs
 # connect_timeout_ms = 5000     # 100 to 60000
-# read_timeout_ms = 60000       # 1000 to 600000. 3 x this value must be less than run.timeout_secs in milliseconds
+# read_timeout_ms = 60000       # 1000 to 600000. 3 x (connect_timeout_ms + read_timeout_ms) + 2 x 5000 must be less than run.timeout_secs x 1000
 #
 # One table per model. The provider "anthropic" is the only value. The name "scripted" is reserved.
 # [[models]]

@@ -461,14 +461,16 @@ pub struct GatewayConfig {
     /// that the gateway chain needs.
     #[serde(default)]
     pub ca_file: Option<String>,
-    /// The time limit to make the connection. Range 100 to 60000.
+    /// The time limit to make the connection. Range 100 to 60000. It counts in the run budget of
+    /// `read_timeout_ms`, which has the rule.
     #[serde(default = "default_gateway_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
     /// The time limit of each read, also of the wait for the response head. It must be more than
     /// the longest silent gap of the gateway stream: the tool-hold `ping` interval (SMA-750 D12,
     /// `tool_interception.keepalive_secs`, default 15 s) and the wait for the first upstream byte
-    /// (`first_byte_timeout_secs`, default 30 s). Range 1000 to 600000. Three times this value
-    /// plus two waits of 5000 ms must be less than `run.timeout_secs` in milliseconds.
+    /// (`first_byte_timeout_secs`, default 30 s). Range 1000 to 600000. Three times the sum of
+    /// `connect_timeout_ms` and this value, plus two waits of 5000 ms, must be less than
+    /// `run.timeout_secs` in milliseconds.
     #[serde(default = "default_gateway_read_timeout_ms")]
     pub read_timeout_ms: u64,
 }
@@ -557,13 +559,16 @@ impl GatewayConfig {
             }
         }
         // Both values are in range here, and `run.timeout_secs` is at most 3600, so the products
-        // cannot overflow. The read timeouts of all attempts (the first call and two retries) and
-        // the waits between them must fit in a run. A wait is at most the `retry-after` cap, which
-        // is also the largest back-off delay.
+        // cannot overflow. The connect and read timeouts of all attempts (the first call and two
+        // retries) and the waits between them must fit in a run. A wait is at most the
+        // `retry-after` cap, which is also the largest back-off delay. This is a lower bound, not
+        // a guarantee: a read timeout bounds one read, so a stream that keeps sending data resets
+        // it and one attempt can last longer.
         let attempts = u64::from(IN_RUN_ATTEMPTS);
         let wait_ms = IN_RUN_RETRY_AFTER_MAX.as_millis() as u64;
-        if attempts * self.read_timeout_ms + (attempts - 1) * wait_ms >= run_timeout_secs * 1000 {
+        if attempts * (self.connect_timeout_ms + self.read_timeout_ms) + (attempts - 1) * wait_ms >= run_timeout_secs * 1000 {
             return Err(ConfigError::GatewayReadTimeoutTooLong {
+                connect_timeout_ms: self.connect_timeout_ms,
                 read_timeout_ms: self.read_timeout_ms,
                 run_timeout_secs,
             });
@@ -812,9 +817,9 @@ pub enum ConfigError {
     #[error("gateway.ca_file must not be empty or have spaces at the start or end (leave the key out to use the platform roots)")]
     GatewayCaPathBlank,
     #[error(
-        "the read timeouts of all attempts and the waits between them (3 x gateway.read_timeout_ms ({read_timeout_ms}) + 2 x 5000 ms) must be less than run.timeout_secs ({run_timeout_secs}) in milliseconds"
+        "the connect and read timeouts of all attempts and the waits between them (3 x (gateway.connect_timeout_ms ({connect_timeout_ms}) + gateway.read_timeout_ms ({read_timeout_ms})) + 2 x 5000 ms) must be less than run.timeout_secs ({run_timeout_secs}) in milliseconds"
     )]
-    GatewayReadTimeoutTooLong { read_timeout_ms: u64, run_timeout_secs: u64 },
+    GatewayReadTimeoutTooLong { connect_timeout_ms: u64, read_timeout_ms: u64, run_timeout_secs: u64 },
     #[error("models.name must not be empty")]
     ModelNameEmpty,
     #[error("models: the name \"{0}\" is used by two entries")]
@@ -2541,7 +2546,7 @@ mod tests {
 
     #[test]
     fn the_gateway_timeouts_have_ranges() {
-        // The run timeout is raised, so that the 3 x rule does not decide these rows.
+        // The run timeout is raised, so that the budget rule does not decide these rows.
         let with = |connect: u64, read: u64| {
             let mut cfg = valid_gateway_cfg();
             cfg.run.timeout_secs = 3600;
@@ -2572,31 +2577,45 @@ mod tests {
     }
 
     #[test]
-    fn three_read_timeouts_must_fit_in_the_run_timeout() {
+    fn the_connect_and_read_timeouts_must_fit_in_the_run_timeout() {
         let mut cfg = valid_gateway_cfg();
-        // The default pair: 3 x 60000 + 2 x 5000 = 190000 ms is less than 300 s.
+        // The default pair: 3 x (5000 + 60000) + 2 x 5000 = 205000 ms is less than 300 s.
+        assert_eq!(cfg.gateway.as_ref().unwrap().connect_timeout_ms, 5000);
         assert_eq!(cfg.validate(), Ok(()));
-        cfg.run.timeout_secs = 60;
-        // 3 x 16667 + 10000 = 60001 ms: refused. 3 x 16666 + 10000 = 59998 ms: accepted.
-        cfg.gateway.as_mut().unwrap().read_timeout_ms = 16_667;
-        assert_eq!(
-            cfg.validate(),
+        let too_long = |connect_timeout_ms, read_timeout_ms, run_timeout_secs| {
             Err(ConfigError::GatewayReadTimeoutTooLong {
-                read_timeout_ms: 16_667,
-                run_timeout_secs: 60
+                connect_timeout_ms,
+                read_timeout_ms,
+                run_timeout_secs,
             })
-        );
+        };
+        cfg.run.timeout_secs = 60;
+        // 3 x (5000 + 11667) + 10000 = 60001 ms: refused. 3 x (5000 + 11666) + 10000 = 59998 ms: accepted.
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 11_667;
+        assert_eq!(cfg.validate(), too_long(5000, 11_667, 60));
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 11_666;
+        assert_eq!(cfg.validate(), Ok(()));
+        // The old rule (3 x read + 10000) accepted 16_666. The connect timeout now refuses it.
         cfg.gateway.as_mut().unwrap().read_timeout_ms = 16_666;
-        assert_eq!(cfg.validate(), Ok(()));
-        // The old rule (3 x read < run) accepted 19_999. The waits now refuse it.
-        cfg.gateway.as_mut().unwrap().read_timeout_ms = 19_999;
         assert!(cfg.validate().is_err());
-        // An exact edge: run 65 s, 3 x 18333 + 10000 = 64999 accepted, 18334 gives 65002 refused.
+        // An exact edge: run 65 s, 3 x (5000 + 13333) + 10000 = 64999 accepted, 13334 gives 65002 refused.
         cfg.run.timeout_secs = 65;
-        cfg.gateway.as_mut().unwrap().read_timeout_ms = 18_333;
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 13_333;
         assert_eq!(cfg.validate(), Ok(()));
-        cfg.gateway.as_mut().unwrap().read_timeout_ms = 18_334;
-        assert!(cfg.validate().is_err());
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 13_334;
+        assert_eq!(cfg.validate(), too_long(5000, 13_334, 65));
+        // A large connect timeout is refused with a small read timeout:
+        // 3 x (60000 + 1000) + 10000 = 193000 ms is more than 150 s.
+        cfg.run.timeout_secs = 150;
+        let gw = cfg.gateway.as_mut().unwrap();
+        gw.connect_timeout_ms = 60_000;
+        gw.read_timeout_ms = 1000;
+        assert_eq!(cfg.validate(), too_long(60_000, 1000, 150));
+        // 193000 ms is less than 194 s: accepted. 193000 ms is not less than 193 s: refused.
+        cfg.run.timeout_secs = 194;
+        assert_eq!(cfg.validate(), Ok(()));
+        cfg.run.timeout_secs = 193;
+        assert_eq!(cfg.validate(), too_long(60_000, 1000, 193));
     }
 
     #[test]
