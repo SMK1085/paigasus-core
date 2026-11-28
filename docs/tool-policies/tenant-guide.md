@@ -409,7 +409,9 @@ During an IAM outage, a changed opt-in list does not reach a gateway. The gatewa
 only when IAM is reachable again and a refresh loads it.
 
 With fail mode `open`, the gateway uses its last known list for at most `max_stale_secs`. After that,
-the tenant part is unavailable and the gateway sends no webhook request for that tenant.
+the tenant part is unavailable, and the gateway sends no webhook request for a new request of
+that tenant. A request that started before then keeps its policy snapshot, so its later tool calls
+can still go to the provider until the request ends.
 
 ## 5. Held versions
 
