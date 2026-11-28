@@ -19,7 +19,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use futures::future::{BoxFuture, Shared};
@@ -34,6 +34,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::config::ToolPolicySettings;
+use crate::domain::detectors::{OptIn, WebhookRegistry, valid_name};
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 
 /// How many tenant reloads one refresh pass runs at the same time.
@@ -242,6 +243,9 @@ pub struct PolicyCache {
     /// The size of `Inner::last_known`, written under the lock. With no floor condition and no
     /// known org, [`Self::floor_history`] returns at once and takes no lock.
     known_orgs: AtomicUsize,
+    /// The webhook providers of the gateway (SMA-856 P4). A load of a tenant entry reads it to warn
+    /// about an opt-in that the gateway cannot run. Without it, no warn is written.
+    registry: OnceLock<Arc<WebhookRegistry>>,
 }
 
 impl PolicyCache {
@@ -262,7 +266,31 @@ impl PolicyCache {
                 last_known: HashMap::new(),
             }),
             known_orgs: AtomicUsize::new(0),
+            registry: OnceLock::new(),
         })
+    }
+
+    /// Set the webhook registry (SMA-856 P4). The first call wins.
+    pub fn set_webhook_registry(&self, registry: Arc<WebhookRegistry>) {
+        let _ = self.registry.set(registry);
+    }
+
+    /// Write one warn for each opt-in name of a new tenant entry that the gateway cannot run for
+    /// the org: an unknown provider or a provider that does not serve the org. A name that is not
+    /// a valid provider name is logged as `invalid`, never as itself (A4).
+    fn warn_unrunnable_opt_ins(&self, org: Uuid, names: &[String]) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
+        for name in names {
+            let reason = match registry.resolve(name, Some(org)) {
+                OptIn::Unknown => "unknown_provider",
+                OptIn::NotPermitted => "not_permitted",
+                OptIn::Run(_) | OptIn::Retired(_) => continue,
+            };
+            let shown = if valid_name(name) { name.as_str() } else { "invalid" };
+            tracing::warn!(org = %org, name = shown, reason, "a tenant opts in to a webhook provider that this gateway cannot run for it");
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -619,11 +647,21 @@ impl PolicyCache {
             return ok;
         }
 
+        // The opt-in names of a new tenant entry, for the warn after the build.
+        let opt_ins = match &fetched {
+            Fetched::Tenant(org, t) => t.settings.as_ref().map(|s| (*org, Arc::clone(&s.webhooks))),
+            Fetched::Floor(_) => None,
+        };
         let compile_started = Instant::now();
         // The floor that this load compiles the tenant set against.
         let compiled_on = floor.clone();
         let built = self.build(key, fetched, floor);
         histogram!(names::GATEWAY_TOOL_POLICY_COMPILE_SECONDS).record(compile_started.elapsed().as_secs_f64());
+        if let Some((org, names)) = &opt_ins
+            && (built.is_ok() || matches!(&built, Err(Some(_))))
+        {
+            self.warn_unrunnable_opt_ins(*org, names);
+        }
         match built {
             Ok(data) => {
                 let known = match (&data, key) {
@@ -1377,6 +1415,42 @@ mod tests {
             on_unavailable: OnUnavailable::Open,
             webhooks: Arc::from([]),
         }
+    }
+
+    /// SMA-856 P4: one warn for each name that the gateway cannot run for the org, once per new entry.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_entry_warns_once_per_unknown_or_forbidden_name() {
+        use crate::application::tool_policy::testing::RecordingDetector;
+        use crate::domain::detectors::{OrgScope, WebhookEntry};
+        use paigasus_logging::test_support::capture_logs;
+        let other_org = Uuid::from_u128(0xb);
+        let registry = Arc::new(WebhookRegistry::new(vec![WebhookEntry {
+            detector: RecordingDetector::new("acme_dlp", vec![]),
+            orgs: OrgScope::Only([other_org].into()),
+            retired: false,
+        }]));
+        let src = FakeSource::new();
+        src.set_settings(TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: OnUnavailable::Open,
+            webhooks: Arc::from(vec!["acme_dlp".to_owned(), "nobody".to_owned(), "Bad\u{7}".to_owned()]),
+        });
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
+        cache.set_webhook_registry(registry);
+        let (logs, _guard) = capture_logs();
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        let text = logs.text();
+        let warns: Vec<&str> = text.lines().filter(|l| l.contains("cannot run for it")).collect();
+        assert_eq!(warns.len(), 3, "{text}");
+        let has = |l: &str, name: &str, reason: &str| l.contains(&format!("name=\"{name}\"")) && l.contains(&format!("reason=\"{reason}\""));
+        assert!(warns.iter().any(|l| has(l, "acme_dlp", "not_permitted")), "{text}");
+        assert!(warns.iter().any(|l| has(l, "nobody", "unknown_provider")), "{text}");
+        assert!(warns.iter().any(|l| has(l, "invalid", "unknown_provider")), "{text}");
+        assert!(!text.contains("Bad"), "{text}");
+        // A second load with the same token stores nothing new, so it writes no warn.
+        assert!(cache.refresh_entry(Key::Tenant(ORG), Some(floor.clone())).await);
+        assert_eq!(logs.text().lines().filter(|l| l.contains("cannot run for it")).count(), 3);
     }
 
     #[tokio::test(start_paused = true)]

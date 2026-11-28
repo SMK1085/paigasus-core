@@ -1601,6 +1601,8 @@ mod detectors {
         /// `None`: the built-in detectors, behind a stage that counts the request screens (F9).
         built_in: Option<Arc<dyn BuiltInStage>>,
         webhooks: Vec<Arc<dyn Detector>>,
+        /// The opt-in list of `ORG_A`. `None`: every webhook of `webhooks` (SMA-856 D8).
+        opt_in: Option<Vec<String>>,
         enabled: bool,
         timeout_ms: u64,
         max_scan_bytes: usize,
@@ -1611,6 +1613,7 @@ mod detectors {
             Det {
                 built_in: None,
                 webhooks: Vec::new(),
+                opt_in: None,
                 enabled: true,
                 timeout_ms: 500,
                 max_scan_bytes: 16 * MIB,
@@ -1654,6 +1657,7 @@ mod detectors {
             max_scan_bytes: det.max_scan_bytes,
             margin: Duration::from_millis(DETECTOR_MARGIN_MS),
         };
+        let opt_in: Vec<String> = det.opt_in.unwrap_or_else(|| det.webhooks.iter().map(|d| d.name().to_owned()).collect());
         let pipeline = Arc::new(DetectorPipeline::new(built_in, det.webhooks, None, settings.timeout));
         let mut cedar = CedarDecider::new(Arc::clone(&recorder));
         // The runtime gives the decider no pipeline with the detectors off.
@@ -1668,7 +1672,9 @@ mod detectors {
         );
         // The request side keeps the pipeline also with `enabled = false`, so a test can prove that
         // the switch alone stops the screen.
-        let tp = RequestToolPolicy::new(cache, tp_settings, Arc::clone(&recorder)).with_detectors(Some(pipeline), settings);
+        let tp = RequestToolPolicy::new(cache, tp_settings, Arc::clone(&recorder))
+            .with_detectors(Some(pipeline), settings)
+            .with_org_webhooks(std::collections::HashMap::from([(org_a(), Arc::from(opt_in))]));
         Stack {
             ti: Some(Arc::new(ToolInterception {
                 limits,

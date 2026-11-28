@@ -106,6 +106,9 @@ pub struct PolicySnapshot {
     /// The history conditions of the org, bound and planned at load (SMA-753 spec P6). `None` when
     /// no history applies to the request.
     pub history: Option<Arc<HistoryPolicy>>,
+    /// The webhook providers that the org opted in to (SMA-856 D8). Empty when the tenant mode is
+    /// off or the tenant part is not evaluated.
+    pub webhooks: Arc<[String]>,
     /// The decider time of this request, summed over every decide call. The gateway records one
     /// overhead sample per request from [`PolicySnapshot::overhead`] (preflight F14).
     decide_elapsed: Nanos,
@@ -145,6 +148,7 @@ impl PolicySnapshot {
             request_elapsed: Duration::ZERO,
             seen_hosts: None,
             history: None,
+            webhooks: Arc::from(Vec::<String>::new()),
             decide_elapsed: Nanos::default(),
             later_request_elapsed: Nanos::default(),
         }
@@ -191,6 +195,13 @@ impl PolicySnapshot {
     #[must_use]
     pub fn with_history(mut self, history: Arc<HistoryPolicy>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    /// Set the webhook opt-in list of the org (SMA-856 D8).
+    #[must_use]
+    pub fn with_webhooks(mut self, list: Arc<[String]>) -> Self {
+        self.webhooks = list;
         self
     }
 
@@ -243,6 +254,17 @@ mod tests {
         assert!(Arc::ptr_eq(s.history.as_ref().expect("history"), &history));
         assert_eq!((s.mode, s.on_unavailable, s.request_elapsed), (TenantMode::LogOnly, OnUnavailable::Closed, Duration::from_millis(3)));
         assert!(matches!(s.set, PolicySet::Unavailable));
+    }
+
+    #[test]
+    fn with_webhooks_sets_the_list_and_a_clone_keeps_it() {
+        let s = PolicySnapshot::new(PolicySet::Unavailable, TenantMode::Enforce, OnUnavailable::Closed);
+        assert!(s.webhooks.is_empty(), "a new snapshot opts in to nothing");
+        let list: Arc<[String]> = Arc::from(vec!["acme_dlp".to_owned()]);
+        let s = s.with_webhooks(Arc::clone(&list));
+        assert_eq!(&*s.webhooks, ["acme_dlp"]);
+        assert_eq!(&*s.clone().webhooks, ["acme_dlp"]);
+        assert_eq!(&*s.with_tenant_unavailable().webhooks, ["acme_dlp"]);
     }
 
     #[test]

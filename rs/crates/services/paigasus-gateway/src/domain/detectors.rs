@@ -340,6 +340,110 @@ pub trait Detector: Send + Sync {
     async fn detect(&self, batch: Arc<DetectBatch>) -> Result<Vec<Vec<Finding>>, DetectorError>;
 }
 
+/// One registered webhook provider (SMA-856 § 6.6): its detector, the orgs it serves and whether it
+/// is retired.
+#[derive(Clone)]
+pub struct WebhookEntry {
+    /// The detector that calls the provider.
+    pub detector: Arc<dyn Detector>,
+    /// The orgs that the provider serves.
+    pub orgs: OrgScope,
+    /// A retired provider is never called. An opt-in to it gives a `retired` failure finding.
+    pub retired: bool,
+}
+
+impl WebhookEntry {
+    /// A shared provider: every org, not retired.
+    #[must_use]
+    pub fn shared(detector: Arc<dyn Detector>) -> Self {
+        Self {
+            detector,
+            orgs: OrgScope::All,
+            retired: false,
+        }
+    }
+}
+
+impl fmt::Debug for WebhookEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WebhookEntry {{ retired: {} }}", self.retired)
+    }
+}
+
+/// The result of the opt-in resolution of one name (SMA-856 D7, D25).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum OptIn<'a> {
+    /// The provider runs.
+    Run(&'a WebhookEntry),
+    /// The provider exists, but the org is not in its `orgs`.
+    NotPermitted,
+    /// The provider is retired.
+    Retired(&'a WebhookEntry),
+    /// No provider has this name.
+    Unknown,
+}
+
+/// The webhook providers of one gateway, in config order.
+#[derive(Clone, Default)]
+pub struct WebhookRegistry {
+    entries: Vec<WebhookEntry>,
+}
+
+impl WebhookRegistry {
+    /// A registry of the entries.
+    #[must_use]
+    pub fn new(entries: Vec<WebhookEntry>) -> Self {
+        Self { entries }
+    }
+
+    /// The number of providers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether there is no provider.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The providers, in config order.
+    pub fn iter(&self) -> impl Iterator<Item = &WebhookEntry> {
+        self.entries.iter()
+    }
+
+    /// Resolve one opt-in name for a batch of `org`. A retired provider gives `Retired` whatever the
+    /// org. An `Only` scope permits `Some(org)` in the set and never `None`; `All` permits any batch.
+    #[must_use]
+    pub fn resolve(&self, name: &str, org: Option<Uuid>) -> OptIn<'_> {
+        let Some(entry) = self.entries.iter().find(|e| e.detector.name() == name) else {
+            return OptIn::Unknown;
+        };
+        if entry.retired {
+            return OptIn::Retired(entry);
+        }
+        let permitted = match &entry.orgs {
+            OrgScope::All => true,
+            OrgScope::Only(set) => org.is_some_and(|o| set.contains(&o)),
+        };
+        if permitted { OptIn::Run(entry) } else { OptIn::NotPermitted }
+    }
+}
+
+impl From<Vec<Arc<dyn Detector>>> for WebhookRegistry {
+    fn from(detectors: Vec<Arc<dyn Detector>>) -> Self {
+        Self::new(detectors.into_iter().map(WebhookEntry::shared).collect())
+    }
+}
+
+impl fmt::Debug for WebhookRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WebhookRegistry {{ providers: {} }}", self.entries.len())
+    }
+}
+
 /// The built-in stage (plan P-1). It is synchronous, and it gives the hosts of each call too.
 pub trait BuiltInStage: Send + Sync {
     /// One vector of findings and one host set per subject, in subject order.

@@ -852,6 +852,11 @@ mod tests {
 
     /// A context with the request snapshot of the Cedar policy: the floor forbids `rm`.
     async fn cedar_ctx(mode: paigasus_gateway_core::TenantMode) -> Arc<DecisionContext> {
+        cedar_ctx_opted(mode, &[]).await
+    }
+
+    /// A context whose org opted in to the webhook providers `webhooks` (SMA-856 D8).
+    async fn cedar_ctx_opted(mode: paigasus_gateway_core::TenantMode, webhooks: &[&str]) -> Arc<DecisionContext> {
         use paigasus_gateway_core::{Format as Fmt, parse_request};
         let source = FakeSource::new(testing::FLOOR, testing::PERMIT_ALL);
         let policy = testing::policy(&source, settings(mode));
@@ -859,7 +864,9 @@ mod tests {
         let turn = parse_request(Fmt::OpenAiChat, &req);
         let ctx = DecisionContext::new(PRINCIPAL, ORG_A_PRN, None);
         let out = policy.apply(&ctx, "m", Fmt::OpenAiChat, &turn, req).await.expect("apply");
-        Arc::new(ctx.with_policy(out.snapshot))
+        Arc::new(ctx.with_policy(Arc::new(
+            paigasus_gateway_core::PolicySnapshot::clone(&out.snapshot).with_webhooks(webhooks.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>().into()),
+        )))
     }
 
     fn names_of(records: &[DecisionRecord]) -> Vec<String> {
@@ -1079,7 +1086,7 @@ mod tests {
         assert!(settings.timeout + settings.margin <= decide_timeout, "the config rule holds");
         let pipeline = Arc::new(DetectorPipeline::new(
             Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
-            vec![Arc::new(SlowDetector("hook_slow", Duration::from_millis(600)))],
+            vec![Arc::new(SlowDetector("hook_slow", Duration::from_millis(600))) as Arc<dyn crate::domain::detectors::Detector>],
             None,
             settings.timeout,
         ));
@@ -1091,7 +1098,7 @@ mod tests {
             ..Limits::defaults()
         };
         let ti = ti_with_recorder(limits, Arc::new(decider), &rec);
-        let text = run_ctx(ti, cedar_ctx(TenantMode::Enforce).await, tool_blocks(&["fetch_a", "fetch_b"], Duration::ZERO)).await;
+        let text = run_ctx(ti, cedar_ctx_opted(TenantMode::Enforce, &["hook_slow"]).await, tool_blocks(&["fetch_a", "fetch_b"], Duration::ZERO)).await;
 
         let records = log.records();
         assert_eq!(names_of(&records), ["fetch_a", "fetch_b"], "{records:?}");
@@ -1147,7 +1154,7 @@ mod tests {
 
     /// The Cedar context with a new session of the memory history.
     async fn session_ctx(h: &ToolHistory) -> Arc<DecisionContext> {
-        let base = cedar_ctx(paigasus_gateway_core::TenantMode::Enforce).await;
+        let base = cedar_ctx_opted(paigasus_gateway_core::TenantMode::Enforce, &["hook_slow"]).await;
         let linked = h.link(PRINCIPAL, testing::ORG_A, None, &ToolTurn::Unavailable("unit test")).await.expect("a session");
         Arc::new(DecisionContext::clone(&base).with_session(linked.session))
     }
@@ -1250,7 +1257,7 @@ mod tests {
         };
         let pipeline = Arc::new(DetectorPipeline::new(
             Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
-            vec![Arc::new(SlowDetector("hook_slow", Duration::from_secs(5)))],
+            vec![Arc::new(SlowDetector("hook_slow", Duration::from_secs(5))) as Arc<dyn crate::domain::detectors::Detector>],
             None,
             settings.timeout,
         ));

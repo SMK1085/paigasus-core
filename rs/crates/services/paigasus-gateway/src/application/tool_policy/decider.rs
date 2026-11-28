@@ -262,7 +262,7 @@ fn take_stage(pending: &mut Vec<Staged>, f: &FindingRecord) -> Option<Stage> {
 /// The detector batch of the calls of one hold: one call subject per call, in call order (§ 6.9).
 /// The seen hosts are those of the request screen, `None` when no screen ran, so `unseen_host` does
 /// not run then (S1).
-fn call_batch(snapshot: &PolicySnapshot, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> DetectBatch {
+fn call_batch(snapshot: &PolicySnapshot, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall], tenant_unavailable: bool) -> DetectBatch {
     let org = match &snapshot.set {
         PolicySet::Available { facts, .. } => Some(facts.org),
         _ => None,
@@ -277,7 +277,15 @@ fn call_batch(snapshot: &PolicySnapshot, ctx: &DecisionContext, turn: &ToolTurn,
         })
         .collect();
     let seen = snapshot.seen_hosts.as_ref().map(|s| Arc::clone(&s.0));
-    DetectBatch::for_calls(org, ctx.request_id.clone(), subjects, seen, Caller::none())
+    // SMA-753 P7, SMA-856 P6: when the tenant part is unavailable for this hold, the hold sends no
+    // webhook, so the opt-in list is empty.
+    let opt_in = if tenant_unavailable { Arc::from(Vec::<String>::new()) } else { Arc::clone(&snapshot.webhooks) };
+    let caller = Caller {
+        principal: Arc::from(ctx.principal.as_str()),
+        session: ctx.session.as_ref().map(|s| s.session_id),
+        opt_in,
+    };
+    DetectBatch::for_calls(org, ctx.request_id.clone(), subjects, seen, caller)
 }
 
 /// The snapshot of `ctx` when its policy set is available: the only case in which the pipeline
@@ -445,7 +453,12 @@ impl Hold {
         // Spec P1: the slots of every call are computed once, before any decision.
         let slots = hold_slots(history_policy, &store, calls.len());
         let found = match (&self.detectors, available(ctx)) {
-            (Some(detectors), Some(snapshot)) => Some(detectors.pipeline.run(call_batch(snapshot, ctx, turn, calls), detectors.deadline(self.hold_start)).await),
+            (Some(detectors), Some(snapshot)) => Some(
+                detectors
+                    .pipeline
+                    .run(call_batch(snapshot, ctx, turn, calls, slots.tenant_unavailable), detectors.deadline(self.hold_start))
+                    .await,
+            ),
             _ => None,
         };
         let hold = HoldFacts { extra, ids: ids.to_vec(), slots };
@@ -623,6 +636,12 @@ mod tests {
         Arc::new(DetectorPipeline::new(built_in, webhooks, None, PIPELINE_TIMEOUT))
     }
 
+    /// `ctx` for an org that opted in to `names` (SMA-856 D8).
+    fn opted(ctx: DecisionContext, names: &[&str]) -> DecisionContext {
+        let snapshot = PolicySnapshot::clone(ctx.policy.as_ref().expect("a snapshot")).with_webhooks(names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>().into());
+        ctx.with_policy(Arc::new(snapshot))
+    }
+
     fn detecting(webhooks: Vec<Arc<dyn Detector>>) -> CedarDecider {
         CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), webhooks), DECIDE_TIMEOUT, detector_settings())
     }
@@ -718,6 +737,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_overhead_includes_the_pipeline_time() {
         let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
+        let ctx = opted(ctx, &["hook_slow"]);
         let snapshot = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
         let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_millis(50)));
         let out = detecting(vec![slow]).decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
@@ -774,7 +794,10 @@ mod tests {
         let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
         // A test-only webhook that gives a finding with the detector name `kernel` (a spoof).
         let spoof: Arc<dyn Detector> = Arc::new(FixedDetector("hook_a", vec![detector_error(DETECTOR_KERNEL)]));
-        let out = detecting(vec![spoof]).decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
+        let out = detecting(vec![spoof])
+            .decide(Arc::new(opted(ctx, &["hook_a"])), Arc::new(turn), calls_with(&[("ok", "{}")]))
+            .await
+            .expect("decide");
         // The strict check replaces the spoof: the record holds the failure finding of `hook_a`.
         let got = kinds(&out[0]);
         assert!(got.contains(&("detector_error".to_owned(), "hook_a".to_owned())), "{got:?}");
@@ -802,6 +825,7 @@ mod tests {
         let has_timeout = |d: &DecidedCall| kinds(d).contains(&("detector_error".to_owned(), "hook_slow".to_owned()));
 
         let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
+        let ctx = opted(ctx, &["hook_slow"]);
         let snapshot = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
         let (ctx, turn) = (Arc::new(ctx), Arc::new(turn));
         let hold_start = tokio::time::Instant::now().into_std() - (DECIDE_TIMEOUT - margin - left);
@@ -816,6 +840,52 @@ mod tests {
         let hold_start = tokio::time::Instant::now().into_std();
         let out = detecting(vec![slow()]).decide_by(ctx, turn, calls_with(&[("ok", "{}")]), hold_start).await.expect("decide");
         assert!(!has_timeout(&out[0]), "{:?}", kinds(&out[0]));
+    }
+
+    /// The webhook of the tests, and its recorded batches.
+    fn recording(name: &'static str) -> Arc<crate::application::tool_policy::testing::RecordingDetector> {
+        crate::application::tool_policy::testing::RecordingDetector::new(name, vec![])
+    }
+
+    #[tokio::test]
+    async fn the_call_batch_carries_the_caller() {
+        let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
+        let hook = recording("hook_a");
+        let session_id = uuid::Uuid::from_u128(0x5e55);
+        let ctx = opted(ctx, &["hook_a"]).with_session(session(Findings::new()));
+        let decider = detecting(vec![hook.clone() as Arc<dyn Detector>]);
+        decider.decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
+        let batches = hook.batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].caller.principal.as_ref(), PRINCIPAL);
+        assert!(batches[0].caller.session.is_some(), "the session id travels (not {session_id})");
+        assert_eq!(&*batches[0].caller.opt_in, ["hook_a"]);
+        assert!(batches[0].webhook_bodies.is_some());
+    }
+
+    /// PD5 (SMA-856 P6, SMA-753 P7): a hold whose tenant part is unavailable sends no webhook.
+    #[tokio::test]
+    async fn a_hold_with_an_unavailable_tenant_part_sends_no_webhook() {
+        let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
+        let hook = recording("hook_a");
+        let ctx = opted(ctx, &["hook_a"]).with_session(session(Findings::new()));
+        let decider = with_store(Arc::new(Down)).with_detectors(
+            pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![hook.clone() as Arc<dyn Detector>]),
+            DECIDE_TIMEOUT,
+            detector_settings(),
+        );
+        assert_eq!(hold_of(&decider, &ctx, &turn, &[SEND_100]).await, [OBSERVE_UNAVAILABLE]);
+        assert!(hook.batches().is_empty(), "no webhook for a hold with an unavailable tenant part");
+        // Control: with a readable store, the same opt-in sends the webhook.
+        let ok = with_store(Arc::new(MemorySessionStore::new())).with_detectors(
+            pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![hook.clone() as Arc<dyn Detector>]),
+            DECIDE_TIMEOUT,
+            detector_settings(),
+        );
+        // The session of the first hold has a reserved intent, so the control uses a new session.
+        let fresh = ctx.clone().with_session(session(Findings::new()));
+        hold_of(&ok, &fresh, &turn, &[SEND_100]).await;
+        assert_eq!(hook.batches().len(), 1);
     }
 
     #[test]
@@ -1515,10 +1585,20 @@ mod tests {
         (during, has_intent(&s, &facts))
     }
 
-    /// `decider` with a pipeline whose one webhook sleeps 1 s: the pipeline timeout (500 ms) ends it.
+    /// A pipeline whose judge sleeps `sleep`. The judge needs no opt-in, so any context waits for it.
+    fn judge_pipeline(sleep: Duration) -> Arc<DetectorPipeline> {
+        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("judge", sleep));
+        Arc::new(DetectorPipeline::new(
+            Arc::new(BuiltInDetector::new(1 << 24)),
+            Vec::<Arc<dyn Detector>>::new(),
+            Some(slow),
+            PIPELINE_TIMEOUT,
+        ))
+    }
+
+    /// `decider` with a pipeline whose judge sleeps 1 s: the pipeline timeout (500 ms) ends it.
     fn slow_pipeline(decider: CedarDecider) -> CedarDecider {
-        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_secs(1)));
-        decider.with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![slow]), DECIDE_TIMEOUT, detector_settings())
+        decider.with_detectors(judge_pipeline(Duration::from_secs(1)), DECIDE_TIMEOUT, detector_settings())
     }
 
     /// The memory store, and whether a reserve asked for a window read.
@@ -1576,8 +1656,8 @@ mod tests {
         // the snapshot of the request, not to the copy.
         let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
         let snap = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
-        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_millis(50)));
-        let decider = with_store(Arc::new(Down)).with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![slow]), DECIDE_TIMEOUT, detector_settings());
+        // A judge, not a webhook: a hold with an unavailable tenant part sends no webhook (P6).
+        let decider = with_store(Arc::new(Down)).with_detectors(judge_pipeline(Duration::from_millis(50)), DECIDE_TIMEOUT, detector_settings());
         let ctx = ctx.with_session(session(Findings::new()));
         assert_eq!(hold_of(&decider, &ctx, &turn, &[SEND_100]).await, [OBSERVE_UNAVAILABLE]);
         assert!(snap.decide_elapsed() >= Duration::from_millis(50), "{:?}", snap.decide_elapsed());

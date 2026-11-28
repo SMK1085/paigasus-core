@@ -781,13 +781,14 @@ impl SessionStore for LookupDown {
     }
 }
 
-/// A webhook that sleeps 5 s, then gives no findings.
+/// A judge that sleeps 5 s, then gives no findings. The judge needs no opt-in, so the pipeline
+/// waits for it in every context (SMA-856 C8).
 struct SlowHook;
 
 #[async_trait::async_trait]
 impl Detector for SlowHook {
     fn name(&self) -> &str {
-        "hook_slow"
+        "judge"
     }
     async fn detect(&self, batch: Arc<DetectBatch>) -> Result<Vec<Vec<Finding>>, DetectorError> {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -805,8 +806,8 @@ fn slow_pipeline(decider: CedarDecider) -> CedarDecider {
     };
     let pipeline = Arc::new(DetectorPipeline::new(
         Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
-        vec![Arc::new(SlowHook)],
-        None,
+        Vec::<Arc<dyn Detector>>::new(),
+        Some(Arc::new(SlowHook)),
         settings.timeout,
     ));
     decider.with_detectors(pipeline, Duration::from_secs(20), settings)
