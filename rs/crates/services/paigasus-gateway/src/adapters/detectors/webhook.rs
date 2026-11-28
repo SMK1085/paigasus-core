@@ -127,7 +127,9 @@ impl WebhookDetector {
         // PD9: the connect timeout is the provider timeout. The call bound covers the rest. The
         // workspace has no `http2` feature, so the client speaks HTTP/1.1.
         let client = build_extra_ca_client(&label, cfg.extra_ca_bundle_path.as_deref(), timeout, |b| {
-            b.pool_max_idle_per_host(max_in_flight).pool_idle_timeout(POOL_IDLE)
+            // N10: no egress proxy for a provider. reqwest reads HTTP_PROXY, HTTPS_PROXY and NO_PROXY by
+            // default; `no_proxy` turns that off for the webhook clients only.
+            b.no_proxy().pool_max_idle_per_host(max_in_flight).pool_idle_timeout(POOL_IDLE)
         })?;
         let url = cfg.parsed_url();
         Ok(Self {
@@ -156,14 +158,20 @@ impl WebhookDetector {
         let cut = batch.deadline.checked_sub(DEADLINE_MARGIN).filter(|cut| *cut > now).ok_or(WebhookFailure::Deadline)?;
         let own = now + self.timeout;
         let (bound, elapsed) = if own < cut { (own, WebhookFailure::Timeout) } else { (cut, WebhookFailure::Deadline) };
-        let body = batch.webhook_bodies.as_ref().and_then(|b| b.get(index)).ok_or(WebhookFailure::Error)?;
+        let body = batch
+            .webhook_bodies
+            .as_ref()
+            .and_then(|b| b.get(index)) // Cannot happen: the pipeline builds one body per call. `transport` keeps the failure finding
+            // valid for the P7 check, and the counter records the call once.
+            .ok_or(WebhookFailure::Transport)?;
         if body.len() > self.max_request_bytes {
             return Err(WebhookFailure::RequestTooLarge);
         }
         let _permit = timeout_at(bound, self.in_flight.acquire())
             .await
             .map_err(|_| WebhookFailure::Overloaded)?
-            .map_err(|_| WebhookFailure::Error)?;
+            // Cannot happen: the semaphore is never closed. `transport` keeps P7 happy (see above).
+            .map_err(|_| WebhookFailure::Transport)?;
         timeout_at(bound, self.exchange(body)).await.map_err(|_| elapsed)?
     }
 
@@ -172,7 +180,8 @@ impl WebhookDetector {
         let nonce = hex_lower(&self.nonce.nonce16().ok_or(WebhookFailure::Transport)?);
         let t = self.clock.now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let mac = request_mac(self.secret.expose_secret().as_bytes(), &self.name, t, &nonce, body);
-        let mut signature = HeaderValue::from_str(&request_signature_header(t, &mac)).map_err(|_| WebhookFailure::Error)?;
+        let mut signature = // Cannot happen: the value is ASCII. `transport` keeps P7 happy (see `call`).
+        HeaderValue::from_str(&request_signature_header(t, &mac)).map_err(|_| WebhookFailure::Transport)?;
         signature.set_sensitive(true);
         let mut response = self
             .client
@@ -585,6 +594,32 @@ mod tests {
         let found = detector(&url, 2000).detect(one_call(far())).await.unwrap();
         assert_eq!(found, failure(WebhookFailure::Transport));
         assert_eq!(counter_of(&snapshotter).get(&(NAME.to_owned(), "transport".to_owned())), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn the_signature_is_checked_before_the_content_type() {
+        let unsigned_text = || reply(200, &[("content-type", "text/plain")], r#"{"findings":[]}"#);
+        let m = mock_sync(move |_| unsigned_text()).await;
+        assert_eq!(detector(&m.url, 2000).detect(one_call(far())).await.unwrap(), failure(WebhookFailure::Signature));
+        let m = mock_sync(|_| {
+            let mut r = signed_by(b"paigasus-webhook-WRONG-secret-0001", r#"{"findings":[]}"#);
+            r.headers_mut().insert("content-type", "text/plain".parse().unwrap());
+            r
+        })
+        .await;
+        assert_eq!(detector(&m.url, 2000).detect(one_call(far())).await.unwrap(), failure(WebhookFailure::Signature));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_identity_encoding_passes() {
+        let m = mock_sync(|_| {
+            let mut r = signed(RESPONSE);
+            r.headers_mut().insert("content-encoding", "identity".parse().unwrap());
+            r
+        })
+        .await;
+        let found = detector(&m.url, 2000).detect(one_call(far())).await.unwrap();
+        assert_eq!(found, vec![vec![Finding::new(NAME, "pii_email", Severity::Medium, "2026.11")]]);
     }
 
     #[tokio::test]
