@@ -239,6 +239,14 @@ async fn a_store_that_binds_no_model_takes_nothing() {
     let empty = PgLeaseStore::new(db.clone(), HB_TIMEOUT).serving_models(Vec::new());
     assert!(empty.acquire_next("w", TTL).await.expect("acquire_next").is_none(), "an empty list binds no model");
     assert_eq!(lease_state(&db, t.x).await, None);
+
+    // The archived-pending gauge is still sampled on the empty-list path.
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    insert_pending_event(&db, t.y, Uuid::new_v4(), 5).await;
+    archive(&db, t.b).await;
+    assert!(empty.acquire_next("w", TTL).await.expect("acquire_next").is_none());
+    assert_eq!(gauge(&recorder, names::AGENT_HOST_ARCHIVED_PENDING_EVENTS), Some(1.0), "the empty path samples the gauge");
 }
 
 /// F2: the receive order is X1 < Y1 < X2 < X3. With `max_runs_per_lease = 1`, the release after X1

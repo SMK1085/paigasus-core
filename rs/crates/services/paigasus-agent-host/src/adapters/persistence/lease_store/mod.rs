@@ -208,6 +208,14 @@ pub(crate) fn lost(operation: &'static str) {
 impl LeaseRepository for PgLeaseStore {
     async fn acquire_next(&self, holder: &str, ttl: Duration) -> Result<Option<LeaseHandle>, StoreError> {
         if self.models.is_empty() {
+            // The store takes nothing, but the archived-pending gauge counts per poll: an archived
+            // agent can hold pending events when this binary serves no model.
+            let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, LAG_SQL, [Vec::<String>::new().into()]);
+            if let Some(row) = self.db.query_one_raw(stmt).await.map_err(store)? {
+                metrics::gauge!(names::AGENT_HOST_INBOX_LAG_SECONDS).set(row.try_get::<f64>("", "lag").map_err(store)?);
+                #[allow(clippy::cast_precision_loss, reason = "a count of events; a gauge is an f64")]
+                metrics::gauge!(names::AGENT_HOST_ARCHIVED_PENDING_EVENTS).set(row.try_get::<i64>("", "archived_pending").map_err(store)? as f64);
+            }
             return Ok(None);
         }
         let models = self.models.clone();

@@ -162,6 +162,13 @@ impl AgentRegistry for MemoryRegistry {
 
     async fn create_inbox(&self, id: &InboxId, agent: &AgentId, principal: &PrincipalId) -> Result<InboxRecord, RegistryError> {
         self.call("create_inbox");
+        // The lock order of `archive`: agents, then inboxes. The parent state is read under the lock.
+        let agents = self.agents.lock().unwrap();
+        let parent = agents.iter().find(|a| &a.definition.id == agent).ok_or(RegistryError::NotFound)?;
+        // As the Postgres registry does: an archived parent gives `Archived`, before the unique check.
+        if parent.archived_at.is_some() {
+            return Err(RegistryError::Archived);
+        }
         let mut inboxes = self.inboxes.lock().unwrap();
         if let Some(existing) = inboxes.iter().find(|i| i.inbox.agent() == agent && i.inbox.principal() == principal) {
             return Err(RegistryError::InboxExists(existing.inbox.id().clone()));

@@ -224,6 +224,14 @@ impl AgentRegistry for MemRegistry {
         if row.version != version {
             return Err(RegistryError::VersionMismatch { current: row.version });
         }
+        let me = row.definition.id.clone();
+        if agents
+            .iter()
+            .any(|a| a.definition.id != me && a.definition.id.org() == me.org() && a.archived_at.is_none() && a.definition.name == fields.name)
+        {
+            return Err(RegistryError::NameTaken);
+        }
+        let row = agents.iter_mut().find(|a| a.definition.id == me).expect("row");
         row.definition.name = fields.name.clone();
         row.definition.model_id = fields.model_id.clone();
         row.definition.instructions = fields.instructions.clone();
@@ -236,8 +244,12 @@ impl AgentRegistry for MemRegistry {
         self.call("archive");
         let mut agents = self.agents.lock().unwrap();
         let row = agents.iter_mut().find(|a| &a.definition.id == id).ok_or(RegistryError::NotFound)?;
-        row.archived_at.get_or_insert(Timestamp::UNIX_EPOCH);
-        Ok(row.clone())
+        let at = *row.archived_at.get_or_insert(Timestamp::UNIX_EPOCH);
+        let record = row.clone();
+        for i in self.inboxes.lock().unwrap().iter_mut().filter(|i| i.inbox.agent() == id) {
+            i.agent_archived_at = Some(at);
+        }
+        Ok(record)
     }
 
     async fn create_inbox(&self, id: &InboxId, agent: &AgentId, principal: &PrincipalId) -> Result<InboxRecord, RegistryError> {
@@ -736,6 +748,15 @@ async fn a_page_token_of_another_org_or_another_filter_is_invalid_page_token() {
 }
 
 #[tokio::test]
+async fn a_rename_to_the_name_of_another_active_agent_is_name_taken() {
+    let h = harness(Answer::Grants(BOTH));
+    h.registry.seed_agent(org(), u(0x2000), "taken");
+    let other = h.registry.seed_agent(org(), u(0x2001), "other");
+    let result = h.admin.update(&user(), key(other.uuid()), 1, AgentFields { name: "taken".to_owned(), ..fields() }).await;
+    assert_eq!(result, Err(AdminError::NameTaken));
+}
+
+#[tokio::test]
 async fn a_garbled_page_token_is_invalid_page_token() {
     let h = harness(Answer::Grants(BOTH));
     let agent = h.registry.seed_agent(org(), u(0x2000), "a");
@@ -743,7 +764,8 @@ async fn a_garbled_page_token_is_invalid_page_token() {
         assert_eq!(h.admin.list(&user(), org(), false, 0, token).await, Err(AdminError::InvalidPageToken), "{token:?}");
         assert_eq!(h.admin.list_inboxes(&user(), key(agent.uuid()), 0, token).await, Err(AdminError::InvalidPageToken), "{token:?}");
     }
-    assert!(!h.registry.calls().contains(&"list"), "a bad token reaches no list");
+    let calls = h.registry.calls();
+    assert!(!calls.contains(&"list") && !calls.contains(&"list_inboxes"), "a bad token reaches no list: {calls:?}");
 }
 
 #[tokio::test]
@@ -757,19 +779,19 @@ async fn the_next_page_token_round_trips() {
         h.registry.seed_inbox(&agent, u(0x3000 + n), u(0x4000 + n));
     }
 
+    // Five rows at size two take exactly three calls: a token on the first two, none on the third.
+    // A cursor that does not advance fails here, and does not loop.
     let mut seen = Vec::new();
     let mut token = String::new();
-    let mut pages = 0;
-    loop {
+    for page in 0..3 {
         let (items, next) = h.admin.list(&user(), org(), false, 2, &token).await.expect("listed");
-        pages += 1;
         seen.extend(items.iter().map(|a| a.definition.id.uuid()));
-        match next {
-            Some(next) => token = next,
-            None => break,
+        match (page, next) {
+            (0 | 1, Some(next)) => token = next,
+            (2, None) => {}
+            (page, next) => panic!("page {page} gave next token {next:?}"),
         }
     }
-    assert_eq!(pages, 3);
     assert_eq!(seen, (0..5).map(|n| u(0x2000 + n)).collect::<Vec<_>>());
 
     let (first, next) = h.admin.list_inboxes(&user(), key(agent.uuid()), 2, "").await.expect("listed");
