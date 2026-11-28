@@ -2,6 +2,7 @@
 
 //! The Helikon adapter: the only place where the agent host meets the agent runtime.
 
+pub mod capabilities;
 pub mod classify;
 pub mod memory_tool;
 pub mod model_registry;

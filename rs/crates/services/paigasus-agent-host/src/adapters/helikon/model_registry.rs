@@ -66,6 +66,14 @@ impl ModelRegistry {
         self.models.get(id).cloned()
     }
 
+    /// The ids of the registered models, sorted.
+    #[must_use]
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.models.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
     /// Check that every agent names a registered model.
     pub fn check(&self, agents: &[AgentDefinition]) -> Result<(), UnknownModel> {
         match agents.iter().find(|a| !self.models.contains_key(&a.model_id)) {

@@ -92,8 +92,8 @@ pub struct Config {
     pub agents: Vec<AgentConfig>,
 }
 
-/// The tool names that an `[[agents]]` entry can list.
-pub const KNOWN_TOOLS: &[&str] = &["memory"];
+/// The tool names that an `[[agents]]` entry can list. They live with the run capabilities.
+pub use crate::adapters::helikon::capabilities::KNOWN_TOOLS;
 
 /// The timers (spec §9.1, §9.2). Every number has a range that [`Config::validate`] checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

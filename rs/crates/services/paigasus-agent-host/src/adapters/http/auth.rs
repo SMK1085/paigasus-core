@@ -31,11 +31,14 @@ use paigasus_kernel::resource_name::Prn;
 use paigasus_proto::paigasus::common::v1::ErrorReason;
 use paigasus_proto::paigasus::iam::v1::{IntrospectApiKeyResponse, IntrospectResponse};
 use tonic::{Code, Status};
-use tonic_types::StatusExt;
 use uuid::Uuid;
 
 use super::error::ApiError;
 use crate::adapters::iam::{CallerCredential, Iam, IamError};
+use crate::application::auth::{AuthError, IAM_SERVICE, ORGANIZATION, iam_reason, key_scope_allows, refusal_after_probe, self_query};
+// The caller types and the agent actions live in the neutral module, so the application layer
+// does not import this transport module (SMA-852).
+pub use crate::application::auth::{Caller, CallerKind, MANAGE_AGENTS_ACTION, READ_AGENTS_ACTION};
 
 /// The IAM action of a write into an inbox. It is the wire form of `Action::WriteInboxEvent` in
 /// `paigasus-iam-core`. The host cannot import that enum across the gRPC boundary.
@@ -43,28 +46,6 @@ pub const WRITE_INBOX_EVENT_ACTION: &str = "WriteInboxEvent";
 
 /// The `status` of an active key or token in an IAM introspect answer.
 const ACTIVE: &str = "active";
-/// The PRN parts of the IAM tenancy nodes.
-const IAM_SERVICE: &str = "iam";
-const ORGANIZATION: &str = "organization";
-const ROOT: &str = "root";
-
-/// What the credential is, with the data that authorisation needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallerKind {
-    /// An API key. `scope_prn` is the scope the key was issued under.
-    ApiKey { scope_prn: String },
-    /// An OIDC user. `member_orgs` are the orgs of the memberships of `Introspect`.
-    Oidc { member_orgs: Vec<Uuid> },
-}
-
-/// An authenticated caller. `credential` is the caller's own credential, for the self-query.
-/// `Debug` prints no secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Caller {
-    pub principal: PrincipalId,
-    pub credential: CallerCredential,
-    pub kind: CallerKind,
-}
 
 /// Read the `Authorization` header. The parse is the gateway's: split on the first space, an
 /// ASCII-case-insensitive `Bearer` scheme, and a trimmed token that is not empty. `DPoP` and every
@@ -115,12 +96,6 @@ pub async fn authenticate_discovery(iam: &dyn Iam, token: &str) -> Result<(), Ap
     }
 }
 
-/// The org PRN and the principal PRN of a self-query for `org`.
-fn self_query_prns(caller: &Caller, org: Uuid) -> (String, String) {
-    let org_prn = Prn::build(IAM_SERVICE, "", None, ORGANIZATION, org).expect("static organization PRN parts are valid").canonical();
-    (org_prn, caller.principal.as_prn().canonical())
-}
-
 /// Authorise a write into `inbox` (§6.3 steps 1 to 3, in that order).
 ///
 /// A refusal that needs no IAM answer (a key out of scope) still runs the self-query, and then
@@ -134,7 +109,7 @@ pub async fn authorize_write(iam: &dyn Iam, caller: &Caller, inbox: &Inbox) -> R
     if let CallerKind::ApiKey { scope_prn } = &caller.kind
         && !key_scope_allows(scope_prn, org)
     {
-        return Err(refusal_after_probe(iam, caller, org).await);
+        return Err(refusal_after_probe(iam, caller, org, WRITE_INBOX_EVENT_ACTION).await.into());
     }
 
     // 2. The owner path. A UUID comparison: `PrincipalId::parse` made `caller.principal`.
@@ -147,19 +122,7 @@ pub async fn authorize_write(iam: &dyn Iam, caller: &Caller, inbox: &Inbox) -> R
     }
 
     // 3. The non-owner path: the self-query against the org of the inbox.
-    let (org_prn, principal_prn) = self_query_prns(caller, org);
-    match iam.is_authorized_self(&caller.credential, &principal_prn, WRITE_INBOX_EVENT_ACTION, &org_prn).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(ApiError::Forbidden),
-        Err(err) => {
-            let mapped = authz_error(err);
-            if mapped == ApiError::Internal {
-                // An exposure-gate denial of a self-query must not occur. Log it.
-                tracing::error!(principal_prn = %principal_prn, "the self-query IsAuthorized returned an unexpected error; possible broken self-query");
-            }
-            Err(mapped)
-        }
-    }
+    Ok(self_query(iam, caller, org, WRITE_INBOX_EVENT_ACTION).await?)
 }
 
 /// The answer for an inbox that does not exist. It must look like a non-owner caller on an
@@ -168,19 +131,18 @@ pub async fn authorize_write(iam: &dyn Iam, caller: &Caller, inbox: &Inbox) -> R
 /// [`ApiError::IamUnavailable`] when IAM is unavailable. Without it, an outage is `503` for an
 /// inbox that exists and `403` for one that does not, and a caller learns which inboxes exist.
 pub async fn deny_unknown_inbox(iam: &dyn Iam, caller: &Caller) -> ApiError {
-    refusal_after_probe(iam, caller, Uuid::nil()).await
+    refusal_after_probe(iam, caller, Uuid::nil(), WRITE_INBOX_EVENT_ACTION).await.into()
 }
 
-/// Run a self-query for its outage only. The verdict and every other error are ignored: the
-/// refusal is already decided. A probe can fail in ways that a real self-query cannot (a key
-/// of another org), and these failures must not change the answer.
-async fn refusal_after_probe(iam: &dyn Iam, caller: &Caller, org: Uuid) -> ApiError {
-    let (org_prn, principal_prn) = self_query_prns(caller, org);
-    let outage = match iam.is_authorized_self(&caller.credential, &principal_prn, WRITE_INBOX_EVENT_ACTION, &org_prn).await {
-        Err(err) => authz_error(err) == ApiError::IamUnavailable,
-        Ok(_) => false,
-    };
-    if outage { ApiError::IamUnavailable } else { ApiError::Forbidden }
+impl From<AuthError> for ApiError {
+    fn from(err: AuthError) -> Self {
+        match err {
+            AuthError::InvalidToken => ApiError::InvalidToken,
+            AuthError::Forbidden => ApiError::Forbidden,
+            AuthError::IamUnavailable => ApiError::IamUnavailable,
+            AuthError::Internal => ApiError::Internal,
+        }
+    }
 }
 
 /// The caller of an active API key.
@@ -211,22 +173,6 @@ fn parse_principal(raw: &str) -> Result<PrincipalId, ApiError> {
     })
 }
 
-/// §6.3 step 1: the scope of a key is the Root node, or exactly the organization `org`. A team,
-/// a project, another org, and a scope that does not parse are all refused. UUIDs are compared.
-fn key_scope_allows(scope_prn: &str, org: Uuid) -> bool {
-    let Ok(prn) = Prn::parse(scope_prn) else {
-        return false;
-    };
-    if prn.service() != IAM_SERVICE || !prn.region().is_empty() || prn.org().is_some() {
-        return false;
-    }
-    match prn.resource_type() {
-        ROOT => prn.resource_id().is_nil(),
-        ORGANIZATION => prn.resource_id() == org,
-        _ => false,
-    }
-}
-
 /// The org a tenancy PRN belongs to, or `None` when the PRN names no org. A copy of the gateway
 /// `org_of` (`paigasus-gateway/src/domain/mod.rs`).
 fn org_of(raw: &str) -> Option<Uuid> {
@@ -241,23 +187,10 @@ fn org_of(raw: &str) -> Option<Uuid> {
     }
 }
 
-/// The reasons IAM sends on `PermissionDenied`. `as_wire_reason` allocates, so each is a
-/// `LazyLock` (the gateway pattern). `expect`: a reason that the registry stops to declare must
-/// fail loudly, not make each comparison false.
+/// The reason IAM sends on `PermissionDenied` for an unprovisioned identity. `as_wire_reason`
+/// allocates, so it is a `LazyLock` (the gateway pattern). `expect`: a reason that the registry
+/// stops to declare must fail loudly, not make each comparison false.
 static IDENTITY_NOT_PROVISIONED: LazyLock<String> = LazyLock::new(|| ErrorReason::IdentityNotProvisioned.as_wire_reason().expect("a declared reason is never the sentinel"));
-static PRINCIPAL_INACTIVE: LazyLock<String> = LazyLock::new(|| ErrorReason::PrincipalInactive.as_wire_reason().expect("a declared reason is never the sentinel"));
-static PROVISIONING_FAILED: LazyLock<String> = LazyLock::new(|| ErrorReason::ProvisioningFailed.as_wire_reason().expect("a declared reason is never the sentinel"));
-
-/// The `ErrorInfo` reason of an IAM `Status`, read on the IAM domain only, never from the
-/// message. A `PermissionDenied` with no `ErrorInfo` is version skew, so it writes one warning.
-fn iam_reason(status: &Status) -> Option<String> {
-    let details = status.get_error_details();
-    let Some(info) = details.error_info() else {
-        tracing::warn!("IAM returned a PermissionDenied with no ErrorInfo; rolling-upgrade skew?");
-        return None;
-    };
-    (info.domain == *paigasus_proto::error::IAM_DOMAIN).then(|| info.reason.clone())
-}
 
 /// Is this `Status` "validated, but not yet provisioned"? The reason decides. A `Status` with no
 /// `ErrorInfo` fails closed.
@@ -282,23 +215,6 @@ fn introspect_error(err: IamError) -> ApiError {
         IamError::Connect(_) => ApiError::IamUnavailable,
         IamError::Rpc(status) => match status.code() {
             Code::Unauthenticated | Code::PermissionDenied => ApiError::InvalidToken,
-            _ => ApiError::IamUnavailable,
-        },
-    }
-}
-
-/// Map an error of the self-query. `PermissionDenied` is read by its reason:
-/// `principal-inactive` and `provisioning-failed` are IAM refusing the caller's credential (401).
-/// Any other `PermissionDenied` means that IAM denied a self-query, which is a fault (500).
-fn authz_error(err: IamError) -> ApiError {
-    match err {
-        IamError::Connect(_) => ApiError::IamUnavailable,
-        IamError::Rpc(status) => match status.code() {
-            Code::PermissionDenied => match iam_reason(&status).as_deref() {
-                Some(reason) if reason == PRINCIPAL_INACTIVE.as_str() || reason == PROVISIONING_FAILED.as_str() => ApiError::InvalidToken,
-                _ => ApiError::Internal,
-            },
-            Code::Unauthenticated => ApiError::InvalidToken,
             _ => ApiError::IamUnavailable,
         },
     }
