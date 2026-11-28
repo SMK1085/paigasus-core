@@ -9,6 +9,8 @@
 //! window limit that the set was compiled with. The cache maps and validates them at load. The
 //! file source has no conditions.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use paigasus_gateway_core::{OnUnavailable, TenantMode};
 use paigasus_proto::paigasus::iam::v1 as pb;
@@ -29,12 +31,15 @@ pub struct PolicyText {
 
 /// The tenant settings from the source (spec §9.2, §9.3). A source with no settings (the file
 /// source) returns `None` in [`TenantPolicies::settings`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantSettings {
     /// The tenant mode.
     pub mode: TenantMode,
     /// What the gateway does when the tenant set is unavailable.
     pub on_unavailable: OnUnavailable,
+    /// The webhook providers that the tenant opted in to, sorted and unique. Empty from a source
+    /// with no opt-in list.
+    pub webhooks: Arc<[String]>,
 }
 
 /// The policy text, the tool catalog and the version of one tenant.

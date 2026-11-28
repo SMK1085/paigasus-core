@@ -353,8 +353,9 @@ impl RequestToolPolicy {
         let pre = self.cache.tenant_settings(org).unwrap_or(TenantSettings {
             mode: TenantMode::Enforce,
             on_unavailable: global,
+            webhooks: Arc::from([]),
         });
-        let fin_of = || self.cache.tenant_settings(org).unwrap_or(pre);
+        let fin_of = || self.cache.tenant_settings(org).unwrap_or_else(|| pre.clone());
         let Ok(principal) = Prn::parse(&ctx.principal) else {
             return (PolicySet::Unavailable, None, fin_of());
         };
@@ -1061,7 +1062,11 @@ mod tests {
         assert_eq!(Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).len(), 1);
     }
     fn from_source(mode: TenantMode, on_unavailable: OnUnavailable) -> Option<TenantSettings> {
-        Some(TenantSettings { mode, on_unavailable })
+        Some(TenantSettings {
+            mode,
+            on_unavailable,
+            webhooks: Arc::from([]),
+        })
     }
 
     #[tokio::test]

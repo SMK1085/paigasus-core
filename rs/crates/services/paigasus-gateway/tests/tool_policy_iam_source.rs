@@ -244,7 +244,7 @@ async fn the_fetch_sends_the_service_credential_as_bearer() {
     let source = s.source(&path);
 
     let tenant = source.tenant(org()).await.expect("tenant");
-    assert_eq!(tenant.version, "t2:enforce:closed");
+    assert_eq!(tenant.version, "t2:enforce:closed:");
     let floor = source.floor().await.expect("floor");
     assert_eq!(floor.version, "f1");
 

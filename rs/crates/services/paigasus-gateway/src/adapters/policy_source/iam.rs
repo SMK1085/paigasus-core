@@ -144,10 +144,19 @@ pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse
         Ok(ToolPolicyFailMode::Closed) => (OnUnavailable::Closed, "closed"),
         _ => return Err(malformed("the fail mode is unspecified or unknown")),
     };
-    // R7: a change of the set version, the mode or the fail mode changes the token. The catalog
+    // R7: a change of the set version, the mode, the fail mode or the webhook list changes the token. The catalog
     // and the text change only with the set version.
-    let version = format!("t{}:{}:{}", set.version, mode.as_str(), fail);
-    let settings = Some(TenantSettings { mode, on_unavailable });
+    // The opt-in list is stored sorted and unique by IAM. The source sorts and de-duplicates again
+    // and keeps a name that fails the name rule: the pipeline refuses such a name later.
+    let mut webhooks = settings.webhooks;
+    webhooks.sort();
+    webhooks.dedup();
+    let version = format!("t{}:{}:{}:{}", set.version, mode.as_str(), fail, webhooks.join(","));
+    let settings = Some(TenantSettings {
+        mode,
+        on_unavailable,
+        webhooks: webhooks.into(),
+    });
     Ok(TenantPolicies {
         text: set.cedar_policies,
         catalog: set.catalog_names,
@@ -172,6 +181,8 @@ pub(crate) fn floor_from_response(r: GetCompiledFloorPoliciesResponse) -> Result
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use paigasus_proto::paigasus::iam::v1::{HistoryCondition, ToolPolicySettings};
 
     use super::*;
@@ -201,6 +212,13 @@ mod tests {
         }
     }
 
+    fn with_hooks(names: &[&str]) -> ToolPolicySettings {
+        ToolPolicySettings {
+            webhooks: names.iter().map(|n| (*n).to_owned()).collect(),
+            ..settings(ToolPolicyMode::Enforce, ToolPolicyFailMode::Closed)
+        }
+    }
+
     fn response(set: CompiledToolPolicySet, settings: ToolPolicySettings) -> GetCompiledToolPoliciesResponse {
         GetCompiledToolPoliciesResponse {
             set: Some(set),
@@ -226,12 +244,13 @@ mod tests {
         let t = tenant_from_response(org(), response(set(7), settings(ToolPolicyMode::Enforce, ToolPolicyFailMode::Open))).expect("maps");
         assert_eq!(t.text, "permit(principal, action, resource);");
         assert_eq!(t.catalog, ["read_file"]);
-        assert_eq!(t.version, "t7:enforce:open");
+        assert_eq!(t.version, "t7:enforce:open:");
         assert_eq!(
             t.settings,
             Some(TenantSettings {
                 mode: TenantMode::Enforce,
-                on_unavailable: OnUnavailable::Open
+                on_unavailable: OnUnavailable::Open,
+                webhooks: Arc::from([])
             })
         );
     }
@@ -243,8 +262,30 @@ mod tests {
         let c = tenant_from_response(org(), response(set(7), settings(ToolPolicyMode::Enforce, ToolPolicyFailMode::Closed))).expect("c");
         assert_eq!(
             [a.version.as_str(), b.version.as_str(), c.version.as_str()],
-            ["t7:enforce:open", "t7:log_only:open", "t7:enforce:closed"]
+            ["t7:enforce:open:", "t7:log_only:open:", "t7:enforce:closed:"]
         );
+    }
+
+    #[test]
+    fn a_webhook_list_change_alone_changes_the_token() {
+        let a = tenant_from_response(org(), response(set(3), with_hooks(&["acme_dlp"]))).unwrap();
+        let b = tenant_from_response(org(), response(set(3), with_hooks(&[]))).unwrap();
+        assert_eq!(a.version, "t3:enforce:closed:acme_dlp");
+        assert_eq!(b.version, "t3:enforce:closed:");
+    }
+
+    #[test]
+    fn an_unsorted_or_doubled_list_gives_the_sorted_token() {
+        let t = tenant_from_response(org(), response(set(3), with_hooks(&["b", "a", "b"]))).unwrap();
+        assert_eq!(t.version, "t3:enforce:closed:a,b");
+        assert_eq!(&*t.settings.unwrap().webhooks, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_bad_name_keeps_the_tenant_set_and_is_not_malformed() {
+        let t = tenant_from_response(org(), response(set(3), with_hooks(&["Bad Name\u{7}"]))).expect("not malformed");
+        assert_eq!(t.text, "permit(principal, action, resource);");
+        assert_eq!(&*t.settings.unwrap().webhooks, ["Bad Name\u{7}"]);
     }
 
     #[test]
@@ -254,16 +295,16 @@ mod tests {
             ..Default::default()
         };
         let t = tenant_from_response(org(), response(empty, settings(ToolPolicyMode::Off, ToolPolicyFailMode::Closed))).expect("valid");
-        assert_eq!((t.text.as_str(), t.catalog.len(), t.version.as_str()), ("", 0, "t0:off:closed"));
+        assert_eq!((t.text.as_str(), t.catalog.len(), t.version.as_str()), ("", 0, "t0:off:closed:"));
     }
 
     #[test]
     fn a_set_with_a_history_condition_loads_with_its_text_catalog_and_settings() {
         // The set loads in every mode, with its text, its catalog and its settings.
         for (mode, fail, token) in [
-            (ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, "t2:log_only:closed"),
-            (ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, "t2:enforce:open"),
-            (ToolPolicyMode::Off, ToolPolicyFailMode::Closed, "t2:off:closed"),
+            (ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed, "t2:log_only:closed:"),
+            (ToolPolicyMode::Enforce, ToolPolicyFailMode::Open, "t2:enforce:open:"),
+            (ToolPolicyMode::Off, ToolPolicyFailMode::Closed, "t2:off:closed:"),
         ] {
             let mut s = set(2);
             s.conditions.push(condition());
