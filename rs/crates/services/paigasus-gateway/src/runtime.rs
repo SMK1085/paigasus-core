@@ -10,6 +10,7 @@
 //! (SMA-463). Mirrors `paigasus-iam`'s composition-root supervision so both services
 //! share one model.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +25,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::adapters::decision_log::jetstream;
 use crate::adapters::decision_log::{RedisDecisionLog, RedisSlot, RelaySettings, WriterSettings, connect_loop, prime_decision_log_metrics, run_relay, run_writer};
-use crate::adapters::detectors::BuiltInDetector;
+use crate::adapters::detectors::{BuiltInDetector, NonceSource, OsNonce, WebhookDetector, prime_webhook_failure_metrics};
 use crate::adapters::history::HmacHistoryDigester;
 use crate::adapters::http::interception::ToolInterception;
 use crate::adapters::iam::client::build_channel;
@@ -35,9 +36,10 @@ use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::ToolHistory;
 use crate::application::tool_policy::{CacheSettings, CedarDecider, FindingLabels, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
-use crate::config::{GatewayConfig, PolicySourceConfig, ToolHistoryConfig};
+use crate::config::{EnvReader, GatewayConfig, PolicySourceConfig, ProcessEnv, ProviderSecrets, ToolHistoryConfig, load_webhook_secrets};
 use crate::domain::decision_log::{Entropy, TracingDecisionLog};
-use crate::domain::limits::{ChargeDropReason, Clock};
+use crate::domain::detectors::{WebhookEntry, WebhookRegistry};
+use crate::domain::limits::{ChargeDropReason, Clock, SystemClock};
 use crate::domain::tool_policy::PolicySource;
 
 /// D16: how long shutdown waits for in-flight limit charges.
@@ -310,6 +312,17 @@ pub fn tool_interception(config: &GatewayConfig, rt: &ToolPolicyRuntime) -> Opti
 ///
 /// `enabled = true` with no `[tool_policy.source]` (a config that skipped `validate`).
 pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>, history: Option<Arc<ToolHistory>>) -> anyhow::Result<ToolPolicyRuntime> {
+    build_tool_policy_with_env(config, recorder, history, &ProcessEnv)
+}
+
+/// [`build_tool_policy`] with the environment as an input: the webhook secrets come from `env`, so a
+/// test needs no `set_var` (SMA-856).
+///
+/// # Errors
+///
+/// As [`build_tool_policy`], and a webhook secret or CA bundle that is not usable. The error names
+/// the provider, never a secret value or a URL path.
+pub fn build_tool_policy_with_env(config: &GatewayConfig, recorder: Arc<DecisionRecorder>, history: Option<Arc<ToolHistory>>, env: &dyn EnvReader) -> anyhow::Result<ToolPolicyRuntime> {
     if !config.tool_policy.enabled {
         if history.is_some() {
             tracing::info!("[tool_history] is set, but the tool policy is off: the history is not used");
@@ -357,10 +370,23 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
             "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
         );
     }
-    // Task 10 wires the webhook kinds of the config here.
-    prime_tool_policy_metrics(&FindingLabels::built_in());
-    let detectors = build_detectors(config);
-    let mut cedar = CedarDecider::new(Arc::clone(&recorder));
+    // The labels hold every kind that a configured webhook declares (SMA-856 D17). One value is
+    // shared by the priming, the decider and the request side.
+    let labels = Arc::new(FindingLabels::with_webhook_kinds(
+        config.tool_policy.detectors.webhook.iter().flat_map(|w| w.kinds.iter().map(String::as_str)),
+    ));
+    prime_tool_policy_metrics(&labels);
+    // With the detectors off no secret is read and no client is built.
+    let secrets = if config.tool_policy.detectors.enabled {
+        load_webhook_secrets(config, env).map_err(anyhow::Error::msg)?
+    } else {
+        BTreeMap::new()
+    };
+    let detectors = build_detectors(config, secrets)?;
+    if let Some(pipeline) = &detectors {
+        cache.set_webhook_registry(Arc::clone(pipeline.registry()));
+    }
+    let mut cedar = CedarDecider::new(Arc::clone(&recorder)).with_finding_labels(Arc::clone(&labels));
     if let Some(pipeline) = &detectors {
         cedar = cedar.with_detectors(
             Arc::clone(pipeline),
@@ -368,8 +394,10 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
             config.tool_policy.detector_settings(config.default_detector_scan_bytes()),
         );
     }
-    let mut request_side =
-        RequestToolPolicy::new(Arc::clone(&cache), settings, Arc::clone(&recorder)).with_detectors(detectors.clone(), config.tool_policy.detector_settings(config.default_detector_scan_bytes()));
+    let mut request_side = RequestToolPolicy::new(Arc::clone(&cache), settings, Arc::clone(&recorder))
+        .with_detectors(detectors.clone(), config.tool_policy.detector_settings(config.default_detector_scan_bytes()))
+        .with_finding_labels(labels)
+        .with_org_webhooks(config.tool_policy.org_webhooks());
     if let Some(h) = &history {
         cedar = cedar.with_history(Arc::clone(h));
         request_side = request_side.with_history(Arc::clone(h));
@@ -403,21 +431,44 @@ pub fn history_digester(config: Option<&ToolHistoryConfig>) -> anyhow::Result<Ar
     Ok(Arc::new(HmacHistoryDigester::from_config(config).map_err(anyhow::Error::msg)?))
 }
 
-/// The one detector pipeline of the gateway (SMA-855 § 6.6.4): the built-in stage only, no webhook
-/// and no judge yet. With `[tool_policy.detectors] enabled = false` there is none, and one info
-/// line says so at boot.
-fn build_detectors(config: &GatewayConfig) -> Option<Arc<DetectorPipeline>> {
+/// The one detector pipeline of the gateway (SMA-855 § 6.6.4): the built-in stage and one webhook
+/// detector for each `[[tool_policy.detectors.webhook]]`, in config order. No judge yet. With
+/// `[tool_policy.detectors] enabled = false` there is none, and one info line says so at boot.
+///
+/// # Errors
+///
+/// A provider with no secret in `secrets`, or a CA bundle or client that does not build. The error
+/// names the provider.
+fn build_detectors(config: &GatewayConfig, mut secrets: BTreeMap<String, ProviderSecrets>) -> anyhow::Result<Option<Arc<DetectorPipeline>>> {
     let settings = config.tool_policy.detector_settings(config.default_detector_scan_bytes());
     if !settings.enabled {
         tracing::info!("tool-policy detectors are off: findings come only from the kernel");
-        return None;
+        return Ok(None);
     }
-    Some(Arc::new(DetectorPipeline::new(
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let nonce: Arc<dyn NonceSource> = Arc::new(OsNonce);
+    let mut entries = Vec::with_capacity(config.tool_policy.detectors.webhook.len());
+    for w in &config.tool_policy.detectors.webhook {
+        let own = secrets
+            .remove(&w.name)
+            .ok_or_else(|| anyhow::anyhow!("tool_policy.detectors.webhook[{}]: no secret was loaded", w.name))?;
+        let detector = WebhookDetector::from_config(w, own, Arc::clone(&clock), Arc::clone(&nonce)).map_err(|e| anyhow::anyhow!("tool_policy.detectors.webhook[{}]: {e}", w.name))?;
+        entries.push(WebhookEntry {
+            detector: Arc::new(detector),
+            orgs: w.org_scope(),
+            retired: w.retired,
+        });
+    }
+    let names: Vec<&str> = config.tool_policy.detectors.webhook.iter().map(|w| w.name.as_str()).collect();
+    prime_webhook_failure_metrics(&names);
+    // A4: the count only. No URL, path or secret reaches the log.
+    tracing::info!(webhooks = entries.len(), "tool-policy detectors are on: the built-in stage and the configured webhook providers");
+    Ok(Some(Arc::new(DetectorPipeline::new(
         Arc::new(BuiltInDetector::new(settings.max_scan_bytes)),
-        Vec::new(),
+        WebhookRegistry::new(entries),
         None,
         settings.timeout,
-    )))
+    ))))
 }
 
 /// SMA-752 § 6.3.5: the NATS invalidation subscription for `cache`, only with `[tool_policy]
@@ -613,6 +664,99 @@ mod tool_policy_tests {
             .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL)
             .count();
         assert_eq!(series, 40);
+    }
+
+    const WH_SECRET: &str = "paigasus-webhook-example-secret-0001";
+
+    /// A config with the tool policy on and one webhook table for each of `names`, each with the
+    /// kind `pii_email` and a secret env var `<NAME>_SECRET`.
+    fn webhook_config(names: &[&str], detectors_on: bool) -> GatewayConfig {
+        let mut toml = format!(
+            "{BASE}[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"/nonexistent\" }}\n[tool_policy.detectors]\nenabled = {detectors_on}\ntimeout_ms = 1000\n"
+        );
+        for n in names {
+            toml.push_str(&format!(
+                "[[tool_policy.detectors.webhook]]\nname = \"{n}\"\nurl = \"https://dlp.example.com/v1/{n}\"\norgs = [\"0190a100-0000-7000-8000-0000000000a1\"]\nsecret_env = \"{}_SECRET\"\nkinds = [\"pii_email\"]\n",
+                n.to_uppercase()
+            ));
+        }
+        config(&toml, true)
+    }
+
+    fn env_with(names: &[&str]) -> std::collections::HashMap<String, String> {
+        names.iter().map(|n| (format!("{}_SECRET", n.to_uppercase()), WH_SECRET.to_owned())).collect()
+    }
+
+    #[test]
+    fn two_providers_give_a_pipeline_with_two_webhooks_in_config_order() {
+        let cfg = webhook_config(&["zeta_dlp", "acme_dlp"], true);
+        let rt = build_tool_policy_with_env(&cfg, rec(), None, &env_with(&["zeta_dlp", "acme_dlp"])).expect("builds");
+        let pipeline = rt.detectors.expect("the pipeline");
+        let names: Vec<&str> = pipeline.registry().iter().map(|e| e.detector.name()).collect();
+        assert_eq!(names, ["zeta_dlp", "acme_dlp"]);
+    }
+
+    #[test]
+    fn a_missing_webhook_secret_stops_the_boot() {
+        let cfg = webhook_config(&["acme_dlp"], true);
+        let err = build_tool_policy_with_env(&cfg, rec(), None, &std::collections::HashMap::new()).err().expect("a boot error");
+        assert!(err.to_string().contains("webhook[acme_dlp].secret_env"), "{err}");
+    }
+
+    #[test]
+    fn the_detectors_off_read_no_secret() {
+        let cfg = webhook_config(&["acme_dlp"], false);
+        let rt = build_tool_policy_with_env(&cfg, rec(), None, &std::collections::HashMap::new()).expect("builds without a secret");
+        assert!(rt.detectors.is_none());
+    }
+
+    #[test]
+    fn a_bad_ca_bundle_stops_the_boot_and_names_the_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(&ca, "not a certificate").expect("write");
+        let mut cfg = webhook_config(&["acme_dlp"], true);
+        cfg.tool_policy.detectors.webhook[0].extra_ca_bundle_path = Some(ca.to_string_lossy().into_owned());
+        let err = build_tool_policy_with_env(&cfg, rec(), None, &env_with(&["acme_dlp"])).err().expect("a boot error");
+        assert!(err.to_string().contains("webhook[acme_dlp]"), "{err}");
+    }
+
+    #[test]
+    fn the_runtime_primes_the_webhook_triples_and_failures() {
+        let debugging = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = debugging.snapshotter();
+        let _local = metrics::set_default_local_recorder(&debugging);
+        let cfg = webhook_config(&["acme_dlp"], true);
+        build_tool_policy_with_env(&cfg, rec(), None, &env_with(&["acme_dlp"])).expect("builds");
+        let finding = [("side", "response"), ("kind", "pii_email"), ("detector", "webhook"), ("severity", "low")];
+        assert_eq!(crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &finding), Some(0));
+        for reason in [
+            "request_too_large",
+            "overloaded",
+            "transport",
+            "timeout",
+            "deadline",
+            "status",
+            "response_too_large",
+            "signature",
+            "malformed",
+        ] {
+            let labels = [("provider", "acme_dlp"), ("reason", reason)];
+            assert_eq!(
+                crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL, &labels),
+                Some(0),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_registry_reaches_the_cache_and_the_labels_reach_the_decider() {
+        // The boot log carries the provider count and nothing of the URL (A4).
+        let cfg = webhook_config(&["acme_dlp"], true);
+        let rt = build_tool_policy_with_env(&cfg, rec(), None, &env_with(&["acme_dlp"])).expect("builds");
+        assert_eq!(rt.detectors.expect("pipeline").registry().len(), 1);
+        assert!(rt.policy.is_some() && rt.cedar.is_some());
     }
 
     /// A tool policy config, on or off, with an optional `[tool_policy.nats]` table.

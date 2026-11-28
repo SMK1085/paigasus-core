@@ -15,7 +15,7 @@ use paigasus_gateway::adapters::policy_source::iam::IamPolicySource;
 use paigasus_gateway::application::tool_policy::{CacheSettings, Lookup, PolicyCache, RequestToolPolicy};
 use paigasus_gateway::config::{GatewayConfig, IamClientConfig, IamTlsConfig, ToolPolicySettings};
 use paigasus_gateway::domain::tool_policy::{PolicySource, SourceError};
-use paigasus_gateway::runtime::build_tool_policy;
+use paigasus_gateway::runtime::{build_tool_policy, build_tool_policy_with_env};
 use paigasus_gateway_core::{BlockCode, Decision, DecisionContext, Format, OnUnavailable, PolicyBasis, TenantMode, decide_calls, parse_body, parse_request};
 use paigasus_proto::paigasus::iam::v1 as pb;
 use paigasus_proto::paigasus::iam::v1::tool_policy_service_server::{ToolPolicyService, ToolPolicyServiceServer};
@@ -23,6 +23,9 @@ use tonic::codegen::http;
 use tonic::transport::{Endpoint, Server};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
+
+#[path = "support/webhook_mock.rs"]
+mod webhook_mock;
 
 const ORG: &str = "0190a100-0000-7000-8000-0000000000a1";
 const ORG_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
@@ -620,4 +623,71 @@ async fn a_negated_slot_forbid_also_denies() {
     let d = decide_through_iam(&s, &["ls", "rm", "del"], &["ls", "rm", "del"]).await;
     assert_eq!(d.decisions, [Decision::Allow, BLOCK, BLOCK]);
     assert_eq!(d.bases, [PolicyBasis::Policy, PolicyBasis::ErroredForbid, PolicyBasis::ErroredForbid]);
+}
+
+// --- SMA-856: the webhook opt-in from IAM reaches the provider --------------------------------
+
+/// A tenant answer of IAM in mode enforce with the webhook opt-in `webhooks`.
+fn tenant_with_webhooks(version: u64, webhooks: &[&str]) -> pb::GetCompiledToolPoliciesResponse {
+    let mut r = tenant_response(version, pb::ToolPolicyMode::Enforce, "@id(\"p\") permit(principal, action, resource);");
+    r.settings.as_mut().expect("settings").webhooks = webhooks.iter().map(|w| (*w).to_owned()).collect();
+    r
+}
+
+/// A gateway config with the IAM source and one webhook provider.
+// `figment::Jail::expect_with` fixes its closure's `Err` type to `figment::Error`.
+#[allow(clippy::result_large_err)]
+fn gateway_config(addr: std::net::SocketAddr, credential_file: &std::path::Path, webhook_url: &str) -> GatewayConfig {
+    let toml = format!(
+        "[upstream.openai]\napi_key = \"sk-test-key\"\n[iam]\ngrpc_addr = \"http://{addr}\"\nservice_credential_file = {:?}\n[iam.tls]\nmode = \"loopback_insecure\"\n[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"iam\" }}\n[[tool_policy.detectors.webhook]]\nname = \"acme_dlp\"\nurl = {webhook_url:?}\norgs = [\"{ORG}\"]\nsecret_env = \"ACME_DLP_SECRET\"\nkinds = [\"pii_email\"]\n",
+        credential_file.to_string_lossy()
+    );
+    let mut out = None;
+    figment::Jail::expect_with(|jail| {
+        jail.create_file("gateway.toml", &toml)?;
+        let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+        cfg.validate().expect("the config validates");
+        out = Some(cfg);
+        Ok(())
+    });
+    out.expect("a config")
+}
+
+#[tokio::test]
+async fn an_opt_in_from_iam_reaches_the_provider_and_an_empty_list_stops_it() {
+    const SECRET: &str = "paigasus-webhook-example-secret-0001";
+    let s = start().await;
+    s.script_floor(Ok(floor_response(1, "")));
+    s.script_tenant(Ok(tenant_with_webhooks(1, &["acme_dlp"])));
+    let mock = webhook_mock::MockProvider::spawn("acme_dlp", SECRET, |_, _| webhook_mock::Reply::signed(r#"{"findings":[]}"#));
+    let (_dir, path) = credential("K");
+    let cfg = gateway_config(s.addr, &path, &mock.url);
+    let env: HashMap<String, String> = HashMap::from([("ACME_DLP_SECRET".to_owned(), SECRET.to_owned())]);
+    let rt = build_tool_policy_with_env(&cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()), None, &env).expect("builds");
+    let (cache, policy) = rt.policy.clone().expect("the request side");
+
+    let hold = |request_id: &'static str| {
+        let policy = Arc::clone(&policy);
+        let decider = Arc::clone(&rt.decider);
+        async move {
+            let body = Bytes::from(serde_json::json!({"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"ls","parameters":{}}}]}).to_string());
+            let turn = parse_request(Format::OpenAiChat, &body);
+            let ctx = DecisionContext::new(PRINCIPAL, ORG_PRN, Some(request_id.into()));
+            let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+            let answer = serde_json::json!({"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"ls","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}).to_string();
+            let calls = parse_body(Format::OpenAiChat, answer.as_bytes(), 1 << 20).expect("answer").calls;
+            decider.decide(Arc::new(ctx.with_policy(out.snapshot)), Arc::new(turn), calls).await.expect("decide")
+        }
+    };
+
+    hold("req-1").await;
+    let seen = mock.requests();
+    assert_eq!(seen.len(), 1, "the opt-in from IAM runs the provider once");
+    assert!(seen[0].signature_ok);
+
+    // IAM drops the opt-in. The token changes, so the next load takes the empty list.
+    s.script_tenant(Ok(tenant_with_webhooks(2, &[])));
+    cache.invalidate_all();
+    hold("req-2").await;
+    assert_eq!(mock.requests().len(), 1, "an empty opt-in list stops the provider");
 }
