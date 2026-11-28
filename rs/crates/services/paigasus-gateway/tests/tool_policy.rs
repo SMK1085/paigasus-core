@@ -2639,13 +2639,22 @@ mod detectors {
         async fn a_provider_wait_keeps_the_stream_alive() {
             let mock = MockProvider::spawn("acme_dlp", SECRET, |_, _| Reply::signed(EMAIL_MEDIUM).after(Duration::from_millis(1500)));
             let dir = policy_dir(SHIPPED_FLOOR, &tenant());
-            let mut w = Wh::one(&mock.url).with_extra("timeout_ms = 1900");
+            let mut w = Wh::one(&mock.url).with_extra("timeout_ms = 3000");
             w.keepalive_secs = 1;
+            w.decide_secs = 5;
+            w.timeout_ms = 3500;
             let s = w.boot(&dir);
             let ex = fetch(&s, Ep::ChatSse, "{}").await;
             assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
             assert!(keep_alives(&ex.text) >= 1, "a keep-alive while the hold waits: {}", ex.text);
             assert_eq!(call_of(&ex.entries, "fetch"), BLOCKED, "the late answer still counts");
+            let call = call_record(&s.log.records(), "fetch");
+            assert_eq!(
+                sev_ver(&call, "acme_dlp", "pii_email").0,
+                Some(Severity::Medium),
+                "the finding is there, not a load-induced cut: {:?}",
+                findings(&call)
+            );
         }
 
         /// R1: the end of one call does not touch the other calls of the batch. The provider answers
@@ -2658,7 +2667,7 @@ mod detectors {
         /// provider timeout (at most `timeout_ms - 50`, D21) always ends first. The `deadline`
         /// reason has its own proofs in the adapter and pipeline unit tests (Task 5 and Task 8).
         #[tokio::test]
-        async fn the_deadline_stops_one_call_only() {
+        async fn a_timeout_stops_one_call_only() {
             let mock = MockProvider::spawn("acme_dlp", SECRET, |_, body| {
                 if body["tool"]["name"] == "fetch_c" {
                     Reply::signed(EMAIL_MEDIUM).after(Duration::from_secs(20))
@@ -2765,6 +2774,7 @@ mod detectors {
             let s = w.boot(&dir);
             let ex = fetch(&s, Ep::ChatJson, "{}").await;
             assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
+            assert_eq!(call_of(&ex.entries, "fetch"), ALLOWED, "mode off");
             assert_eq!(mock.requests().len(), 0, "mode off");
 
             // A tenant set that does not compile.
@@ -2772,6 +2782,7 @@ mod detectors {
             let s = Wh::one(&mock.url).boot(&bad);
             let ex = fetch(&s, Ep::ChatJson, "{}").await;
             assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
+            assert_eq!(call_of(&ex.entries, "fetch"), UNAVAILABLE_BLOCKED, "a tenant set that does not compile");
             assert_eq!(mock.requests().len(), 0, "a tenant set that does not compile");
 
             // Retired: no request, and `retired` at the failure severity of the provider.
