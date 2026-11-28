@@ -182,7 +182,7 @@ An agent is a row of the table `agent`. It holds the name, the model, the instru
 of tool names. The API makes, changes and archives agents, and binds an agent to a principal through
 an inbox. The `[[agents]]` section of the configuration is removed. A configuration that has it, or
 an `AGENT_HOST_AGENTS*` variable, fails the boot with the message "`[[agents]]` is removed; use the
-agent API". The API needs `[iam]`.
+agent API (SMA-852)". The API needs `[iam]`.
 
 The API is on `http_addr` (REST) and, when `grpc_addr` is set, on `grpc_addr` (gRPC `AgentService`).
 The service does not terminate TLS. The ingress or the mesh in front of it does.
@@ -190,7 +190,7 @@ The service does not terminate TLS. The ingress or the mesh in front of it does.
 | Route | RPC | Action |
 |---|---|---|
 | `POST /v1/agents` | `CreateAgent` | Make an agent. Answer 201. |
-| `GET /v1/agents?org=<org PRN>` | `ListAgents` | List the agents of an organization. Optional `include_archived`, `page_size`, `page_token`. |
+| `GET /v1/agents?org=<org PRN>` | `ListAgents` | List the agents of an organization. Optional `include_archived`, `page_size` (1 to 100), `page_token`. |
 | `GET /v1/agents/{agent}` | `GetAgent` | Read one agent. |
 | `PATCH /v1/agents/{agent}` | `UpdateAgent` | Replace `name`, `model`, `instructions` and `tools`. The body needs the current `version`. |
 | `DELETE /v1/agents/{agent}` | `ArchiveAgent` | Archive the agent. It keeps the row and frees the name. |
@@ -198,9 +198,15 @@ The service does not terminate TLS. The ingress or the mesh in front of it does.
 | `GET /v1/agents/{agent}/inboxes` | `ListInboxes` | List the inboxes of an agent. |
 | `GET /v1/inboxes/{inbox}` | `GetInbox` | Read one inbox. |
 
-`{agent}` and `{inbox}` are UUIDs. An answer gives the PRN of an agent in `agent` and the PRN of an inbox
-in `inbox`. A path takes only the last segment of the PRN, which is the UUID. A page token is opaque. Use it only with the same organization
-and filter that made it. The default page size is 50.
+`{agent}` and `{inbox}` are UUIDs. An answer gives the PRN of an agent in `agent` and the PRN of
+an inbox in `inbox`. A path takes only the last segment of the PRN, which is the UUID. A page token
+is opaque. Use it only with the same organization and filter that made it. The default page size is
+50. The maximum page size is 100.
+
+The field names differ between the transports. REST uses `org` and `principal`. gRPC uses
+`org_prn` and `principal_prn`. The metadata of `invalid-agent-field` names the field of the
+transport that was called. A negative `version` is `invalid-agent-field` over gRPC and
+`invalid-request-schema` over REST.
 
 ```sh
 # Make an agent. The answer holds the PRN of the agent in "agent".
@@ -258,15 +264,20 @@ works at once, with no restart.
 
 | Status | Code | Meaning |
 |---|---|---|
-| 400 | `unknown-model` | The host does not serve the model. The metadata names it. |
-| 400 | `unknown-tool` | The host does not have the tool. The metadata names it. |
-| 400 | `invalid-agent-field` | A field is empty, too long or not valid. The metadata names the field. |
+| 400 | `unknown-model` | The host does not serve the model. The metadata key `model` names it. |
+| 400 | `unknown-tool` | The host does not have the tool. The metadata key `tool` names it. |
+| 400 | `invalid-agent-field` | A field is empty, too long or not valid. The metadata key `field` names the field. |
 | 400 | `invalid-pagination` | The page size is out of range. |
 | 400 | `invalid-cursor` | The page token is not valid for this list. |
+| 400 | `invalid-query-parameter` | A query parameter is not valid or occurs twice. REST only. |
+| 400 | `invalid-request-body` | The body is not JSON. REST only. |
+| 400 | `invalid-request-schema` | The JSON does not have the shape of the route. REST only. |
+| 400 | `invalid-uuid` | A path segment is not a UUID. REST only. |
+| 413 | `request-too-large` | The body is larger than the limit. REST only. |
 | 409 | `agent-name-taken` | An active agent of the organization has this name. |
-| 409 | `agent-version-mismatch` | The `version` is not the current version. The metadata holds the current one. |
+| 409 | `agent-version-mismatch` | The `version` is not the current version. The metadata key `version` holds the current one. |
 | 409 | `agent-archived` | The agent is archived. |
-| 409 | `inbox-exists` | The agent has an inbox for this principal. The metadata holds its id. |
+| 409 | `inbox-exists` | The agent has an inbox for this principal. The metadata key `inbox` holds its PRN. |
 
 The shared codes `invalid-token` (401), `forbidden` (403), `iam-unavailable` (503),
 `store-unavailable` (503) and `internal` (500) also apply. The error envelope has the optional key
@@ -282,14 +293,14 @@ exit code 1 and this message:
 Error: migration failed under the advisory lock: Custom Error: Migration file of version 'm0006_create_agent' is missing, this migration has been applied but its file is missing
 ```
 
-This was measured with a binary built from the base of the branch against a Postgres 16 database
-that the new binary migrated. The old binary does not run `down`. To roll back, restore a backup
-that was made before the upgrade. Or run `ALTER TABLE inbox DROP CONSTRAINT inbox_agent_fk` and
-`DROP TABLE agent`, and delete the row `m0006_create_agent` from `agent_host_migrations`. The old
-binary has no code that inserts a row into the table `inbox`. Rows reach it only by SQL. With
-`inbox_agent_fk` in place, such an insert for an agent with no `agent` row fails with
-`violates foreign key constraint "inbox_agent_fk"`. The old binary does not read `agent`, so it
-serves no agent that was made through the API.
+The refusal was measured with a binary built from the base of the branch against a Postgres 16
+database that the new binary migrated. The old binary does not run `down`. To roll back, restore a
+backup that was made before the upgrade. Or run `ALTER TABLE inbox DROP CONSTRAINT inbox_agent_fk`
+and `DROP TABLE agent`, and delete the row `m0006_create_agent` from `agent_host_migrations`. These
+manual steps are not measured. The old binary has no code that inserts a row into the table
+`inbox`. Rows reach it only by SQL. With `inbox_agent_fk` in place, such an insert for an agent
+with no `agent` row fails with `violates foreign key constraint "inbox_agent_fk"`. The old binary
+does not read `agent`, so it serves no agent that was made through the API.
 
 ## Storage
 
