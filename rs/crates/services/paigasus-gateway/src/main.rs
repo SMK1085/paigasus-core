@@ -352,7 +352,7 @@ fn describe_gateway_metrics() {
     );
     describe_counter!(
         names::GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL,
-        "Tool calls whose webhook provider failed, labelled by the configured provider name and a fixed reason (SMA-856)."
+        "Tool calls whose webhook provider failed, and opt-ins that were rejected, labelled by the configured provider name and a fixed reason. The provider is \"unknown\" for an opt-in name that is not registered or not valid (SMA-856)."
     );
     describe_counter!(
         names::GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,

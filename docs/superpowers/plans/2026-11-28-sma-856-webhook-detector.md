@@ -322,7 +322,7 @@ assert_eq!(ErrorReason::InvalidWebhookOptIn as i32, 64);
 - Modify: every `TenantSettings { mode, on_unavailable }` literal (`grep -rn "TenantSettings {" rs/crates/services/paigasus-gateway`) and the `Copy` uses in `src/application/tool_policy/request.rs:351-380`
 
 **Interfaces:**
-- Produces: `TenantSettings { pub mode: TenantMode, pub on_unavailable: OnUnavailable, pub webhooks: Arc<[String]> }` — `Debug, Clone, PartialEq, Eq`, no `Copy`. The IAM source sorts and de-duplicates the list. It keeps a name that fails the name rule. The version token is `format!("t{}:{}:{}:{}", set.version, mode.as_str(), fail, webhooks.join(","))`.
+- Produces: `TenantSettings { pub mode: TenantMode, pub on_unavailable: OnUnavailable, pub webhooks: Arc<[String]> }` — `Debug, Clone, PartialEq, Eq`, no `Copy`. The IAM source sorts and de-duplicates the list. It keeps a name that fails the name rule. The version token is `t{version}:{mode}:{fail}:{list}`. Each name in the list is written `<len>.<name>`, and the names are joined with ",".
 
 - [ ] **Step 1: Write the failing tests** (in `iam.rs` tests).
 
@@ -330,12 +330,12 @@ assert_eq!(ErrorReason::InvalidWebhookOptIn as i32, 64);
 #[test] fn a_webhook_list_change_alone_changes_the_token() {
     let a = tenant_from_response(org(), response(set(3), with_hooks(&["acme_dlp"]))).unwrap();
     let b = tenant_from_response(org(), response(set(3), with_hooks(&[]))).unwrap();
-    assert_eq!(a.version, "t3:enforce:closed:acme_dlp");
+    assert_eq!(a.version, "t3:enforce:closed:8.acme_dlp");
     assert_eq!(b.version, "t3:enforce:closed:");
 }
 #[test] fn an_unsorted_or_doubled_list_gives_the_sorted_token() {
     let t = tenant_from_response(org(), response(set(3), with_hooks(&["b", "a", "b"]))).unwrap();
-    assert_eq!(t.version, "t3:enforce:closed:a,b");
+    assert_eq!(t.version, "t3:enforce:closed:1.a,1.b");
     assert_eq!(&*t.settings.unwrap().webhooks, ["a", "b"]);
 }
 #[test] fn a_bad_name_keeps_the_tenant_set_and_is_not_malformed() {
@@ -772,7 +772,7 @@ const RESPONSE_MAC: &str = "cf6147bdf8be4b7c7b4619accf9b1f592a14d6d9209e112a1a86
 //   webhook_failures_total{provider="acme_dlp",reason="signature"} == 0.
 // tests/tool_policy_iam_source.rs
 // an_opt_in_from_iam_reaches_the_provider_and_an_empty_list_stops_it:
-//   the fake IAM answers webhooks ["acme_dlp"] (token t1:enforce:closed:acme_dlp); a gateway built by
+//   the fake IAM answers webhooks ["acme_dlp"] (token t1:enforce:closed:8.acme_dlp); a gateway built by
 //   build_tool_policy_with_env over the fake IAM and a MockProvider -> request side `apply`, then
 //   `rt.decider.decide(..)` for one call -> the mock records 1 request. The fake IAM then answers
 //   webhooks [] (new token); cache.invalidate_all(); the next hold -> the mock still records 1 request.

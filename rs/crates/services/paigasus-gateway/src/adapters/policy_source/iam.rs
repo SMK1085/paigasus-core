@@ -151,7 +151,10 @@ pub(crate) fn tenant_from_response(org: Uuid, r: GetCompiledToolPoliciesResponse
     let mut webhooks = settings.webhooks;
     webhooks.sort();
     webhooks.dedup();
-    let version = format!("t{}:{}:{}:{}", set.version, mode.as_str(), fail, webhooks.join(","));
+    // Each name has its length in front (`<len>.<name>`), so the token is injective: `["a","b"]` and `["a,b"]`,
+    // or `[]` and `[""]`, give different tokens.
+    let hooks = webhooks.iter().map(|w| format!("{}.{w}", w.len())).collect::<Vec<_>>().join(",");
+    let version = format!("t{}:{}:{}:{}", set.version, mode.as_str(), fail, hooks);
     let settings = Some(TenantSettings {
         mode,
         on_unavailable,
@@ -270,15 +273,22 @@ mod tests {
     fn a_webhook_list_change_alone_changes_the_token() {
         let a = tenant_from_response(org(), response(set(3), with_hooks(&["acme_dlp"]))).unwrap();
         let b = tenant_from_response(org(), response(set(3), with_hooks(&[]))).unwrap();
-        assert_eq!(a.version, "t3:enforce:closed:acme_dlp");
+        assert_eq!(a.version, "t3:enforce:closed:8.acme_dlp");
         assert_eq!(b.version, "t3:enforce:closed:");
     }
 
     #[test]
     fn an_unsorted_or_doubled_list_gives_the_sorted_token() {
         let t = tenant_from_response(org(), response(set(3), with_hooks(&["b", "a", "b"]))).unwrap();
-        assert_eq!(t.version, "t3:enforce:closed:a,b");
+        assert_eq!(t.version, "t3:enforce:closed:1.a,1.b");
         assert_eq!(&*t.settings.unwrap().webhooks, ["a", "b"]);
+    }
+
+    #[test]
+    fn the_token_tells_apart_lists_that_a_plain_join_would_merge() {
+        let token = |names: &[&str]| tenant_from_response(org(), response(set(3), with_hooks(names))).unwrap().version;
+        assert_ne!(token(&["a", "b"]), token(&["a,b"]));
+        assert_ne!(token(&[]), token(&[""]));
     }
 
     #[test]

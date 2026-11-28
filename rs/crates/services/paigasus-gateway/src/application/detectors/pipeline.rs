@@ -178,8 +178,11 @@ impl DetectorPipeline {
         };
         let late_start = Instant::now();
         let late = self.late_stages(&batch, &calls, &out.findings, (run_start + self.timeout).min(deadline), &items, bodies).await;
-        // D28: the decider keeps this time out of the overhead.
-        out.late_elapsed = late_start.elapsed();
+        // D28: the decider keeps this time out of the overhead. When no late detector runs (only failed
+        // opt-in names and no judge), the time stays zero: the local failure handling is overhead.
+        if items.iter().any(|i| matches!(i, Late::Run(_))) || self.judge.is_some() {
+            out.late_elapsed = late_start.elapsed();
+        }
         // `late` holds one entry per opt-in item, then one for the judge.
         for (stage, found_by) in late {
             for (j, found) in found_by.into_iter().enumerate() {
@@ -1137,6 +1140,14 @@ mod tests {
         let out = p.run(opted(vec![call(0, "{}")], None, &["Bad Name\u{7}"]), far()).await;
         assert_eq!(out.findings[0], vec![failure_finding("webhook", Severity::High, WebhookFailure::UnknownProvider)]);
         assert!(!logs.text().contains("Bad Name"), "{}", logs.text());
+    }
+
+    #[tokio::test]
+    async fn an_opt_in_that_runs_no_detector_keeps_the_late_time_at_zero() {
+        let p = pipeline(built_ins(), vec![], None, Duration::from_millis(500));
+        let out = p.run(opted(vec![call(0, "{}")], None, &["nobody"]), far()).await;
+        assert_eq!(out.findings[0], vec![failure_finding("nobody", Severity::High, WebhookFailure::UnknownProvider)]);
+        assert_eq!(out.late_elapsed, Duration::ZERO);
     }
 
     #[tokio::test]

@@ -573,7 +573,7 @@ mod tests {
             let err = webhook_client(Some(path)).expect_err("a bad bundle must fail");
             assert!(matches!(err, ExtraCaError::CaBundle { .. }), "{err:?}");
             let text = err.to_string();
-            assert!(text.contains(WEBHOOK_LABEL) && text.contains(path.as_str()), "{text}");
+            assert!(text.contains(WEBHOOK_LABEL) && text.contains(&format!("{path:?}")), "{text}");
         }
     }
 
@@ -585,7 +585,10 @@ mod tests {
         let only_bundle = build(true).expect_err("an invalid anchor must fail the build");
         let rendered = describe_error(&only_bundle);
         assert!(matches!(only_bundle, ExtraCaError::CaBundle { .. }), "{only_bundle:?}");
-        assert!(rendered.contains("not valid DER") && rendered.contains(WEBHOOK_LABEL) && rendered.contains(path), "{rendered}");
+        assert!(
+            rendered.contains("not valid DER") && rendered.contains(WEBHOOK_LABEL) && rendered.contains(&format!("{path:?}")),
+            "{rendered}"
+        );
         let both = build(false).expect_err("an invalid anchor must fail the build");
         let rendered = describe_error(&both);
         assert!(

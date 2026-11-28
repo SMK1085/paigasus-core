@@ -238,10 +238,33 @@ pub fn content_type_ok(value: &str) -> bool {
     value.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
 }
 
+/// A value that must be a JSON object. A derived struct also accepts a JSON array, so a signed `[[]]`
+/// would parse as an answer with no finding. This wrapper asks the deserializer for a map, so an array
+/// is an error. The duplicate-key and unknown-field checks of the derive stay.
+struct ObjectOnly<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ObjectOnly<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Wrap<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Wrap<T> {
+            type Value = ObjectOnly<T>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(ObjectOnly)
+            }
+        }
+        deserializer.deserialize_map(Wrap(std::marker::PhantomData))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Answer {
-    findings: Vec<AnswerFinding>,
+    findings: Vec<ObjectOnly<AnswerFinding>>,
 }
 
 #[derive(Deserialize)]
@@ -260,14 +283,14 @@ struct AnswerFinding {
 /// # Errors
 /// [`WebhookFailure::Malformed`] for each of the cases above.
 pub fn parse_answer(name: &str, body: &[u8], kinds: &BTreeSet<String>) -> Result<Vec<Finding>, WebhookFailure> {
-    let answer: Answer = serde_json::from_slice(body).map_err(|_| WebhookFailure::Malformed)?;
+    let ObjectOnly(answer): ObjectOnly<Answer> = serde_json::from_slice(body).map_err(|_| WebhookFailure::Malformed)?;
     if answer.findings.len() > MAX_FINDINGS {
         return Err(WebhookFailure::Malformed);
     }
     answer
         .findings
         .into_iter()
-        .map(|f| {
+        .map(|ObjectOnly(f)| {
             let severity = match f.severity.as_str() {
                 "info" => Severity::Info,
                 "low" => Severity::Low,
@@ -416,6 +439,11 @@ mod tests {
             r#"{"findings":[{"kind":"pii_email","severity":"low","version":"Bad!"}]}"#,
             r#"{"findings":[{"kind":"pii_email","severity":"low","detector":"kernel"}]}"#,
             r#"{"findings":[{"kind":"pii_email"}]}"#,
+            // An array is not an object, at either level.
+            r#"[[]]"#,
+            r#"[]"#,
+            r#"{"findings":[["pii_email","low"]]}"#,
+            r#"{"findings":[[]]}"#,
             "not json",
             seventeen.as_str(),
         ] {

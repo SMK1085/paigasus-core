@@ -172,6 +172,11 @@ impl WebhookDetector {
             .map_err(|_| WebhookFailure::Overloaded)?
             // Cannot happen: the semaphore is never closed. `transport` keeps P7 happy (see above).
             .map_err(|_| WebhookFailure::Transport)?;
+        // The wait for the permit can end at the bound. `timeout_at` polls the future first, so check the
+        // bound here: a call that is past it sends nothing.
+        if Instant::now() >= bound {
+            return Err(elapsed);
+        }
         timeout_at(bound, self.exchange(body)).await.map_err(|_| elapsed)?
     }
 
@@ -293,8 +298,9 @@ impl Detector for WebhookDetector {
     }
 }
 
-/// Set the failure counter of every adapter reason to zero for each provider, so that `increase()`
-/// sees the first failure (the first sample of a new series is 1).
+/// Set the failure counter of every adapter reason to zero for each provider. The first sample of a
+/// new series is 1. Priming lets `increase()` see the first failure only when a scrape saw the zero
+/// before it.
 pub fn prime_webhook_failure_metrics(providers: &[&str]) {
     for provider in providers {
         for reason in ADAPTER {
@@ -652,7 +658,10 @@ mod tests {
         // The request limit: BODY.len() passes, BODY.len() - 1 sends nothing.
         let m = mock_sync(|_| signed(RESPONSE)).await;
         let at = |max| WebhookDetector::from_config(&config(&m.url, 2000, max, 64), secrets(false), Arc::new(FixedClock), Arc::new(FixedNonce)).unwrap();
-        assert_eq!(at(BODY.len()).detect(one_call(far())).await.unwrap()[0].len(), 1);
+        assert_eq!(
+            at(BODY.len()).detect(one_call(far())).await.unwrap(),
+            vec![vec![Finding::new(NAME, "pii_email", Severity::Medium, "2026.11")]]
+        );
         assert_eq!(m.hits(), 1);
         assert_eq!(at(BODY.len() - 1).detect(one_call(far())).await.unwrap(), failure(WebhookFailure::RequestTooLarge));
         assert_eq!(m.hits(), 1, "no request for an oversized body");
@@ -710,7 +719,9 @@ mod tests {
             }
             release.wait().await;
         };
-        let (found, ()) = tokio::join!(d.detect(batch), releaser);
+        let (found, ()) = tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(d.detect(batch), releaser) })
+            .await
+            .expect("the test setup did not finish in 20 s");
         let found = found.unwrap();
         assert_eq!(found.len(), 10);
         for (n, f) in found.iter().enumerate() {
@@ -734,12 +745,14 @@ mod tests {
         let d = WebhookDetector::from_config(&config(&m.url, 5000, 1_048_576, 1), secrets(false), Arc::new(FixedClock), Arc::new(FixedNonce)).unwrap();
         let a = d.detect(one_call(far()));
         let b = async {
-            started.notified().await;
+            tokio::time::timeout(Duration::from_secs(10), started.notified()).await.expect("the first call did not start in 10 s");
             let found = d.detect(one_call(Instant::now() + Duration::from_millis(110))).await;
             release.notify_one();
             found
         };
-        let (a, b) = tokio::join!(a, b);
+        let (a, b) = tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(a, b) })
+            .await
+            .expect("the test setup did not finish in 20 s");
         assert_eq!(b.unwrap(), failure(WebhookFailure::Overloaded));
         assert_eq!(a.unwrap(), vec![vec![Finding::new(NAME, "pii_email", Severity::Medium, "2026.11")]]);
         assert_eq!(m.hits(), 1);

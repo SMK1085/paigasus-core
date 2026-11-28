@@ -605,7 +605,7 @@ message PutToolPolicySettingsRequest {
 - The IAM source maps `settings.webhooks`, sorts and de-duplicates it (D23). A name that fails
   the IAM rule stays in the list. It becomes an `unknown_provider` finding later (D7, R6). It is
   never `malformed`.
-- The version token becomes `t{set.version}:{mode}:{fail}:{webhooks joined with ","}`.
+- The version token becomes `t{set.version}:{mode}:{fail}:{list}`. Each name in the list is written `<len>.<name>`, and the names are joined with ",". The length makes the token injective: `["a","b"]` and `["a,b"]` give different tokens.
 
 ### 6.7 The pipeline changes
 

@@ -1205,6 +1205,9 @@ impl DetectorsConfig {
                     if u.query().is_some() {
                         return Err(format!("{at}.url must not hold a query"));
                     }
+                    if u.fragment().is_some() {
+                        return Err(format!("{at}.url must not hold a fragment"));
+                    }
                     if !urls.insert(u.as_str().to_owned()) {
                         return Err(format!("{at}.url is already used by an earlier provider"));
                     }
@@ -2984,6 +2987,7 @@ mod tests {
             ("url = \"http://dlp.acme.example/x\"", "webhook[acme_dlp].url"),
             ("url = \"https://u:p@dlp.acme.example/x\"", "webhook[acme_dlp].url"),
             ("url = \"https://dlp.acme.example/x?a=1\"", "webhook[acme_dlp].url"),
+            ("url = \"https://dlp.acme.example/x#frag\"", "webhook[acme_dlp].url"),
             ("url = \"not a url\"", "webhook[acme_dlp].url"),
             ("orgs = []", "webhook[acme_dlp].orgs"),
             ("orgs = \"all\"", "webhook[acme_dlp].orgs"),

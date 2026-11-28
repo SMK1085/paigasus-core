@@ -64,12 +64,12 @@ A provider must not rely on the order of the fields.
 
 Exactly one of `args` and `args_text` is not `null`.
 
-- When the argument text is valid JSON and has no duplicate key and no excess depth, `args` holds
+- `args` is set only when the argument text is one JSON object. The object has no duplicate key at any depth and no excess depth. `args` holds
   that JSON. The text goes in as it is, but the whitespace before and after the text is removed.
   The gateway does not write the JSON again. A number with many digits stays as the model wrote it.
 - In every other case, `args` is `null` and `args_text` holds the argument text as a string. This
-  includes text input (the tool kinds `custom`, `apply_patch` and `other`), invalid JSON and a JSON
-  object with a duplicate key.
+  includes text input (the tool kinds `custom`, `apply_patch` and `other`), invalid JSON, JSON that is not an
+  object (for example an array, a string or a number) and a JSON object with a duplicate key.
 
 ## The response
 
