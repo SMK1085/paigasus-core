@@ -2,11 +2,12 @@
 
 //! paigasus-agent-host composition root (spec §6.5). The boot order is:
 //!
-//! 1. load and validate the configuration, 2. start logging, 3. read the `[[agents]]` list and
-//!    check each model against the model registry (spec §6.2), 4. install the metrics recorder,
+//! 1. load and validate the configuration, 2. start logging, 3. build the model registry
+//!    (the agents live in the database, SMA-852), 4. install the metrics recorder,
 //! 5. connect to the database (and, when the worker pool starts, the lease pool), 6. bind the HTTP
-//!    listener (and the metrics listener), 7. serve the boot router, 8. start the Prometheus
-//!    upkeep task, 9. migrate under the advisory lock, 10. when `[nats]` is set, check each
+//!    listener (and the metrics and gRPC listeners), 7. serve the boot router, 8. start the Prometheus
+//!    upkeep task, 9. migrate under the advisory lock and warn about each active agent whose model
+//!    this host does not serve, 10. when `[nats]` is set, check each
 //!    channel inbox and the durable (spec §9.1), 11. install the application router in the boot
 //!    slot, 12. start the NATS source, the scheduler loop (when `timers.enabled` is true) and,
 //!    when the pool starts, the worker pool, 13. wait for a shutdown signal and drain.
@@ -17,31 +18,36 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use paigasus_agent_host::adapters::agents::ConfigAgentResolver;
+use paigasus_agent_host::adapters::agents::PgAgentResolver;
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
+use paigasus_agent_host::adapters::grpc::AgentGrpcSlot;
+use paigasus_agent_host::adapters::helikon::capabilities::HelikonCapabilities;
 use paigasus_agent_host::adapters::helikon::memory_tool::run_nonce;
 use paigasus_agent_host::adapters::helikon::model_registry::ModelRegistry;
 use paigasus_agent_host::adapters::helikon::runner::HelikonAgentRunner;
 use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
-use paigasus_agent_host::adapters::iam::IamClient;
+use paigasus_agent_host::adapters::iam::{Iam, IamClient};
+use paigasus_agent_host::adapters::id::MintIds;
 use paigasus_agent_host::adapters::memory_commit::MemoryCommit;
 use paigasus_agent_host::adapters::nats::consumer::{NatsSource, bind_channels, connect_and_check};
+use paigasus_agent_host::adapters::persistence::agent_registry::{PgAgentRegistry, warn_unknown_models};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
 use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
 use paigasus_agent_host::adapters::persistence::scheduler::PgScheduler;
+use paigasus_agent_host::application::agents::AgentAdmin;
 use paigasus_agent_host::application::scheduler_loop::run_scheduler_loop;
 use paigasus_agent_host::application::worker::pool::{PoolSettings, holder_prefix, run_worker_pool};
 use paigasus_agent_host::application::worker::ports::RunLimits;
 use paigasus_agent_host::application::worker::run::{RunWorker, WorkerPorts, WorkerSettings};
 use paigasus_agent_host::config::Config;
-use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::fault::FaultPoint;
-use paigasus_agent_host_core::ports::{InboxRepository, LeaseRepository, Scheduler};
+use paigasus_agent_host_core::ports::{InboxRepository, LeaseRepository, RunCapabilities, Scheduler};
 use paigasus_agent_host_core::screen::AllowAll;
 use paigasus_agent_host_core::timer::BundledTzResolver;
 use paigasus_observability::names;
+use paigasus_proto::paigasus::agents::v1::agent_service_server::AgentServiceServer;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tokio::task::JoinSet;
 
@@ -89,20 +95,13 @@ async fn serve() -> anyhow::Result<()> {
     config.validate()?;
     paigasus_logging::init("paigasus-agent-host", &config.log_level);
 
-    // Spec §6.2: an agent that names an unregistered model is a config error. It stops the boot
-    // before the database is touched.
-    let agents = config.agent_definitions()?;
+    // SMA-852: the agents live in the database. The pool starts whenever the worker is on, and it
+    // takes the inboxes of the agents that exist, also those that are created later.
     let models = Arc::new(model_registry()?);
-    models.check(&agents)?;
-    let pool_starts = if !config.worker.enabled {
+    let pool_starts = config.worker.enabled;
+    if !pool_starts {
         tracing::info!("worker.enabled is false; the worker pool is off");
-        false
-    } else if agents.is_empty() {
-        tracing::warn!("no [[agents]] is configured; the worker pool does not start");
-        false
-    } else {
-        true
-    };
+    }
 
     // The recorder exists only when metrics are on. Without it, `/metrics` is never mounted.
     let metrics_handle = config.metrics.enabled.then(|| paigasus_observability::init("paigasus-agent-host"));
@@ -119,6 +118,11 @@ async fn serve() -> anyhow::Result<()> {
     // Bind here, before the migration, so a bind failure shows at once and the socket listens for
     // the whole migration window.
     let http_listener = tokio::net::TcpListener::bind(config.http_addr).await?;
+    // The gRPC `AgentService` listener (SMA-852). It answers `UNAVAILABLE` until boot installs the admin.
+    let grpc_listener = match config.grpc_addr {
+        Some(addr) => Some((tokio::net::TcpListener::bind(addr).await?, addr)),
+        None => None,
+    };
     let metrics_listener = match config.metrics.addr {
         Some(addr) if metrics_handle.is_some() => Some((tokio::net::TcpListener::bind(addr).await?, addr)),
         _ => None,
@@ -144,6 +148,22 @@ async fn serve() -> anyhow::Result<()> {
         servers.spawn(async move {
             axum::serve(http_listener, app)
                 .with_graceful_shutdown(async move {
+                    let _ = rx.changed().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        });
+    }
+    let grpc_slot = AgentGrpcSlot::default();
+    if let Some((listener, grpc_addr)) = grpc_listener {
+        let mut rx = rx.clone();
+        let service = AgentServiceServer::new(grpc_slot.clone());
+        servers.spawn(async move {
+            tracing::info!(%grpc_addr, "paigasus-agent-host gRPC listener started");
+            tonic::transport::Server::builder()
+                .layer(paigasus_observability::CorrelationLayer)
+                .add_service(service)
+                .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async move {
                     let _ = rx.changed().await;
                 })
                 .await
@@ -184,7 +204,7 @@ async fn serve() -> anyhow::Result<()> {
     // One signal registration for the whole life of the process. A second registration can lose a
     // signal that arrives in the gap between the two.
     let outcome: anyhow::Result<BootTasks> = tokio::select! {
-        r = boot(&db, lease_db, &config, &slot, agents, models) => r,
+        r = boot(&db, lease_db, &config, &slot, &grpc_slot, models) => r,
         () = &mut shutdown => {
             tracing::info!("shutdown signal received during boot");
             interrupted = true;
@@ -313,19 +333,13 @@ fn fault_point() -> Arc<dyn FaultPoint> {
 
 /// Build the worker pool on the real adapters. The take, the heartbeat and the release use the
 /// lease pool. The claim, the run and the commit use the main pool.
-fn worker_pool_task(
-    db: &DatabaseConnection,
-    lease_db: DatabaseConnection,
-    config: &Config,
-    agents: Vec<AgentDefinition>,
-    models: Arc<ModelRegistry>,
-    memory: MemoryCommit,
-) -> anyhow::Result<WorkerPoolTask> {
+fn worker_pool_task(db: &DatabaseConnection, lease_db: DatabaseConnection, config: &Config, models: Arc<ModelRegistry>, memory: MemoryCommit) -> anyhow::Result<WorkerPoolTask> {
     let faults = fault_point();
     let caps = config.memory.caps.to_caps();
     let heartbeat_timeout = config.lease.heartbeat_statement_timeout();
-    let resolver = ConfigAgentResolver::new(db.clone(), agents);
-    let leases = Arc::new(PgLeaseStore::new(lease_db, heartbeat_timeout).serving(resolver.served()));
+    let resolver = PgAgentResolver::new(db.clone());
+    // The store takes the inboxes of the active agents whose model this host serves.
+    let leases = Arc::new(PgLeaseStore::new(lease_db, heartbeat_timeout).serving_models(HelikonCapabilities::new(Arc::clone(&models)).model_ids()));
     let ports = WorkerPorts {
         leases: leases.clone(),
         claims: Arc::new(PgLeaseStore::new(db.clone(), heartbeat_timeout)),
@@ -363,7 +377,7 @@ fn worker_pool_task(
 /// Everything between the bind and ready: the migration, the NATS boot checks, the build of the
 /// worker pool (when `lease_db` is set) and the install of the application router. It returns an
 /// error and does not use `?` out of `serve`, so that `serve` always drains.
-async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, config: &Config, slot: &BootSlot, agents: Vec<AgentDefinition>, models: Arc<ModelRegistry>) -> anyhow::Result<BootTasks> {
+async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, config: &Config, slot: &BootSlot, grpc_slot: &AgentGrpcSlot, models: Arc<ModelRegistry>) -> anyhow::Result<BootTasks> {
     let migration = migrate_under_lock(db, config.migration.lock_wait()).await?;
     tracing::info!(
         waited = ?migration.waited,
@@ -371,6 +385,11 @@ async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, con
         migrations_applied = migration.migrations_applied,
         "database migrations complete"
     );
+    // SMA-852 spec §6.7: one warning for each active agent whose model this host does not serve.
+    // The boot goes on, also when the read fails: the warning is advice, not a check.
+    if let Err(e) = warn_unknown_models(&PgAgentRegistry::new(db.clone()), &HelikonCapabilities::new(Arc::clone(&models))).await {
+        tracing::warn!(error = %e, "the check of the agent models failed");
+    }
     let inboxes: Arc<dyn InboxRepository> = Arc::new(PgInboxRepository::new(db.clone()));
     // Spec §9.1: after the migrations, each channel inbox must exist and the durable filters must
     // be the channel subjects. Each failure is a config error and stops the boot.
@@ -388,14 +407,25 @@ async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, con
             None
         }
     };
-    let ingress = match &config.iam {
-        Some(iam) => Some(Arc::new(Ingress {
-            iam: Arc::new(IamClient::connect(iam)?),
-            max_body_bytes: config.ingress.max_body_bytes,
-        })),
+    let (ingress, agents) = match &config.iam {
+        Some(iam) => {
+            let iam: Arc<dyn Iam> = Arc::new(IamClient::connect(iam)?);
+            let ingress = Arc::new(Ingress {
+                iam: Arc::clone(&iam),
+                max_body_bytes: config.ingress.max_body_bytes,
+            });
+            // SMA-852: the agent API shares the IAM link with the ingress.
+            let admin = Arc::new(AgentAdmin::new(
+                Arc::new(PgAgentRegistry::new(db.clone())),
+                Arc::new(HelikonCapabilities::new(Arc::clone(&models))),
+                iam,
+                Arc::new(MintIds),
+            ));
+            (Some(ingress), Some(admin))
+        }
         None => {
-            tracing::info!("no [iam] section is set; the event ingress and the service-info route are off");
-            None
+            tracing::info!("no [iam] section is set; the event ingress, the service-info route and the agent API are off");
+            (None, None)
         }
     };
     // Only the resolver and the scheduler: the timer store has no caller in this binary yet.
@@ -409,15 +439,19 @@ async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, con
     // One commit mode for the process: `memory.backend` selects it, and the worker pool and the
     // application state share it. For `s3` the build runs the boot probe (SMA-829).
     let memory = MemoryCommit::build(&config.memory, db.clone(), utf8_env()).await?;
-    // `serve` sets `lease_db` only when the pool starts: `worker.enabled` and an agent.
+    // `serve` sets `lease_db` only when the pool starts: `worker.enabled` is true.
     let workers = match lease_db {
-        Some(lease_db) => Some(worker_pool_task(db, lease_db, config, agents, models, memory.clone())?),
+        Some(lease_db) => Some(worker_pool_task(db, lease_db, config, models, memory.clone())?),
         None => None,
     };
+    if let Some(admin) = &agents {
+        grpc_slot.install(Arc::clone(admin))?;
+    }
     let state = AppState {
         db: db.clone(),
         inboxes,
         ingress,
+        agents,
         memory,
     };
     slot.install(app_router(state, None))?;
@@ -503,7 +537,7 @@ fn describe_agent_host_metrics() {
     );
     describe_counter!(
         names::AGENT_HOST_TIMER_FIRED_TOTAL,
-        "Timer firings, labeled by kind (follow_up or schedule), origin (agent or system) and outcome (inserted or duplicate)."
+        "Timer firings, labeled by kind (follow_up or schedule), origin (agent or system) and outcome (inserted, duplicate or agent_archived)."
     );
     describe_counter!(
         names::AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL,
@@ -533,7 +567,11 @@ fn describe_agent_host_metrics() {
     describe_counter!(names::AGENT_HOST_WORKER_RESTARTS_TOTAL, "Restarts of a worker task of the pool.");
     describe_gauge!(
         names::AGENT_HOST_INBOX_LAG_SECONDS,
-        "Age in seconds of the oldest due pending event of the agents that this host serves. It is 0 when nothing is due."
+        "Age in seconds of the oldest due pending event of the agents that this host can take: active, with a served model. It is 0 when nothing is due."
+    );
+    describe_gauge!(
+        names::AGENT_HOST_ARCHIVED_PENDING_EVENTS,
+        "Pending events of the inboxes whose agent is archived. No worker takes these events."
     );
     describe_histogram!(names::AGENT_HOST_EVENT_ATTEMPTS, "The attempts of an inbox event when it goes to done or dead.");
     describe_counter!(

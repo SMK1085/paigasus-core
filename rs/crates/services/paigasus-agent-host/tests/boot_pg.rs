@@ -72,8 +72,17 @@ async fn the_inbox_unique_constraint_holds() {
     support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
 
     let insert = "INSERT INTO inbox (id, org_id, agent_id, principal_id) VALUES \
-                  (gen_random_uuid(), gen_random_uuid(), '11111111-1111-1111-1111-111111111111', \
+                  (gen_random_uuid(), '33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111', \
                   '22222222-2222-2222-2222-222222222222')";
+    // Without an agent row the foreign key refuses the inbox (SQLSTATE 23503).
+    let err = db.execute_unprepared(insert).await.expect_err("an inbox without an agent must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected SQLSTATE 23503, got {err:?}");
+    db.execute_unprepared(
+        "INSERT INTO agent (id, org_id, name, model, instructions) VALUES \
+         ('11111111-1111-1111-1111-111111111111', '33333333-3333-3333-3333-333333333333', 'a', 'scripted', 'test')",
+    )
+    .await
+    .expect("insert the agent");
     db.execute_unprepared(insert).await.expect("the first insert");
     let err = db.execute_unprepared(insert).await.expect_err("the second insert must fail");
     // `sql_err` maps SQLSTATE 23505 (unique_violation) to this variant.
@@ -286,36 +295,61 @@ async fn wait_for_log(child: &support::Child, line: &str) {
 }
 
 #[tokio::test]
-async fn with_no_agents_the_pool_does_not_start() {
+async fn with_no_agents_the_pool_starts_and_takes_nothing() {
     let Some((_node, url)) = support::start_raw_postgres().await else {
         eprintln!("skipping boot test: Docker unavailable");
         return;
     };
-    // The default `worker.enabled` is true, and the default `[[agents]]` list is empty.
+    // The default `worker.enabled` is true. The database holds no agent row.
     let (mut child, port) = support::spawn_service_with(&url, &[("RUST_LOG", "paigasus_agent_host=info,warn".to_string())]);
     support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
-    // `serve` logs "started" after it spawns every boot task, so once "started" is in the log,
-    // the absence of the pool line is final.
     wait_for_log(&child, "paigasus-agent-host started").await;
     let log = child.tail();
-    assert!(log.contains("the worker pool does not start"), "boot must warn that no agent is configured; log:\n{log}");
-    assert!(!log.contains("the worker pool started"), "with no agent, boot must start no pool; log:\n{log}");
+    assert!(log.contains("the worker pool started"), "boot must start the pool with no agent; log:\n{log}");
+    assert!(!log.contains("the worker pool does not start"), "the old warning is gone; log:\n{log}");
+    let db = support::connect(&url).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(support::scalar_i64(&db, "SELECT count(*) AS n FROM run").await, 0, "the pool took nothing");
 }
 
+/// The agent is in the database with a model that this host does not serve. The boot warns once
+/// for it and goes on, and the event of its inbox waits.
 #[tokio::test]
-async fn an_agent_with_an_unregistered_model_fails_the_boot() {
+async fn an_active_agent_with_an_unknown_model_logs_a_warning_and_boots() {
+    let Some((_node, url, db)) = support::inbox::migrated_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    let (org, inbox, agent, event) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    support::inbox::insert_agent(&db, org, agent, "gpt-x", "Sort the request.", &[]).await;
+    support::inbox::insert_inbox(&db, org, inbox, agent, uuid::Uuid::new_v4()).await;
+    support::lease::insert_pending_event(&db, inbox, event, 1).await;
+
+    let (mut child, port) = support::spawn_service_with(&url, &[("RUST_LOG", "paigasus_agent_host=info,warn".to_string())]);
+    support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
+    wait_for_log(&child, "paigasus-agent-host started").await;
+    let log = child.tail();
+    let prn = paigasus_agent_host_core::ids::AgentId::new(org, agent).as_prn().canonical();
+    assert!(log.contains("an active agent names a model that this host does not serve"), "boot must warn; log:\n{log}");
+    assert!(log.contains("gpt-x") && log.contains(&prn), "the warning names the model and the agent; log:\n{log}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        support::scalar_bool(&db, &format!("SELECT status = 'pending' AS v FROM inbox_event WHERE id = '{event}'")).await,
+        "the event of an unserved agent waits"
+    );
+}
+
+/// The worker cannot commit an external memory store yet, so the S3 store with the worker on stops
+/// the boot before the database is touched. No agent is needed (the agents live in the database).
+#[tokio::test]
+async fn the_s3_memory_store_with_the_worker_on_fails_the_boot() {
     let Some((_node, url)) = support::start_raw_postgres().await else {
         eprintln!("skipping boot test: Docker unavailable");
         return;
     };
     let dir = std::env::temp_dir().join(format!("agent-host-boot-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create the config dir");
-    let id = paigasus_agent_host_core::ids::AgentId::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).as_prn().canonical();
-    std::fs::write(
-        dir.join("agent-host.toml"),
-        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"gpt-x\"\ninstructions = \"Sort the request.\"\n"),
-    )
-    .expect("write agent-host.toml");
+    std::fs::write(dir.join("agent-host.toml"), "[memory]\nbackend = \"s3\"\n[memory.s3]\nbucket = \"paigasus-mem\"\nprefix = \"mem\"\n").expect("write agent-host.toml");
 
     let (mut child, _port) = support::spawn_service_in(&url, Some(&dir), &[]);
     let started = std::time::Instant::now();
@@ -323,42 +357,11 @@ async fn an_agent_with_an_unregistered_model_fails_the_boot() {
         if let Some(exit) = child.child.try_wait().expect("try_wait") {
             break exit;
         }
-        assert!(started.elapsed() < Duration::from_secs(60), "an unknown model must stop the boot; log:\n{}", child.tail());
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(!exit.success(), "the boot must fail, got {exit}; log:\n{}", child.tail());
-    // The reader threads can lag the exit by a moment.
-    wait_for_log(&child, "gpt-x").await;
-}
-
-/// The worker cannot commit an external memory store yet, so the S3 store plus an agent (the pool
-/// starts) stops the boot before the database is touched. The config unit test
-/// `the_worker_refuses_the_s3_memory_store` covers the S3 store with no agent.
-#[tokio::test]
-async fn the_s3_memory_store_with_an_agent_fails_the_boot() {
-    let Some((_node, url)) = support::start_raw_postgres().await else {
-        eprintln!("skipping boot test: Docker unavailable");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("agent-host-boot-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("create the config dir");
-    let id = paigasus_agent_host_core::ids::AgentId::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).as_prn().canonical();
-    std::fs::write(
-        dir.join("agent-host.toml"),
-        format!(
-            "[memory]\nbackend = \"s3\"\n[memory.s3]\nbucket = \"paigasus-mem\"\nprefix = \"mem\"\n\n[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\n"
-        ),
-    )
-    .expect("write agent-host.toml");
-
-    let (mut child, _port) = support::spawn_service_in(&url, Some(&dir), &[]);
-    let started = std::time::Instant::now();
-    let exit = loop {
-        if let Some(exit) = child.child.try_wait().expect("try_wait") {
-            break exit;
-        }
-        assert!(started.elapsed() < Duration::from_secs(60), "the S3 store with an agent must stop the boot; log:\n{}", child.tail());
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the S3 store with the worker on must stop the boot; log:\n{}",
+            child.tail()
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let _ = std::fs::remove_dir_all(&dir);
@@ -367,7 +370,7 @@ async fn the_s3_memory_store_with_an_agent_fails_the_boot() {
     wait_for_log(&child, "the worker supports only the Postgres memory store for now").await;
 }
 
-/// The composition root end to end: with one agent on the file-scripted model, the pool starts
+/// The composition root end to end: with one agent row on the file-scripted model, the pool starts
 /// and a run moves a pending event to `done`.
 #[cfg(feature = "test-model")]
 #[tokio::test]
@@ -384,13 +387,7 @@ async fn with_an_agent_the_pool_serves_a_pending_event() {
 
     let dir = std::env::temp_dir().join(format!("agent-host-boot-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create the config dir");
-    let id = paigasus_agent_host_core::ids::AgentId::new(org, agent).as_prn().canonical();
-    std::fs::write(
-        dir.join("agent-host.toml"),
-        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\n"),
-    )
-    .expect("write agent-host.toml");
-    // No tool call: the model answers `done` at once.
+    // The agent is the row that `insert_inbox` made. No tool call: the model answers `done` at once.
     let script = dir.join("script.json");
     std::fs::write(&script, "[]").expect("write the script");
 
@@ -417,5 +414,76 @@ async fn with_an_agent_the_pool_serves_a_pending_event() {
         support::scalar_bool(&db, &format!("SELECT count(*) = 1 AS v FROM run WHERE inbox_id = '{inbox}' AND status = 'completed'")).await,
         "one completed run must serve the event; log:\n{}",
         child.tail()
+    );
+}
+
+/// SMA-852: the binary binds `grpc_addr`, serves `AgentService` after the boot, and drains the
+/// listener on SIGTERM within the drain timeout.
+#[tokio::test]
+async fn a_boot_with_grpc_addr_serves_agent_service() {
+    use paigasus_proto::paigasus::agents::v1::ListAgentsRequest;
+    use paigasus_proto::paigasus::agents::v1::agent_service_client::AgentServiceClient;
+    use support::fake_iam::{FakeIam, serve_grpc};
+
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping boot test: Docker unavailable");
+        return;
+    };
+    const TOKEN: &str = "boot-grpc-token";
+    let (iam, _server) = serve_grpc(FakeIam::new(TOKEN, uuid::Uuid::from_u128(4))).await;
+    let grpc_port = support::free_port();
+    let (mut child, port) = support::spawn_service_with(
+        &url,
+        &[
+            ("AGENT_HOST_IAM__GRPC_ADDR", format!("http://{iam}")),
+            ("AGENT_HOST_IAM__TLS__MODE", "loopback_insecure".to_owned()),
+            ("AGENT_HOST_GRPC_ADDR", format!("127.0.0.1:{grpc_port}")),
+            ("AGENT_HOST_WORKER__ENABLED", "false".to_owned()),
+        ],
+    );
+    support::wait_for_status(&mut child, port, "/readyz", 200, READY_BUDGET).await;
+
+    let mut client = AgentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}")).await.expect("connect to grpc_addr");
+    let mut request = tonic::Request::new(ListAgentsRequest {
+        org_prn: format!("prn:pgs:iam:::organization/{}", uuid::Uuid::from_u128(5)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
+    let answer = client
+        .list_agents(request)
+        .await
+        .unwrap_or_else(|e| panic!("ListAgents must get a verdict, not {e:?}; log:\n{}", child.tail()));
+    // The answer carries the correlation id: the process wires the `CorrelationLayer` on this listener.
+    let correlation = answer
+        .metadata()
+        .get(paigasus_observability::correlation::CORRELATION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    assert!(correlation.is_some_and(|v| uuid::Uuid::parse_str(&v).is_ok()), "the gRPC answer has a correlation id header");
+    assert!(answer.into_inner().agents.is_empty());
+
+    // A call without a credential is a verdict too: UNAUTHENTICATED.
+    let status = client.list_agents(ListAgentsRequest::default()).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+
+    // SIGTERM: the listener stops accepting and the process ends inside the drain timeout.
+    let pid = child.child.id();
+    let killed = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status().expect("run kill(1)");
+    assert!(killed.success());
+    let started = std::time::Instant::now();
+    let exit = loop {
+        if let Some(exit) = child.child.try_wait().expect("try_wait") {
+            break exit;
+        }
+        // `DRAIN_TIMEOUT` is 10 s. A listener that ignores the shutdown watch is aborted then, and the
+        // process still exits 0. So the bound is below it.
+        assert!(started.elapsed() < Duration::from_secs(9), "the drain must end the gRPC listener; log:\n{}", child.tail());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(exit.success(), "exit after SIGTERM: {exit}; log:\n{}", child.tail());
+    assert!(!child.tail().contains("drain timed out"), "the drain must not time out; log:\n{}", child.tail());
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", grpc_port)).await.is_err(),
+        "the gRPC listener must be closed after the drain"
     );
 }

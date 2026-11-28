@@ -24,7 +24,7 @@ namespace Pgs::Iam {
          CreateServiceAccount, GetServiceAccount, ListServiceAccounts, ArchiveServiceAccount,
          IssueApiKey, RevokeApiKey, ListApiKeys, ListAuditLog, ListOutboxDeadLetters,
          ReplayOutboxDeadLetter, DiscardOutboxDeadLetter, RetireSystemPolicy, InvokeModel,
-         WriteInboxEvent,
+         WriteInboxEvent, ManageAgents, ReadAgents,
          CreateUser, GetUser, LinkExternalIdentity, UnlinkExternalIdentity, ChangeUserEmail,
          ManageToolCatalog, ReadToolCatalog, ManageToolPolicies, ReadToolPolicies,
          ManageToolPolicyFloor, ReadToolPolicyFloor, ManageToolPolicySettings,
@@ -102,6 +102,14 @@ mod tests {
             "ReadCompiledToolPolicies",
             "ManageToolPolicyRecompile",
         ] {
+            let src = format!(r#"permit(principal, action == Pgs::Iam::Action::"{name}", resource);"#);
+            assert!(validate_policy(&src).is_ok(), "{name} must be declared in SCHEMA_SRC");
+        }
+    }
+    /// SMA-852: the two agent registry actions must be declared in `SCHEMA_SRC`.
+    #[test]
+    fn the_agent_registry_actions_validate_against_the_embedded_schema() {
+        for name in ["ManageAgents", "ReadAgents"] {
             let src = format!(r#"permit(principal, action == Pgs::Iam::Action::"{name}", resource);"#);
             assert!(validate_policy(&src).is_ok(), "{name} must be declared in SCHEMA_SRC");
         }

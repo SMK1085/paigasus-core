@@ -18,7 +18,7 @@ use async_nats::jetstream::{self, AckKind, consumer::PullConsumer};
 use futures::StreamExt;
 use paigasus_agent_host_core::ids::EventId;
 use paigasus_agent_host_core::inbox::{Inbox, NewInboxEvent};
-use paigasus_agent_host_core::ports::{InboxRepository, RepositoryError};
+use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, RepositoryError};
 use paigasus_observability::names;
 use tokio::sync::watch;
 use tracing::Instrument;
@@ -213,6 +213,10 @@ pub async fn handle_message(channels: &[BoundChannel], inboxes: &dyn InboxReposi
         envelope: event.to_json(),
     };
     match ingest(inboxes, new_event, Channel::Nats).await {
+        Ok(InsertOutcome::AgentArchived) => {
+            tracing::warn!(subject, inbox = %channel.inbox.id().uuid(), ce_id = event.id(), "the agent of the inbox is archived; the event is terminated");
+            Disposition::Term
+        }
         Ok(_) => Disposition::Ack,
         Err(e) => {
             let delay = back_off(delivered);
@@ -378,7 +382,6 @@ mod tests {
     use jiff::Timestamp;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use paigasus_agent_host_core::ids::{AgentId, InboxId, PrincipalId};
-    use paigasus_agent_host_core::ports::InsertOutcome;
 
     /// IAM's encoding of `iam.organization.created` for the org `u(0x500)` (the Task 1 fixture).
     const FIX_ORG: &[u8] = include_bytes!("../../../../../libs/paigasus-cloudevents/tests/fixtures/iam/organization_created_trailing_zeros.json");
@@ -400,6 +403,7 @@ mod tests {
     /// An in-memory repository: a dedup on `(inbox, source, ce_id)`, or a store error.
     struct Memory {
         fail: bool,
+        archived: bool,
         rows: Mutex<Vec<NewInboxEvent>>,
     }
 
@@ -407,12 +411,22 @@ mod tests {
         fn new() -> Self {
             Memory {
                 fail: false,
+                archived: false,
                 rows: Mutex::new(Vec::new()),
             }
         }
         fn failing() -> Self {
             Memory {
                 fail: true,
+                archived: false,
+                rows: Mutex::new(Vec::new()),
+            }
+        }
+        /// A repository whose inbox has no active agent.
+        fn archived() -> Self {
+            Memory {
+                fail: false,
+                archived: true,
                 rows: Mutex::new(Vec::new()),
             }
         }
@@ -429,6 +443,9 @@ mod tests {
         async fn insert_event(&self, event: NewInboxEvent) -> Result<InsertOutcome, RepositoryError> {
             if self.fail {
                 return Err(RepositoryError::Store("down".into()));
+            }
+            if self.archived {
+                return Ok(InsertOutcome::AgentArchived);
             }
             let mut rows = self.rows.lock().unwrap();
             if let Some(row) = rows.iter().find(|r| r.inbox == event.inbox && r.source == event.source && r.ce_id == event.ce_id) {
@@ -490,6 +507,16 @@ mod tests {
         assert_eq!(env["time"], "2026-08-07T12:30:45.100000Z");
         assert_eq!(env["subject"], format!("prn:pgs:iam:::organization/{}", u(0x500)));
         assert_eq!(env["data"], serde_json::json!({"slug": "acme"}));
+    }
+
+    /// An event for an inbox without an active agent is terminated, not acked: it is never stored
+    /// and it is not redelivered.
+    #[tokio::test]
+    async fn an_event_for_an_archived_agent_is_terminated() {
+        let repo = Memory::archived();
+        let d = handle_message(&[channel(0x500)], &repo, "iam.organization.created", FIX_ORG, 1).await;
+        assert_eq!(d, Disposition::Term);
+        assert!(repo.rows().is_empty());
     }
 
     #[tokio::test]

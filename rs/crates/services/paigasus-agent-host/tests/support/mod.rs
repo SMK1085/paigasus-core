@@ -229,5 +229,6 @@ pub mod fake_iam;
 pub mod fake_inbox;
 pub mod inbox;
 pub mod lease;
+pub mod memory_registry;
 pub mod stub_iam;
 pub mod timer;

@@ -186,12 +186,18 @@ class ErrorDomain(betterproto2.Enum):
     "gateway.paigasus.io"
     """
 
+    AGENTS = 3
+    """
+    "agents.paigasus.io"
+    """
+
     @classmethod
     def betterproto_value_to_renamed_proto_names(cls) -> dict[int, str]:
         return {
             0: "ERROR_DOMAIN_UNSPECIFIED",
             1: "ERROR_DOMAIN_IAM",
             2: "ERROR_DOMAIN_GATEWAY",
+            3: "ERROR_DOMAIN_AGENTS",
         }
 
     @classmethod
@@ -200,6 +206,7 @@ class ErrorDomain(betterproto2.Enum):
             "ERROR_DOMAIN_UNSPECIFIED": 0,
             "ERROR_DOMAIN_IAM": 1,
             "ERROR_DOMAIN_GATEWAY": 2,
+            "ERROR_DOMAIN_AGENTS": 3,
         }
 
 
@@ -780,7 +787,9 @@ class ErrorReason(betterproto2.Enum):
     """
     "invalid-query-parameter" — a query-string parameter could not be
     deserialized into its target type, or was supplied more than once.
-    Emitted by IAM's EnvelopeQuery extractor before any handler runs.
+    Emitted by the EnvelopeQuery extractor of IAM and of the agent host
+    before any handler runs. The agent host also emits it for an
+    include_archived value that is not true or false.
     HTTP-only: gRPC has no query string. Unlike 905/906, that property is
     NOT enforced by the transport — this reason is a TenancyError variant,
     which the gRPC surface also maps — so it is held by a source scan in
@@ -807,6 +816,53 @@ class ErrorReason(betterproto2.Enum):
     """
     In the shared range (900-999). Emitted by the agent host (SMA-787).
     "store-unavailable" — the service cannot reach its database. Retryable (503).
+    """
+
+    AGENT_NAME_TAKEN = 911
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-852).
+    "agent-name-taken" — an active agent of the organization already has this name. HTTP 409.
+    """
+
+    INBOX_EXISTS = 912
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-852).
+    "inbox-exists" — the agent already has an inbox for this principal. HTTP 409. Metadata
+    key `inbox`: the PRN of the existing inbox.
+    """
+
+    AGENT_VERSION_MISMATCH = 913
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-852).
+    "agent-version-mismatch" — the version in an update is not the current version of the
+    agent. HTTP 409. Metadata key `version`: the current version.
+    """
+
+    AGENT_ARCHIVED = 914
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-852).
+    "agent-archived" — the agent is archived and the call needs an active agent. HTTP 409.
+    """
+
+    UNKNOWN_MODEL = 915
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-852).
+    "unknown-model" — the model of the agent is not one that the host serves. HTTP 400.
+    Metadata key `model`: the rejected value.
+    """
+
+    UNKNOWN_TOOL = 916
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-852).
+    "unknown-tool" — a tool of the agent is not in the tool catalog. HTTP 400. Metadata key
+    `tool`: the rejected value.
+    """
+
+    INVALID_AGENT_FIELD = 917
+    """
+    In the shared range (900-999). Emitted by the agent host (SMA-852).
+    "invalid-agent-field" — a field of the agent is empty, too long or malformed. HTTP 400.
+    Metadata key `field`: the name of the field.
     """
 
     @classmethod
@@ -906,6 +962,13 @@ class ErrorReason(betterproto2.Enum):
             908: "ERROR_REASON_INVALID_PATH_SEGMENT",
             909: "ERROR_REASON_INVALID_DPOP_PROOF",
             910: "ERROR_REASON_STORE_UNAVAILABLE",
+            911: "ERROR_REASON_AGENT_NAME_TAKEN",
+            912: "ERROR_REASON_INBOX_EXISTS",
+            913: "ERROR_REASON_AGENT_VERSION_MISMATCH",
+            914: "ERROR_REASON_AGENT_ARCHIVED",
+            915: "ERROR_REASON_UNKNOWN_MODEL",
+            916: "ERROR_REASON_UNKNOWN_TOOL",
+            917: "ERROR_REASON_INVALID_AGENT_FIELD",
         }
 
     @classmethod
@@ -1005,6 +1068,13 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_INVALID_PATH_SEGMENT": 908,
             "ERROR_REASON_INVALID_DPOP_PROOF": 909,
             "ERROR_REASON_STORE_UNAVAILABLE": 910,
+            "ERROR_REASON_AGENT_NAME_TAKEN": 911,
+            "ERROR_REASON_INBOX_EXISTS": 912,
+            "ERROR_REASON_AGENT_VERSION_MISMATCH": 913,
+            "ERROR_REASON_AGENT_ARCHIVED": 914,
+            "ERROR_REASON_UNKNOWN_MODEL": 915,
+            "ERROR_REASON_UNKNOWN_TOOL": 916,
+            "ERROR_REASON_INVALID_AGENT_FIELD": 917,
         }
 
 

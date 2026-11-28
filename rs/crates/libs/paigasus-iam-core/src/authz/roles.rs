@@ -75,7 +75,10 @@ pub const FORBID_ARCHIVED_WRITES_ID: &str = "forbid-archived-writes";
 ///
 /// `8`: SMA-787 added `WriteInboxEvent` (a non-restore write, so it joins the generated forbid
 /// list) and the `agent_event_writer` role template.
-pub const STARTER_POLICY_REVISION: u32 = 8;
+///
+/// `9`: SMA-852 added `ManageAgents` (a non-restore write, so it joins the generated forbid
+/// list), `ReadAgents`, and the `agent_admin` role template.
+pub const STARTER_POLICY_REVISION: u32 = 9;
 
 /// Every `policy_id` [`starter_policies`] produces, in the order it produces them. A `const`
 /// so the reserved-namespace check in `PolicyStore::put_in` is a slice scan rather than nine
@@ -93,6 +96,7 @@ pub const STARTER_POLICY_IDS: &[&str] = &[
     "gateway_user",
     "tool_policy_reader",
     "agent_event_writer",
+    "agent_admin",
 ];
 
 /// Whether `id` is one of the code-owned starter policy ids. The public `PutPolicy` API
@@ -105,7 +109,7 @@ pub fn is_starter_policy_id(id: &str) -> bool {
 
 /// The pinned content hash guarding [`STARTER_POLICY_REVISION`] — see the test that reads it.
 #[cfg(test)]
-const EXPECTED_STARTER_CONTENT_HASH: &str = "f3c9928affc748cac4723da1d2701052c193c4fdec7c7ebe4b0ceface0380cef";
+const EXPECTED_STARTER_CONTENT_HASH: &str = "9258657f6fd5c9947043d704e3d1ef9d5edb1a38e04dd635d2ae9a59802547ca";
 
 /// `platform_admin`'s role key — also its template's `policy_id` (see module docs).
 const PLATFORM_ADMIN_KEY: &str = "platform_admin";
@@ -155,6 +159,7 @@ const ORG_ADMIN_ACTIONS: &[Action] = &[
     Action::ManageToolPolicies,
     Action::ReadToolPolicies,
     Action::ManageToolPolicySettings,
+    Action::ReadAgents,
 ];
 
 /// `org_member`: org/team/project reads only (design §3.2) — no membership rosters, no grant
@@ -241,7 +246,11 @@ const TOOL_POLICY_READER_ACTIONS: &[Action] = &[Action::ReadCompiledToolPolicies
 /// role so `org_admin` and `gateway_user` never gain the right to write agent inbox events).
 const AGENT_EVENT_WRITER_ACTIONS: &[Action] = &[Action::WriteInboxEvent];
 
-/// The ten system roles (design §3.2), each `system = true` and immutable via the policy/role
+/// `agent_admin`: [ManageAgents] and [ReadAgents], at an Organization (SMA-852). A dedicated role,
+/// so `org_admin` reads agents but never manages them.
+const AGENT_ADMIN_ACTIONS: &[Action] = &[Action::ManageAgents, Action::ReadAgents];
+
+/// The eleven system roles (design §3.2), each `system = true` and immutable via the policy/role
 /// CRUD API. Every `template_id` equals the role's own `key` (see module docs).
 #[must_use]
 pub fn system_roles() -> Vec<Role> {
@@ -316,6 +325,13 @@ pub fn system_roles() -> Vec<Role> {
             description: "Write events into the agent inboxes of an organization.".to_string(),
             system: true,
         },
+        Role {
+            key: "agent_admin".to_string(),
+            template_id: "agent_admin".to_string(),
+            scope_kinds: vec![NodeKind::Organization],
+            description: "Manage the agents and the agent inboxes of an organization.".to_string(),
+            system: true,
+        },
     ]
 }
 
@@ -387,6 +403,7 @@ fn template_source(key: &str) -> String {
         "gateway_user" => GATEWAY_USER_ACTIONS,
         "tool_policy_reader" => TOOL_POLICY_READER_ACTIONS,
         "agent_event_writer" => AGENT_EVENT_WRITER_ACTIONS,
+        "agent_admin" => AGENT_ADMIN_ACTIONS,
         other => panic!("template_source: unknown system role key {other:?}"),
     };
     format!("permit(principal == ?principal, action in [{}], resource in ?resource);", action_refs(actions))
@@ -981,6 +998,63 @@ mod tests {
                 resource: uni.archived_project_in_o.prn().clone(),
                 expect: Effect::Deny,
             },
+            // -- SMA-852: ManageAgents, ReadAgents and the agent_admin role.
+            Case {
+                name: "agent_admin allows ManageAgents on its own org (SMA-852)",
+                grants: vec![grant(151, &uni.principal, "agent_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageAgents,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "agent_admin allows ReadAgents on its own org (SMA-852)",
+                grants: vec![grant(152, &uni.principal, "agent_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ReadAgents,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "agent_admin denies ManageAgents on another org (SMA-852)",
+                grants: vec![grant(153, &uni.principal, "agent_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageAgents,
+                resource: uni.org_other.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_admin allows ReadAgents on its own org (SMA-852)",
+                grants: vec![grant(154, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ReadAgents,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Allow,
+            },
+            Case {
+                name: "org_admin denies ManageAgents on its own org (SMA-852)",
+                grants: vec![grant(155, &uni.principal, "org_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageAgents,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_member denies ReadAgents (SMA-852)",
+                grants: vec![grant(156, &uni.principal, "org_member", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ReadAgents,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "org_member denies ManageAgents (SMA-852)",
+                grants: vec![grant(157, &uni.principal, "org_member", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
+                action: Action::ManageAgents,
+                resource: uni.org_o.prn().clone(),
+                expect: Effect::Deny,
+            },
+            Case {
+                name: "forbid-archived-writes denies ManageAgents on an archived org even for agent_admin (SMA-852)",
+                grants: vec![grant(158, &uni.principal, "agent_admin", GrantScope::Node(TenancyNodeRef::Organization(uni.archived_org.clone())))],
+                action: Action::ManageAgents,
+                resource: uni.archived_org.prn().clone(),
+                expect: Effect::Deny,
+            },
             Case {
                 name: "gateway_user at an org allows InvokeModel on the org itself (SMA-635 D4)",
                 grants: vec![grant(93, &uni.principal, "gateway_user", GrantScope::Node(TenancyNodeRef::Organization(uni.org_o.clone())))],
@@ -1199,5 +1273,11 @@ mod tests {
     #[test]
     fn agent_event_writer_is_organization_only() {
         assert_eq!(role("agent_event_writer").unwrap().scope_kinds, vec![NodeKind::Organization]);
+    }
+
+    /// SMA-852: `agent_admin` is an Organization-only role.
+    #[test]
+    fn agent_admin_is_organization_only() {
+        assert_eq!(role("agent_admin").unwrap().scope_kinds, vec![NodeKind::Organization]);
     }
 }

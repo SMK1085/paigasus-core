@@ -181,10 +181,14 @@ pub const AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL: &str = "agent_host_commit_out
 /// Restarts of a worker of the pool. No label.
 pub const AGENT_HOST_WORKER_RESTARTS_TOTAL: &str = "agent_host_worker_restarts_total";
 /// The age in seconds of the oldest due pending event (`status = 'pending'`, `not_before <= now()`)
-/// of every inbox of an agent that this host serves, on the database clock, or 0 when there is
+/// of every inbox of an active agent with a model this binary has, on the database clock, or 0 when there is
 /// none. An event in a leased or locked inbox counts too. Read in each poll of `acquire_next`.
 /// No label.
 pub const AGENT_HOST_INBOX_LAG_SECONDS: &str = "agent_host_inbox_lag_seconds";
+/// The number of `pending` events of the inboxes whose agent is archived (SMA-852). No worker takes
+/// these inboxes, so the events stay pending. It is read in the same statement as the lag, in each
+/// poll of `acquire_next`. No label.
+pub const AGENT_HOST_ARCHIVED_PENDING_EVENTS: &str = "agent_host_archived_pending_events";
 /// A histogram of the `attempts` of an event when it goes to `done` or `dead`. No label.
 pub const AGENT_HOST_EVENT_ATTEMPTS: &str = "agent_host_event_attempts";
 // Agent host S3 memory store (SMA-829 spec §6.11). No label holds a path or a key.
@@ -460,6 +464,7 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
     AGENT_HOST_WORKER_RESTARTS_TOTAL,
     AGENT_HOST_INBOX_LAG_SECONDS,
+    AGENT_HOST_ARCHIVED_PENDING_EVENTS,
     AGENT_HOST_EVENT_ATTEMPTS,
     AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
     AGENT_HOST_MEMORY_S3_PARTIAL_APPLIES_TOTAL,
@@ -584,6 +589,7 @@ mod tests {
             AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
             AGENT_HOST_WORKER_RESTARTS_TOTAL,
             AGENT_HOST_INBOX_LAG_SECONDS,
+            AGENT_HOST_ARCHIVED_PENDING_EVENTS,
             AGENT_HOST_EVENT_ATTEMPTS,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");

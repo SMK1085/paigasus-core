@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::lease_store::{CANDIDATE_LIMIT, CANDIDATES_SQL, PgLeaseStore};
-use paigasus_agent_host_core::ids::{AgentId, EventId, InboxId, RunId};
+use paigasus_agent_host_core::ids::{EventId, InboxId, RunId};
 use paigasus_agent_host_core::inbox::NewInboxEvent;
 use paigasus_agent_host_core::lease::HeartbeatError;
 use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, LeaseRepository};
@@ -221,7 +221,7 @@ async fn acquire_next_takes_the_inbox_with_the_oldest_pending_event() {
     ))
     .await
     .expect("set the event times");
-    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving(vec![AgentId::new(u(1), u(3)), AgentId::new(u(1), u(30))]);
+    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving_models(vec!["scripted".to_owned()]);
     let first = store.acquire_next("w", TTL).await.expect("acquire_next").expect("some");
     assert_eq!(first.inbox(), &inbox_id(20));
     let second = store.acquire_next("w", TTL).await.expect("acquire_next").expect("some");
@@ -234,7 +234,7 @@ async fn acquire_next_skips_an_inbox_with_a_live_lease() {
     let Some((_node, _url, db)) = migrated_postgres().await else { return };
     insert_inbox(&db, u(1), u(10), u(3), u(4)).await;
     insert_pending_event(&db, u(10), u(101), 5).await;
-    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving(vec![AgentId::new(u(1), u(3))]);
+    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving_models(vec!["scripted".to_owned()]);
     let _held = store.acquire(&inbox_id(10), "w1", TTL).await.expect("acquire").expect("some");
     assert!(store.acquire_next("w2", TTL).await.expect("acquire_next").is_none());
 }
@@ -245,7 +245,7 @@ async fn acquire_next_skips_an_inbox_whose_events_wait_on_not_before() {
     insert_inbox(&db, u(1), u(10), u(3), u(4)).await;
     insert_pending_event(&db, u(10), u(101), 5).await;
     db.execute_unprepared("UPDATE inbox_event SET not_before = now() + interval '1 hour'").await.expect("update");
-    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving(vec![AgentId::new(u(1), u(3))]);
+    let store = PgLeaseStore::new(db, HB_TIMEOUT).serving_models(vec!["scripted".to_owned()]);
     assert!(store.acquire_next("w", TTL).await.expect("acquire_next").is_none());
 }
 
@@ -261,7 +261,7 @@ async fn acquire_next_on_many_inboxes_gives_one_holder_each() {
         let url = url.clone();
         tasks.push(tokio::spawn(async move {
             let conn = support::connect_pinned(&url).await;
-            let store = PgLeaseStore::new(conn, HB_TIMEOUT).serving((0..20u128).map(|n| AgentId::new(u(1), u(500 + n))).collect());
+            let store = PgLeaseStore::new(conn, HB_TIMEOUT).serving_models(vec!["scripted".to_owned()]);
             let mut taken = Vec::new();
             while let Some(handle) = store.acquire_next(&format!("w{w}"), Duration::from_secs(60)).await.expect("acquire_next") {
                 taken.push(handle.inbox().uuid());
@@ -290,7 +290,7 @@ async fn an_open_acquirer_does_not_block_an_insert() {
         .query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             CANDIDATES_SQL,
-            [limit.into(), vec![u(1)].into(), vec![u(3)].into()],
+            [limit.into(), vec!["scripted".to_owned()].into()],
         ))
         .await
         .expect("candidates");

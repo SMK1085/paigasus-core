@@ -1,6 +1,7 @@
 # The agent host needs its own database. A separate schema in a shared database is not supported.
 
 # http_addr = "0.0.0.0:8086"
+# grpc_addr = "0.0.0.0:8087"   # the gRPC AgentService. Needs [iam]. The port must differ from http_addr and metrics.addr
 # database_url = "postgres://user:password@localhost/agent_host"   # required
 # log_level = "info"
 
@@ -28,15 +29,6 @@
 # [retry]
 # base_delay_secs = 30      # the delay before the first retry. Range 1 to 3600
 # max_delay_secs = 1800     # the cap of the delay. Range 1 to 86400, and at least base_delay_secs
-
-# One table per agent. The id is an agent PRN: prn:pgs:agents::<org-uuid>:agent/<agent-uuid>.
-# The ids must be unique. The only known tool is "memory".
-# [[agents]]
-# id = "prn:pgs:agents::00000000-0000-0000-0000-000000000001:agent/00000000-0000-0000-0000-000000000002"
-# name = "triage"
-# model = "scripted"        # a model name; boot checks it against the model registry
-# instructions = "Sort the request and answer it."
-# tools = ["memory"]        # optional
 
 # [lease]
 # ttl_secs = 30             # 3 to 600, and at least 3 x heartbeat_interval_secs
@@ -82,7 +74,7 @@
 
 # [memory]
 # backend = "postgres"      # "postgres" or "s3". A backend switch does not move data. "s3" needs [memory.s3]
-#                           # "s3" with worker.enabled = true and an [[agents]] entry stops the boot: the worker supports only "postgres" for now
+#                           # "s3" needs worker.enabled = false: the worker supports only "postgres" for now
 # [memory.caps]
 # max_file_bytes = 65536          # greater than 0
 # max_store_bytes = 1048576       # greater than 0

@@ -62,6 +62,9 @@ rand = { workspace = true }
 tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
 # `adapters::http::auth` reads the `ErrorInfo` reason of an IAM `Status`.
 tonic-types = { workspace = true }
+# `main.rs` serves the gRPC `AgentService` through a `TcpListenerStream` (SMA-852). The tests of
+# `tests/support/fake_iam.rs` use it too.
+tokio-stream = { workspace = true, features = ["net"] }
 # The generated IAM clients and messages, and the `ErrorReason` registry of `http::error`.
 paigasus-proto = { workspace = true }
 # `adapters::http::ingress` parses and builds the CloudEvents envelope (spec §5.2).
@@ -93,8 +96,6 @@ figment = { workspace = true, features = ["test"] }
 paigasus-test-docker = { workspace = true }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres", "nats"] }
-# `tests/support/fake_iam.rs` — the fake IAM gRPC server listens through a `TcpListenerStream`.
-tokio-stream = { workspace = true, features = ["net"] }
 # The tests of `application::lease_keeper` run on paused time.
 tokio = { workspace = true, features = ["test-util"] }
 # The counter tests of `application::ingest` read a local `DebuggingRecorder`.

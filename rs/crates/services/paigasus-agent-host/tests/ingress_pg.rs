@@ -31,14 +31,19 @@ const AGENT: u128 = 3;
 const OWNER: u128 = 4;
 
 fn app(db: &DatabaseConnection) -> Router {
+    app_with(db, StubIam::api_key(u(OWNER)))
+}
+
+fn app_with(db: &DatabaseConnection, iam: StubIam) -> Router {
     app_router(
         AppState {
             db: db.clone(),
             inboxes: Arc::new(PgInboxRepository::new(db.clone())),
             ingress: Some(Arc::new(Ingress {
-                iam: Arc::new(StubIam::api_key(u(OWNER))),
+                iam: Arc::new(iam),
                 max_body_bytes: 262_144,
             })),
+            agents: None,
             memory: MemoryCommit::InTransaction(PgMemoryStore::new(DatabaseConnection::default())),
         },
         None,
@@ -120,4 +125,36 @@ async fn a_foreign_threadid_is_stored_as_null() {
     assert!(row.try_get::<bool>("", "v").unwrap());
     let envelope: Value = serde_json::from_str(&row.try_get::<String>("", "envelope").unwrap()).unwrap();
     assert_eq!(envelope["threadid"], foreign.to_string());
+}
+
+async fn archive_agent(db: &DatabaseConnection) {
+    db.execute_unprepared(&format!("UPDATE agent SET archived_at = now() WHERE id = '{}'", u(AGENT)))
+        .await
+        .expect("archive");
+}
+
+#[tokio::test]
+async fn an_authorized_post_to_an_archived_agents_inbox_is_409_agent_archived_and_writes_no_row() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(ORG), u(INBOX), u(AGENT), u(OWNER)).await;
+    archive_agent(&db).await;
+    let (status, body) = post(&app(&db), &event()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "agent-archived");
+    assert_eq!(body["error"]["message"], "the agent is archived");
+    let row = one_row(&db, "SELECT count(*) AS n FROM inbox_event").await;
+    assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0);
+}
+
+#[tokio::test]
+async fn an_unauthorized_post_to_an_archived_agents_inbox_is_403() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(ORG), u(INBOX), u(AGENT), u(OWNER)).await;
+    archive_agent(&db).await;
+    // The caller is not the owner and IAM refuses: the answer must not tell that the agent is archived.
+    let (status, body) = post(&app_with(&db, StubIam::api_key(u(0x11)).allowing(false)), &event()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "forbidden");
+    let row = one_row(&db, "SELECT count(*) AS n FROM inbox_event").await;
+    assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0);
 }

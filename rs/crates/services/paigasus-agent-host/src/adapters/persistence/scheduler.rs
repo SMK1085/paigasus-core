@@ -158,7 +158,8 @@ struct Fired {
     ctx: Ctx,
     kind: &'static str,
     origin: &'static str,
-    duplicate: bool,
+    /// `"inserted"`, `"duplicate"` or `"agent_archived"`.
+    outcome: &'static str,
 }
 
 /// Run `f`. A panic in it is a permanent failure of the row. The payload is not read: it can hold
@@ -210,7 +211,7 @@ impl PgScheduler {
                         paigasus_observability::names::AGENT_HOST_TIMER_FIRED_TOTAL,
                         "kind" => fired.kind,
                         "origin" => fired.origin,
-                        "outcome" => if fired.duplicate { "duplicate" } else { "inserted" }
+                        "outcome" => fired.outcome
                     )
                     .increment(1);
                     return Ok(true);
@@ -267,24 +268,41 @@ impl PgScheduler {
         .map_err(fail)?;
 
         let outcome = insert_event_in(txn, &event).await.map_err(|e| fail(Fail::db(&e)))?;
-        let duplicate = match &outcome {
-            InsertOutcome::Inserted { .. } => false,
+        let label = match &outcome {
+            InsertOutcome::Inserted { .. } => "inserted",
             InsertOutcome::Duplicate { payload_matches, .. } => {
                 if !payload_matches {
                     tracing::warn!(timer_id = %ctx.id, "a timer event exists with the same key and another payload");
                 }
-                true
+                "duplicate"
             }
+            InsertOutcome::AgentArchived => "agent_archived",
         };
         if let Some(hook) = &self.hook {
             hook.after_insert(txn, &outcome).await;
+        }
+        if matches!(outcome, InsertOutcome::AgentArchived) {
+            // The agent is archived: no event, and the timer is cancelled in this transaction.
+            // Lock order (SMA-852): `archive` locks the agent row, then its timer rows. This
+            // transaction holds the timer row `FOR UPDATE`, so it must not lock the agent row.
+            // The insert reads `agent` with a plain `EXISTS` (no `FOR SHARE`, no `FOR UPDATE`).
+            txn.execute_raw(stmt("UPDATE timer SET status = 'cancelled', updated_at = now() WHERE id = $1", vec![ctx.id.into()]))
+                .await
+                .map_err(|e| fail(Fail::db(&e)))?;
+            tracing::warn!(timer_id = %ctx.id, "the agent of the timer is archived; the timer is cancelled and writes no event");
+            return Ok(Some(Fired {
+                kind: timer.kind().as_str(),
+                origin: timer.origin().as_str(),
+                ctx,
+                outcome: label,
+            }));
         }
         update_fired(txn, &timer, &plan).await.map_err(|e| fail(Fail::db(&e)))?;
         Ok(Some(Fired {
             kind: timer.kind().as_str(),
             origin: timer.origin().as_str(),
             ctx,
-            duplicate,
+            outcome: label,
         }))
     }
 

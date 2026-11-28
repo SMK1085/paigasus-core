@@ -52,6 +52,9 @@ enum ErrorDomain {
 
   // "gateway.paigasus.io"
   ERROR_DOMAIN_GATEWAY = 2;
+
+  // "agents.paigasus.io"
+  ERROR_DOMAIN_AGENTS = 3;
 }
 
 // The canonical error vocabulary. See the file comment for the mapping rule,
@@ -371,7 +374,9 @@ enum ErrorReason {
   ERROR_REASON_INVALID_REQUEST_SCHEMA = 906;
   // "invalid-query-parameter" — a query-string parameter could not be
   // deserialized into its target type, or was supplied more than once.
-  // Emitted by IAM's EnvelopeQuery extractor before any handler runs.
+  // Emitted by the EnvelopeQuery extractor of IAM and of the agent host
+  // before any handler runs. The agent host also emits it for an
+  // include_archived value that is not true or false.
   // HTTP-only: gRPC has no query string. Unlike 905/906, that property is
   // NOT enforced by the transport — this reason is a TenancyError variant,
   // which the gRPC surface also maps — so it is held by a source scan in
@@ -390,4 +395,30 @@ enum ErrorReason {
   // In the shared range (900-999). Emitted by the agent host (SMA-787).
   // "store-unavailable" — the service cannot reach its database. Retryable (503).
   ERROR_REASON_STORE_UNAVAILABLE = 910;
+  // In the shared range (900-999). Emitted by the agent host (SMA-852).
+  // "agent-name-taken" — an active agent of the organization already has this name. HTTP 409.
+  ERROR_REASON_AGENT_NAME_TAKEN = 911;
+  // In the shared range (900-999). Emitted by the agent host (SMA-852).
+  // "inbox-exists" — the agent already has an inbox for this principal. HTTP 409. Metadata
+  // key `inbox`: the PRN of the existing inbox.
+  ERROR_REASON_INBOX_EXISTS = 912;
+  // In the shared range (900-999). Emitted by the agent host (SMA-852).
+  // "agent-version-mismatch" — the version in an update is not the current version of the
+  // agent. HTTP 409. Metadata key `version`: the current version.
+  ERROR_REASON_AGENT_VERSION_MISMATCH = 913;
+  // In the shared range (900-999). Emitted by the agent host (SMA-852).
+  // "agent-archived" — the agent is archived and the call needs an active agent. HTTP 409.
+  ERROR_REASON_AGENT_ARCHIVED = 914;
+  // In the shared range (900-999). Emitted by the agent host (SMA-852).
+  // "unknown-model" — the model of the agent is not one that the host serves. HTTP 400.
+  // Metadata key `model`: the rejected value.
+  ERROR_REASON_UNKNOWN_MODEL = 915;
+  // In the shared range (900-999). Emitted by the agent host (SMA-852).
+  // "unknown-tool" — a tool of the agent is not in the tool catalog. HTTP 400. Metadata key
+  // `tool`: the rejected value.
+  ERROR_REASON_UNKNOWN_TOOL = 916;
+  // In the shared range (900-999). Emitted by the agent host (SMA-852).
+  // "invalid-agent-field" — a field of the agent is empty, too long or malformed. HTTP 400.
+  // Metadata key `field`: the name of the field.
+  ERROR_REASON_INVALID_AGENT_FIELD = 917;
 }

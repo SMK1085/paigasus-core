@@ -161,9 +161,9 @@ async fn down_drops_every_table_of_m0003_in_dependency_order() {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
-    // m0004 (the timer table, SMA-788) and m0005 (the session table, SMA-790) are newer than
-    // m0003, so three steps down reach m0003.
-    Migrator::down(&db, Some(3)).await.expect("down of m0005, m0004 and m0003");
+    // m0004 (the timer table, SMA-788), m0005 (the session table, SMA-790) and m0006 (the agent
+    // table, SMA-852) are newer than m0003, so four steps down reach m0003.
+    Migrator::down(&db, Some(4)).await.expect("down of m0006, m0005, m0004 and m0003");
     for table in ["thread", "inbox_lease", "run", "run_event", "inbox_event"] {
         assert!(support::scalar_bool(&db, &format!("SELECT to_regclass('{table}') IS NULL AS v")).await, "{table} must be gone");
     }
@@ -316,7 +316,7 @@ async fn m0004_down_drops_only_the_timer_table() {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
-    Migrator::down(&db, Some(2)).await.expect("down of m0005 and m0004");
+    Migrator::down(&db, Some(3)).await.expect("down of m0006, m0005 and m0004");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('timer') IS NULL AS v").await, "timer must be gone");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('inbox_event') IS NOT NULL AS v").await, "m0003 must stay");
 }
@@ -352,7 +352,7 @@ async fn down_of_m0005_drops_session_event_and_the_run_columns() {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
-    Migrator::down(&db, Some(1)).await.expect("down of m0005");
+    Migrator::down(&db, Some(2)).await.expect("down of m0006 and m0005");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('session_event') IS NULL AS v").await);
     assert!(
         support::scalar_bool(
@@ -396,4 +396,75 @@ async fn a_session_event_cannot_name_a_run_of_another_inbox() {
     // Inbox 1, thread 500 of inbox 1, run 601 of inbox 2: only the run key fails.
     let err = db.execute_unprepared(&session_event_sql(id(1), id(500), 0, id(601))).await.expect_err("must fail");
     assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+}
+
+fn raw_inbox_sql(org: Uuid, inbox: Uuid, agent: Uuid) -> String {
+    format!("INSERT INTO inbox (id, org_id, agent_id, principal_id) VALUES ('{inbox}', '{org}', '{agent}', '{inbox}')")
+}
+
+fn raw_agent_sql(org: Uuid, agent: Uuid, name: &str) -> String {
+    format!("INSERT INTO agent (id, org_id, name, model, instructions) VALUES ('{agent}', '{org}', '{name}', 'scripted', 'test')")
+}
+
+#[tokio::test]
+async fn m0006_creates_the_agent_table_and_the_inbox_foreign_key() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    // No agent row: the foreign key refuses the inbox.
+    let err = db.execute_unprepared(&raw_inbox_sql(id(100), id(1), id(10))).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+    // An agent row of the same org: the inbox succeeds.
+    db.execute_unprepared(&raw_agent_sql(id(100), id(10), "a")).await.expect("insert agent");
+    db.execute_unprepared(&raw_inbox_sql(id(100), id(1), id(10))).await.expect("inbox of the same org");
+    // An inbox of another org than its agent's org fails.
+    let err = db.execute_unprepared(&raw_inbox_sql(id(101), id(2), id(10))).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+}
+
+#[tokio::test]
+async fn m0006_down_drops_the_agent_table_and_the_constraint() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('agent') IS NOT NULL AS v").await, "agent must exist before down");
+    let err = db.execute_unprepared(&raw_inbox_sql(id(100), id(1), id(10))).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
+    Migrator::down(&db, Some(1)).await.expect("down of m0006");
+    db.execute_unprepared(&raw_inbox_sql(id(100), id(1), id(10))).await.expect("an inbox without an agent");
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('agent') IS NULL AS v").await, "agent must be gone");
+}
+
+#[tokio::test]
+async fn m0006_fails_on_an_inbox_without_an_agent() {
+    let Some((_node, url)) = support::start_raw_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    let db = support::connect(&url).await;
+    Migrator::up(&db, Some(5)).await.expect("up to m0005");
+    db.execute_unprepared(&raw_inbox_sql(id(100), id(1), id(10))).await.expect("insert inbox");
+    let err = Migrator::up(&db, None).await.expect_err("m0006 must fail");
+    assert!(format!("{err}").contains("inbox_agent_fk"), "the error must name the constraint: {err}");
+    assert_eq!(support::scalar_i64(&db, "SELECT count(*) AS n FROM agent_host_migrations").await, 5);
+    assert!(
+        support::scalar_bool(&db, "SELECT to_regclass('agent') IS NULL AS v").await,
+        "the failed m0006 must roll back the agent table"
+    );
+}
+
+#[tokio::test]
+async fn the_agent_name_is_unique_among_active_agents_only() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping schema test: Docker unavailable");
+        return;
+    };
+    db.execute_unprepared(&raw_agent_sql(id(100), id(10), "same")).await.expect("first agent");
+    let err = db.execute_unprepared(&raw_agent_sql(id(100), id(11), "same")).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))), "expected 23505, got {err:?}");
+    assert!(format!("{err}").contains("agent_org_name_active"), "the error must name the index: {err}");
+    db.execute_unprepared(&format!("UPDATE agent SET archived_at = now() WHERE id = '{}'", id(10))).await.expect("archive");
+    db.execute_unprepared(&raw_agent_sql(id(100), id(11), "same")).await.expect("the name is free again");
 }

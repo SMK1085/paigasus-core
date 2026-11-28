@@ -23,7 +23,7 @@ pub async fn not_found() -> Response {
 pub enum ApiError {
     /// 401: no credential, a credential that IAM refuses, or a scheme other than `Bearer`.
     InvalidToken,
-    /// 403: the caller may not write to this inbox.
+    /// 403: the caller may not perform this action.
     Forbidden,
     /// 503: IAM cannot be reached. The client can retry.
     IamUnavailable,
@@ -33,10 +33,14 @@ pub enum ApiError {
     RequestTooLarge,
     /// 400: the body cannot be read, or it is not JSON.
     BadRequestBody,
-    /// 400: the body is JSON, and it is not a valid CloudEvent for this route.
+    /// 400: the request does not match the schema of the route (for ingress: a CloudEvent).
     InvalidRequestSchema,
     /// 400: a path segment is not a UUID.
     InvalidUuid,
+    /// 400: the query string does not parse into the query of the route.
+    InvalidQueryParameter,
+    /// 409: the agent of the inbox is archived. It takes no new events.
+    AgentArchived,
     /// 503: the database failed. The client can retry.
     StoreUnavailable,
     /// 500: an unexpected fault. The detail stays in the logs.
@@ -49,13 +53,15 @@ impl ApiError {
     pub fn parts(&self) -> (StatusCode, &'static str, &'static str) {
         match self {
             ApiError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid-token", "the bearer credential is missing or not valid"),
-            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "the caller may not write to this inbox"),
+            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "the caller may not perform this action"),
             ApiError::IamUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "iam-unavailable", "the identity service cannot be reached; retry later"),
             ApiError::UnsupportedContentType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported-content-type", "the content type must be application/cloudevents+json"),
             ApiError::RequestTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "request-too-large", "the request body is larger than the limit"),
             ApiError::BadRequestBody => (StatusCode::BAD_REQUEST, "invalid-request-body", "the request body is not valid JSON"),
-            ApiError::InvalidRequestSchema => (StatusCode::BAD_REQUEST, "invalid-request-schema", "the request body is not a valid CloudEvent for this route"),
+            ApiError::InvalidRequestSchema => (StatusCode::BAD_REQUEST, "invalid-request-schema", "the request does not match the schema of this route"),
             ApiError::InvalidUuid => (StatusCode::BAD_REQUEST, "invalid-uuid", "a path segment is not a valid UUID"),
+            ApiError::InvalidQueryParameter => (StatusCode::BAD_REQUEST, "invalid-query-parameter", "a query parameter is not valid"),
+            ApiError::AgentArchived => (StatusCode::CONFLICT, "agent-archived", "the agent is archived"),
             ApiError::StoreUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "store-unavailable", "the store cannot be reached; retry later"),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal", "an internal error occurred"),
         }
@@ -93,6 +99,8 @@ mod tests {
             (ApiError::BadRequestBody, ErrorReason::InvalidRequestBody),
             (ApiError::InvalidRequestSchema, ErrorReason::InvalidRequestSchema),
             (ApiError::InvalidUuid, ErrorReason::InvalidUuid),
+            (ApiError::InvalidQueryParameter, ErrorReason::InvalidQueryParameter),
+            (ApiError::AgentArchived, ErrorReason::AgentArchived),
             (ApiError::StoreUnavailable, ErrorReason::StoreUnavailable),
             (ApiError::Internal, ErrorReason::Internal),
         ] {
@@ -112,6 +120,8 @@ mod tests {
             ApiError::BadRequestBody,
             ApiError::InvalidRequestSchema,
             ApiError::InvalidUuid,
+            ApiError::InvalidQueryParameter,
+            ApiError::AgentArchived,
             ApiError::StoreUnavailable,
             ApiError::Internal,
         ] {

@@ -2,7 +2,7 @@
 
 The agent host service. This crate holds the configuration, the database migrations, the event
 inbox and the HTTP surface of the service. The surface serves `/healthz`, `/readyz` and `/metrics`.
-It also serves the event ingress when `[iam]` is set. Any other path returns the 404 error envelope.
+It also serves the event ingress and the agent API when `[iam]` is set. Any other path returns the 404 error envelope.
 
 The agent host needs its own database. A separate schema in a shared database is not supported.
 
@@ -15,12 +15,13 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | Key | Environment variable | Default | Meaning |
 |---|---|---|---|
 | `http_addr` | `AGENT_HOST_HTTP_ADDR` | `0.0.0.0:8086` | Address of the HTTP listener. |
+| `grpc_addr` | `AGENT_HOST_GRPC_ADDR` | none | Address of the gRPC listener of the agent API. It needs `[iam]`. Its port must differ from the ports of `http_addr` and `metrics.addr`. |
 | `database_url` | `AGENT_HOST_DATABASE_URL` | none (required) | Postgres connection string. |
 | `log_level` | `AGENT_HOST_LOG_LEVEL` | `info` | Log filter. |
 | `metrics.enabled` | `AGENT_HOST_METRICS__ENABLED` | `true` | Serve `/metrics`. |
 | `metrics.addr` | `AGENT_HOST_METRICS__ADDR` | none | Separate metrics listener. Its port must differ from the port of `http_addr`. |
 | `migration.lock_wait_secs` | `AGENT_HOST_MIGRATION__LOCK_WAIT_SECS` | `120` | Seconds to wait for the migration lock. Range 1 to 3600. |
-| `worker.enabled` | `AGENT_HOST_WORKER__ENABLED` | `true` | The service reads and validates this value. It has no effect until SMA-790. |
+| `worker.enabled` | `AGENT_HOST_WORKER__ENABLED` | `true` | Start the worker pool. `memory.backend = "s3"` needs `false`. |
 | `lease.ttl_secs` | `AGENT_HOST_LEASE__TTL_SECS` | `30` | Time to live of an inbox lease. Range 3 to 600, and at least 3 times `lease.heartbeat_interval_secs`. |
 | `lease.heartbeat_interval_secs` | `AGENT_HOST_LEASE__HEARTBEAT_INTERVAL_SECS` | `10` | Seconds between two lease heartbeats. Range 1 to 200. |
 | `claim.batch_limit` | `AGENT_HOST_CLAIM__BATCH_LIMIT` | `20` | Maximum number of events in one claim. Range 1 to 500. |
@@ -65,6 +66,8 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 
 Set `memory.backend = "s3"` and the `memory.s3` section to keep the agent memory in an S3 bucket.
 The store works with AWS S3 and with S3-compatible stores.
+
+- The worker supports only the Postgres store. `worker.enabled` is `true` by default, so an S3 configuration must set `worker.enabled = false`. Without it, the boot stops. An agent can now arrive at run time, so the check no longer looks at the agent list.
 
 - A backend switch does not move data. The old backend keeps its files. The destination shows the data that it already holds. Only a fresh destination starts empty. A switch back shows the old data again.
 - The bucket must not keep object versions. The boot probe refuses a bucket that keeps versions.
@@ -172,6 +175,132 @@ An API key must have the scope Root or the organization of the inbox. Then two c
 
 The service compares principals by UUID, not by string. The owner path does not run the IAM policy
 `forbid-archived-writes`. An owner in an archived organization can still write to the own inbox.
+
+## Agent API
+
+An agent is a row of the table `agent`. It holds the name, the model, the instructions and the list
+of tool names. The API makes, changes and archives agents, and binds an agent to a principal through
+an inbox. The `[[agents]]` section of the configuration is removed. A configuration that has it, or
+an `AGENT_HOST_AGENTS*` variable, fails the boot with the message "`[[agents]]` is removed; use the
+agent API (SMA-852)". The API needs `[iam]`.
+
+The API is on `http_addr` (REST) and, when `grpc_addr` is set, on `grpc_addr` (gRPC `AgentService`).
+The service does not terminate TLS. The ingress or the mesh in front of it does.
+
+| Route | RPC | Action |
+|---|---|---|
+| `POST /v1/agents` | `CreateAgent` | Make an agent. Answer 201. |
+| `GET /v1/agents?org=<org PRN>` | `ListAgents` | List the agents of an organization. Optional `include_archived`, `page_size` (1 to 100), `page_token`. |
+| `GET /v1/agents/{agent}` | `GetAgent` | Read one agent. |
+| `PATCH /v1/agents/{agent}` | `UpdateAgent` | Replace `name`, `model`, `instructions` and `tools`. The body needs the current `version`. |
+| `DELETE /v1/agents/{agent}` | `ArchiveAgent` | Archive the agent. It keeps the row and frees the name. |
+| `POST /v1/agents/{agent}/inboxes` | `CreateInbox` | Bind the agent to a principal. Answer 201. |
+| `GET /v1/agents/{agent}/inboxes` | `ListInboxes` | List the inboxes of an agent. |
+| `GET /v1/inboxes/{inbox}` | `GetInbox` | Read one inbox. |
+
+`{agent}` and `{inbox}` are UUIDs. An answer gives the PRN of an agent in `agent` and the PRN of
+an inbox in `inbox`. A path takes only the last segment of the PRN, which is the UUID. A page token
+is opaque. Use it only with the same organization and filter that made it. The default page size is
+50. The maximum page size is 100.
+
+The field names differ between the transports. REST uses `org` and `principal`. gRPC uses
+`org_prn` and `principal_prn`. The metadata of `invalid-agent-field` names the field of the
+transport that was called. A negative `version` is `invalid-agent-field` over gRPC and
+`invalid-request-schema` over REST.
+
+```sh
+# Make an agent. The answer holds the PRN of the agent in "agent".
+# The path takes only the UUID, the last segment of the PRN.
+AGENT=$(curl -sS -X POST http://localhost:8086/v1/agents \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"org":"<org PRN>","name":"support","model":"<model id>",
+       "instructions":"Answer the customer.","tools":[]}' | jq -r '.agent | split("/") | last')
+
+# Bind the agent to a principal. The answer holds the PRN of the inbox in "inbox".
+# Use the same extraction for GET /v1/inboxes/{inbox}.
+curl -sS -X POST "http://localhost:8086/v1/agents/$AGENT/inboxes" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"principal":"<principal PRN>"}' | jq -r '.inbox | split("/") | last'
+```
+
+The `model` must be a model that this host serves. A tool name must be a tool that this host has.
+In a build with no model, every create fails with `unknown-model` until SMA-851 adds a model.
+
+### Authorization
+
+The service authenticates the caller as the event ingress does. Then it asks IAM about the
+organization of the agent. Two IAM actions apply:
+
+- `ManageAgents` allows create, update, archive and bind.
+- `ReadAgents` allows get and list.
+
+The role template `agent_admin` holds both actions at an organization. The role `org_admin` holds
+`ReadAgents` only. An `org_admin` grants `agent_admin` through the IAM call `GrantRole`, with the
+`principal_prn`, the `role_key` `agent_admin` and the `scope_prn` of the organization. IAM audits
+the grant. An API key must have the scope Root or the organization of the agent. An unknown id, an
+id of another organization, a key of another organization and a missing right all give the same
+403 answer.
+
+A bind does not check the principal. A holder of `ManageAgents` can bind an agent to any principal.
+SMA-793 must add a check before a run acts for the principal.
+
+### Rollout
+
+IAM must deploy before the agent host. The new IAM has the starter policy revision 9 and knows the
+actions `ManageAgents` and `ReadAgents`. An agent host that asks an older IAM about them gets
+`InvalidAction`, and the API answers 503.
+
+The starter policy id `agent_admin` can collide with a policy of the same id that an operator made.
+IAM then refuses the upgrade with `StarterPolicyIdCollision`. Rename that policy before the IAM
+upgrade.
+
+### NATS channels
+
+A `[[nats.channels]]` entry needs its inbox at boot. The API is mounted after that check. So make
+the inbox through the API first, then add the channel and restart the service once. HTTP ingress
+works at once, with no restart.
+
+### Errors
+
+| Status | Code | Meaning |
+|---|---|---|
+| 400 | `unknown-model` | The host does not serve the model. The metadata key `model` names it. |
+| 400 | `unknown-tool` | The host does not have the tool. The metadata key `tool` names it. |
+| 400 | `invalid-agent-field` | A field is empty, too long or not valid. The metadata key `field` names the field. |
+| 400 | `invalid-pagination` | The page size is out of range. |
+| 400 | `invalid-cursor` | The page token is not valid for this list. |
+| 400 | `invalid-query-parameter` | A query parameter is not valid or occurs twice. REST only. |
+| 400 | `invalid-request-body` | The body is not JSON. REST only. |
+| 400 | `invalid-request-schema` | The JSON does not have the shape of the route. REST only. |
+| 400 | `invalid-uuid` | A path segment is not a UUID. REST only. |
+| 413 | `request-too-large` | The body is larger than the limit. REST only. |
+| 409 | `agent-name-taken` | An active agent of the organization has this name. |
+| 409 | `agent-version-mismatch` | The `version` is not the current version. The metadata key `version` holds the current one. |
+| 409 | `agent-archived` | The agent is archived. |
+| 409 | `inbox-exists` | The agent has an inbox for this principal. The metadata key `inbox` holds its PRN. |
+
+The shared codes `invalid-token` (401), `forbidden` (403), `iam-unavailable` (503),
+`store-unavailable` (503) and `internal` (500) also apply. The error envelope has the optional key
+`metadata` when the error has metadata.
+
+### Rollback
+
+Migration `m0006_create_agent` makes the table `agent` and the foreign key `inbox_agent_fk`. An
+older binary (the build before SMA-852) does not start on a database that has m0006. It stops with
+exit code 1 and this message:
+
+```text
+Error: migration failed under the advisory lock: Custom Error: Migration file of version 'm0006_create_agent' is missing, this migration has been applied but its file is missing
+```
+
+The refusal was measured with a binary built from the base of the branch against a Postgres 16
+database that the new binary migrated. The old binary does not run `down`. To roll back, restore a
+backup that was made before the upgrade. Or run `ALTER TABLE inbox DROP CONSTRAINT inbox_agent_fk`
+and `DROP TABLE agent`, and delete the row `m0006_create_agent` from `agent_host_migrations`. These
+manual steps are not measured. The old binary has no code that inserts a row into the table
+`inbox`. Rows reach it only by SQL. With `inbox_agent_fk` in place, such an insert for an agent
+with no `agent` row fails with `violates foreign key constraint "inbox_agent_fk"`. The old binary
+does not read `agent`, so it serves no agent that was made through the API.
 
 ## Storage
 

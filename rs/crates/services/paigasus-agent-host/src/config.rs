@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::{Figment, error::Error as FigmentError};
-use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::claim::ClaimConfig;
-use paigasus_agent_host_core::ids::AgentId;
 use paigasus_agent_host_core::memory::MemoryCaps;
 use paigasus_agent_host_core::mid_run::MidRunPolicy;
 use paigasus_agent_host_core::retry::RetryPolicy;
@@ -87,13 +85,13 @@ pub struct Config {
     pub run: RunSettings,
     /// The retry delay of a failed run (spec §6.9, §6.12).
     pub retry: RetrySettings,
-    /// The agents that this host can run (spec §6.2). The list can be empty.
+    /// The gRPC listener of `AgentService` (spec §6.5). Needs `[iam]`.
     #[serde(default)]
-    pub agents: Vec<AgentConfig>,
+    pub grpc_addr: Option<SocketAddr>,
+    /// The removed `[[agents]]` key. Only `validate` reads it, to refuse it (spec §6.9, A5).
+    #[serde(default, rename = "agents", skip_serializing)]
+    pub removed_agents: Option<figment::value::Value>,
 }
-
-/// The tool names that an `[[agents]]` entry can list.
-pub const KNOWN_TOOLS: &[&str] = &["memory"];
 
 /// The timers (spec §9.1, §9.2). Every number has a range that [`Config::validate`] checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -402,19 +400,6 @@ impl RetrySettings {
     }
 }
 
-/// One `[[agents]]` entry (spec §6.2).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct AgentConfig {
-    /// The agent PRN: `prn:pgs:agents::<org>:agent/<uuid>`.
-    pub id: String,
-    pub name: String,
-    /// The model name. Task 14 checks it against the model registry.
-    pub model: String,
-    pub instructions: String,
-    #[serde(default)]
-    pub tools: Vec<String>,
-}
-
 /// The inbox lease (spec §8.6, §8.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LeaseConfig {
@@ -602,7 +587,7 @@ pub enum ConfigError {
     /// The worker pool starts and the S3 memory store is selected. The run commit of the worker
     /// supports only the Postgres store until its S3 commit semantics are decided.
     #[error(
-        "memory.backend is \"s3\", and the worker pool starts (worker.enabled is true and an [[agents]] entry exists): the worker supports only the Postgres memory store for now. Set memory.backend = \"postgres\", or set worker.enabled = false"
+        "memory.backend is \"s3\", and the worker pool starts (worker.enabled is true): the worker supports only the Postgres memory store for now. Set memory.backend = \"postgres\", or set worker.enabled = false"
     )]
     WorkerNeedsPostgresMemory,
     #[error("timers.{key} must be between {min} and {max} (got {value})")]
@@ -611,12 +596,12 @@ pub enum ConfigError {
     ValueOutOfRange { key: &'static str, value: u64, min: u64, max: u64 },
     #[error("retry.max_delay_secs ({max}) must be at least retry.base_delay_secs ({base})")]
     RetryMaxBelowBase { base: u64, max: u64 },
-    #[error("agents: the id \"{0}\" is not an agent PRN (prn:pgs:agents::<org>:agent/<uuid>)")]
-    AgentIdInvalid(String),
-    #[error("agents: the id \"{0}\" is used by two entries")]
-    AgentDuplicate(String),
-    #[error("agents: the agent \"{agent}\" lists the unknown tool \"{tool}\"")]
-    AgentUnknownTool { agent: String, tool: String },
+    #[error("`[[agents]]` is removed; use the agent API (SMA-852)")]
+    AgentsRemoved,
+    #[error("grpc_addr needs an [iam] section")]
+    GrpcNeedsIam,
+    #[error("grpc_addr must use a different port than http_addr and metrics.addr")]
+    GrpcPortClash,
 }
 
 /// The defaults. `database_url` has none: it is required. `iam` has none: no `[iam]` section
@@ -857,11 +842,23 @@ impl Config {
     /// Boot-time checks that serde does not make. Each range check runs before the rule that
     /// pairs `lease.ttl_secs` with `lease.heartbeat_interval_secs`.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // The key is removed. Any value refuses the boot, so a stale config cannot start silently.
+        if self.removed_agents.is_some() {
+            return Err(ConfigError::AgentsRemoved);
+        }
         // Compare the port only. Two addresses with one port still fail at bind time.
         if let Some(addr) = self.metrics.addr
             && addr.port() == self.http_addr.port()
         {
             return Err(ConfigError::MetricsPortClash);
+        }
+        if let Some(grpc) = self.grpc_addr {
+            if self.iam.is_none() {
+                return Err(ConfigError::GrpcNeedsIam);
+            }
+            if grpc.port() == self.http_addr.port() || self.metrics.addr.is_some_and(|m| m.port() == grpc.port()) {
+                return Err(ConfigError::GrpcPortClash);
+            }
         }
         if !(1..=3600).contains(&self.migration.lock_wait_secs) {
             return Err(ConfigError::LockWaitOutOfRange(self.migration.lock_wait_secs));
@@ -973,41 +970,13 @@ impl Config {
                 max: retry.max_delay_secs,
             });
         }
-        self.agent_definitions()?;
-        // The worker pool starts only with `worker.enabled` and an agent (see `serve`). Its run
-        // commit cannot commit an external memory store yet, so that pair stops the boot. The S3
-        // store stays usable when the pool does not start.
-        if matches!(self.memory.backend, MemoryBackend::S3) && self.worker.enabled && !self.agents.is_empty() {
+        // The worker pool starts with `worker.enabled`. Its run commit cannot commit an external
+        // memory store yet, so that pair stops the boot. The S3 store stays usable when the pool
+        // does not start.
+        if matches!(self.memory.backend, MemoryBackend::S3) && self.worker.enabled {
             return Err(ConfigError::WorkerNeedsPostgresMemory);
         }
         Ok(())
-    }
-
-    /// The agent definitions of the `[[agents]]` list. An id that is not an agent PRN, an id that
-    /// appears twice and a tool that is not in [`KNOWN_TOOLS`] each give an error.
-    pub fn agent_definitions(&self) -> Result<Vec<AgentDefinition>, ConfigError> {
-        let mut seen = std::collections::HashSet::new();
-        let mut definitions = Vec::with_capacity(self.agents.len());
-        for agent in &self.agents {
-            let id = AgentId::parse(&agent.id).map_err(|_| ConfigError::AgentIdInvalid(agent.id.clone()))?;
-            if !seen.insert(id.clone()) {
-                return Err(ConfigError::AgentDuplicate(agent.id.clone()));
-            }
-            if let Some(tool) = agent.tools.iter().find(|t| !KNOWN_TOOLS.contains(&t.as_str())) {
-                return Err(ConfigError::AgentUnknownTool {
-                    agent: agent.id.clone(),
-                    tool: tool.clone(),
-                });
-            }
-            definitions.push(AgentDefinition {
-                id,
-                name: agent.name.clone(),
-                model_id: agent.model.clone(),
-                instructions: agent.instructions.clone(),
-                tool_names: agent.tools.clone(),
-            });
-        }
-        Ok(definitions)
     }
 }
 
@@ -1500,7 +1469,7 @@ mod tests {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
             jail.create_file(
                 "agent-host.toml",
-                "[memory]\nbackend = \"s3\"\n[memory.s3]\nbucket = \"paigasus-mem\"\nprefix = \"mem\"\nendpoint = \"http://127.0.0.1:9000\"\nallow_http = true\n",
+                "[worker]\nenabled = false\n[memory]\nbackend = \"s3\"\n[memory.s3]\nbucket = \"paigasus-mem\"\nprefix = \"mem\"\nendpoint = \"http://127.0.0.1:9000\"\nallow_http = true\n",
             )?;
             let cfg = with_url();
             assert_eq!(cfg.validate(), Ok(()));
@@ -1518,6 +1487,7 @@ mod tests {
     fn memory_s3_loads_from_the_environment() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AGENT_HOST_WORKER__ENABLED", "false");
             jail.set_env("AGENT_HOST_MEMORY__BACKEND", "s3");
             jail.set_env("AGENT_HOST_MEMORY__S3__BUCKET", "paigasus-mem");
             jail.set_env("AGENT_HOST_MEMORY__S3__PREFIX", "mem");
@@ -1580,26 +1550,22 @@ mod tests {
     }
 
     fn s3_with(extra: &str) -> Config {
-        s3_cfg(&format!("{S3_BASE}{extra}"), None)
+        s3_cfg(&format!("[worker]\nenabled = false\n{S3_BASE}{extra}"), None)
     }
 
     #[test]
     fn the_worker_refuses_the_s3_memory_store() {
-        let agent = agent_toml(&agent_prn(7), "[]");
-        // The pool starts (default `worker.enabled = true`, one agent): the boot is refused.
-        let refused = s3_cfg(&format!("{S3_BASE}{agent}"), None).validate();
+        // The pool starts (default `worker.enabled = true`): the boot is refused. No agent is needed.
+        let refused = s3_cfg(S3_BASE, None).validate();
         assert_eq!(refused, Err(ConfigError::WorkerNeedsPostgresMemory));
         let text = refused.unwrap_err().to_string();
         assert!(
             text.contains("memory.backend") && text.contains("worker.enabled") && text.contains("only the Postgres memory store"),
             "{text}"
         );
-        // No agent: the pool does not start, so the S3 store is allowed.
+        assert!(!text.contains("[[agents]]"), "{text}");
+        // `worker.enabled = false`: the pool does not start, so the S3 store is allowed.
         assert_eq!(s3_with("").validate(), Ok(()));
-        // An agent with `worker.enabled = false`: the pool does not start either.
-        assert_eq!(s3_cfg(&format!("[worker]\nenabled = false\n{S3_BASE}{agent}"), None).validate(), Ok(()));
-        // Positive control: the Postgres store with an agent is valid.
-        assert_eq!(s3_cfg(&agent, None).validate(), Ok(()));
     }
 
     #[test]
@@ -1643,7 +1609,7 @@ mod tests {
         assert_eq!(s3_with("apply_deadline_secs = 0\n").validate(), Err(ConfigError::MemoryS3DeadlineOutOfRange { deadline: 0, ttl: 30 }));
         let at_ttl = s3_cfg(&format!("{S3_BASE}apply_deadline_secs = 30\n"), Some(30));
         assert_eq!(at_ttl.validate(), Err(ConfigError::MemoryS3DeadlineOutOfRange { deadline: 30, ttl: 30 }));
-        let below_ttl = s3_cfg(&format!("{S3_BASE}apply_deadline_secs = 29\n"), Some(30));
+        let below_ttl = s3_cfg(&format!("[worker]\nenabled = false\n{S3_BASE}apply_deadline_secs = 29\n"), Some(30));
         assert_eq!(below_ttl.validate(), Ok(()));
     }
 
@@ -2064,14 +2030,6 @@ mod tests {
         });
     }
 
-    fn agent_toml(id: &str, tools: &str) -> String {
-        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\ntools = {tools}\n")
-    }
-
-    fn agent_prn(n: u128) -> String {
-        paigasus_agent_host_core::ids::AgentId::new(Uuid::from_u128(1), Uuid::from_u128(n)).as_prn().canonical()
-    }
-
     #[test]
     fn the_worker_run_and_retry_defaults_match_the_spec() {
         figment::Jail::expect_with(|jail| {
@@ -2084,7 +2042,8 @@ mod tests {
             assert_eq!(cfg.run.timeout_secs, 300);
             assert_eq!(cfg.retry.base_delay_secs, 30);
             assert_eq!(cfg.retry.max_delay_secs, 1800);
-            assert!(cfg.agents.is_empty());
+            assert_eq!(cfg.grpc_addr, None);
+            assert!(cfg.removed_agents.is_none());
             assert_eq!(cfg.validate(), Ok(()));
             let policy = cfg.retry.to_policy();
             assert_eq!(policy.base, Duration::from_secs(30));
@@ -2107,66 +2066,77 @@ mod tests {
         });
     }
 
-    fn agent_cfg(id: &str, tools: &[&str]) -> AgentConfig {
-        AgentConfig {
-            id: id.to_owned(),
-            name: "triage".to_owned(),
-            model: "scripted".to_owned(),
-            instructions: "Sort the request.".to_owned(),
-            tools: tools.iter().map(|t| (*t).to_owned()).collect(),
-        }
-    }
+    const AGENT_TOML: &str = "[[agents]]\nid = \"x\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\n";
 
     #[test]
-    fn an_agent_id_that_does_not_parse_fails() {
+    fn a_toml_agents_table_fails_with_agents_removed() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
-            let mut cfg = with_url();
-            cfg.agents = vec![agent_cfg("triage", &[])];
-            assert_eq!(cfg.validate(), Err(ConfigError::AgentIdInvalid("triage".to_owned())));
+            // Positive control: without the table the same config is valid.
+            assert_eq!(with_url().validate(), Ok(()));
+            jail.create_file("agent-host.toml", AGENT_TOML)?;
+            assert_eq!(with_url().validate(), Err(ConfigError::AgentsRemoved));
+            assert_eq!(ConfigError::AgentsRemoved.to_string(), "`[[agents]]` is removed; use the agent API (SMA-852)");
             Ok(())
         });
     }
 
     #[test]
-    fn a_duplicate_agent_id_fails() {
+    fn an_env_agents_key_fails_with_agents_removed() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
-            let mut cfg = with_url();
-            let id = agent_prn(2);
-            cfg.agents = vec![agent_cfg(&id, &[]), agent_cfg(&id, &[])];
-            assert_eq!(cfg.validate(), Err(ConfigError::AgentDuplicate(id)));
+            jail.set_env("AGENT_HOST_AGENTS", "[]");
+            assert_eq!(with_url().validate(), Err(ConfigError::AgentsRemoved));
             Ok(())
         });
     }
 
-    #[test]
-    fn an_unknown_tool_fails() {
+    fn grpc_cfg(grpc: &str, with_iam: bool) -> Config {
+        let mut cfg = None;
         figment::Jail::expect_with(|jail| {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
-            let mut cfg = with_url();
-            let id = agent_prn(2);
-            cfg.agents = vec![agent_cfg(&id, &["shell"])];
-            assert_eq!(cfg.validate(), Err(ConfigError::AgentUnknownTool { agent: id, tool: "shell".to_owned() }));
+            jail.set_env("AGENT_HOST_GRPC_ADDR", grpc);
+            if with_iam {
+                jail.set_env("AGENT_HOST_IAM__GRPC_ADDR", "http://127.0.0.1:50051");
+                jail.set_env("AGENT_HOST_IAM__TLS__MODE", "loopback_insecure");
+            }
+            jail.set_env("AGENT_HOST_METRICS__ADDR", "0.0.0.0:9090");
+            cfg = Some(with_url());
             Ok(())
         });
+        cfg.expect("config")
     }
 
     #[test]
-    fn agents_are_read_from_toml() {
+    fn grpc_addr_without_iam_fails() {
+        assert_eq!(grpc_cfg("0.0.0.0:50052", false).validate(), Err(ConfigError::GrpcNeedsIam));
+    }
+
+    #[test]
+    fn grpc_addr_on_the_http_port_fails() {
+        assert_eq!(grpc_cfg("127.0.0.1:8086", true).validate(), Err(ConfigError::GrpcPortClash));
+    }
+
+    #[test]
+    fn grpc_addr_on_the_metrics_port_fails() {
+        assert_eq!(grpc_cfg("127.0.0.1:9090", true).validate(), Err(ConfigError::GrpcPortClash));
+    }
+
+    #[test]
+    fn grpc_addr_with_iam_and_its_own_port_is_valid() {
+        let cfg = grpc_cfg("0.0.0.0:50052", true);
+        assert_eq!(cfg.grpc_addr.map(|a| a.port()), Some(50052));
+        assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_example_config_has_no_agents_table_and_validates() {
+        let text = include_str!("../agent-host.toml.example");
+        assert!(!text.contains("[[agents]]"), "the example config must not mention [[agents]]");
         figment::Jail::expect_with(|jail| {
             jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
-            let id = agent_prn(2);
-            jail.create_file("agent-host.toml", &agent_toml(&id, "[\"memory\"]"))?;
-            let cfg = Config::load()?;
-            assert_eq!(cfg.validate(), Ok(()));
-            let defs = cfg.agent_definitions().unwrap();
-            assert_eq!(defs.len(), 1);
-            assert_eq!(defs[0].id.as_prn().canonical(), id);
-            assert_eq!(defs[0].name, "triage");
-            assert_eq!(defs[0].model_id, "scripted");
-            assert_eq!(defs[0].instructions, "Sort the request.");
-            assert_eq!(defs[0].tool_names, ["memory"]);
+            jail.create_file("agent-host.toml", text)?;
+            assert_eq!(with_url().validate(), Ok(()));
             Ok(())
         });
     }
