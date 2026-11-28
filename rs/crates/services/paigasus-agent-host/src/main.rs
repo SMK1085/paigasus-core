@@ -485,7 +485,7 @@ fn describe_agent_host_metrics() {
     );
     describe_counter!(
         names::AGENT_HOST_LEASE_LOST_TOTAL,
-        "Inbox leases found lost, labeled by operation (heartbeat, claim, commit, screen_out, back_off, release_after_shutdown or deadline)."
+        "Inbox leases found lost, labeled by operation (heartbeat, claim, commit, screen_out, back_off, host_fault, release_after_shutdown or deadline)."
     );
     describe_counter!(names::AGENT_HOST_CLAIMS_TOTAL, "Committed claims of inbox events. Each claim opens one run.");
     describe_counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL, "Inbox events moved to dead after the maximum number of attempts.");
@@ -524,7 +524,7 @@ fn describe_agent_host_metrics() {
     // The worker run loop (SMA-790 spec §6.14). The names are provisional; SMA-798 owns them.
     describe_counter!(
         names::AGENT_HOST_RUNS_TOTAL,
-        "Runs that ended, labeled by class (completed, stopped, deterministic, transient, screened, discarded or shutdown)."
+        "Runs that ended, labeled by class (completed, stopped, deterministic, transient, host_fault, screened, discarded or shutdown)."
     );
     describe_histogram!(names::AGENT_HOST_RUN_DURATION_SECONDS, "Duration of one run, from the claim to the end of the commit, in seconds.");
     describe_counter!(names::AGENT_HOST_EVENTS_SCREENED_TOTAL, "Inbox events that the screen flagged.");

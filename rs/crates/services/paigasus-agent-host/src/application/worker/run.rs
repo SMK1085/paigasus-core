@@ -25,6 +25,9 @@ use tokio_util::sync::CancellationToken;
 use super::ports::{AgentRunner, RunEnd, RunLimits, RunSpec, UserTurn};
 use crate::application::lease_keeper::{KeeperTiming, LeaseKeeper};
 
+/// The longest delay of a host fault, `retry_after` included.
+pub const HOST_FAULT_DELAY_CAP: Duration = Duration::from_secs(86_400);
+
 /// The settings of a worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerSettings {
@@ -222,6 +225,7 @@ impl RunWorker {
         let (class, session, close_thread) = match out.end {
             RunEnd::Cancelled => return self.transient(keeper, claim, &passed, "the run was cancelled".to_owned(), None).await,
             RunEnd::Transient { error, retry_after } => return self.transient(keeper, claim, &passed, error, retry_after).await,
+            RunEnd::HostFault { error, retry_after } => return self.host_fault(keeper, claim, &passed, error, retry_after).await,
             RunEnd::Completed { output, usage } => (RunClass::Completed { output: Some(output), usage }, out.session, false),
             RunEnd::Stopped { output, reason, usage } => (RunClass::Stopped { output: Some(output), reason, usage }, out.session, false),
             RunEnd::Deterministic { error, close_thread } => (
@@ -304,6 +308,45 @@ impl RunWorker {
                 Step::Drop
             }
         }
+    }
+
+    /// A host fault end: fail the run as `host_fault`, delay `targets` and give back their
+    /// attempts. A failed back-off drops the keeper, and the events become free by lease expiry.
+    async fn host_fault(&self, keeper: &LeaseKeeper, claim: &Claim, targets: &[InboxEvent], error: String, retry_after: Option<Duration>) -> Step {
+        let back_off = BackOff {
+            run: claim.run.clone(),
+            token: claim.lease_token,
+            error: error.clone(),
+            retry: self.host_fault_delays(targets, retry_after),
+        };
+        match keeper.host_fault(back_off).await {
+            Ok(()) => {
+                count_run("host_fault");
+                tracing::error!(run = %claim.run.uuid(), %error, "a host fault ended the run; the attempt is given back");
+                Step::Next
+            }
+            Err(e) => {
+                tracing::warn!(run = %claim.run.uuid(), error = %e, "a host fault back-off failed; the worker drops the lease");
+                Step::Drop
+            }
+        }
+    }
+
+    /// The delay of a host fault: at least `retry_after`, which the retry cap does not cut, and at
+    /// most `HOST_FAULT_DELAY_CAP`.
+    fn host_fault_delays(&self, targets: &[InboxEvent], retry_after: Option<Duration>) -> Vec<EventDelay> {
+        targets
+            .iter()
+            .map(|event| EventDelay {
+                event: event.id,
+                delay: self
+                    .settings
+                    .retry
+                    .delay(event.attempts, Jitter::new(rand::random_range(0.8..=1.2)), None)
+                    .max(retry_after.unwrap_or_default())
+                    .min(HOST_FAULT_DELAY_CAP),
+            })
+            .collect()
     }
 
     /// The retry delay of each event, from its attempts, with a fresh jitter per event.
@@ -605,7 +648,6 @@ mod tests {
         assert_eq!(record.run, two_events().run);
         assert!(!record.close_thread);
         assert!(r.committer.back_offs().is_empty());
-        assert!(r.committer.host_faults().is_empty());
         let turn = &r.runner.turns()[0];
         assert!(turn.memory.as_deref().is_some_and(|m| m.starts_with("<memory-N1") && m.contains("be kind")), "{turn:?}");
         assert_eq!(turn.events, render::events::events(&[event(1), event(2)], NONCE));
@@ -771,6 +813,56 @@ mod tests {
         assert_eq!(backs[0].retry.len(), 2);
         assert!(backs[0].retry.iter().all(|d| d.delay == Duration::from_secs(600)), "{:?}", backs[0].retry);
         assert!(r.committer.commits().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_fault_backs_off_with_a_refund_and_counts_host_fault() {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let r = rig(Parts {
+            runner: FakeRunner::ending(RunEnd::HostFault {
+                error: "the gateway link failed".into(),
+                retry_after: Some(Duration::from_secs(60)),
+            }),
+            ..Parts::default()
+        });
+        assert_eq!(r.serve().await, LeaseEnd::Released);
+        let faults = r.committer.host_faults();
+        assert_eq!(faults.len(), 1, "{:?}", r.committer.calls());
+        assert!(r.committer.back_offs().is_empty());
+        assert!(r.committer.commits().is_empty());
+        assert_eq!(faults[0].error, "the gateway link failed");
+        assert_eq!(faults[0].retry.len(), 2);
+        assert!(faults[0].retry.iter().all(|d| d.delay >= Duration::from_secs(60)), "{:?}", faults[0].retry);
+        assert_eq!(counter(&recorder, names::AGENT_HOST_RUNS_TOTAL, Some(("class", "host_fault"))), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_fault_delay_keeps_a_retry_after_above_the_retry_cap() {
+        let r = rig(Parts {
+            runner: FakeRunner::ending(RunEnd::HostFault {
+                error: "x".into(),
+                retry_after: Some(Duration::from_secs(3600)),
+            }),
+            ..Parts::default()
+        });
+        assert_eq!(r.serve().await, LeaseEnd::Released);
+        let faults = r.committer.host_faults();
+        assert_eq!(faults.len(), 1);
+        assert!(faults[0].retry.iter().all(|d| d.delay == Duration::from_secs(3600)), "{:?}", faults[0].retry);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_host_fault_drops_the_lease() {
+        let mut committer = FakeCommitter::default();
+        committer.host_fault_result = Some(Err(CommitError::Store("x".into())));
+        let r = rig(Parts {
+            runner: FakeRunner::ending(RunEnd::HostFault { error: "x".into(), retry_after: None }),
+            committer,
+            ..Parts::default()
+        });
+        assert_eq!(r.serve().await, LeaseEnd::Dropped);
+        assert_eq!(r.committer.host_faults().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]
