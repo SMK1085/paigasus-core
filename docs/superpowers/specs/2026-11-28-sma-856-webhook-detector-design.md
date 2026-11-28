@@ -30,6 +30,11 @@ against the code. They change the spec as follows.
   The "8 × 15 + 3" count in § 6.8 is replaced by this rule.
 - P6. D8: when the tenant part is unavailable for one hold (SMA-753 P7), that hold sends no
   webhook request.
+- P7. D17: `detector_error` is in `FINDING_KINDS`, so the strict webhook check must not drop
+  the adapter's own failure finding. The late-stage check keeps a `detector_error` from a
+  webhook when its `version` is an adapter reason, its severity is that provider's
+  `failure_severity()` (or `high` for D7 and D25), and it has no evidence. Any other
+  `detector_error` from a webhook is still a `check` failure.
 
 ## Revision 2 changelog
 
