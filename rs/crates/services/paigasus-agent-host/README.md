@@ -198,20 +198,23 @@ The service does not terminate TLS. The ingress or the mesh in front of it does.
 | `GET /v1/agents/{agent}/inboxes` | `ListInboxes` | List the inboxes of an agent. |
 | `GET /v1/inboxes/{inbox}` | `GetInbox` | Read one inbox. |
 
-`{agent}` and `{inbox}` are UUIDs. A page token is opaque. Use it only with the same organization
+`{agent}` and `{inbox}` are UUIDs. An answer gives the PRN of an agent in `agent` and the PRN of an inbox
+in `inbox`. A path takes only the last segment of the PRN, which is the UUID. A page token is opaque. Use it only with the same organization
 and filter that made it. The default page size is 50.
 
 ```sh
-# Make an agent. The answer holds the agent id.
-curl -sS -X POST http://localhost:8086/v1/agents \
+# Make an agent. The answer holds the PRN of the agent in "agent".
+# The path takes only the UUID, the last segment of the PRN.
+AGENT=$(curl -sS -X POST http://localhost:8086/v1/agents \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"org":"<org PRN>","name":"support","model":"<model id>",
-       "instructions":"Answer the customer.","tools":[]}'
+       "instructions":"Answer the customer.","tools":[]}' | jq -r '.agent | split("/") | last')
 
-# Bind the agent to a principal. The answer holds the inbox id.
-curl -sS -X POST http://localhost:8086/v1/agents/<agent uuid>/inboxes \
+# Bind the agent to a principal. The answer holds the PRN of the inbox in "inbox".
+# Use the same extraction for GET /v1/inboxes/{inbox}.
+curl -sS -X POST "http://localhost:8086/v1/agents/$AGENT/inboxes" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"principal":"<principal PRN>"}'
+  -d '{"principal":"<principal PRN>"}' | jq -r '.inbox | split("/") | last'
 ```
 
 The `model` must be a model that this host serves. A tool name must be a tool that this host has.
