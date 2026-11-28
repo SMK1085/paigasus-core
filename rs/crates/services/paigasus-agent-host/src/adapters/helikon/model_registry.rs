@@ -60,7 +60,9 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     pub fn register(&mut self, id: impl Into<String>, model: SharedModel) {
-        self.models.insert(id.into(), model);
+        let id = id.into();
+        self.max_output_tokens.remove(&id);
+        self.models.insert(id, model);
     }
 
     /// Register a model with the limit of output tokens of one call.
@@ -153,6 +155,15 @@ mod tests {
         registry.register("n", SharedModel::new(Counting(Arc::new(AtomicUsize::new(0)))));
         assert_eq!(registry.max_output_tokens("m"), Some(512));
         assert_eq!(registry.max_output_tokens("n"), None);
+        assert!(registry.model("m").is_some());
+    }
+
+    #[test]
+    fn register_removes_the_limit_of_a_replaced_model() {
+        let mut registry = ModelRegistry::default();
+        registry.register_with_limit("m", SharedModel::new(Counting(Arc::new(AtomicUsize::new(0)))), 512);
+        registry.register("m", SharedModel::new(Counting(Arc::new(AtomicUsize::new(0)))));
+        assert_eq!(registry.max_output_tokens("m"), None);
         assert!(registry.model("m").is_some());
     }
 

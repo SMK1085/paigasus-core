@@ -80,6 +80,11 @@ async fn the_real_binary_runs_an_agent_through_the_gateway() {
     assert!(!requests.is_empty(), "the model sent a request; log:\n{log}");
     assert_eq!(requests[0].headers.get("x-api-key").and_then(|v| v.to_str().ok()), Some(KEY), "the key header");
     assert_eq!(requests[0].body["max_tokens"], 16000, "the max_tokens of the model entry");
+    // The boot probe runs in a detached task. Wait for it, bounded, before the exact count.
+    let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while fake.models_requests().is_empty() && std::time::Instant::now() < probe_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     let probes = fake.models_requests();
     assert_eq!(probes.len(), 1, "the boot probe asked once for the models");
     assert!(probes[0].contains_key("anthropic-version"), "the probe carries anthropic-version");

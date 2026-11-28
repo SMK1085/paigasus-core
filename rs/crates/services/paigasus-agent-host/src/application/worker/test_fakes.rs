@@ -279,6 +279,8 @@ pub(crate) struct FakeRunner {
     panic_next: AtomicBool,
     /// The outputs of the next calls, in order. The last one repeats. Empty: `output` repeats.
     sequence: StdMutex<VecDeque<RunOutput>>,
+    /// A delay of the first call, which starts after the call took its output.
+    first_call_delay: StdMutex<Option<Duration>>,
 }
 
 impl FakeRunner {
@@ -291,7 +293,14 @@ impl FakeRunner {
             turns: StdMutex::new(Vec::new()),
             panic_next: AtomicBool::new(false),
             sequence: StdMutex::new(VecDeque::new()),
+            first_call_delay: StdMutex::new(None),
         }
+    }
+
+    /// The same runner, but the first call ends after `delay`. The call takes its output first.
+    pub fn with_first_call_delay(self, delay: Duration) -> Self {
+        *lock(&self.first_call_delay) = Some(delay);
+        self
     }
 
     /// A runner that ends with these ends in order, with no session rows. The last end repeats.
@@ -337,12 +346,19 @@ impl AgentRunner for FakeRunner {
         if self.wait_for_cancel {
             spec.cancel.cancelled().await;
         }
-        let mut sequence = lock(&self.sequence);
-        match sequence.len() {
-            0 => self.output.clone(),
-            1 => sequence[0].clone(),
-            _ => sequence.pop_front().expect("a non-empty queue"),
+        let output = {
+            let mut sequence = lock(&self.sequence);
+            match sequence.len() {
+                0 => self.output.clone(),
+                1 => sequence[0].clone(),
+                _ => sequence.pop_front().expect("a non-empty queue"),
+            }
+        };
+        let delay = lock(&self.first_call_delay).take();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
         }
+        output
     }
 }
 

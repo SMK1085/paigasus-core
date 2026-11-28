@@ -120,9 +120,10 @@ impl WorkerTask {
         }
         while !self.token.is_cancelled() {
             // A pause after host faults in a row takes no claim. `serve` checks it again before
-            // each further claim of a lease.
+            // each further claim of a lease. A sleep lasts at most one poll interval, so a task
+            // sees that a completed run of another task has ended the pause.
             if let Some(left) = self.worker.pause_left() {
-                if !self.pause(left).await {
+                if !self.pause(left.min(self.settings.poll_interval)).await {
                     return;
                 }
                 continue;
@@ -401,6 +402,43 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(11)).await;
         assert_eq!(runner.calls(), 4, "the first claim after the pause completes");
         assert_eq!(gauge(&recorder, names::AGENT_HOST_WORKER_HOST_FAULT_PAUSED), Some(0.0));
+        tx.send(()).expect("send the shutdown");
+        join_within(Duration::from_secs(5), task).await;
+    }
+
+    /// A completed run of one task ends the pause. A second task that sleeps in the pause
+    /// claims again within one poll interval, and does not wait for the old deadline (30 s).
+    #[tokio::test(start_paused = true)]
+    async fn a_completed_run_ends_the_pause_of_a_sleeping_task_within_one_poll() {
+        let (tx, rx) = watch::channel(());
+        let handles = (0..10).map(|_| handle()).collect();
+        let leases = FakeLeases::new(Ok(())).with_next(handles);
+        // Call 1 completes after 5 s. Calls 2 to 4 are host faults, which start the pause (30 s).
+        let runner = FakeRunner::sequence(vec![
+            RunEnd::Completed {
+                output: "done".into(),
+                usage: RunUsage::default(),
+            },
+            host_fault_end(),
+            host_fault_end(),
+            host_fault_end(),
+            RunEnd::Completed {
+                output: "done".into(),
+                usage: RunUsage::default(),
+            },
+        ])
+        .with_first_call_delay(Duration::from_secs(5));
+        let (worker, leases, runner) = worker_and_runner(leases, (0..10).map(|_| claim()).collect(), runner);
+        let task = tokio::spawn(run_worker_pool(worker, leases.clone(), pool_settings(2, Duration::from_secs(1)), PREFIX.to_owned(), rx));
+        let second = format!("{PREFIX}/1");
+        let second_polls = || leases.holders().iter().filter(|h| **h == second).count();
+
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        assert_eq!(runner.calls(), 4, "the three faults and the slow run have started");
+        // One lease serves the three faulting claims, so the second task polled once.
+        assert_eq!(second_polls(), 1, "the second task is in the pause and takes no claim");
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(second_polls() > 1, "the second task claims again within one poll after the run completed, not at 30 s");
         tx.send(()).expect("send the shutdown");
         join_within(Duration::from_secs(5), task).await;
     }

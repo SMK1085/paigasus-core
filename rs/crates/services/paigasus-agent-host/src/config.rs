@@ -17,6 +17,7 @@ use paigasus_agent_host_core::timer::{TimerCaps, WALK_BOUND};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::adapters::helikon::gateway_model::IN_RUN_RETRY_AFTER_MAX;
 use crate::adapters::memory_s3::keys::{KeyPrefix, PrefixError};
 use crate::adapters::nats::channels::filters_overlap;
 use crate::adapters::nats::{DURABLE_NAME, STREAM_NAME};
@@ -467,7 +468,7 @@ pub struct GatewayConfig {
     /// the longest silent gap of the gateway stream: the tool-hold `ping` interval (SMA-750 D12,
     /// `tool_interception.keepalive_secs`, default 15 s) and the wait for the first upstream byte
     /// (`first_byte_timeout_secs`, default 30 s). Range 1000 to 600000. Three times this value
-    /// must be less than `run.timeout_secs` in milliseconds.
+    /// plus two waits of 5000 ms must be less than `run.timeout_secs` in milliseconds.
     #[serde(default = "default_gateway_read_timeout_ms")]
     pub read_timeout_ms: u64,
 }
@@ -556,8 +557,12 @@ impl GatewayConfig {
             }
         }
         // Both values are in range here, and `run.timeout_secs` is at most 3600, so the products
-        // cannot overflow. Three read timeouts (the first call and two retries) must fit in a run.
-        if u64::from(IN_RUN_ATTEMPTS) * self.read_timeout_ms >= run_timeout_secs * 1000 {
+        // cannot overflow. The read timeouts of all attempts (the first call and two retries) and
+        // the waits between them must fit in a run. A wait is at most the `retry-after` cap, which
+        // is also the largest back-off delay.
+        let attempts = u64::from(IN_RUN_ATTEMPTS);
+        let wait_ms = IN_RUN_RETRY_AFTER_MAX.as_millis() as u64;
+        if attempts * self.read_timeout_ms + (attempts - 1) * wait_ms >= run_timeout_secs * 1000 {
             return Err(ConfigError::GatewayReadTimeoutTooLong {
                 read_timeout_ms: self.read_timeout_ms,
                 run_timeout_secs,
@@ -806,7 +811,9 @@ pub enum ConfigError {
     GatewayKeyPathBlank,
     #[error("gateway.ca_file must not be empty or have spaces at the start or end (leave the key out to use the platform roots)")]
     GatewayCaPathBlank,
-    #[error("3 x gateway.read_timeout_ms ({read_timeout_ms}) must be less than run.timeout_secs ({run_timeout_secs}) in milliseconds")]
+    #[error(
+        "the read timeouts of all attempts and the waits between them (3 x gateway.read_timeout_ms ({read_timeout_ms}) + 2 x 5000 ms) must be less than run.timeout_secs ({run_timeout_secs}) in milliseconds"
+    )]
     GatewayReadTimeoutTooLong { read_timeout_ms: u64, run_timeout_secs: u64 },
     #[error("models.name must not be empty")]
     ModelNameEmpty,
@@ -879,8 +886,8 @@ struct MigrationConfigDefaults {
 /// match like `host.starts_with("127.")` is trivially bypassable: `127.evil.com` and
 /// `127.0.0.1.attacker.com` both pass it yet are DNS-resolvable to arbitrary addresses, which
 /// would let an operator disable TLS on a link that then carries raw API keys off-loopback
-/// (D8). `localhost` is matched by EXACT equality for the same reason (`localhost.evil.com`
-/// must NOT match).
+/// (D8). `localhost` is matched by whole-name equality for the same reason (`localhost.evil.com`
+/// must NOT match). The comparison ignores ASCII case, because host names are case-insensitive.
 ///
 /// [`Ipv4Addr::is_loopback`]: std::net::Ipv4Addr::is_loopback
 /// [`Ipv6Addr::is_loopback`]: std::net::Ipv6Addr::is_loopback
@@ -897,7 +904,7 @@ fn is_loopback_host(grpc_addr: &str) -> bool {
     // `Ipv6Addr` parse below succeeds.
     let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
 
-    host == "localhost" || host.parse::<Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false) || host.parse::<Ipv6Addr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+    host.eq_ignore_ascii_case("localhost") || host.parse::<Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false) || host.parse::<Ipv6Addr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
 /// True when `s` is a URI-reference (RFC 3986 section 4.1): it uses only the characters that RFC
@@ -2104,6 +2111,9 @@ mod tests {
         // Every address in 127.0.0.0/8 is loopback.
         assert!(is_loopback_host("http://127.0.0.5:9090"));
         assert!(is_loopback_host("http://localhost:9090"));
+        // Host names are case-insensitive. A longer name is still refused.
+        assert!(is_loopback_host("http://LOCALHOST:8088"));
+        assert!(!is_loopback_host("http://localhost.evil.com"));
         // An IPv6 literal: the brackets are removed before the parse.
         assert!(is_loopback_host("http://[::1]:9090"));
         // A bare host with no scheme and no port.
@@ -2564,19 +2574,29 @@ mod tests {
     #[test]
     fn three_read_timeouts_must_fit_in_the_run_timeout() {
         let mut cfg = valid_gateway_cfg();
-        // The default pair: 3 x 60000 ms is less than 300 s.
+        // The default pair: 3 x 60000 + 2 x 5000 = 190000 ms is less than 300 s.
         assert_eq!(cfg.validate(), Ok(()));
         cfg.run.timeout_secs = 60;
-        cfg.gateway.as_mut().unwrap().read_timeout_ms = 20_000;
+        // 3 x 16667 + 10000 = 60001 ms: refused. 3 x 16666 + 10000 = 59998 ms: accepted.
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 16_667;
         assert_eq!(
             cfg.validate(),
             Err(ConfigError::GatewayReadTimeoutTooLong {
-                read_timeout_ms: 20_000,
+                read_timeout_ms: 16_667,
                 run_timeout_secs: 60
             })
         );
-        cfg.gateway.as_mut().unwrap().read_timeout_ms = 19_999;
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 16_666;
         assert_eq!(cfg.validate(), Ok(()));
+        // The old rule (3 x read < run) accepted 19_999. The waits now refuse it.
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 19_999;
+        assert!(cfg.validate().is_err());
+        // An exact edge: run 65 s, 3 x 18333 + 10000 = 64999 accepted, 18334 gives 65002 refused.
+        cfg.run.timeout_secs = 65;
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 18_333;
+        assert_eq!(cfg.validate(), Ok(()));
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 18_334;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
