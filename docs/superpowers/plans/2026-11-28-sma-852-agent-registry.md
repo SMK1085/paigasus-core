@@ -441,8 +441,9 @@ impl AgentRegistry for PgAgentRegistry { /* all eight methods */ }
     updated_at = now() WHERE status = 'active' AND inbox_id IN (SELECT id FROM inbox WHERE org_id = $1
     AND agent_id = $2)`. A second archive returns the same `archived_at`.
   - `create_inbox`: one transaction: `SELECT archived_at FROM agent WHERE org_id = $1 AND id = $2
-    FOR SHARE` (no row → `NotFound`, set → `Archived`), then the insert. 23505 on
-    `(agent_id, principal_id)` → read the existing id → `InboxExists(InboxId)`. An `InboxId` whose org
+    FOR SHARE` (no row → `NotFound`, set → `Archived`), then
+    `INSERT … ON CONFLICT (agent_id, principal_id) DO NOTHING RETURNING …` (a 23505 would abort the
+    transaction). No row returned → read the existing id in the same transaction → `InboxExists(InboxId)`. An `InboxId` whose org
     differs from the agent's org → `Invalid("org")` (from `Inbox::new`'s `OrgMismatch`), with no SQL.
   - `list` / `list_inboxes`: `WHERE org_id = $1 [AND archived_at IS NULL] AND ($after IS NULL OR id >
     $after) ORDER BY id LIMIT size + 1`. `next_after` is the id of the last returned row when a

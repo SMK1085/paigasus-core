@@ -13,7 +13,7 @@ use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::ids::{AgentId, InboxId, PrincipalId};
 use paigasus_agent_host_core::inbox::Inbox;
 use paigasus_agent_host_core::ports::{AgentRegistry, IdSource, RunCapabilities};
-use paigasus_agent_host_core::registry::{AgentFields, AgentRecord, InboxRecord, Page, PageRequest, RegistryError};
+use paigasus_agent_host_core::registry::{AgentFields, AgentRecord, InboxRecord, PAGE_SIZE_DEFAULT, Page, PageRequest, RegistryError};
 use uuid::Uuid;
 
 /// An `AgentRegistry` over two vectors. It records the name of each call.
@@ -70,7 +70,7 @@ impl MemoryRegistry {
 fn page_of<T: Clone>(mut rows: Vec<T>, page: PageRequest, id_of: impl Fn(&T) -> Uuid) -> Page<T> {
     rows.sort_by_key(&id_of);
     let rows: Vec<T> = rows.into_iter().filter(|r| page.after.is_none_or(|a| id_of(r) > a)).collect();
-    let size = page.size as usize;
+    let size = if page.size == 0 { PAGE_SIZE_DEFAULT } else { page.size } as usize;
     let next_after = (rows.len() > size).then(|| id_of(&rows[size - 1]));
     Page {
         items: rows.into_iter().take(size).collect(),
@@ -131,6 +131,15 @@ impl AgentRegistry for MemoryRegistry {
         if row.version != version {
             return Err(RegistryError::VersionMismatch { current: row.version });
         }
+        let me = row.definition.id.clone();
+        let org = me.org();
+        if agents
+            .iter()
+            .any(|a| a.definition.id != me && a.definition.id.org() == org && a.archived_at.is_none() && a.definition.name == fields.name)
+        {
+            return Err(RegistryError::NameTaken);
+        }
+        let row = agents.iter_mut().find(|a| a.definition.id == me).expect("row");
         row.definition.name = fields.name.clone();
         row.definition.model_id = fields.model_id.clone();
         row.definition.instructions = fields.instructions.clone();
@@ -143,8 +152,12 @@ impl AgentRegistry for MemoryRegistry {
         self.call("archive");
         let mut agents = self.agents.lock().unwrap();
         let row = agents.iter_mut().find(|a| &a.definition.id == id).ok_or(RegistryError::NotFound)?;
-        row.archived_at.get_or_insert(Timestamp::UNIX_EPOCH);
-        Ok(row.clone())
+        let at = *row.archived_at.get_or_insert(Timestamp::UNIX_EPOCH);
+        let record = row.clone();
+        for i in self.inboxes.lock().unwrap().iter_mut().filter(|i| i.inbox.agent() == id) {
+            i.agent_archived_at = Some(at);
+        }
+        Ok(record)
     }
 
     async fn create_inbox(&self, id: &InboxId, agent: &AgentId, principal: &PrincipalId) -> Result<InboxRecord, RegistryError> {
