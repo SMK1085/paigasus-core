@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod agent_registry;
 pub mod inbox_repository;
 pub mod lease_store;
 pub mod memory;
