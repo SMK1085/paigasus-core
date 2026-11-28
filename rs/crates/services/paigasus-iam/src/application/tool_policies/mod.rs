@@ -388,7 +388,6 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
         let state = self.repo.state(&key).await?;
         let before = self.repo.settings(org).await?;
         let first_enabled_at = before.as_ref().and_then(|s| s.first_enabled_at);
-        let webhooks_before = before.map(|s| s.webhooks).unwrap_or_default();
         let save_starter = check_transition(mode, state.live_version > 0, first_enabled_at.is_some())?;
 
         // Step 2: compile the starter, with no transaction open.
@@ -439,6 +438,11 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             first_enabled_at: first_enabled_at.or((mode != ToolPolicyMode::Off).then_some(now)),
             webhooks: Vec::new(),
         };
+        // The predecessor for the audit entry is read here, under a row lock that lasts until the
+        // commit. The read of step 1 can be stale: another settings write may commit between
+        // that read and this transaction. The lock is taken only when the request carries a
+        // list, because only then does the audit entry record one.
+        let webhooks_before = if webhooks.is_some() { Some(self.repo.webhooks_for_update_in(&*tx, org).await?) } else { None };
         settings.webhooks = self.repo.upsert_settings_in(&*tx, org, &settings, webhooks.clone()).await?;
         self.outbox.enqueue(&*tx, &events::settings_changed(&*self.ids, corr, actor, &org_prn, org, &settings, now)).await?;
         let mut detail = json!({
@@ -447,7 +451,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             "starter_version": (starter_version > 0).then_some(starter_version),
         });
         // The list keys appear only when the request carries the field.
-        if webhooks.is_some() {
+        if let Some(webhooks_before) = webhooks_before {
             detail["webhooks_before"] = json!(webhooks_before);
             detail["webhooks_after"] = json!(settings.webhooks);
         }
@@ -2076,6 +2080,19 @@ mod tests {
         assert!(detail.get("webhooks_before").is_none(), "{detail}");
         assert!(detail.get("webhooks_after").is_none(), "{detail}");
         assert_eq!(last_event_payload(&h)["webhooks"], json!(["a", "b"]));
+    }
+
+    #[tokio::test]
+    async fn the_audited_predecessor_is_the_list_stored_right_before_the_write() {
+        let h = harness();
+        h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&["a"])).await.unwrap();
+        // Another writer replaces the list after the outer read of step 1.
+        h.repo.store_webhooks_after_next_settings_read(h.org, vec!["b".to_owned()]);
+        let r = h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&["c"])).await.unwrap();
+        assert_eq!(r.settings.webhooks, ["c"]);
+        let detail = settings_audit(&h);
+        assert_eq!(detail["webhooks_before"], json!(["b"]));
+        assert_eq!(detail["webhooks_after"], json!(["c"]));
     }
 
     #[tokio::test]

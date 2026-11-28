@@ -318,3 +318,62 @@ async fn the_down_migration_drops_the_column() {
     Migrator::up(&db, Some(1)).await.expect("m0016 must apply again");
     assert_eq!(repo.settings(org).await.unwrap().unwrap().webhooks, Vec::<String>::new());
 }
+
+/// One settings write as `put_settings` does it: read the predecessor under the row lock, then
+/// replace the list. Returns the predecessor that the audit entry would record.
+async fn locked_write(repo: &PgToolPolicies, uow: &SeaOrmUnitOfWork, org: Uuid, new: &str, entered: Option<tokio::sync::oneshot::Sender<()>>) -> Vec<String> {
+    let tx = uow.begin().await.unwrap();
+    let before = repo.webhooks_for_update_in(&*tx, org).await.unwrap();
+    if let Some(entered) = entered {
+        let _ = entered.send(());
+    }
+    repo.upsert_settings_in(&*tx, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), list(&[new]))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    before
+}
+
+#[tokio::test]
+async fn an_absent_row_has_an_empty_locked_predecessor() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let tx = uow.begin().await.unwrap();
+    assert_eq!(repo.webhooks_for_update_in(&*tx, org).await.unwrap(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn two_overlapping_settings_writes_record_a_chain_of_predecessors() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    write_with(&repo, &uow, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), list(&["a"])).await;
+
+    // The first writer holds the row lock from its read until its commit.
+    let tx = uow.begin().await.unwrap();
+    assert_eq!(repo.webhooks_for_update_in(&*tx, org).await.unwrap(), ["a"]);
+    // The second writer starts now and must wait for the lock.
+    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
+    let second = {
+        let (repo, uow) = (repo.clone(), uow.clone());
+        tokio::spawn(async move { locked_write(&repo, &uow, org, "c", Some(entered_tx)).await })
+    };
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(1500), &mut entered_rx).await;
+    assert!(waited.is_err(), "the second writer read the list while the first held the lock");
+    repo.upsert_settings_in(&*tx, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), list(&["b"]))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // The first writer recorded ["a"]. The second one now sees the list that the first stored.
+    let second_before = second.await.unwrap();
+    assert_eq!(second_before, ["b"]);
+    assert_eq!(repo.settings(org).await.unwrap().unwrap().webhooks, ["c"]);
+}

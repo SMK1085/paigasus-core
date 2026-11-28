@@ -1970,10 +1970,14 @@ pub struct InMemoryToolPolicies {
     live_before_next_live: Arc<Mutex<Option<ToolPolicyVersion>>>,
     live_before_next_stale_list: Arc<Mutex<Option<ToolPolicyVersion>>>,
     write_before_next_catalog_read: Arc<Mutex<Option<(Uuid, StoredTool)>>>,
+    webhooks_after_next_settings_read: Arc<Mutex<PendingWebhooks>>,
     writes: Arc<AtomicUsize>,
     insert_attempts: Arc<AtomicUsize>,
     read_log: Arc<Mutex<Vec<&'static str>>>,
 }
+
+/// A webhook list to store for an organization at a set point of a test.
+type PendingWebhooks = Option<(Uuid, Vec<String>)>;
 
 const NO_STATE: ToolPolicyState = ToolPolicyState {
     catalog_revision: 0,
@@ -2006,6 +2010,12 @@ impl InMemoryToolPolicies {
     /// observation, like the REPEATABLE READ transaction of the Postgres adapter.
     pub fn write_before_next_catalog_read(&self, org: Uuid, tool: StoredTool) {
         *self.write_before_next_catalog_read.lock().unwrap() = Some((org, tool));
+    }
+
+    /// Store `list` as the webhook opt-in list of `org` right after the next `settings` call
+    /// returns: a settings write that another writer committed after the caller read the row.
+    pub fn store_webhooks_after_next_settings_read(&self, org: Uuid, list: Vec<String>) {
+        *self.webhooks_after_next_settings_read.lock().unwrap() = Some((org, list));
     }
 
     fn apply_pending_catalog_write(&self, data: &mut ToolPolicyData) {
@@ -2313,7 +2323,16 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
 
     async fn settings(&self, org: Uuid) -> Result<Option<ToolPolicySettings>, RepositoryError> {
         self.read_log.lock().unwrap().push("settings");
-        Ok(self.data.lock().unwrap().settings.get(&org).cloned())
+        let mut data = self.data.lock().unwrap();
+        let read = data.settings.get(&org).cloned();
+        if let Some((target, list)) = self.webhooks_after_next_settings_read.lock().unwrap().take() {
+            data.settings.entry(target).or_insert_with(ToolPolicySettings::default_for_absent_row).webhooks = list;
+        }
+        Ok(read)
+    }
+
+    async fn webhooks_for_update_in(&self, _tx: &dyn Transaction, org: Uuid) -> Result<Vec<String>, RepositoryError> {
+        Ok(self.data.lock().unwrap().settings.get(&org).map(|s| s.webhooks.clone()).unwrap_or_default())
     }
 
     async fn upsert_settings_in(&self, _tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings, webhooks: Option<Vec<String>>) -> Result<Vec<String>, RepositoryError> {

@@ -103,6 +103,12 @@ pub trait ToolPolicyRepository: Send + Sync {
     /// `s.webhooks` is ignored. `webhooks` `Some` replaces the stored opt-in list. `None` keeps
     /// it, and a new row gets an empty list. Returns the stored list after the write.
     async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings, webhooks: Option<Vec<String>>) -> Result<Vec<String>, RepositoryError>;
+    /// The stored webhook opt-in list of an organization, read inside `tx` under a row lock
+    /// (`SELECT ... FOR UPDATE`). The lock lasts until `tx` ends, so a second settings write for
+    /// the same organization waits, and the list that this call returns is the list that the
+    /// write of `tx` replaces. An organization with no settings row gives an empty list (and no
+    /// row to lock).
+    async fn webhooks_for_update_in(&self, tx: &dyn Transaction, org: Uuid) -> Result<Vec<String>, RepositoryError>;
 }
 
 /// A lock that lets one re-compile job run at a time across replicas (spec section 8).

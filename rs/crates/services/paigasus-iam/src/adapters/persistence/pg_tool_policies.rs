@@ -629,6 +629,12 @@ impl ToolPolicyRepository for PgToolPolicies {
             .map_err(map_err)?;
         parse_webhooks(&stored.webhooks)
     }
+
+    async fn webhooks_for_update_in(&self, tx: &dyn Transaction, org: Uuid) -> Result<Vec<String>, RepositoryError> {
+        let txn = recover_txn(tx)?;
+        let row = settings_rows::Entity::find_by_id(org).lock_exclusive().one(txn).await.map_err(map_err)?;
+        row.map(|m| parse_webhooks(&m.webhooks)).transpose().map(Option::unwrap_or_default)
+    }
 }
 
 /// Reads the stored opt-in list. A value that is not a JSON array of strings is corrupt.
