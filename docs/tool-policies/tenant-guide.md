@@ -233,7 +233,7 @@ Your policies read the findings in three context attributes:
 | `unseen_host` | `unseen_host` | medium | A host in the arguments is not in the history of the request. |
 | `secret_in_args` | `secret_in_args` | high | The arguments hold a credential, for example a cloud access key. |
 | `injection_markers` | `injection_markers` | high or medium | A tool result holds a marker of a prompt injection. Only hidden Unicode tag text is `high`. |
-| `detector_error` | the detector that failed: `built_in`, `kernel` or `webhook` | high, or the `failure_severity` of a webhook provider | A detector failed, or a scan limit stopped it. For a webhook provider, the severity is the `failure_severity` of that provider. |
+| `detector_error` | the detector that failed: `built_in`, `kernel`, or the name of the webhook provider (for example `hook_a`). The name `webhook` is used only for an opt-in name that is not valid or is reserved. | high, or the `failure_severity` of a webhook provider. An opt-in that is `not_permitted` or `unknown_provider` is always high. | A detector failed, or a scan limit stopped it. For a webhook provider that fails, the severity is the `failure_severity` of that provider. A name that you opted in to, but that is not open to your organization or not registered, is always `high`. |
 | `forged_history` | `kernel` | high | The request has a tool result for a call that the gateway did not forward. This kind needs the session history. |
 | `mixed_sessions` | `kernel` | medium | The calls and the tool results of the request belong to more than one session. This kind needs the session history. |
 | `history_truncated` | `kernel` | low | The history store removed events of the session at a limit. This kind needs the session history. |
@@ -271,7 +271,10 @@ What the policy blocks:
   is the job of a judge (SMA-857).
 - `detector_error`. A built-in or kernel error is `high`, so it blocks under this policy. That is fail
   closed. A webhook failure has the `failure_severity` of its provider. Under this policy, a `high`
-  failure blocks and a `low` failure does not. These are the causes of a detector error:
+  failure blocks and a `low` failure does not. There is one exception. An opt-in to a provider
+  whose `orgs` scope does not hold your organization (`not_permitted`), or to an unknown provider
+  (`unknown_provider`), is always `high`, whatever the `failure_severity` of the provider. The
+  starter policy then blocks the call. These are the causes of a detector error:
   - A detector fails.
   - A scan limit stops a scan.
   - The scan of the request fails.
@@ -394,10 +397,16 @@ when { context.findings.contains("pii_email") };
 ```
 
 A provider that fails gives a `detector_error` finding. Its severity is the failure severity that
-the operator set. A rule such as `context.max_severity >= 3` does not match a `low` failure.
+the operator set. A rule such as `context.max_severity >= 3` does not match a `low` failure. The
+exception is an opt-in name that is `not_permitted` or `unknown_provider`: its finding is always
+`high`.
 
-When you opt out, the change can take up to `max_stale_secs` to reach a gateway during an IAM
-outage with fail mode `open`. The gateway then uses the last known list until it expires.
+When you opt out, the change applies to requests that start after the gateway refreshes its policy
+cache. A request that is already in progress keeps the policy snapshot from when it was screened.
+The later tool calls of that request can still go to the provider until the request ends.
+
+During an IAM outage with fail mode `open`, the change can take up to `max_stale_secs` to reach a
+gateway. The gateway then uses the last known list until it expires.
 
 ## 5. Held versions
 
