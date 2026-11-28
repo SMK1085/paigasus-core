@@ -5,3 +5,7 @@
 pub mod built_in;
 
 pub use built_in::{BuiltInDetector, SCAN_LIMIT};
+
+pub mod webhook;
+
+pub use webhook::{NonceSource, OsNonce, WebhookDetector, prime_webhook_failure_metrics};
