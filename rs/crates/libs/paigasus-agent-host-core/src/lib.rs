@@ -16,6 +16,7 @@ pub mod memory;
 pub mod mid_run;
 pub mod outbox;
 pub mod ports;
+pub mod registry;
 pub mod render;
 pub mod retry;
 pub mod run;
@@ -43,6 +44,8 @@ mod port_tests {
         assert_port::<dyn MemoryStore>();
         assert_port::<dyn Outbox>();
         assert_port::<dyn AgentResolver>();
+        assert_port::<dyn AgentRegistry>();
+        assert_port::<dyn RunCapabilities>();
         assert_port::<dyn RunCommitter>();
         assert_port::<dyn EventScreen>();
         assert_port::<dyn FaultPoint>();

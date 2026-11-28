@@ -15,11 +15,12 @@ use uuid::Uuid;
 
 use crate::claim::{Claim, ClaimConfig};
 pub use crate::fault::FaultPoint;
-use crate::ids::{EventId, InboxId, OutboxMessageId, TimerId};
+use crate::ids::{AgentId, EventId, InboxId, OutboxMessageId, PrincipalId, TimerId};
 use crate::inbox::{Inbox, NewInboxEvent};
 use crate::lease::{ClaimError, HeartbeatError, LeaseHandle};
 use crate::memory::{CapError, MemoryCaps, MemoryCommitSet, MemoryDir, MemoryPath, MemoryScope, MemoryVersion};
 use crate::outbox::OutboxMessage;
+use crate::registry::{AgentFields, AgentRecord, InboxRecord, Page, PageRequest, RegistryError};
 use crate::run::{BackOff, CommitError, Committed, RunRecord, ScreenOut, ScreenResult};
 pub use crate::screen::EventScreen;
 use crate::timer::{TimerOrigin, TimerView};
@@ -229,6 +230,40 @@ pub trait Outbox: Send + Sync {
 pub trait AgentResolver: Send + Sync {
     /// Resolve the agent for an inbox.
     async fn resolve(&self, inbox: &InboxId) -> Result<ResolvedAgent, RepositoryError>;
+}
+
+/// The registry of agent definitions and their inboxes. Owner: SMA-852.
+/// Used outside a run, by the agent administration service.
+/// Provisional: the owner may change the methods, not the responsibility.
+#[async_trait]
+pub trait AgentRegistry: Send + Sync {
+    /// Store a new agent.
+    async fn create(&self, id: &AgentId, fields: &AgentFields) -> Result<AgentRecord, RegistryError>;
+    /// Read an agent by id. It returns `None` when the agent does not exist.
+    async fn get(&self, id: Uuid) -> Result<Option<AgentRecord>, RegistryError>;
+    /// List the agents of an organization, in order of id.
+    async fn list(&self, org: Uuid, include_archived: bool, page: PageRequest) -> Result<Page<AgentRecord>, RegistryError>;
+    /// Replace the fields of an agent. `version` is the version that the caller read.
+    async fn update(&self, id: &AgentId, version: u64, fields: &AgentFields) -> Result<AgentRecord, RegistryError>;
+    /// Archive an agent.
+    async fn archive(&self, id: &AgentId) -> Result<AgentRecord, RegistryError>;
+    /// Store a new inbox for an agent.
+    async fn create_inbox(&self, id: &InboxId, agent: &AgentId, principal: &PrincipalId) -> Result<InboxRecord, RegistryError>;
+    /// Read an inbox by id. It returns `None` when the inbox does not exist.
+    async fn get_inbox(&self, id: Uuid) -> Result<Option<InboxRecord>, RegistryError>;
+    /// List the inboxes of an agent, in order of id.
+    async fn list_inboxes(&self, agent: &AgentId, page: PageRequest) -> Result<Page<InboxRecord>, RegistryError>;
+}
+
+/// What this host can run. The registry checks the model and the tools of an agent against it.
+/// Owner: SMA-852.
+pub trait RunCapabilities: Send + Sync {
+    /// True when the host serves the model.
+    fn has_model(&self, model: &str) -> bool;
+    /// True when the host has the tool.
+    fn has_tool(&self, tool: &str) -> bool;
+    /// The ids of every model that the host serves.
+    fn model_ids(&self) -> Vec<String>;
 }
 
 /// The committer of a run outcome. Owner: SMA-790.
