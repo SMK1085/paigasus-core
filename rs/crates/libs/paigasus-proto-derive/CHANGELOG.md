@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.8.0...paigasus-proto-derive-v0.9.0) - 2026-11-28
+
+### Added
+
+- *(rs)* add the agent-definition registry to the agent host (SMA-852) ([#537](https://github.com/SMK1085/paigasus-core/pull/537))
+- *(rs)* evaluate tool-policy history conditions in the gateway (SMA-753) ([#536](https://github.com/SMK1085/paigasus-core/pull/536))
+- *(rs)* add tool-call detector findings with severity and the built-in detectors (SMA-855) ([#534](https://github.com/SMK1085/paigasus-core/pull/534))
+- *(rs)* add agent-host timers, follow-ups, schedules and the scheduler loop (SMA-788) ([#525](https://github.com/SMK1085/paigasus-core/pull/525))
+- *(rs)* add the event inbox of the agent host (SMA-787) ([#518](https://github.com/SMK1085/paigasus-core/pull/518))
+
 ## [0.8.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-proto-derive-v0.7.0...paigasus-proto-derive-v0.8.0) - 2026-11-20
 
 ### Added
