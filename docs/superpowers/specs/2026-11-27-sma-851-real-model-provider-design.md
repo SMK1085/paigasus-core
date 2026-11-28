@@ -135,9 +135,13 @@ reqwest = { workspace = true, features = ["json", "stream"] }
   `http_client`.
 - Helikon CI: add `cargo build` and `cargo test -p paigasus-helikon-providers-anthropic
   --no-default-features -F rustls-no-provider` to `build-no-default-features`. The tests install a
-  provider from a dev-dependency, so the A2 `-e normal` rule holds. Add
-  `cargo tree -p paigasus-helikon-providers-anthropic --no-default-features -F rustls-no-provider
-  -e normal --target all -i aws-lc-rs`, and the same for `-i ring`. Both must print nothing.
+  provider from a dev-dependency, so the A2 `-e normal` rule holds. This step runs in
+  the Helikon repo. The provider default feature `rustls-aws-lc` needs `aws-lc-rs`, so a lockfile
+  absence check is wrong there. In Helikon, check the `rustls-no-provider` build with the normal
+  dependency graph (`cargo tree -e normal` with that feature set), as A2 says. In paigasus-core,
+  check absence with `grep -E '^name = "aws-lc-rs"' Cargo.lock`, and the same for `ring`. Both must
+  print nothing. `cargo tree -i` fails with "did not match any packages" when the crate is absent,
+  so it does not print nothing.
 
 **Credential safety.**
 
@@ -427,11 +431,22 @@ Not folded in:
 - **Redirect (§7.3).** The client uses `redirect::Policy::custom`. It refuses every redirect with an
   error. It does not use `Policy::none()`. So a redirect is a `Transport` error and a host fault.
   Reqwest 0.13.5 keeps `x-api-key` on a redirect to another host. So the refusal also protects the key.
-- **Read timeout (§7.4).** The config refuses the value when `3 x gateway.read_timeout_ms` is
-  greater than or equal to `run.timeout_secs x 1000`. The 3 is the number of attempts of one turn.
+- **Read timeout (§7.4).** The config refuses the value when
+  `IN_RUN_ATTEMPTS x gateway.read_timeout_ms + (IN_RUN_ATTEMPTS - 1) x 5000` is greater than or
+  equal to `run.timeout_secs x 1000`. `IN_RUN_ATTEMPTS` is 3, the number of attempts of one turn.
+  The 5000 ms is the longest wait between two attempts: the maximum retry delay and
+  `IN_RUN_RETRY_AFTER_MAX` are both 5 s. With the default values, 3 x 60000 + 2 x 5000 = 190000 ms
+  is less than 300000 ms.
 - **Stale faults (§7.5).** A host fault of a run that started before the current pause began does
   not count. It does not double the pause.
 - **Pause check (§7.5).** The pause check runs before every claim, also between claims inside one lease.
 - **404 text (§6).** The host-fault text of a 404 says "the gateway route is off, or the gateway
   does not know the model". A wrong `[[models]].model` id gives a 404 from the upstream.
 - **Run duration metric.** `agent_host_run_duration_seconds` now starts just before the claim.
+- **Known limit: stall on a later turn (§7.4, §7.5).** A gateway stall on a later model turn can
+  last until the outer run timeout, because the per-read timeout does not shrink to the time left
+  in the run. The run then ends as `RunError::Timeout`. This error stays deterministic and costs an
+  attempt, so a long gateway outage can move an event to `dead`. The author (Sven) chose to keep
+  this behavior for this PR and to handle it in the follow-up sweep. The sweep also covers a
+  related risk: an in-stream request-class error, or a stream protocol violation, maps to
+  `Transport`. This is a host fault, and it can retry without end.

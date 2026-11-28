@@ -27,7 +27,7 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `gateway.api_key_file` | `AGENT_HOST_GATEWAY__API_KEY_FILE` | none (required in `[gateway]`) | Path of the file that holds the gateway API key. No config key holds the key. The path has no space at the start or end. |
 | `gateway.ca_file` | `AGENT_HOST_GATEWAY__CA_FILE` | none | PEM file of trust anchors. The file REPLACES the platform roots. It must hold every root that the gateway chain needs. |
 | `gateway.connect_timeout_ms` | `AGENT_HOST_GATEWAY__CONNECT_TIMEOUT_MS` | `5000` | Time limit to make the connection. Range 100 to 60000. |
-| `gateway.read_timeout_ms` | `AGENT_HOST_GATEWAY__READ_TIMEOUT_MS` | `60000` | Time limit of each read. Range 1000 to 600000. Three times this value must be less than `run.timeout_secs` in milliseconds. |
+| `gateway.read_timeout_ms` | `AGENT_HOST_GATEWAY__READ_TIMEOUT_MS` | `60000` | Time limit of each read. Range 1000 to 600000. Three times this value plus two waits of 5000 ms must be less than `run.timeout_secs` in milliseconds. |
 | `models` | none (TOML only) | none | List of `[[models]]` tables. See the Model gateway section. Each table has `name`, `provider`, `model` and `max_output_tokens`. |
 | `models.max_output_tokens` | none (TOML only) | none (required) | Most output tokens of one model call. Range 1 to 128000. |
 | `lease.ttl_secs` | `AGENT_HOST_LEASE__TTL_SECS` | `30` | Time to live of an inbox lease. Range 3 to 600, and at least 3 times `lease.heartbeat_interval_secs`. |
@@ -154,7 +154,8 @@ When two such agents have different organizations, the service refuses the confi
 
 **The key file.** The file holds one key on one line. The host reads it once at boot.
 The host removes a trailing newline. A byte order mark, or a space, a tab or another white-space character inside the key, stops the boot.
-The error text names the path and never the key. To rotate the key, issue the new key, restart every host, then revoke the old key.
+The error text names the path and never the key. To rotate the key, issue the new key and write it into the configured `gateway.api_key_file` of every host. Then restart every host.
+Revoke the old key only after every host runs with the new key.
 
 **Rollback.** The gateway model writes `provider_data` (signed thinking blocks) into the session rows.
 A rollback of the agent host to a build with Helikon core below 0.8 needs a database restore.
@@ -165,6 +166,10 @@ A host fault is a fault of the host or of the gateway link. It is not a fault of
 A host fault gives the attempt back and never moves an event to `dead`. The run row gets `status = 'failed'` and `error_class = 'host_fault'`.
 The event gets a delay of at least `retry_after`, up to 86400 seconds. No memory commit happens.
 The worker writes one `error` log line for each host fault. The line never holds the key.
+
+**Known limit.** A gateway stall on a later model turn can last until the outer run timeout. The read timeout does not shrink to the time left in the run.
+The run then ends as `RunError::Timeout`. This error stays deterministic and costs an attempt. A long gateway outage can so move an event to `dead`.
+The author chose to keep this behavior for this release.
 
 | Error of the model call | Class |
 |---|---|

@@ -134,9 +134,10 @@ Make a throwaway cargo project in the session scratchpad (name it `helikon-probe
 dependencies `paigasus-helikon = { version = "=<facade>", default-features = false, features = ["runtime-tokio"] }`,
 `paigasus-helikon-providers-anthropic = { version = "=<provider>", default-features = false, features = ["rustls-no-provider"] }`
 and `paigasus-helikon-sessions-testkit = "=<testkit>"`. Run `cargo fetch` and
-`cargo tree -e normal --target all -i aws-lc-rs` in it.
-Expected: `cargo tree` prints nothing (or "nothing to print"), and `cargo tree -d` shows one
-`paigasus-helikon-core` and one `jiff`.
+`grep -E '^name = "aws-lc-rs"' Cargo.lock` in it.
+Expected: `grep` prints nothing. No output means that `aws-lc-rs` is absent. Do not use
+`cargo tree -i aws-lc-rs` for this check: it fails with "did not match any packages" when the
+crate is absent. `cargo tree -d` shows one `paigasus-helikon-core` and one `jiff`.
 
 - [ ] **Step 3: Check the SMA-868 API in the fetched sources**
 
@@ -308,8 +309,10 @@ The rules (spec §7.4), all in `validate()`, with no I/O:
   only when `is_loopback_host(base_url)` is true (else `GatewayBaseUrlScheme`). No user name or
   password, no query, no fragment. A path prefix is allowed.
 - `api_key_file` and `ca_file`: not empty and equal to their `trim()` (as `MemoryS3CaPathBlank`).
-- `3 × read_timeout_ms < run.timeout_secs × 1000` (Review Focus 3; the spec rule
-  `read_timeout_ms < run.timeout_secs × 1000` follows from it). Else `GatewayReadTimeoutTooLong`.
+- `IN_RUN_ATTEMPTS × read_timeout_ms + (IN_RUN_ATTEMPTS − 1) × 5000 < run.timeout_secs × 1000`
+  (Review Focus 3; the 5000 ms is `IN_RUN_RETRY_AFTER_MAX` and the largest back-off delay; the
+  spec rule `read_timeout_ms < run.timeout_secs × 1000` follows from it). Else
+  `GatewayReadTimeoutTooLong`.
 - `[[models]].name`: not empty, unique, not `scripted`. `model`: not empty after `trim()`.
 - D3: every agent whose `model` is a `[[models]].name` has the same org (`AgentId::org()`). Else
   `GatewayAgentsOrgMismatch` with the two agent ids. Agents on other models do not count.
@@ -357,9 +360,10 @@ The table of `the_base_url_rules_hold` (input → result):
 | `https://gw.example/#f` | `GatewayBaseUrlFragment` |
 | `not a url` | `GatewayBaseUrlUnparsable` |
 
-`three_read_timeouts_must_fit_in_the_run_timeout`: `run.timeout_secs = 60` with
-`read_timeout_ms = 20000` gives
-`Err(GatewayReadTimeoutTooLong { read_timeout_ms: 20000, run_timeout_secs: 60 })`, and `19999`
+`three_read_timeouts_must_fit_in_the_run_timeout`: the rule refuses the value when
+`IN_RUN_ATTEMPTS x read + (IN_RUN_ATTEMPTS - 1) x 5000 >= run x 1000`. With `run.timeout_secs = 60`,
+`read_timeout_ms = 16667` gives
+`Err(GatewayReadTimeoutTooLong { read_timeout_ms: 16667, run_timeout_secs: 60 })`, and `16666`
 gives `Ok(())`. The default pair (60000, 300) gives `Ok(())`.
 
 `model_names_are_unique_not_empty_and_not_scripted`: two entries `claude` give
@@ -1160,6 +1164,7 @@ Make a shim directory that holds only `bash` → `/bin/bash` (system bash 3.2), 
 root:
 
 ```bash
+export PATH="$HOME/.proto/shims:$HOME/.proto/bin:$PATH"
 moon ci :build :test :lint :fmt :deny :osv :machete :actionlint :typecheck :breaking \
   :affected-smoke :parity-corpus-drift :next-env-drift :wasm-getrandom-free \
   :redis-connect-single-site :iam-docker-policy-single-site :error-code-single-site \
