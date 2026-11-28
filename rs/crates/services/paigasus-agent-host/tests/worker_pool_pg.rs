@@ -18,6 +18,7 @@ use paigasus_agent_host::adapters::helikon::scripted::{CancelWaitingModel, Scrip
 use paigasus_agent_host::adapters::iam::CallerCredential;
 use paigasus_agent_host::adapters::id::MintIds;
 use paigasus_agent_host::adapters::persistence::agent_registry::PgAgentRegistry;
+use paigasus_agent_host::adapters::persistence::inbox_repository::PgInboxRepository;
 use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::application::agents::{AgentAdmin, ResourceKey};
@@ -28,9 +29,10 @@ use paigasus_agent_host::application::worker::ports::RunLimits;
 use paigasus_agent_host::application::worker::run::{RunWorker, WorkerPorts, WorkerSettings};
 use paigasus_agent_host_core::claim::ClaimConfig;
 use paigasus_agent_host_core::fault::NoFaults;
-use paigasus_agent_host_core::ids::{InboxId, PrincipalId};
+use paigasus_agent_host_core::ids::{EventId, InboxId, PrincipalId};
+use paigasus_agent_host_core::inbox::NewInboxEvent;
 use paigasus_agent_host_core::memory::MemoryCaps;
-use paigasus_agent_host_core::ports::LeaseRepository;
+use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, LeaseRepository};
 use paigasus_agent_host_core::registry::AgentFields;
 use paigasus_agent_host_core::retry::RetryPolicy;
 use paigasus_agent_host_core::screen::AllowAll;
@@ -169,6 +171,40 @@ async fn an_inbox_of_an_archived_agent_is_not_taken_and_its_events_stay_pending(
     assert!(
         support::scalar_bool(&db, &format!("SELECT status = 'pending' AS v FROM inbox_event WHERE id = '{x_event}'")).await,
         "the event of X stays pending"
+    );
+}
+
+/// An event that the store accepted before the archive stays `pending` after it (Review Focus 5):
+/// the archive closes the inbox to NEW events and does not touch stored ones. The pending gauge
+/// has its own test below.
+#[tokio::test]
+async fn an_event_of_an_agent_that_is_archived_later_stays_pending() {
+    let Some((_node, _url, db)) = migrated_postgres().await else {
+        eprintln!("skipping worker_pool_pg: Docker unavailable");
+        return;
+    };
+    let t = two_inboxes(&db).await;
+    let repo = PgInboxRepository::new(db.clone());
+    let event = Uuid::new_v4();
+    let stored = repo
+        .insert_event(NewInboxEvent {
+            id: EventId::from_uuid(event),
+            inbox: InboxId::new(t.org, t.x),
+            source: "urn:test".to_string(),
+            ce_id: "before-archive".to_string(),
+            ce_type: "agents.x".to_string(),
+            thread: None,
+            envelope: serde_json::json!({}),
+        })
+        .await
+        .expect("insert");
+    assert_eq!(stored, InsertOutcome::Inserted { id: EventId::from_uuid(event) });
+    archive(&db, t.a).await;
+
+    assert!(store_of(&db).acquire_next("w", TTL).await.expect("acquire_next").is_none(), "no run takes the event");
+    assert!(
+        support::scalar_bool(&db, &format!("SELECT status = 'pending' AS v FROM inbox_event WHERE id = '{event}'")).await,
+        "the stored event stays pending"
     );
 }
 

@@ -219,6 +219,30 @@ async fn ack_and_skip_on_a_tenancy_refusal() {
     task.await.expect("join").expect("run");
 }
 
+/// An event for the inbox of an archived agent is terminated (SMA-852): NATS never redelivers it,
+/// and the store holds no row. The event names the org of the stack, so the tenancy skip cannot
+/// hide the case.
+#[tokio::test]
+async fn a_message_for_an_archived_agents_inbox_is_terminated_and_writes_no_row() {
+    let Some(s) = stack("a_message_for_an_archived_agents_inbox_is_terminated_and_writes_no_row", 0x500, &[FILTER]).await else {
+        return;
+    };
+    s.db.execute_unprepared(&format!("UPDATE agent SET archived_at = now() WHERE id = '{}'", u(0x11)))
+        .await
+        .expect("archive");
+    let (stop, task) = start_source(&s).await;
+    publish(&s.js, FIX_ORG.to_vec()).await;
+    all_acked(&s.js, Duration::from_secs(10)).await;
+    // A nak would redeliver within the 3 s; a term never does.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let info = consumer_info(&s.js).await;
+    assert_eq!(info.num_ack_pending, 0);
+    assert_eq!(info.num_redelivered, 0);
+    assert_eq!(rows(&s.db).await, 0);
+    let _ = stop.send(());
+    task.await.expect("join").expect("run");
+}
+
 #[tokio::test]
 async fn term_on_a_bad_body() {
     let Some(s) = stack("term_on_a_bad_body", 0x500, &[FILTER]).await else { return };

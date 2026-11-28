@@ -43,6 +43,8 @@ pub async fn ingest(repo: &dyn InboxRepository, event: NewInboxEvent, channel: C
                 tracing::warn!(%inbox, %source, %ce_id, channel = label, "a duplicate event has another type or data than the stored event");
             }
         }
+        // The caller logs or answers it. No counter: nothing was stored.
+        InsertOutcome::AgentArchived => {}
     }
     Ok(outcome)
 }

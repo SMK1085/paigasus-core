@@ -37,6 +37,8 @@ pub enum ApiError {
     InvalidRequestSchema,
     /// 400: a path segment is not a UUID.
     InvalidUuid,
+    /// 409: the agent of the inbox is archived. It takes no new events.
+    AgentArchived,
     /// 503: the database failed. The client can retry.
     StoreUnavailable,
     /// 500: an unexpected fault. The detail stays in the logs.
@@ -56,6 +58,7 @@ impl ApiError {
             ApiError::BadRequestBody => (StatusCode::BAD_REQUEST, "invalid-request-body", "the request body is not valid JSON"),
             ApiError::InvalidRequestSchema => (StatusCode::BAD_REQUEST, "invalid-request-schema", "the request body is not a valid CloudEvent for this route"),
             ApiError::InvalidUuid => (StatusCode::BAD_REQUEST, "invalid-uuid", "a path segment is not a valid UUID"),
+            ApiError::AgentArchived => (StatusCode::CONFLICT, "agent-archived", "the agent of this inbox is archived"),
             ApiError::StoreUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "store-unavailable", "the store cannot be reached; retry later"),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal", "an internal error occurred"),
         }
@@ -93,6 +96,7 @@ mod tests {
             (ApiError::BadRequestBody, ErrorReason::InvalidRequestBody),
             (ApiError::InvalidRequestSchema, ErrorReason::InvalidRequestSchema),
             (ApiError::InvalidUuid, ErrorReason::InvalidUuid),
+            (ApiError::AgentArchived, ErrorReason::AgentArchived),
             (ApiError::StoreUnavailable, ErrorReason::StoreUnavailable),
             (ApiError::Internal, ErrorReason::Internal),
         ] {
@@ -112,6 +116,7 @@ mod tests {
             ApiError::BadRequestBody,
             ApiError::InvalidRequestSchema,
             ApiError::InvalidUuid,
+            ApiError::AgentArchived,
             ApiError::StoreUnavailable,
             ApiError::Internal,
         ] {

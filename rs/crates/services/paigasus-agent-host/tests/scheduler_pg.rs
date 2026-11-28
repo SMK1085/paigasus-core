@@ -111,6 +111,39 @@ async fn events_like(env: &Env, ib: &Ib, ce_id_prefix: &str) -> i64 {
     .await
 }
 
+/// The agent is archived with SQL, not through `archive`, so that the timer is still `active` when
+/// the scheduler fires. The pass counts the row, the timer is `cancelled` and no event exists.
+#[tokio::test]
+async fn a_due_timer_of_an_archived_agent_is_cancelled_and_writes_no_event() {
+    let Some(env) = env().await else {
+        eprintln!("skipping scheduler_pg: Docker unavailable");
+        return;
+    };
+    let ib = new_inbox(&env).await;
+    let id = due_follow_up(&env, &ib, 5).await;
+    exec(&env, &format!("UPDATE agent SET archived_at = now() WHERE id = (SELECT agent_id FROM inbox WHERE id = '{}')", ib.uuid)).await;
+    assert_eq!(support::timer::timer_state(&env.db, id).await.status, "active", "the archive by SQL leaves the timer active");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let sched = scheduler(&env.db, settings());
+    assert_eq!(sched.fire_due(1).await.expect("pass"), 1, "the pass counts the row as processed");
+
+    let state = support::timer::timer_state(&env.db, id).await;
+    assert_eq!((state.status.as_str(), state.fire_count), ("cancelled", 0));
+    assert_eq!(support::timer::timer_events(&env.db, ib.uuid).await.len(), 0);
+    let fired = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, ..)| key.key().name() == names::AGENT_HOST_TIMER_FIRED_TOTAL)
+        .any(|(key, ..)| key.key().labels().any(|l| l.key() == "outcome" && l.value() == "agent_archived"));
+    assert!(fired, "the fire counter has the outcome agent_archived");
+    // A second pass finds nothing due.
+    assert_eq!(sched.fire_due(1).await.expect("pass"), 0);
+}
+
 #[tokio::test]
 async fn restart_fires_a_missed_daily_slot_once() {
     let Some(env) = env().await else {

@@ -497,7 +497,7 @@ fn describe_agent_host_metrics() {
     );
     describe_counter!(
         names::AGENT_HOST_TIMER_FIRED_TOTAL,
-        "Timer firings, labeled by kind (follow_up or schedule), origin (agent or system) and outcome (inserted or duplicate)."
+        "Timer firings, labeled by kind (follow_up or schedule), origin (agent or system) and outcome (inserted, duplicate or agent_archived)."
     );
     describe_counter!(
         names::AGENT_HOST_TIMER_FIRE_ERRORS_TOTAL,

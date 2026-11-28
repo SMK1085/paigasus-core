@@ -131,6 +131,8 @@ pub async fn post_event(
         tracing::error!(error = %e, "the event insert failed");
         ApiError::StoreUnavailable
     })?;
-    let (InsertOutcome::Inserted { id } | InsertOutcome::Duplicate { id, .. }) = outcome;
+    let (InsertOutcome::Inserted { id } | InsertOutcome::Duplicate { id, .. }) = outcome else {
+        return Err(ApiError::AgentArchived);
+    };
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": id.uuid().to_string() }))))
 }

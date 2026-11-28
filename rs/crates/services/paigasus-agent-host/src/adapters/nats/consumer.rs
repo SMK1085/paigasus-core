@@ -18,7 +18,7 @@ use async_nats::jetstream::{self, AckKind, consumer::PullConsumer};
 use futures::StreamExt;
 use paigasus_agent_host_core::ids::EventId;
 use paigasus_agent_host_core::inbox::{Inbox, NewInboxEvent};
-use paigasus_agent_host_core::ports::{InboxRepository, RepositoryError};
+use paigasus_agent_host_core::ports::{InboxRepository, InsertOutcome, RepositoryError};
 use paigasus_observability::names;
 use tokio::sync::watch;
 use tracing::Instrument;
@@ -213,6 +213,10 @@ pub async fn handle_message(channels: &[BoundChannel], inboxes: &dyn InboxReposi
         envelope: event.to_json(),
     };
     match ingest(inboxes, new_event, Channel::Nats).await {
+        Ok(InsertOutcome::AgentArchived) => {
+            tracing::warn!(subject, inbox = %channel.inbox.id().uuid(), ce_id = event.id(), "the agent of the inbox is archived; the event is terminated");
+            Disposition::Term
+        }
         Ok(_) => Disposition::Ack,
         Err(e) => {
             let delay = back_off(delivered);
@@ -378,7 +382,6 @@ mod tests {
     use jiff::Timestamp;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use paigasus_agent_host_core::ids::{AgentId, InboxId, PrincipalId};
-    use paigasus_agent_host_core::ports::InsertOutcome;
 
     /// IAM's encoding of `iam.organization.created` for the org `u(0x500)` (the Task 1 fixture).
     const FIX_ORG: &[u8] = include_bytes!("../../../../../libs/paigasus-cloudevents/tests/fixtures/iam/organization_created_trailing_zeros.json");

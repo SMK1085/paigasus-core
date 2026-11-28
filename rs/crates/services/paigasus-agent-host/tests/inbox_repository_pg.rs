@@ -260,3 +260,33 @@ async fn insert_in_a_transaction_sees_a_duplicate() {
         }
     );
 }
+
+#[tokio::test]
+async fn an_insert_into_an_inbox_of_an_archived_agent_is_agent_archived_and_writes_no_row() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    db.execute_unprepared(&format!("UPDATE agent SET archived_at = now() WHERE id = '{}'", u(3))).await.expect("archive");
+    let repo = PgInboxRepository::new(db.clone());
+    let outcome = repo.insert_event(new_event(10, 2, "c1", "agents.x", json!({"data": 1}), None)).await.expect("insert");
+    assert_eq!(outcome, InsertOutcome::AgentArchived);
+    let row = one_row(&db, "SELECT count(*) AS n FROM inbox_event").await;
+    assert_eq!(row.try_get::<i64>("", "n").expect("n"), 0);
+}
+
+#[tokio::test]
+async fn a_duplicate_key_of_an_archived_agent_stays_duplicate() {
+    let Some((_node, _url, db)) = migrated_postgres().await else { return };
+    insert_inbox(&db, u(1), u(2), u(3), u(4)).await;
+    let repo = PgInboxRepository::new(db.clone());
+    let first = repo.insert_event(new_event(10, 2, "c1", "agents.x", json!({"data": 1}), None)).await.expect("insert");
+    assert_eq!(first, InsertOutcome::Inserted { id: EventId::from_uuid(u(10)) });
+    db.execute_unprepared(&format!("UPDATE agent SET archived_at = now() WHERE id = '{}'", u(3))).await.expect("archive");
+    let again = repo.insert_event(new_event(11, 2, "c1", "agents.x", json!({"data": 1}), None)).await.expect("insert");
+    assert_eq!(
+        again,
+        InsertOutcome::Duplicate {
+            id: EventId::from_uuid(u(10)),
+            payload_matches: true
+        }
+    );
+}

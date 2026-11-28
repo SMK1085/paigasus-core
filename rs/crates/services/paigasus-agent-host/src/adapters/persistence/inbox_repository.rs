@@ -13,9 +13,15 @@ use uuid::Uuid;
 use super::time::from_micros;
 
 /// One statement. The thread subselect keeps a thread of another inbox out of the foreign key:
-/// the row then gets a `NULL` thread. A conflict on the dedup key writes nothing.
+/// the row then gets a `NULL` thread. A conflict on the dedup key writes nothing. The `EXISTS`
+/// writes nothing for an inbox of an archived agent (SMA-852). It is a plain read of `agent`: it
+/// takes no row lock, so a scheduler that holds a timer row never waits on the agent row.
+/// Every parameter has a cast, because a `SELECT` list gives Postgres nothing to infer from.
 const INSERT_SQL: &str = "INSERT INTO inbox_event (id, inbox_id, source, ce_id, ce_type, thread_id, envelope) \
-     VALUES ($1, $2, $3, $4, $5, (SELECT t.id FROM thread t WHERE t.id = $6 AND t.inbox_id = $2), $7::jsonb) \
+     SELECT $1::uuid, $2::uuid, $3::text, $4::text, $5::text, \
+            (SELECT t.id FROM thread t WHERE t.id = $6::uuid AND t.inbox_id = $2::uuid), $7::jsonb \
+     WHERE EXISTS (SELECT 1 FROM inbox i JOIN agent a ON a.org_id = i.org_id AND a.id = i.agent_id \
+                   WHERE i.id = $2::uuid AND a.archived_at IS NULL) \
      ON CONFLICT (inbox_id, source, ce_id) DO NOTHING \
      RETURNING id";
 
@@ -105,7 +111,7 @@ fn domain_err(e: DomainError) -> RepositoryError {
 
 /// Insert one event on any connection, so that a caller can do it inside its own transaction.
 /// A conflict on the dedup key writes nothing and returns the stored row with a payload check.
-/// A stored row that is gone is a `DbErr::Custom`.
+/// No row and no stored row mean that the agent of the inbox is archived.
 pub async fn insert_event_in<C: ConnectionTrait>(conn: &C, event: &NewInboxEvent) -> Result<InsertOutcome, DbErr> {
     let inbox = event.inbox.uuid();
     let thread: Option<Uuid> = event.thread.as_ref().map(|t| t.uuid());
@@ -131,7 +137,10 @@ pub async fn insert_event_in<C: ConnectionTrait>(conn: &C, event: &NewInboxEvent
         STORED_SQL,
         [inbox.into(), event.source.clone().into(), event.ce_id.clone().into(), new_data.into()],
     );
-    let row = conn.query_one_raw(stmt).await?.ok_or_else(|| DbErr::Custom("the stored row of a duplicate key is gone".to_string()))?;
+    // No stored row either: the `EXISTS` refused the insert, so the agent is archived.
+    let Some(row) = conn.query_one_raw(stmt).await? else {
+        return Ok(InsertOutcome::AgentArchived);
+    };
     let id: Uuid = row.try_get("", "id")?;
     let stored_type: String = row.try_get("", "ce_type")?;
     let data_equal: bool = row.try_get("", "data_equal")?;
