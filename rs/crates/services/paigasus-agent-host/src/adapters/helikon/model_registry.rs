@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_helikon::core::{CancellationToken, Model, ModelCapabilities, ModelError, ModelEvent, ModelRequest};
 
 /// A shared model. `LlmAgent` needs a sized model type, so this wrapper holds the trait object
@@ -42,14 +41,6 @@ impl Model for SharedModel {
     }
 }
 
-/// An agent names a model that the registry does not hold.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("the agent \"{agent}\" names the model \"{model}\", which is not registered")]
-pub struct UnknownModel {
-    pub agent: String,
-    pub model: String,
-}
-
 /// The models by name.
 #[derive(Clone, Default)]
 pub struct ModelRegistry {
@@ -73,24 +64,11 @@ impl ModelRegistry {
         ids.sort();
         ids
     }
-
-    /// Check that every agent names a registered model.
-    pub fn check(&self, agents: &[AgentDefinition]) -> Result<(), UnknownModel> {
-        match agents.iter().find(|a| !self.models.contains_key(&a.model_id)) {
-            Some(a) => Err(UnknownModel {
-                agent: a.id.as_prn().canonical(),
-                model: a.model_id.clone(),
-            }),
-            None => Ok(()),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use paigasus_agent_host_core::ids::AgentId;
 
     use super::*;
 
@@ -117,16 +95,6 @@ mod tests {
         }
     }
 
-    fn def(model: &str) -> AgentDefinition {
-        AgentDefinition {
-            id: AgentId::new(uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)),
-            name: "a".to_owned(),
-            model_id: model.to_owned(),
-            instructions: String::new(),
-            tool_names: vec![],
-        }
-    }
-
     #[tokio::test]
     async fn a_shared_model_forwards_invoke() {
         let count = Arc::new(AtomicUsize::new(0));
@@ -142,16 +110,5 @@ mod tests {
     #[test]
     fn the_production_registry_is_empty() {
         assert!(ModelRegistry::default().model("scripted").is_none());
-    }
-
-    #[test]
-    fn check_names_the_agent_and_the_model() {
-        let d = def("gpt");
-        let err = ModelRegistry::default().check(std::slice::from_ref(&d)).expect_err("no model");
-        assert_eq!(err.agent, d.id.as_prn().canonical());
-        assert_eq!(err.model, "gpt");
-        let mut registry = ModelRegistry::default();
-        registry.register("gpt", SharedModel::new(Counting(Arc::new(AtomicUsize::new(0)))));
-        assert_eq!(registry.check(&[d]), Ok(()));
     }
 }
