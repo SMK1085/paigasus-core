@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.3.0...paigasus-kernel-v0.4.0) - 2026-11-28
+
+### Added
+
+- *(rs)* evaluate tool-policy history conditions in the gateway (SMA-753) ([#536](https://github.com/SMK1085/paigasus-core/pull/536))
+- *(rs)* add tool-call detector findings with severity and the built-in detectors (SMA-855) ([#534](https://github.com/SMK1085/paigasus-core/pull/534))
+- *(rs)* add the gateway session history store and session linking (SMA-753, part 1 of 2) ([#527](https://github.com/SMK1085/paigasus-core/pull/527))
+
 ## [0.3.0](https://github.com/SMK1085/paigasus-core/compare/paigasus-kernel-v0.2.1...paigasus-kernel-v0.3.0) - 2026-11-20
 
 ### Added

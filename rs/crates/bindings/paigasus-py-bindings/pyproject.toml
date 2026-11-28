@@ -1,6 +1,6 @@
 [project]
 name = "paigasus-py-bindings"
-version = "0.3.0"
+version = "0.4.0"
 description = "PyO3 bindings for the Paigasus behavioral kernel."
 readme = "README.md"
 license = "Apache-2.0"
