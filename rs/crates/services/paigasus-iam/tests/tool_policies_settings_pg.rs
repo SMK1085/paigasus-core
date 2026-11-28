@@ -34,6 +34,7 @@ fn settings(mode: ToolPolicyMode, fail_mode: FailMode, by: &str) -> ToolPolicySe
         updated_at: Some(Utc::now()),
         updated_by: Some(by.to_string()),
         first_enabled_at: None,
+        webhooks: Vec::new(),
     }
 }
 
@@ -70,14 +71,14 @@ async fn upsert_inserts_then_updates_one_row() {
 
     let first = settings(ToolPolicyMode::LogOnly, FailMode::Closed, "alice");
     let tx = uow.begin().await.unwrap();
-    repo.upsert_settings_in(&*tx, org, &first).await.unwrap();
+    repo.upsert_settings_in(&*tx, org, &first, None).await.unwrap();
     tx.commit().await.unwrap();
     let got = repo.settings(org).await.unwrap().unwrap();
     assert_eq!((got.mode, got.fail_mode, got.updated_by.as_deref()), (ToolPolicyMode::LogOnly, FailMode::Closed, Some("alice")));
 
     let second = settings(ToolPolicyMode::Enforce, FailMode::Open, "bob");
     let tx = uow.begin().await.unwrap();
-    repo.upsert_settings_in(&*tx, org, &second).await.unwrap();
+    repo.upsert_settings_in(&*tx, org, &second, None).await.unwrap();
     tx.commit().await.unwrap();
     let got = repo.settings(org).await.unwrap().unwrap();
     assert_eq!((got.mode, got.fail_mode, got.updated_by.as_deref()), (ToolPolicyMode::Enforce, FailMode::Open, Some("bob")));
@@ -97,7 +98,7 @@ async fn first_enabled_at_round_trips_and_survives_a_later_write() {
         let (repo, uow) = (repo.clone(), uow.clone());
         async move {
             let tx = uow.begin().await.unwrap();
-            repo.upsert_settings_in(&*tx, org, &s).await.unwrap();
+            repo.upsert_settings_in(&*tx, org, &s, None).await.unwrap();
             tx.commit().await.unwrap();
         }
     };
@@ -154,7 +155,7 @@ async fn deleting_the_org_cascades_to_its_settings() {
     let repo = PgToolPolicies::new(db.clone());
     let uow = SeaOrmUnitOfWork::new(db.clone());
     let tx = uow.begin().await.unwrap();
-    repo.upsert_settings_in(&*tx, org, &settings(ToolPolicyMode::Enforce, FailMode::Open, "alice")).await.unwrap();
+    repo.upsert_settings_in(&*tx, org, &settings(ToolPolicyMode::Enforce, FailMode::Open, "alice"), None).await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(row_count(&db, org).await, 1);
     raw(&db, format!("DELETE FROM organization WHERE id = '{org}'")).await.unwrap();
@@ -199,7 +200,7 @@ async fn an_upsert_rolls_back_with_its_transaction() {
     let repo = PgToolPolicies::new(db.clone());
     let uow = SeaOrmUnitOfWork::new(db.clone());
     let tx = uow.begin().await.unwrap();
-    repo.upsert_settings_in(&*tx, org, &settings(ToolPolicyMode::Enforce, FailMode::Open, "alice")).await.unwrap();
+    repo.upsert_settings_in(&*tx, org, &settings(ToolPolicyMode::Enforce, FailMode::Open, "alice"), None).await.unwrap();
     drop(tx);
     assert_eq!(repo.settings(org).await.unwrap(), None);
 }
@@ -213,6 +214,107 @@ async fn an_upsert_without_actor_or_time_is_an_error() {
     let repo = PgToolPolicies::new(db.clone());
     let uow = SeaOrmUnitOfWork::new(db.clone());
     let tx = uow.begin().await.unwrap();
-    let err = repo.upsert_settings_in(&*tx, org, &ToolPolicySettings::default_for_absent_row()).await.unwrap_err();
+    let err = repo.upsert_settings_in(&*tx, org, &ToolPolicySettings::default_for_absent_row(), None).await.unwrap_err();
     assert!(matches!(err, RepositoryError::Backend(_)), "{err:?}");
+}
+
+// ---- SMA-856: the webhook opt-in list ----
+
+async fn write_with(repo: &PgToolPolicies, uow: &SeaOrmUnitOfWork, org: Uuid, s: &ToolPolicySettings, webhooks: Option<Vec<String>>) -> Vec<String> {
+    let tx = uow.begin().await.unwrap();
+    let stored = repo.upsert_settings_in(&*tx, org, s, webhooks).await.unwrap();
+    tx.commit().await.unwrap();
+    stored
+}
+
+fn list(names: &[&str]) -> Option<Vec<String>> {
+    Some(names.iter().map(|s| (*s).to_owned()).collect())
+}
+
+#[tokio::test]
+async fn the_webhooks_column_defaults_to_an_empty_list() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let stored = write_with(&repo, &uow, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), None).await;
+    assert_eq!(stored, Vec::<String>::new());
+    assert_eq!(repo.settings(org).await.unwrap().unwrap().webhooks, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_webhook_list_round_trips() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    let s = settings(ToolPolicyMode::Off, FailMode::Closed, "alice");
+    assert_eq!(write_with(&repo, &uow, org, &s, list(&["a", "b"])).await, ["a", "b"]);
+    assert_eq!(repo.settings(org).await.unwrap().unwrap().webhooks, ["a", "b"]);
+    assert_eq!(write_with(&repo, &uow, org, &s, list(&[])).await, Vec::<String>::new());
+    assert_eq!(repo.settings(org).await.unwrap().unwrap().webhooks, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn an_absent_list_does_not_undo_a_concurrent_write() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    write_with(&repo, &uow, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), list(&["a"])).await;
+    // A stale struct (`webhooks` empty) with `None` must keep the stored list.
+    let stale = ToolPolicySettings {
+        webhooks: Vec::new(),
+        ..settings(ToolPolicyMode::LogOnly, FailMode::Open, "bob")
+    };
+    let stored = write_with(&repo, &uow, org, &stale, None).await;
+    assert_eq!(stored, ["a"]);
+    let got = repo.settings(org).await.unwrap().unwrap();
+    assert_eq!((got.mode, got.webhooks), (ToolPolicyMode::LogOnly, vec!["a".to_owned()]));
+}
+
+#[tokio::test]
+async fn a_bad_stored_list_is_corrupt() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    write_with(&repo, &uow, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), None).await;
+    raw(&db, format!("UPDATE tool_policy_settings SET webhooks = 'not json' WHERE org_id = '{org}'")).await.unwrap();
+    let err = repo.settings(org).await.unwrap_err();
+    assert!(matches!(err, RepositoryError::Backend(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn the_down_migration_drops_the_column() {
+    use paigasus_iam::adapters::persistence::Migrator;
+    use sea_orm_migration::MigratorTrait;
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    write_with(&repo, &uow, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), list(&["a"])).await;
+    // m0016 is the last migration of this change; `down(Some(1))` is its `down`.
+    Migrator::down(&db, Some(1)).await.expect("m0016 down must succeed");
+    let columns = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'tool_policy_settings' AND column_name = 'webhooks'".to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert!(columns.is_empty(), "the column is gone");
+    assert_eq!(row_count(&db, org).await, 1, "the row stays");
+    Migrator::up(&db, Some(1)).await.expect("m0016 must apply again");
+    assert_eq!(repo.settings(org).await.unwrap().unwrap().webhooks, Vec::<String>::new());
 }

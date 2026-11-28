@@ -14,6 +14,8 @@ pub struct Model {
     pub updated_at: DateTimeUtc,
     pub updated_by: String,
     pub first_enabled_at: Option<DateTimeUtc>,
+    /// A JSON array of strings (SMA-856).
+    pub webhooks: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

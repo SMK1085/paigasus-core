@@ -219,6 +219,9 @@ pub struct ToolPolicySettings {
     /// When the organization first left `off` (spec section 9.2). `None` until then. It is
     /// written once: a later write keeps the stored value.
     pub first_enabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The webhook providers that the organization opts in to (SMA-856). Sorted and unique.
+    /// `upsert_settings_in` ignores this field: the write takes the list as its own argument.
+    pub webhooks: Vec<String>,
 }
 
 impl ToolPolicySettings {
@@ -230,6 +233,7 @@ impl ToolPolicySettings {
             updated_at: None,
             updated_by: None,
             first_enabled_at: None,
+            webhooks: Vec::new(),
         }
     }
 }

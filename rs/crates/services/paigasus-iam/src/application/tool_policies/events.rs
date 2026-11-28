@@ -39,7 +39,7 @@ pub(crate) fn settings_changed(ids: &impl IdGenerator, corr: Uuid, actor: &Prn, 
         aggregate_prn: org_prn.canonical(),
         actor_prn: Some(actor.canonical()),
         occurred_at: now,
-        payload: json!({"org_id": org.to_string(), "mode": s.mode.as_str(), "fail_mode": s.fail_mode.as_str()}),
+        payload: json!({"org_id": org.to_string(), "mode": s.mode.as_str(), "fail_mode": s.fail_mode.as_str(), "webhooks": s.webhooks}),
         correlation_id: Some(corr),
     }
 }

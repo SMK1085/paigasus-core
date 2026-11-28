@@ -27,9 +27,43 @@ pub(crate) fn check_transition(next: ToolPolicyMode, has_set: bool, ever_enabled
     }
 }
 
+/// The most distinct names that an opt-in list may hold.
+const WEBHOOK_OPT_IN_MAX: usize = 16;
+/// The most characters in one provider name.
+const WEBHOOK_NAME_MAX: usize = 64;
+
+/// Validates and normalises a webhook opt-in list (SMA-856): each name matches `[a-z0-9_]{1,64}`,
+/// and the list holds at most 16 distinct names. Returns the names sorted and unique. Any
+/// other input is `InvalidWebhookOptIn`.
+pub(crate) fn normalise_opt_in(names: Vec<String>) -> Result<Vec<String>, TenancyError> {
+    let valid = |n: &str| !n.is_empty() && n.len() <= WEBHOOK_NAME_MAX && n.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'));
+    if !names.iter().all(|n| valid(n)) {
+        return Err(TenancyError::InvalidWebhookOptIn);
+    }
+    let unique: std::collections::BTreeSet<String> = names.into_iter().collect();
+    if unique.len() > WEBHOOK_OPT_IN_MAX {
+        return Err(TenancyError::InvalidWebhookOptIn);
+    }
+    Ok(unique.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_opt_in_list_is_sorted_unique_and_bounded() {
+        assert_eq!(normalise_opt_in(vec!["b".into(), "a".into(), "b".into()]).unwrap(), ["a", "b"]);
+        assert_eq!(normalise_opt_in(vec![]).unwrap(), Vec::<String>::new());
+        let sixteen: Vec<String> = (0..16).map(|i| format!("p{i}")).collect();
+        assert_eq!(normalise_opt_in(sixteen.iter().chain(&sixteen).cloned().collect()).unwrap().len(), 16, "duplicates do not count");
+        let seventeen: Vec<String> = (0..17).map(|i| format!("p{i}")).collect();
+        assert_eq!(normalise_opt_in(seventeen), Err(TenancyError::InvalidWebhookOptIn));
+        for bad in ["", "Acme", "a-b", "a b", "é", &"a".repeat(65)] {
+            assert_eq!(normalise_opt_in(vec![bad.to_owned()]), Err(TenancyError::InvalidWebhookOptIn), "{bad:?}");
+        }
+        assert!(normalise_opt_in(vec!["a".repeat(64)]).is_ok());
+    }
 
     #[test]
     fn the_transition_table_holds() {

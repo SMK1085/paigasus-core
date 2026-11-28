@@ -17,6 +17,7 @@ mod m0012_role_grant_scope_index;
 mod m0013_create_tool_policies;
 mod m0014_create_tool_policy_settings;
 pub mod m0015_tool_policy_held_versions;
+mod m0016_tool_policy_webhooks;
 
 pub struct Migrator;
 
@@ -39,6 +40,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0013_create_tool_policies::Migration),
             Box::new(m0014_create_tool_policy_settings::Migration),
             Box::new(m0015_tool_policy_held_versions::Migration),
+            Box::new(m0016_tool_policy_webhooks::Migration),
         ]
     }
 }

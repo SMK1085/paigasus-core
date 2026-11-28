@@ -57,7 +57,7 @@ pub use self::held::HeldTarget;
 pub use self::recompile::{RECOMPILE_JOB_ACTOR, RECOMPILE_RESULT_LABELS, RecompileOutcome, RecompileRun, RecompileTasks, SetRecompile};
 pub use self::rejection::{RejectionReason, ToolPolicyRejection};
 use self::sets::{CompiledMeta, add_dropped_field_reasons, decode_compiled, encode_compiled, history_rejections};
-use self::settings::check_transition;
+use self::settings::{check_transition, normalise_opt_in};
 use crate::application::authorize::Authorize;
 use crate::application::error::TenancyError;
 use crate::application::pagination::Page;
@@ -375,13 +375,20 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     /// `enforce` before a first change away from `off`, or with no set, is
     /// `tool-policy-mode-transition-invalid` (final review I-2). The first change away from
     /// `off` stores `first_enabled_at` in the same transaction.
-    pub async fn put_settings(&self, actor: &Prn, org: Uuid, mode: ToolPolicyMode, fail_mode: FailMode) -> Result<SettingsAccepted, TenancyError> {
+    ///
+    /// `webhooks` is the opt-in list (SMA-856). `None` keeps the stored list. `Some` replaces it,
+    /// and `Some` of an empty list clears it. An invalid list is `InvalidWebhookOptIn` and
+    /// nothing is read or written.
+    pub async fn put_settings(&self, actor: &Prn, org: Uuid, mode: ToolPolicyMode, fail_mode: FailMode, webhooks: Option<Vec<String>>) -> Result<SettingsAccepted, TenancyError> {
+        let webhooks = webhooks.map(normalise_opt_in).transpose()?;
         let org_prn = self.authorize_org(actor, org, Action::ManageToolPolicySettings).await?;
         let key = ToolPolicySetKey::Tenant(org);
 
         // Step 1: the state, and the decision.
         let state = self.repo.state(&key).await?;
-        let first_enabled_at = self.repo.settings(org).await?.and_then(|s| s.first_enabled_at);
+        let before = self.repo.settings(org).await?;
+        let first_enabled_at = before.as_ref().and_then(|s| s.first_enabled_at);
+        let webhooks_before = before.map(|s| s.webhooks).unwrap_or_default();
         let save_starter = check_transition(mode, state.live_version > 0, first_enabled_at.is_some())?;
 
         // Step 2: compile the starter, with no transaction open.
@@ -423,16 +430,27 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
                 .await?;
             starter_version = version.version;
         }
-        let settings = ToolPolicySettings {
+        let mut settings = ToolPolicySettings {
             mode,
             fail_mode,
             updated_at: Some(now),
             updated_by: Some(actor.canonical()),
             // Written once: the repository keeps a stored value (also under a concurrent write).
             first_enabled_at: first_enabled_at.or((mode != ToolPolicyMode::Off).then_some(now)),
+            webhooks: Vec::new(),
         };
-        self.repo.upsert_settings_in(&*tx, org, &settings).await?;
+        settings.webhooks = self.repo.upsert_settings_in(&*tx, org, &settings, webhooks.clone()).await?;
         self.outbox.enqueue(&*tx, &events::settings_changed(&*self.ids, corr, actor, &org_prn, org, &settings, now)).await?;
+        let mut detail = json!({
+            "mode": mode.as_str(),
+            "fail_mode": fail_mode.as_str(),
+            "starter_version": (starter_version > 0).then_some(starter_version),
+        });
+        // The list keys appear only when the request carries the field.
+        if webhooks.is_some() {
+            detail["webhooks_before"] = json!(webhooks_before);
+            detail["webhooks_after"] = json!(settings.webhooks);
+        }
         let entry = AuditEntry {
             id: self.ids.new_audit_id(),
             occurred_at: now,
@@ -441,11 +459,7 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
             resource_prn: Some(org_prn.canonical()),
             outcome: AuditOutcome::Committed,
             determining_policies: vec![],
-            detail: json!({
-                "mode": mode.as_str(),
-                "fail_mode": fail_mode.as_str(),
-                "starter_version": (starter_version > 0).then_some(starter_version),
-            }),
+            detail,
             correlation_id: Some(corr),
         };
         self.audit.record(&*tx, &entry).await?;
@@ -1915,7 +1929,7 @@ mod tests {
     use paigasus_iam_core::tool_policy::{FailMode, ToolPolicyMode};
 
     async fn put_mode(h: &Harness, mode: ToolPolicyMode, fail_mode: FailMode) -> Result<SettingsAccepted, TenancyError> {
-        h.svc.put_settings(&h.actor, h.org, mode, fail_mode).await
+        h.svc.put_settings(&h.actor, h.org, mode, fail_mode, None).await
     }
 
     #[tokio::test]
@@ -1946,7 +1960,7 @@ mod tests {
         let wire: Vec<&str> = ev.iter().map(|e| e.event_type.as_wire()).collect();
         assert_eq!(wire, vec!["iam.policy.tool_set.published", "iam.policy.tool_settings.changed"]);
         assert_eq!(ev[0].payload, json!({"org_id": h.org.to_string(), "version": 1, "origin": "starter"}));
-        assert_eq!(ev[1].payload, json!({"org_id": h.org.to_string(), "mode": "log_only", "fail_mode": "closed"}));
+        assert_eq!(ev[1].payload, json!({"org_id": h.org.to_string(), "mode": "log_only", "fail_mode": "closed", "webhooks": []}));
         let entries = h.audit.0.lock().unwrap().clone();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "PutToolPolicySettings");
@@ -2023,6 +2037,65 @@ mod tests {
         let wire: Vec<&str> = events(&h).iter().map(|e| e.event_type.as_wire()).collect();
         assert_eq!(wire, vec!["iam.policy.tool_set.published", "iam.policy.tool_settings.changed"]);
         assert_eq!(h.audit.0.lock().unwrap().last().unwrap().detail["starter_version"], json!(null));
+    }
+
+    // ---- SMA-856: the webhook opt-in list ----
+
+    fn names(list: &[&str]) -> Option<Vec<String>> {
+        Some(list.iter().map(|s| (*s).to_owned()).collect())
+    }
+
+    fn settings_audit(h: &Harness) -> serde_json::Value {
+        let entries = h.audit.0.lock().unwrap().clone();
+        entries.iter().rev().find(|e| e.action == "PutToolPolicySettings").expect("a settings audit entry").detail.clone()
+    }
+
+    fn last_event_payload(h: &Harness) -> serde_json::Value {
+        events(h).last().expect("an event").payload.clone()
+    }
+
+    #[tokio::test]
+    async fn put_settings_with_webhooks_stores_audits_and_publishes_the_list() {
+        let h = harness();
+        let r = h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&["b", "a"])).await.unwrap();
+        assert_eq!(r.settings.webhooks, ["a", "b"]);
+        assert_eq!(h.repo.settings(h.org).await.unwrap().unwrap().webhooks, ["a", "b"]);
+        let detail = settings_audit(&h);
+        assert_eq!(detail["webhooks_before"], json!([]));
+        assert_eq!(detail["webhooks_after"], json!(["a", "b"]));
+        assert_eq!(last_event_payload(&h)["webhooks"], json!(["a", "b"]));
+    }
+
+    #[tokio::test]
+    async fn put_settings_without_webhooks_keeps_the_list_and_has_no_audit_keys() {
+        let h = harness();
+        h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&["b", "a"])).await.unwrap();
+        let r = h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Open, None).await.unwrap();
+        assert_eq!(r.settings.webhooks, ["a", "b"]);
+        let detail = settings_audit(&h);
+        assert!(detail.get("webhooks_before").is_none(), "{detail}");
+        assert!(detail.get("webhooks_after").is_none(), "{detail}");
+        assert_eq!(last_event_payload(&h)["webhooks"], json!(["a", "b"]));
+    }
+
+    #[tokio::test]
+    async fn put_settings_with_an_empty_list_clears_it() {
+        let h = harness();
+        h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&["a"])).await.unwrap();
+        let r = h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&[])).await.unwrap();
+        assert_eq!(r.settings.webhooks, Vec::<String>::new());
+        let detail = settings_audit(&h);
+        assert_eq!(detail["webhooks_before"], json!(["a"]));
+        assert_eq!(detail["webhooks_after"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_bad_opt_in_writes_nothing() {
+        let h = harness();
+        let err = h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&["Bad"])).await.unwrap_err();
+        assert_eq!(err, TenancyError::InvalidWebhookOptIn);
+        assert_eq!((h.repo.writes(), events(&h).len(), h.audit.0.lock().unwrap().len(), h.uow.commits()), (0, 0, 0, 0));
+        assert_eq!(h.repo.settings(h.org).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -2118,7 +2191,10 @@ mod tests {
         let h = harness();
         let absent = Uuid::from_u128(999);
         assert_eq!(h.svc.get_settings(&h.actor, absent).await.unwrap_err(), TenancyError::NotFound);
-        assert_eq!(h.svc.put_settings(&h.actor, absent, ToolPolicyMode::Off, FailMode::Closed).await.unwrap_err(), TenancyError::NotFound);
+        assert_eq!(
+            h.svc.put_settings(&h.actor, absent, ToolPolicyMode::Off, FailMode::Closed, None).await.unwrap_err(),
+            TenancyError::NotFound
+        );
     }
 
     // ---- SMA-775: the compiled-policy fetch ----

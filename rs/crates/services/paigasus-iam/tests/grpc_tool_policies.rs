@@ -20,7 +20,8 @@ use paigasus_proto::paigasus::iam::v1::tool_policy_service_client::ToolPolicySer
 use paigasus_proto::paigasus::iam::v1::{
     DeleteToolRequest, GetCompiledFloorPoliciesRequest, GetCompiledToolPoliciesRequest, GetFloorPolicySetRequest, GetToolPolicySetRequest, GetToolPolicySettingsRequest, ImportToolsRequest,
     ListToolsRequest, PutFloorPolicySetRequest, PutToolPolicySetRequest, PutToolPolicySettingsRequest, PutToolRequest, ToolImportFormat, ToolKind, ToolPolicyFailMode, ToolPolicyMode,
-    ToolPolicySetKind, ToolPolicyVersionOrigin, ToolPolicyVersionStatus, delete_tool_response, import_tools_response, put_floor_policy_set_response, put_tool_policy_set_response, put_tool_response,
+    ToolPolicySetKind, ToolPolicyVersionOrigin, ToolPolicyVersionStatus, WebhookOptIn, delete_tool_response, import_tools_response, put_floor_policy_set_response, put_tool_policy_set_response,
+    put_tool_response,
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde_json::json;
@@ -924,6 +925,67 @@ async fn the_first_enable_over_grpc_returns_starter_version_1_and_the_fetch_sees
         .unwrap()
         .into_inner();
     assert_eq!(again.starter_version, 0);
+}
+
+fn opt_in(names: &[&str]) -> Option<WebhookOptIn> {
+    Some(WebhookOptIn {
+        names: names.iter().map(|s| (*s).to_owned()).collect(),
+    })
+}
+
+/// SMA-856: an absent field keeps the list, a present one replaces it, an empty one clears it.
+#[tokio::test]
+async fn the_webhook_opt_in_absent_keeps_present_replaces_empty_clears() {
+    let Some(env) = setup(true, true, &tenant_accepted()).await else { return };
+    let mut c = env.client();
+    let org = env.org_prn.clone();
+    let mut req = put_settings(&org, ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed);
+    req.webhooks = opt_in(&["b", "a", "a"]);
+    let put = c.put_tool_policy_settings(authed(req, &env.admin)).await.unwrap().into_inner();
+    assert_eq!(put.settings.expect("settings").webhooks, ["a", "b"]);
+
+    let keep = c
+        .put_tool_policy_settings(authed(put_settings(&org, ToolPolicyMode::LogOnly, ToolPolicyFailMode::Open), &env.admin))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(keep.settings.expect("settings").webhooks, ["a", "b"], "an absent field keeps the list");
+
+    let read = c
+        .get_tool_policy_settings(authed(GetToolPolicySettingsRequest { org_prn: org.clone() }, &env.admin))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.settings.expect("settings").webhooks, ["a", "b"]);
+    let compiled = c.get_compiled_tool_policies(authed(get_compiled(&org, None), &env.admin)).await.unwrap().into_inner();
+    assert_eq!(compiled.settings.expect("settings").webhooks, ["a", "b"]);
+
+    let mut clear = put_settings(&org, ToolPolicyMode::LogOnly, ToolPolicyFailMode::Open);
+    clear.webhooks = opt_in(&[]);
+    let cleared = c.put_tool_policy_settings(authed(clear, &env.admin)).await.unwrap().into_inner();
+    assert_eq!(cleared.settings.expect("settings").webhooks, Vec::<String>::new());
+    let read = c
+        .get_tool_policy_settings(authed(GetToolPolicySettingsRequest { org_prn: org }, &env.admin))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.settings.expect("settings").webhooks, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_bad_opt_in_is_invalid_webhook_opt_in() {
+    let Some(env) = setup(true, true, &tenant_accepted()).await else { return };
+    let mut c = env.client();
+    let seventeen: Vec<String> = (0..17).map(|i| format!("p{i}")).collect();
+    let too_many = seventeen.iter().map(String::as_str).collect::<Vec<_>>();
+    for bad in [too_many, vec!["Bad-Name"]] {
+        let mut req = put_settings(&env.org_prn, ToolPolicyMode::LogOnly, ToolPolicyFailMode::Closed);
+        req.webhooks = opt_in(&bad);
+        let status = c.put_tool_policy_settings(authed(req, &env.admin)).await.unwrap_err();
+        assert_status(&status, Code::InvalidArgument, "invalid-webhook-opt-in");
+        let details = tonic_types::StatusExt::get_error_details(&status);
+        assert_eq!(details.error_info().unwrap().metadata.get("field").map(String::as_str), Some("webhooks"));
+    }
 }
 
 #[tokio::test]

@@ -217,6 +217,10 @@ pub enum TenancyError {
     /// SMA-781. The held tool policy version has no compile output, so an admin cannot accept it.
     #[error("the held tool policy version has no compile output and cannot be accepted")]
     ToolPolicyHeldNotAcceptable,
+    /// SMA-856. The webhook opt-in list holds more than 16 distinct names, or a name does not
+    /// match `[a-z0-9_]{1,64}`.
+    #[error("webhooks must hold at most 16 distinct names, and each name must match [a-z0-9_]{{1,64}}")]
+    InvalidWebhookOptIn,
     #[error("internal server error")]
     Internal,
 }
@@ -272,6 +276,7 @@ impl TenancyError {
             Self::ToolPolicyVersionNotFound => "tool-policy-version-not-found",
             Self::ToolPolicyModeTransitionInvalid => "tool-policy-mode-transition-invalid",
             Self::ToolPolicyHeldNotAcceptable => "tool-policy-held-not-acceptable",
+            Self::InvalidWebhookOptIn => "invalid-webhook-opt-in",
             Self::Internal => "internal",
         }
     }
@@ -302,7 +307,8 @@ impl TenancyError {
             | Self::InvalidBulkReplay
             | Self::InvalidReason
             | Self::UnknownIssuer
-            | Self::InvalidSubject => ErrorClass::Validation,
+            | Self::InvalidSubject
+            | Self::InvalidWebhookOptIn => ErrorClass::Validation,
             Self::NotFound | Self::ToolPolicyVersionNotFound => ErrorClass::NotFound,
             Self::SlugConflict
             | Self::DuplicateMembership
@@ -359,6 +365,7 @@ impl TenancyError {
             Self::InvalidReason => Some("reason"),
             Self::UnknownIssuer => Some("issuer"),
             Self::InvalidSubject => Some("subject"),
+            Self::InvalidWebhookOptIn => Some("webhooks"),
             Self::SlugConflict
             | Self::DuplicateMembership
             | Self::EmailConflict
@@ -528,6 +535,15 @@ mod tests {
             assert_eq!(err.class(), class, "{code}");
             assert_eq!(err.field(), None, "{code}");
         }
+    }
+
+    /// SMA-856: the opt-in list error names its field.
+    #[test]
+    fn the_webhook_opt_in_error_has_its_code_class_and_field() {
+        let err = TenancyError::InvalidWebhookOptIn;
+        assert_eq!(err.code(), "invalid-webhook-opt-in");
+        assert_eq!(err.class(), ErrorClass::Validation);
+        assert_eq!(err.field(), Some("webhooks"));
     }
 
     /// SMA-774: the compare-and-set conflict of the version write is the version conflict, not

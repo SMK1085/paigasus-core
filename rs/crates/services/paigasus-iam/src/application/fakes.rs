@@ -2316,7 +2316,7 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         Ok(self.data.lock().unwrap().settings.get(&org).cloned())
     }
 
-    async fn upsert_settings_in(&self, _tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError> {
+    async fn upsert_settings_in(&self, _tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings, webhooks: Option<Vec<String>>) -> Result<Vec<String>, RepositoryError> {
         if s.updated_at.is_none() || s.updated_by.is_none() {
             return Err(RepositoryError::Backend("upsert_settings_in needs updated_at and updated_by".into()));
         }
@@ -2325,10 +2325,13 @@ impl ToolPolicyRepository for InMemoryToolPolicies {
         let kept = data.settings.get(&org).and_then(|old| old.first_enabled_at);
         let mut row = s.clone();
         row.first_enabled_at = kept.or(s.first_enabled_at);
+        // `s.webhooks` is ignored: an absent list keeps the stored one, as in the Pg adapter.
+        row.webhooks = webhooks.unwrap_or_else(|| data.settings.get(&org).map(|old| old.webhooks.clone()).unwrap_or_default());
+        let stored = row.webhooks.clone();
         data.settings.insert(org, row);
         drop(data);
         self.writes.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(stored)
     }
 }
 

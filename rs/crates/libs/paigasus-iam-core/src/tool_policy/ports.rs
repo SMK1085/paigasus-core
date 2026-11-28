@@ -100,7 +100,9 @@ pub trait ToolPolicyRepository: Send + Sync {
     /// Insert the settings of an organization, or replace them. `s.updated_at` and
     /// `s.updated_by` must be set: a `None` is an error (`Backend`), not a panic.
     /// `first_enabled_at` is written once: a stored non-null value is kept, whatever `s` holds.
-    async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError>;
+    /// `s.webhooks` is ignored. `webhooks` `Some` replaces the stored opt-in list. `None` keeps
+    /// it, and a new row gets an empty list. Returns the stored list after the write.
+    async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings, webhooks: Option<Vec<String>>) -> Result<Vec<String>, RepositoryError>;
 }
 
 /// A lock that lets one re-compile job run at a time across replicas (spec section 8).
