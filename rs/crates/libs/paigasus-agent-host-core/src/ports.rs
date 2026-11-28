@@ -235,9 +235,9 @@ pub trait AgentResolver: Send + Sync {
 /// Used inside a run: this is the only writer.
 /// Provisional: the owner may change the methods, not the responsibility.
 ///
-/// The port has four methods. `commit` writes a run outcome. `screen_out` closes the events that
-/// the screen flagged. `back_off` returns the events to the inbox with a delay.
-/// `release_after_shutdown` gives up the lease when the worker stops.
+/// The port has five methods. `commit` writes a run outcome. `screen_out` closes the events that
+/// the screen flagged. `back_off` returns the events to the inbox with a delay. `host_fault` does the same for a host
+/// fault and gives back the attempts. `release_after_shutdown` gives up the lease when the worker stops.
 ///
 /// There is no `Transient` outcome. A transient failure rolls back and does not commit.
 /// A database error is `Store`, never `LeaseLost`. Only `CommitError::LeaseLost` counts as a lost
@@ -250,6 +250,9 @@ pub trait RunCommitter: Send + Sync {
     async fn screen_out(&self, h: &mut LeaseHandle, s: ScreenOut) -> Result<ScreenResult, CommitError>;
     /// Return the events of a failed run to the inbox with a delay.
     async fn back_off(&self, h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError>;
+    /// Return the events of a run that a host fault ended. Fail the run as `host_fault`, delay
+    /// the events and give back the attempt of each, in one transaction (SMA-851 D1).
+    async fn host_fault(&self, h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError>;
     /// Release the lease after a shutdown.
     async fn release_after_shutdown(&self, h: LeaseHandle) -> Result<(), CommitError>;
 }

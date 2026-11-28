@@ -112,6 +112,7 @@ pub(crate) enum CommitterCall {
     Commit(Box<RunRecord>),
     ScreenOut(ScreenOut),
     BackOff(BackOff),
+    HostFault(BackOff),
     ReleaseAfterShutdown,
 }
 
@@ -123,6 +124,7 @@ pub(crate) struct FakeCommitter {
     calls: StdMutex<Vec<CommitterCall>>,
     pub commit_results: StdMutex<VecDeque<Result<Committed, CommitError>>>,
     pub screen_out_result: Option<Result<ScreenResult, CommitError>>,
+    pub host_fault_result: Option<Result<(), CommitError>>,
     pub gate: Option<Semaphore>,
     pub entered: Notify,
 }
@@ -171,6 +173,16 @@ impl FakeCommitter {
             .collect()
     }
 
+    pub fn host_faults(&self) -> Vec<BackOff> {
+        self.calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                CommitterCall::HostFault(b) => Some(b),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn screen_outs(&self) -> Vec<ScreenOut> {
         self.calls()
             .into_iter()
@@ -208,6 +220,11 @@ impl RunCommitter for FakeCommitter {
     async fn back_off(&self, _h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
         self.record(CommitterCall::BackOff(b));
         Ok(())
+    }
+
+    async fn host_fault(&self, _h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
+        self.record(CommitterCall::HostFault(b));
+        self.host_fault_result.clone().unwrap_or(Ok(()))
     }
 
     async fn release_after_shutdown(&self, _h: LeaseHandle) -> Result<(), CommitError> {

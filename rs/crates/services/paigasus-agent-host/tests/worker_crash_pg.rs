@@ -212,6 +212,10 @@ impl RunCommitter for RecordingCommitter {
         self.inner.back_off(h, b).await
     }
 
+    async fn host_fault(&self, h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
+        self.inner.host_fault(h, b).await
+    }
+
     async fn release_after_shutdown(&self, h: LeaseHandle) -> Result<(), CommitError> {
         self.inner.release_after_shutdown(h).await
     }

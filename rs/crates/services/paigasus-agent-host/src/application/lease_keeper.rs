@@ -179,6 +179,18 @@ impl LeaseKeeper {
         result
     }
 
+    /// Fail the run as `host_fault`, delay its events and give back their attempts, under the
+    /// mutex (SMA-851 D1). The rules of `back_off` apply.
+    pub async fn host_fault(&self, b: BackOff) -> Result<(), CommitError> {
+        let mut guard = self.lock_handle().await;
+        let Some(handle) = guard.slot.as_mut().filter(|_| !self.cancel.is_cancelled()) else {
+            return Err(CommitError::LeaseLost);
+        };
+        let result = self.committer.host_fault(handle, b).await;
+        self.settle(handle, &result, result.is_ok());
+        result
+    }
+
     /// Stop the heartbeat, then release the lease under the mutex.
     pub async fn release(self) -> Result<(), StoreError> {
         self.heartbeat.abort();
@@ -532,6 +544,11 @@ mod tests {
             Ok(())
         }
 
+        async fn host_fault(&self, handle: &mut LeaseHandle, _b: BackOff) -> Result<(), CommitError> {
+            self.see(handle);
+            Ok(())
+        }
+
         async fn release_after_shutdown(&self, handle: LeaseHandle) -> Result<(), CommitError> {
             self.see(&handle);
             self.shutdowns.fetch_add(1, Ordering::SeqCst);
@@ -871,6 +888,16 @@ mod tests {
         assert_eq!(keeper.claim(&cfg()).await, Err(ClaimError::LeaseLost));
         sleep_ms(100_000).await;
         assert_eq!(fake.heartbeats(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_fault_on_a_cancelled_keeper_is_lease_lost() {
+        let fake = Arc::new(Fake { commit_lost: true, ..Fake::new() });
+        let keeper = start(&fake);
+        assert_eq!(keeper.commit(a_record()).await, Err(CommitError::LeaseLost));
+        assert!(keeper.is_lost());
+        assert_eq!(keeper.host_fault(a_back_off()).await, Err(CommitError::LeaseLost));
+        assert_eq!(fake.open_claims.lock().expect("open claims").len(), 1, "a cancelled keeper called the committer");
     }
 
     #[tokio::test(start_paused = true)]

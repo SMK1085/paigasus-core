@@ -605,6 +605,7 @@ mod tests {
         assert_eq!(record.run, two_events().run);
         assert!(!record.close_thread);
         assert!(r.committer.back_offs().is_empty());
+        assert!(r.committer.host_faults().is_empty());
         let turn = &r.runner.turns()[0];
         assert!(turn.memory.as_deref().is_some_and(|m| m.starts_with("<memory-N1") && m.contains("be kind")), "{turn:?}");
         assert_eq!(turn.events, render::events::events(&[event(1), event(2)], NONCE));
