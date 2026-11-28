@@ -468,10 +468,13 @@ async fn a_boot_with_grpc_addr_serves_agent_service() {
         if let Some(exit) = child.child.try_wait().expect("try_wait") {
             break exit;
         }
-        assert!(started.elapsed() < Duration::from_secs(15), "the drain must end the gRPC listener; log:\n{}", child.tail());
+        // `DRAIN_TIMEOUT` is 10 s. A listener that ignores the shutdown watch is aborted then, and the
+        // process still exits 0. So the bound is below it.
+        assert!(started.elapsed() < Duration::from_secs(9), "the drain must end the gRPC listener; log:\n{}", child.tail());
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     assert!(exit.success(), "exit after SIGTERM: {exit}; log:\n{}", child.tail());
+    assert!(!child.tail().contains("drain timed out"), "the drain must not time out; log:\n{}", child.tail());
     assert!(
         tokio::net::TcpStream::connect(("127.0.0.1", grpc_port)).await.is_err(),
         "the gRPC listener must be closed after the drain"
