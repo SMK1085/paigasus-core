@@ -619,6 +619,11 @@ ALLOW_OVER_APPROXIMATION = {
     ("paigasus-agent-host-rs", "rs/crates/libs/paigasus-cloudevents"): (
         "the NATS consumer tests read the IAM fixture organization_created_trailing_zeros.json with include_bytes!"
     ),
+    # SMA-851: the gateway model tests of the agent host read the SMA-750 Anthropic fixtures of
+    # `paigasus-gateway` (`tests/fixtures/`, not `src/`) with `include_str!`.
+    ("paigasus-agent-host-rs", "rs/crates/services/paigasus-gateway"): (
+        "the gateway model tests read the SMA-750 Anthropic fixtures with include_str!"
+    ),
 }
 
 # A6's anti-vacuity floor, mirroring REQUIRED_FFI_TASKS. A6 DERIVES each crate's closure from
