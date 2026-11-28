@@ -225,6 +225,7 @@ pub async fn wait_for_status(child: &mut Child, port: u16, path: &str, want: u16
 }
 
 pub mod commit;
+pub mod fake_gateway;
 pub mod fake_iam;
 pub mod fake_inbox;
 pub mod inbox;

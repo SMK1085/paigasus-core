@@ -54,7 +54,7 @@ impl AgentRunner for HelikonAgentRunner {
                 session: Vec::new(),
             };
         };
-        let agent = build_agent(&spec.agent, model, spec.workspace);
+        let agent = build_agent(&spec.agent, model, self.models.max_output_tokens(&spec.agent.model_id), spec.workspace);
         let session = Arc::new(PgRunSession::new(self.db.clone(), spec.thread, spec.fresh_thread));
         let ctx = RunContext::new(Arc::new(()), session.clone() as Arc<dyn Session>, HookRegistry::new(), TracerHandle::default(), spec.cancel).with_deferred_tool_calls(false);
         let mut input = AgentInput::new();

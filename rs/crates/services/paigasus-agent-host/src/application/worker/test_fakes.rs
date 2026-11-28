@@ -112,6 +112,7 @@ pub(crate) enum CommitterCall {
     Commit(Box<RunRecord>),
     ScreenOut(ScreenOut),
     BackOff(BackOff),
+    HostFault(BackOff),
     ReleaseAfterShutdown,
 }
 
@@ -123,6 +124,7 @@ pub(crate) struct FakeCommitter {
     calls: StdMutex<Vec<CommitterCall>>,
     pub commit_results: StdMutex<VecDeque<Result<Committed, CommitError>>>,
     pub screen_out_result: Option<Result<ScreenResult, CommitError>>,
+    pub host_fault_result: Option<Result<(), CommitError>>,
     pub gate: Option<Semaphore>,
     pub entered: Notify,
 }
@@ -171,6 +173,16 @@ impl FakeCommitter {
             .collect()
     }
 
+    pub fn host_faults(&self) -> Vec<BackOff> {
+        self.calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                CommitterCall::HostFault(b) => Some(b),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn screen_outs(&self) -> Vec<ScreenOut> {
         self.calls()
             .into_iter()
@@ -208,6 +220,11 @@ impl RunCommitter for FakeCommitter {
     async fn back_off(&self, _h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
         self.record(CommitterCall::BackOff(b));
         Ok(())
+    }
+
+    async fn host_fault(&self, _h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
+        self.record(CommitterCall::HostFault(b));
+        self.host_fault_result.clone().unwrap_or(Ok(()))
     }
 
     async fn release_after_shutdown(&self, _h: LeaseHandle) -> Result<(), CommitError> {
@@ -260,6 +277,10 @@ pub(crate) struct FakeRunner {
     calls: AtomicUsize,
     turns: StdMutex<Vec<UserTurn>>,
     panic_next: AtomicBool,
+    /// The outputs of the next calls, in order. The last one repeats. Empty: `output` repeats.
+    sequence: StdMutex<VecDeque<RunOutput>>,
+    /// A delay of the first call, which starts after the call took its output.
+    first_call_delay: StdMutex<Option<Duration>>,
 }
 
 impl FakeRunner {
@@ -271,7 +292,24 @@ impl FakeRunner {
             calls: AtomicUsize::new(0),
             turns: StdMutex::new(Vec::new()),
             panic_next: AtomicBool::new(false),
+            sequence: StdMutex::new(VecDeque::new()),
+            first_call_delay: StdMutex::new(None),
         }
+    }
+
+    /// The same runner, but the first call ends after `delay`. The call takes its output first.
+    pub fn with_first_call_delay(self, delay: Duration) -> Self {
+        *lock(&self.first_call_delay) = Some(delay);
+        self
+    }
+
+    /// A runner that ends with these ends in order, with no session rows. The last end repeats.
+    pub fn sequence(ends: Vec<RunEnd>) -> Self {
+        let outputs: VecDeque<RunOutput> = ends.into_iter().map(|end| RunOutput { end, session: Vec::new() }).collect();
+        let first = outputs.front().expect("a sequence has at least one end").clone();
+        let runner = Self::new(first);
+        *lock(&runner.sequence) = outputs;
+        runner
     }
 
     /// The same runner, but its first call panics.
@@ -308,7 +346,19 @@ impl AgentRunner for FakeRunner {
         if self.wait_for_cancel {
             spec.cancel.cancelled().await;
         }
-        self.output.clone()
+        let output = {
+            let mut sequence = lock(&self.sequence);
+            match sequence.len() {
+                0 => self.output.clone(),
+                1 => sequence[0].clone(),
+                _ => sequence.pop_front().expect("a non-empty queue"),
+            }
+        };
+        let delay = lock(&self.first_call_delay).take();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        output
     }
 }
 
@@ -409,4 +459,12 @@ impl Counters {
 /// resets every counter: read two counters with one `Counters::take`.
 pub(crate) fn counter(recorder: &DebuggingRecorder, name: &str, label: Option<(&str, &str)>) -> u64 {
     Counters::take(recorder).get(name, label)
+}
+
+/// The value of a gauge with no label, or `None` when it was never set.
+pub(crate) fn gauge(recorder: &DebuggingRecorder, name: &str) -> Option<f64> {
+    recorder.snapshotter().snapshot().into_vec().into_iter().find_map(|(key, _, _, v)| match v {
+        DebugValue::Gauge(g) if key.key().name() == name => Some(g.into_inner()),
+        _ => None,
+    })
 }

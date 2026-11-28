@@ -53,10 +53,29 @@ pub struct RunSpec {
 /// Only when neither holds does the end decide the class, and `Cancelled` is then Transient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunEnd {
-    Completed { output: String, usage: RunUsage },
-    Stopped { output: String, reason: String, usage: RunUsage },
-    Deterministic { error: String, close_thread: bool },
-    Transient { error: String, retry_after: Option<Duration> },
+    Completed {
+        output: String,
+        usage: RunUsage,
+    },
+    Stopped {
+        output: String,
+        reason: String,
+        usage: RunUsage,
+    },
+    Deterministic {
+        error: String,
+        close_thread: bool,
+    },
+    Transient {
+        error: String,
+        retry_after: Option<Duration>,
+    },
+    /// The fault is in the host or the gateway link, not in the event. The worker backs off and
+    /// gives the attempt back.
+    HostFault {
+        error: String,
+        retry_after: Option<Duration>,
+    },
     Cancelled,
 }
 

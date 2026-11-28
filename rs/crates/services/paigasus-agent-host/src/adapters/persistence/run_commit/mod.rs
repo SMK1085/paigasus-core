@@ -9,6 +9,7 @@
 
 mod back_off;
 mod commit;
+mod host_fault;
 mod screen;
 mod shutdown;
 
@@ -66,6 +67,10 @@ impl RunCommitter for PgRunCommitter {
 
     async fn back_off(&self, h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
         self.back_off_run(h, b).await
+    }
+
+    async fn host_fault(&self, h: &mut LeaseHandle, b: BackOff) -> Result<(), CommitError> {
+        self.host_fault_run(h, b).await
     }
 
     async fn release_after_shutdown(&self, h: LeaseHandle) -> Result<(), CommitError> {

@@ -599,7 +599,7 @@ UPSTREAM_INPUT_TASKS = ("build", "test", "lint")
 
 # Consumer -> upstream pairs deliberately declared in `fileGroups.upstreams` WITHOUT being in the
 # crate's Moon closure. A6 is strict-equality (SMA-429's default-deny model), so an intentional
-# over-approximation needs an entry here with a non-empty reason. One entry today (SMA-787).
+# over-approximation needs an entry here with a non-empty reason. Three entries today (SMA-787 twice, SMA-851).
 #
 # MIND THE KEY SHAPE: it is (moon id, upstream SOURCE DIR) — e.g.
 # ("paigasus-iam-rs", "rs/crates/libs/paigasus-kernel") — NOT the (moon id, moon id) shape
@@ -618,6 +618,11 @@ ALLOW_OVER_APPROXIMATION = {
     # tests also read one IAM fixture of that crate (a `tests/` file, not `src/`) with `include_bytes!`.
     ("paigasus-agent-host-rs", "rs/crates/libs/paigasus-cloudevents"): (
         "the NATS consumer tests read the IAM fixture organization_created_trailing_zeros.json with include_bytes!"
+    ),
+    # SMA-851: the gateway model tests of the agent host read the SMA-750 Anthropic fixtures of
+    # `paigasus-gateway` (`tests/fixtures/`, not `src/`) with `include_str!`.
+    ("paigasus-agent-host-rs", "rs/crates/services/paigasus-gateway"): (
+        "the gateway model tests read the SMA-750 Anthropic fixtures with include_str!"
     ),
 }
 

@@ -4,7 +4,10 @@
 //!
 //! The Helikon enums are `#[non_exhaustive]`, so each match has a wildcard arm. The wildcard is
 //! transient: a transient end commits nothing, so an unknown error cannot write memory, and
-//! `max_attempts` still ends the retries. Every variant that Helikon core 0.6.0 has is named.
+//! `max_attempts` still ends the retries. Every variant that Helikon core 0.8.4 has is named.
+//!
+//! A gateway fault (a credential, a missing route, a rate limit, a budget or a failed link) is a
+//! host fault: the fault is not in the event, so the attempt goes back (SMA-851 part F).
 
 use std::time::Duration;
 
@@ -86,14 +89,65 @@ fn agent_error(e: AgentError, text: String) -> RunEnd {
     }
 }
 
+/// A rate limit or budget refusal whose `retry-after` is longer than an in-run retry may wait.
+/// The gateway adapter puts it into `ModelError::Other`, so that `RetryingModel` does not sleep
+/// for it inside the run (Review Focus 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the gateway refused the call for {retry_after_ms} ms (a rate limit or a budget)")]
+pub struct GatewayBackOff {
+    pub retry_after_ms: u64,
+}
+
+fn host_fault(error: String, retry_after: Option<Duration>) -> RunEnd {
+    RunEnd::HostFault { error, retry_after }
+}
+
+/// The text of a host fault: the fixed head, then `: {message}` when the error has a message.
+fn host_fault_text(head: &str, message: Option<&str>) -> String {
+    match message {
+        Some(m) => replace_nul(&format!("{head}: {m}")),
+        None => replace_nul(head),
+    }
+}
+
 fn model_error(e: ModelError, text: String) -> RunEnd {
     match e {
         // A long thread closes, so the next claim starts a fresh one (spec §6.7).
         ModelError::ContextLengthExceeded => deterministic(text, true),
         ModelError::Refused { .. } => deterministic(text, false),
-        ModelError::RateLimited { retry_after_ms } => transient(text, retry_after_ms.map(Duration::from_millis)),
-        ModelError::Unavailable | ModelError::Transport(_) => transient(text, None),
-        ModelError::Other(_) => transient(text, None),
+        ModelError::Rejected { status, error_type, message } => match status {
+            // The gateway refuses the credential of the agent host. A retry cannot help until an
+            // operator acts, so the attempt goes back to the event.
+            401 | 403 => {
+                let head = if error_type.is_empty() {
+                    format!("the gateway rejected the agent host credential (status {status})")
+                } else {
+                    format!("the gateway rejected the agent host credential (status {status}, {error_type})")
+                };
+                host_fault(host_fault_text(&head, Some(message.as_str()).filter(|m| !m.is_empty())), None)
+            }
+            404 => {
+                let head = if error_type.is_empty() {
+                    "the gateway route is off, or the gateway does not know the model (status 404)".to_owned()
+                } else {
+                    format!("the gateway route is off, or the gateway does not know the model (status 404, {error_type})")
+                };
+                host_fault(host_fault_text(&head, Some(message.as_str()).filter(|m| !m.is_empty())), None)
+            }
+            // The request is wrong. The same request fails again.
+            400 | 413 => deterministic(text, false),
+            _ => transient(text, None),
+        },
+        ModelError::RateLimited { retry_after_ms } => host_fault(host_fault_text("the gateway rate limit or budget refused the call", None), retry_after_ms.map(Duration::from_millis)),
+        ModelError::Unavailable => host_fault(host_fault_text("the gateway link failed", None), None),
+        ModelError::Transport(m) => host_fault(host_fault_text("the gateway link failed", Some(m.as_str()).filter(|m| !m.is_empty())), None),
+        ModelError::Other(e) => match e.downcast_ref::<GatewayBackOff>() {
+            Some(back_off) => host_fault(
+                host_fault_text("the gateway rate limit or budget refused the call", None),
+                Some(Duration::from_millis(back_off.retry_after_ms)),
+            ),
+            None => transient(text, None),
+        },
         _ => transient(text, None),
     }
 }
@@ -103,7 +157,7 @@ mod tests {
     use paigasus_agent_host_core::run::RunUsage;
     use paigasus_helikon::core::{AgentError, GuardrailKind, InvalidResume, ModelError, RunError, RunResult, SessionError, StopReason, TokenUsage, ToolError};
 
-    use super::classify;
+    use super::{GatewayBackOff, classify};
     use crate::application::worker::ports::RunEnd;
 
     fn ok(stop_reason: StopReason) -> Result<RunResult, RunError> {
@@ -130,7 +184,17 @@ mod tests {
             RunEnd::Deterministic { close_thread: true, .. } => "deterministic+close".to_owned(),
             RunEnd::Transient { retry_after: None, .. } => "transient".to_owned(),
             RunEnd::Transient { retry_after: Some(d), .. } => format!("transient+{}", d.as_millis()),
+            RunEnd::HostFault { retry_after: None, .. } => "host_fault".to_owned(),
+            RunEnd::HostFault { retry_after: Some(d), .. } => format!("host_fault+{}", d.as_millis()),
             RunEnd::Cancelled => "cancelled".to_owned(),
+        }
+    }
+
+    fn rejected(status: u16) -> ModelError {
+        ModelError::Rejected {
+            status,
+            error_type: "e".into(),
+            message: "m".into(),
         }
     }
 
@@ -168,10 +232,17 @@ mod tests {
             (Err(agent(AgentError::Incomplete { stop_reason: StopReason::Completed })), "deterministic"),
             (Err(agent_model(ModelError::Refused { reason: "policy".into() })), "deterministic"),
             (Err(agent_model(ModelError::ContextLengthExceeded)), "deterministic+close"),
-            (Err(agent_model(ModelError::RateLimited { retry_after_ms: Some(5000) })), "transient+5000"),
-            (Err(agent_model(ModelError::RateLimited { retry_after_ms: None })), "transient"),
-            (Err(agent_model(ModelError::Unavailable)), "transient"),
-            (Err(agent_model(ModelError::Transport("x".into()))), "transient"),
+            (Err(agent_model(ModelError::RateLimited { retry_after_ms: Some(5000) })), "host_fault+5000"),
+            (Err(agent_model(ModelError::RateLimited { retry_after_ms: None })), "host_fault"),
+            (Err(agent_model(ModelError::Unavailable)), "host_fault"),
+            (Err(agent_model(ModelError::Transport("x".into()))), "host_fault"),
+            (Err(agent_model(rejected(401))), "host_fault"),
+            (Err(agent_model(rejected(403))), "host_fault"),
+            (Err(agent_model(rejected(404))), "host_fault"),
+            (Err(agent_model(rejected(400))), "deterministic"),
+            (Err(agent_model(rejected(413))), "deterministic"),
+            (Err(agent_model(rejected(418))), "transient"),
+            (Err(agent_model(ModelError::Other(anyhow::Error::new(GatewayBackOff { retry_after_ms: 120_000 })))), "host_fault+120000"),
             (Err(agent_model(ModelError::Other(anyhow::anyhow!("x")))), "transient"),
             (Err(agent(AgentError::Session(SessionError::Unavailable))), "transient"),
             (Err(agent(AgentError::Other(anyhow::anyhow!("x")))), "transient"),
@@ -182,6 +253,42 @@ mod tests {
         for (input, want) in cases {
             let shown = format!("{input:?}");
             assert_eq!(label(&classify(input)), want, "input: {shown}");
+        }
+    }
+
+    #[test]
+    fn a_credential_rejection_says_so() {
+        match classify(Err(agent_model(rejected(401)))) {
+            RunEnd::HostFault { error, retry_after: None } => {
+                assert!(error.starts_with("the gateway rejected the agent host credential (status 401, e)"), "{error}");
+                assert!(error.ends_with(": m"), "{error}");
+            }
+            other => panic!("expected a host fault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_message_leaves_no_trailing_separator() {
+        let empty = ModelError::Rejected {
+            status: 401,
+            error_type: String::new(),
+            message: String::new(),
+        };
+        match classify(Err(agent_model(empty))) {
+            RunEnd::HostFault { error, .. } => assert_eq!(error, "the gateway rejected the agent host credential (status 401)"),
+            other => panic!("expected a host fault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_route_and_a_failed_link_say_so() {
+        match classify(Err(agent_model(rejected(404)))) {
+            RunEnd::HostFault { error, .. } => assert!(error.starts_with("the gateway route is off, or the gateway does not know the model (status 404, e)"), "{error}"),
+            other => panic!("expected a host fault, got {other:?}"),
+        }
+        match classify(Err(agent_model(ModelError::Transport("refused".into())))) {
+            RunEnd::HostFault { error, .. } => assert_eq!(error, "the gateway link failed: refused"),
+            other => panic!("expected a host fault, got {other:?}"),
         }
     }
 

@@ -2,8 +2,9 @@
 
 //! paigasus-agent-host composition root (spec §6.5). The boot order is:
 //!
-//! 1. load and validate the configuration, 2. start logging, 3. read the `[[agents]]` list and
-//!    check each model against the model registry (spec §6.2), 4. install the metrics recorder,
+//! 1. load and validate the configuration, 2. start logging, 3. build the model registry (the
+//!    gateway models of `[[models]]` when `[gateway]` is set, SMA-851), read the `[[agents]]` list
+//!    and check each model against the registry (spec §6.2), 4. install the metrics recorder,
 //! 5. connect to the database (and, when the worker pool starts, the lease pool), 6. bind the HTTP
 //!    listener (and the metrics listener), 7. serve the boot router, 8. start the Prometheus
 //!    upkeep task, 9. migrate under the advisory lock, 10. when `[nats]` is set, check each
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 use paigasus_agent_host::adapters::agents::ConfigAgentResolver;
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
+use paigasus_agent_host::adapters::helikon::gateway_model::{self, GatewayProbe};
 use paigasus_agent_host::adapters::helikon::memory_tool::run_nonce;
 use paigasus_agent_host::adapters::helikon::model_registry::ModelRegistry;
 use paigasus_agent_host::adapters::helikon::runner::HelikonAgentRunner;
@@ -92,7 +94,8 @@ async fn serve() -> anyhow::Result<()> {
     // Spec §6.2: an agent that names an unregistered model is a config error. It stops the boot
     // before the database is touched.
     let agents = config.agent_definitions()?;
-    let models = Arc::new(model_registry()?);
+    let (models, gateway_probe) = model_registry(&config)?;
+    let models = Arc::new(models);
     models.check(&agents)?;
     let pool_starts = if !config.worker.enabled {
         tracing::info!("worker.enabled is false; the worker pool is off");
@@ -180,6 +183,14 @@ async fn serve() -> anyhow::Result<()> {
         });
     }
     tracing::info!(%config.http_addr, "paigasus-agent-host listener bound; migrating");
+
+    // The probe is detached and is not in `servers`: an ended task there stops the process. The
+    // boot does not fail on the probe.
+    if let Some(probe) = gateway_probe {
+        tokio::spawn(async move {
+            let _ = probe.run().await;
+        });
+    }
 
     // One signal registration for the whole life of the process. A second registration can lose a
     // signal that arrives in the gap between the two.
@@ -290,14 +301,18 @@ async fn connect(url: &str, max_connections: u32) -> Result<DatabaseConnection, 
     Database::connect(options).await
 }
 
-/// The model registry. In production it is empty (spec §6.2): the real provider is SMA-851. The
-/// `test-model` feature registers the file-scripted `scripted` model.
-fn model_registry() -> anyhow::Result<ModelRegistry> {
-    #[cfg_attr(not(feature = "test-model"), allow(unused_mut))]
+/// The model registry. With `[gateway]` set, it holds each `[[models]]` entry (SMA-851), also when
+/// `worker.enabled` is false. The `test-model` feature adds the file-scripted `scripted` model. The
+/// probe is `None` without a gateway.
+fn model_registry(config: &Config) -> anyhow::Result<(ModelRegistry, Option<GatewayProbe>)> {
     let mut models = ModelRegistry::default();
+    let probe = match &config.gateway {
+        Some(gateway) => Some(gateway_model::register(&mut models, gateway, &config.models)?),
+        None => None,
+    };
     #[cfg(feature = "test-model")]
     paigasus_agent_host::adapters::test_model::register(&mut models)?;
-    Ok(models)
+    Ok((models, probe))
 }
 
 /// The fault point of the run commit and the run worker. Only the `test-model` feature has one:
@@ -347,6 +362,7 @@ fn worker_pool_task(
         retry: config.retry.to_policy(),
         max_runs_per_lease: config.worker.max_runs_per_lease,
         caps,
+        host_fault: config.worker.host_fault_settings(),
     };
     Ok(WorkerPoolTask {
         worker: Arc::new(RunWorker::new(ports, settings)),
@@ -485,7 +501,7 @@ fn describe_agent_host_metrics() {
     );
     describe_counter!(
         names::AGENT_HOST_LEASE_LOST_TOTAL,
-        "Inbox leases found lost, labeled by operation (heartbeat, claim, commit, screen_out, back_off, release_after_shutdown or deadline)."
+        "Inbox leases found lost, labeled by operation (heartbeat, claim, commit, screen_out, back_off, host_fault, release_after_shutdown or deadline)."
     );
     describe_counter!(names::AGENT_HOST_CLAIMS_TOTAL, "Committed claims of inbox events. Each claim opens one run.");
     describe_counter!(names::AGENT_HOST_INBOX_EVENTS_DEAD_TOTAL, "Inbox events moved to dead after the maximum number of attempts.");
@@ -524,13 +540,17 @@ fn describe_agent_host_metrics() {
     // The worker run loop (SMA-790 spec §6.14). The names are provisional; SMA-798 owns them.
     describe_counter!(
         names::AGENT_HOST_RUNS_TOTAL,
-        "Runs that ended, labeled by class (completed, stopped, deterministic, transient, screened, discarded or shutdown)."
+        "Runs that ended, labeled by class (completed, stopped, deterministic, transient, host_fault, screened, discarded or shutdown)."
     );
-    describe_histogram!(names::AGENT_HOST_RUN_DURATION_SECONDS, "Duration of one run, from the claim to the end of the commit, in seconds.");
+    describe_histogram!(
+        names::AGENT_HOST_RUN_DURATION_SECONDS,
+        "Duration of one run, from just before the claim to the end of the commit, in seconds."
+    );
     describe_counter!(names::AGENT_HOST_EVENTS_SCREENED_TOTAL, "Inbox events that the screen flagged.");
     describe_counter!(names::AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL, "Run commits that the memory store refused with a version conflict.");
     describe_counter!(names::AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL, "Run commits whose COMMIT statement failed, so the outcome is unknown.");
     describe_counter!(names::AGENT_HOST_WORKER_RESTARTS_TOTAL, "Restarts of a worker task of the pool.");
+    describe_gauge!(names::AGENT_HOST_WORKER_HOST_FAULT_PAUSED, "1 while the worker pool pauses after host faults in a row, else 0.");
     describe_gauge!(
         names::AGENT_HOST_INBOX_LAG_SECONDS,
         "Age in seconds of the oldest due pending event of the agents that this host serves. It is 0 when nothing is due."

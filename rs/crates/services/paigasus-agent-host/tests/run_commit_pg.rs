@@ -657,6 +657,85 @@ async fn a_stale_back_off_is_lease_lost_and_changes_no_row() {
     assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, Some(("operation", "back_off"))), 1);
 }
 
+const HOST_FAULT_ERROR: &str = "the gateway rejected the agent host credential (status 401)";
+
+fn host_fault_of(s: &Setup, delay: Duration) -> BackOff {
+    BackOff {
+        error: HOST_FAULT_ERROR.into(),
+        ..back_off_of(s, delay)
+    }
+}
+
+#[tokio::test]
+async fn host_fault_fails_the_run_delays_the_events_and_refunds_the_attempt() {
+    let Some(mut s) = setup().await else { return };
+    let run = s.claim.run.uuid();
+    let b = host_fault_of(&s, Duration::from_secs(30));
+    assert_eq!(s.committer.host_fault(&mut s.handle, b).await, Ok(()));
+    assert_eq!(
+        n(
+            &s.db,
+            &format!(
+                "SELECT count(*) AS n FROM run WHERE id = '{run}' AND status = 'failed' AND finished_at IS NOT NULL \
+                 AND error_class = 'host_fault' AND error = '{HOST_FAULT_ERROR}'"
+            )
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        n(
+            &s.db,
+            &format!(
+                "SELECT count(*) AS n FROM inbox_event WHERE status = 'pending' AND attempts = 0 AND last_error = '{HOST_FAULT_ERROR}' \
+                 AND not_before > now() + interval '25 seconds'"
+            )
+        )
+        .await,
+        2
+    );
+    assert!(!s.handle.is_poisoned());
+}
+
+#[tokio::test]
+async fn a_stale_host_fault_is_lease_lost_and_changes_no_row() {
+    let Some(mut s) = setup().await else { return };
+    expire(&s.db, u(INBOX)).await;
+    let before = snapshot(&s.db, u(INBOX)).await;
+    let recorder = DebuggingRecorder::new();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let b = host_fault_of(&s, Duration::from_secs(30));
+    assert_eq!(s.committer.host_fault(&mut s.handle, b).await, Err(CommitError::LeaseLost));
+    assert_eq!(snapshot(&s.db, u(INBOX)).await, before);
+    assert_eq!(counter(&recorder, names::AGENT_HOST_LEASE_LOST_TOTAL, Some(("operation", "host_fault"))), 1);
+}
+
+#[tokio::test]
+async fn a_failed_commit_of_host_fault_is_outcome_unknown() {
+    let Some(mut s) = setup().await else { return };
+    refuse_event_update_at_commit(&s.db).await;
+    let b = host_fault_of(&s, Duration::from_secs(30));
+    assert_eq!(s.committer.host_fault(&mut s.handle, b).await, Err(CommitError::OutcomeUnknown));
+    assert!(s.handle.is_poisoned());
+}
+
+#[tokio::test]
+async fn repeated_host_faults_never_reach_dead() {
+    let Some(mut s) = setup().await else { return };
+    let store = PgLeaseStore::new(s.db.clone(), HB_TIMEOUT);
+    let five = ClaimConfig { max_attempts: 5, ..cfg() };
+    let expected = events(&s);
+    for _ in 0..6 {
+        let b = host_fault_of(&s, Duration::ZERO);
+        s.committer.host_fault(&mut s.handle, b).await.expect("host_fault");
+        s.handle.record_complete();
+        s.claim = store.claim_events(&mut s.handle, &five).await.expect("claim").expect("some claim");
+        assert_eq!(events(&s), expected);
+    }
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE status = 'dead'").await, 0);
+    assert_eq!(n(&s.db, "SELECT count(*) AS n FROM inbox_event WHERE attempts = 1").await, 2);
+}
+
 #[tokio::test]
 async fn back_off_then_the_claim_moves_to_dead_with_the_kept_error() {
     let Some(mut s) = setup().await else { return };

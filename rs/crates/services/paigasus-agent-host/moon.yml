@@ -60,6 +60,8 @@ tasks:
       - '/ops/nats/subjects.env'
       # SMA-787 Task 18: the NATS consumer tests read this IAM fixture with `include_bytes!`.
       - '/rs/crates/libs/paigasus-cloudevents/tests/fixtures/iam/organization_created_trailing_zeros.json'
+      # SMA-851: the gateway model tests read the SMA-750 Anthropic fixtures with `include_str!`.
+      - '/rs/crates/services/paigasus-gateway/tests/fixtures/anthropic/**/*'
     # The Postgres tests start containers. They share a runner with the console e2e tasks.
     options:
       mutex: 'heavy-integration'
