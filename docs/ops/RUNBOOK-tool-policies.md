@@ -841,7 +841,9 @@ not change the other calls.
   `not_permitted` and `retired`. `unknown_provider` and `not_permitted` always give severity
   `high`. `retired` uses `failure_severity`.
 - `gateway_tool_policy_webhook_failures_total{provider, reason}` counts each failed call once. It
-  is primed at zero for each provider. `provider` is `unknown` for `unknown_provider`.
+  is primed at zero for each provider. `provider` is `unknown` for `unknown_provider`. In one rare
+  case a call counts twice. The pipeline backstop cut counts `deadline` for every call of the
+  provider, also for a call that the provider had already counted.
 - The gateway writes at most one `warn` event for each provider and reason in 10 seconds. The event
   has no body, no header value and no URL path.
 - A failure in mode `log_only` does not block a call.

@@ -161,7 +161,7 @@ impl WebhookDetector {
         let body = batch
             .webhook_bodies
             .as_ref()
-            .and_then(|b| b.get(index)) // Cannot happen: the pipeline builds one body per call. `transport` keeps the failure finding
+            .and_then(|b| b.get(index).and_then(Option::as_ref)) // Cannot happen: the pipeline builds one body per call. A `None` slot is a body that did not build. `transport` keeps the failure finding
             // valid for the P7 check, and the counter records the call once.
             .ok_or(WebhookFailure::Transport)?;
         if body.len() > self.max_request_bytes {
@@ -470,7 +470,7 @@ mod tests {
             None,
             caller,
         );
-        let bodies: Vec<Bytes> = batch.subjects.iter().map(|s| call_body(&batch, s, &[]).unwrap()).collect();
+        let bodies: Vec<Option<Bytes>> = batch.subjects.iter().map(|s| Some(call_body(&batch, s, &[]).unwrap())).collect();
         batch.webhook_bodies = Some(Arc::from(bodies));
         batch.deadline = deadline;
         Arc::new(batch)

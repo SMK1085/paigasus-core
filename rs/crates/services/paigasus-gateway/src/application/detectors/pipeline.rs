@@ -170,8 +170,9 @@ impl DetectorPipeline {
         }
         // One body per call, built once and shared by every provider (§ 6.3).
         let bodies = if items.iter().any(|i| matches!(i, Late::Run(_))) {
-            let built: Vec<Bytes> = calls.iter().map(|&i| call_body(&batch, &batch.subjects[i], &out.findings[i]).unwrap_or_default()).collect();
-            Some(Arc::<[Bytes]>::from(built))
+            // A body that does not build stays `None`: the webhook sends nothing for that call.
+            let built: Vec<Option<Bytes>> = calls.iter().map(|&i| call_body(&batch, &batch.subjects[i], &out.findings[i])).collect();
+            Some(Arc::<[Option<Bytes>]>::from(built))
         } else {
             batch.webhook_bodies.clone()
         };
@@ -210,7 +211,7 @@ impl DetectorPipeline {
                     reason: WebhookFailure::Retired,
                 },
                 OptIn::Unknown => Late::Fail {
-                    finding: failure_finding(if valid_name(name) { name } else { "webhook" }, Severity::High, WebhookFailure::UnknownProvider),
+                    finding: failure_finding(if valid_name(name) && !reserved_name(name) { name } else { "webhook" }, Severity::High, WebhookFailure::UnknownProvider),
                     provider: "unknown".to_owned(),
                     reason: WebhookFailure::UnknownProvider,
                 },
@@ -220,7 +221,15 @@ impl DetectorPipeline {
 
     /// The opted-in webhooks at the same time, then the judge, inside one hard deadline (D30, D35).
     /// The result holds one entry per item, then one for the judge, each with one vector per call.
-    async fn late_stages(&self, batch: &DetectBatch, calls: &[usize], built: &[Vec<Finding>], cut: Instant, items: &[Late<'_>], bodies: Option<Arc<[Bytes]>>) -> Vec<(Stage, Vec<Vec<Finding>>)> {
+    async fn late_stages(
+        &self,
+        batch: &DetectBatch,
+        calls: &[usize],
+        built: &[Vec<Finding>],
+        cut: Instant,
+        items: &[Late<'_>],
+        bodies: Option<Arc<[Option<Bytes>]>>,
+    ) -> Vec<(Stage, Vec<Vec<Finding>>)> {
         let m = calls.len();
         let side = batch.side;
         let call_batch = Arc::new(DetectBatch {
@@ -394,6 +403,12 @@ fn reason_of(error: DetectorError) -> WebhookFailure {
         DetectorError::Timeout => WebhookFailure::Deadline,
         DetectorError::Panicked => WebhookFailure::Panic,
     }
+}
+
+/// Whether `name` is a name that the config refuses for a provider. Such a name is never the
+/// detector of a failure finding that the caller can cause with an opt-in name.
+fn reserved_name(name: &str) -> bool {
+    BUILT_IN_NAMES.contains(&name) || ["judge", "webhook", "other"].contains(&name)
 }
 
 /// One `detector_error` of the built-in stage per subject.
@@ -903,7 +918,7 @@ mod tests {
         source.caller.principal = Arc::from("prn:x");
         source.caller.session = Some(uuid::Uuid::nil());
         // The pipeline builds the bodies itself: a body that the caller put in is replaced.
-        source.webhook_bodies = Some(Arc::from(vec![bytes::Bytes::from_static(b"stale")]));
+        source.webhook_bodies = Some(Arc::from(vec![Some(bytes::Bytes::from_static(b"stale"))]));
         let expected = call_body(&source, &source.subjects[0], &[]).expect("a call has a body");
         let start = Instant::now();
         let p = pipeline(
@@ -920,7 +935,7 @@ mod tests {
         }
         let bodies = hook.batches()[0].webhook_bodies.clone().expect("bodies");
         assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0], expected);
+        assert_eq!(bodies[0], Some(expected));
         assert!(Arc::ptr_eq(&bodies, judge.batches()[0].webhook_bodies.as_ref().expect("bodies")));
     }
 
@@ -1134,6 +1149,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reserved_opt_in_name_is_never_the_detector_of_the_finding() {
+        let p = pipeline(built_ins(), vec![], None, Duration::from_millis(500));
+        for name in ["secret_in_args", "kernel", "judge", "other"] {
+            let out = p.run(opted(vec![call(0, "{}")], None, &[name]), far()).await;
+            assert_eq!(out.findings[0], vec![failure_finding("webhook", Severity::High, WebhookFailure::UnknownProvider)], "{name}");
+        }
+    }
+
+    #[tokio::test]
     async fn the_bodies_are_built_once_and_shared() {
         let a = RecordingDetector::new("hook_a", vec![]);
         let b = RecordingDetector::new("hook_b", vec![]);
@@ -1150,7 +1174,7 @@ mod tests {
             let subject = &ba[0].subjects[j];
             // The body holds the built-in findings of its own call.
             let built: Vec<Finding> = out.findings[i].iter().filter(|f| f.detector == SECRET_IN_ARGS).cloned().collect();
-            assert_eq!(xa[j], call_body(&probe, subject, &built).expect("body"), "call {i}");
+            assert_eq!(xa[j], call_body(&probe, subject, &built), "call {i}");
         }
     }
 }

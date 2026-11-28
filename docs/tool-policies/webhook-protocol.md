@@ -36,7 +36,7 @@ as hex or base64. The secret has at least 32 bytes, with no leading or trailing 
 
 ### The request body
 
-The order of the fields is fixed. Do not rely on it.
+A provider must not rely on the order of the fields.
 
 ```json
 {
@@ -52,7 +52,7 @@ The order of the fields is fixed. Do not rely on it.
 }
 ```
 
-- `request_id` and `session` are `null` when they are absent.
+- `request_id`, `org` and `session` are `null` when they are absent.
 - `subject` is the PRN of the caller. `org` is the organization UUID.
 - `tool.declared` is `yes`, `no` or `unknown`. It tells if the client offered the tool.
 - `findings` holds the built-in findings of this call. A finding has `detector`, `kind`, `severity`,

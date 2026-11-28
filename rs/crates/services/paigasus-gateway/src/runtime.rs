@@ -452,7 +452,7 @@ fn build_detectors(config: &GatewayConfig, mut secrets: BTreeMap<String, Provide
         let own = secrets
             .remove(&w.name)
             .ok_or_else(|| anyhow::anyhow!("tool_policy.detectors.webhook[{}]: no secret was loaded", w.name))?;
-        let detector = WebhookDetector::from_config(w, own, Arc::clone(&clock), Arc::clone(&nonce)).map_err(|e| anyhow::anyhow!("tool_policy.detectors.webhook[{}]: {e}", w.name))?;
+        let detector = WebhookDetector::from_config(w, own, Arc::clone(&clock), Arc::clone(&nonce)).map_err(|e| anyhow::Error::new(e).context("a webhook detector did not build"))?;
         entries.push(WebhookEntry {
             detector: Arc::new(detector),
             orgs: w.org_scope(),
@@ -718,7 +718,10 @@ mod tool_policy_tests {
         let mut cfg = webhook_config(&["acme_dlp"], true);
         cfg.tool_policy.detectors.webhook[0].extra_ca_bundle_path = Some(ca.to_string_lossy().into_owned());
         let err = build_tool_policy_with_env(&cfg, rec(), None, &env_with(&["acme_dlp"])).err().expect("a boot error");
-        assert!(err.to_string().contains("webhook[acme_dlp]"), "{err}");
+        let text = format!("{err:#}");
+        assert!(text.contains("webhook[acme_dlp]"), "{text}");
+        // The cause stays in the chain: the reason that the bundle is unusable.
+        assert!(text.to_lowercase().contains("certificate"), "{text}");
     }
 
     #[test]

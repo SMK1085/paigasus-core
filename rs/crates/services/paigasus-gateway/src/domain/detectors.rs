@@ -155,8 +155,9 @@ pub struct DetectBatch {
     /// `new` sets the time of its call; `run` sets the cut.
     pub deadline: tokio::time::Instant,
     /// The request body of each call subject for the webhooks, built once per run. `None` until
-    /// the pipeline builds it.
-    pub webhook_bodies: Option<Arc<[Bytes]>>,
+    /// the pipeline builds it. A slot is `None` when the body of that call did not build: the webhook
+    /// sends nothing for that call.
+    pub webhook_bodies: Option<Arc<[Option<Bytes>]>>,
 }
 
 impl DetectBatch {
