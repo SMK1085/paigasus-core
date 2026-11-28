@@ -164,7 +164,7 @@ impl CloudEvent {
 
 /// RFC 3339 in UTC with exactly six fraction digits. Finer digits are cut, not rounded.
 fn format_time(t: Timestamp) -> String {
-    let z = t.to_zoned(TimeZone::UTC);
+    let z = t.to_zoned_datetime(TimeZone::UTC);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
         z.year(),

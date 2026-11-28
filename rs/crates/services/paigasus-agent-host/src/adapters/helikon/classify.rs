@@ -4,7 +4,7 @@
 //!
 //! The Helikon enums are `#[non_exhaustive]`, so each match has a wildcard arm. The wildcard is
 //! transient: a transient end commits nothing, so an unknown error cannot write memory, and
-//! `max_attempts` still ends the retries. Every variant that Helikon core 0.6.0 has is named.
+//! `max_attempts` still ends the retries. Every variant that Helikon core 0.8.4 has is named.
 
 use std::time::Duration;
 
@@ -94,6 +94,7 @@ fn model_error(e: ModelError, text: String) -> RunEnd {
         ModelError::RateLimited { retry_after_ms } => transient(text, retry_after_ms.map(Duration::from_millis)),
         ModelError::Unavailable | ModelError::Transport(_) => transient(text, None),
         ModelError::Other(_) => transient(text, None),
+        // `ModelError::Rejected` (new in core 0.8) reaches the wildcard until SMA-851 Task 4.
         _ => transient(text, None),
     }
 }

@@ -23,11 +23,11 @@ Sven on 2026-11-27 with D1 (a), D2 (a), D3 (a)). Read §5, §7.2 to §7.7 and §
 
 | Name in this plan | Crate | Version |
 |---|---|---|
-| `<facade>` | `paigasus-helikon` | (Task 0) |
-| `<core>` | `paigasus-helikon-core` | (Task 0) |
-| `<provider>` | `paigasus-helikon-providers-anthropic` | (Task 0, a `0.4.x`) |
-| `<runtime-tokio>` | `paigasus-helikon-runtime-tokio` | (Task 0) |
-| `<testkit>` | `paigasus-helikon-sessions-testkit` | (Task 0) |
+| `<facade>` | `paigasus-helikon` | 0.10.0 |
+| `<core>` | `paigasus-helikon-core` | 0.8.4 |
+| `<provider>` | `paigasus-helikon-providers-anthropic` | 0.4.0 |
+| `<runtime-tokio>` | `paigasus-helikon-runtime-tokio` | 0.3.3 |
+| `<testkit>` | `paigasus-helikon-sessions-testkit` | 0.3.3 |
 
 ## Global Constraints
 

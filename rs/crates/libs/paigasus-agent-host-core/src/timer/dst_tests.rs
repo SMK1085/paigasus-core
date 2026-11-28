@@ -140,7 +140,7 @@ fn daily_nine_fires_once_per_local_day() {
             let mut expected: Vec<Date> = Vec::new();
             let mut day = date("2025-12-31");
             while day <= date("2027-01-02") {
-                let at = day.at(9, 0, 0, 0).to_zoned(tz.clone()).unwrap().timestamp();
+                let at = day.at(9, 0, 0, 0).to_zoned_datetime(tz.clone()).unwrap().timestamp();
                 if at >= from && at < to {
                     expected.push(day);
                 }

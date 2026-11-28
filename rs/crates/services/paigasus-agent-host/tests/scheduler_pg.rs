@@ -121,7 +121,7 @@ async fn restart_fires_a_missed_daily_slot_once() {
     let tz = BundledTzResolver::new();
     let berlin = tz.resolve("Europe/Berlin").expect("zone");
     let now = db_now(&env).await;
-    let local_now = now.to_zoned(berlin.clone());
+    let local_now = now.to_zoned_datetime(berlin.clone());
     let slot_civil = local_now.date().checked_sub(Span::new().days(2)).expect("date").at(9, 0, 0, 0);
     let schedule = CronSchedule::parse("0 9 * * *", "Europe/Berlin", &tz).expect("schedule");
     let stored_at = schedule.instant(Slot { civil: slot_civil, second: false }).expect("instant");
@@ -138,7 +138,7 @@ async fn restart_fires_a_missed_daily_slot_once() {
     // The planner's "now" is the `time` of the event. The next slot comes from that time, not from
     // a sample that the test took before the pass.
     let fired_now: Timestamp = events[0].envelope["time"].as_str().expect("event time").parse().expect("RFC 3339 time");
-    let fired_local = fired_now.to_zoned(berlin.clone());
+    let fired_local = fired_now.to_zoned_datetime(berlin.clone());
     let today_nine = fired_local.with().time(civil::time(9, 0, 0, 0)).build().expect("zoned");
     let want_next = if today_nine.timestamp() > fired_now {
         today_nine
@@ -330,9 +330,9 @@ async fn a_double_fire_is_a_matching_duplicate() {
     };
     let ib = new_inbox(&env).await;
     let now = db_now(&env).await;
-    let slot = (now - SignedDuration::from_hours(3)).to_zoned(TimeZone::UTC).datetime();
+    let slot = (now - SignedDuration::from_hours(3)).to_zoned_datetime(TimeZone::UTC).datetime();
     let slot = slot.with().minute(0).second(0).subsec_nanosecond(0).build().expect("slot");
-    let at = slot.to_zoned(TimeZone::UTC).expect("zoned").timestamp();
+    let at = slot.to_zoned_datetime(TimeZone::UTC).expect("zoned").timestamp();
     let id = due_schedule(&env, &ib, "0 * * * *", "UTC", &civil_text(slot), at).await;
 
     let recorder = DebuggingRecorder::new();
@@ -468,7 +468,7 @@ async fn a_back_off_from_before_a_fire_changes_nothing() {
     let now = db_now(&env).await;
     let back = (now - SignedDuration::from_hours(2)).as_second();
     let at = Timestamp::from_second(back - back.rem_euclid(3600)).expect("ts");
-    let slot = at.to_zoned(TimeZone::UTC).datetime();
+    let slot = at.to_zoned_datetime(TimeZone::UTC).datetime();
     let id = due_schedule(&env, &ib, "0 * * * *", "UTC", &civil_text(slot), at).await;
     let sched = scheduler(&env.db, settings());
     // Worker A reads the row and cannot decode it. Worker B fires the row.
@@ -500,7 +500,7 @@ async fn missed_slots_fire_once() {
     let now = db_now(&env).await;
     let back = (now - SignedDuration::from_hours(6)).as_second();
     let at = Timestamp::from_second(back - back.rem_euclid(900)).expect("ts");
-    let slot = at.to_zoned(TimeZone::UTC).datetime();
+    let slot = at.to_zoned_datetime(TimeZone::UTC).datetime();
     let id = due_schedule(&env, &ib, "*/15 * * * *", "UTC", &civil_text(slot), at).await;
 
     let sched = scheduler(&env.db, settings());
@@ -554,7 +554,7 @@ async fn a_low_walk_bound_is_permanent() {
     let ib = new_inbox(&env).await;
     let now = db_now(&env).await;
     let at = Timestamp::from_second(now.as_second() - 365 * 86_400).expect("ts");
-    let slot = at.to_zoned(TimeZone::UTC).datetime();
+    let slot = at.to_zoned_datetime(TimeZone::UTC).datetime();
     let id = due_schedule(&env, &ib, "*/15 * * * *", "UTC", &civil_text(slot), at).await;
 
     let sched = scheduler(&env.db, SchedulerSettings { walk_bound: 1, ..settings() });
@@ -662,7 +662,7 @@ async fn a_schedule_over_the_budget_still_fires() {
     assert!(created > BUDGET, "the inbox is over the budget: {created} created, budget {BUDGET}");
     let now = db_now(&env).await;
     let at = Timestamp::from_second(now.as_second() - 3600).expect("ts");
-    let slot = at.to_zoned(TimeZone::UTC).datetime();
+    let slot = at.to_zoned_datetime(TimeZone::UTC).datetime();
     let id = due_schedule(&env, &ib, "0 * * * *", "UTC", &civil_text(slot), at).await;
 
     let sched = scheduler(&env.db, settings());
@@ -733,7 +733,7 @@ async fn a_schedule_fire_after_a_back_off_advances_both_times() {
     let now = db_now(&env).await;
     let back = (now - SignedDuration::from_hours(2)).as_second();
     let at = Timestamp::from_second(back - back.rem_euclid(3600)).expect("ts");
-    let slot = at.to_zoned(TimeZone::UTC).datetime();
+    let slot = at.to_zoned_datetime(TimeZone::UTC).datetime();
     let id = due_schedule(&env, &ib, "0 * * * *", "UTC", &civil_text(slot), at).await;
     let sched = scheduler(&env.db, settings());
     let backed = back_off_once(&sched, &env, id).await;

@@ -45,7 +45,7 @@ anyhow = { workspace = true }
 # `adapters::helikon` — the agent runtime.
 # Exact pin (SMA-786 §6.9): the facade re-exports the core, and one facade PATCH release
 # already moved the core from 0.5 to 0.6. A facade bump re-checks §6.9 of the spec.
-paigasus-helikon = { version = "=0.6.12", default-features = false, features = ["runtime-tokio"] }
+paigasus-helikon = { version = "=0.10.0", default-features = false, features = ["runtime-tokio"] }
 # `application::lease_keeper` — the cancellation token. It is the type that Helikon re-exports.
 tokio-util = { workspace = true }
 paigasus-agent-host-core = { workspace = true }
@@ -105,9 +105,9 @@ proptest = { workspace = true }
 paigasus-agent-host-core = { workspace = true, features = ["test-support"] }
 
 # `tests/run_session_pg.rs` runs the Helikon sessions conformance suite against `PgRunSession`
-# and a write-through wrapper of `write_session` (spec §6.6). Exact pin: a 0.1 patch release can
+# and a write-through wrapper of `write_session` (spec §6.6). Exact pin: a 0.3 patch release can
 # add a sub-test or move the core requirement.
-paigasus-helikon-sessions-testkit = "=0.1.2"
+paigasus-helikon-sessions-testkit = "=0.3.3"
 
 # `adapters::timer_event` tests decode the `agents/v1` descriptor set.
 prost = { workspace = true }

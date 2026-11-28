@@ -86,3 +86,23 @@ pub fn to_session_row(event: &SessionEvent) -> Result<SessionRow, serde_json::Er
         payload: serde_json::to_value(event)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use paigasus_helikon::core::SessionEvent;
+
+    use super::to_session_row;
+
+    /// A row that Helikon core 0.6.0 wrote (SMA-851 Task 1 Step 1). The new core must read it
+    /// unchanged.
+    const CORE_0_6_ROW: &str = r#"{"type":"user_message","content":[{"type":"text","text":"hi"}],"ts":"2025-11-24T16:00:00.123456789Z"}"#;
+
+    #[test]
+    fn a_core_0_6_row_with_a_fractional_ts_reads_with_the_new_core() {
+        let event: SessionEvent = serde_json::from_str(CORE_0_6_ROW).expect("the new core reads the 0.6 row");
+        let SessionEvent::UserMessage { ts, .. } = &event else { panic!("{event:?}") };
+        assert_eq!(ts.as_nanosecond(), 1_764_000_000_123_456_789);
+        let back = to_session_row(&event).expect("row").payload;
+        assert_eq!(back, serde_json::from_str::<serde_json::Value>(CORE_0_6_ROW).expect("json"), "the new core writes the same ts text");
+    }
+}
