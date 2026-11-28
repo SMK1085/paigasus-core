@@ -102,6 +102,10 @@ impl RunWorker {
         let keeper = LeaseKeeper::start(handle, p.leases.clone(), p.claims.clone(), p.committer.clone(), self.settings.timing);
         let mut runs: u32 = 0;
         loop {
+            // The start of this run, taken before the claim. The duration metric and the host-fault
+            // pause (Ruling F2) both use it: a pause that starts after this point does not count
+            // the run, however late the run reaches the runner.
+            let started = Instant::now();
             // A shutdown takes no new claim. Nothing is claimed, so a plain release is enough.
             if shutdown.is_cancelled() {
                 return release(keeper, &inbox, LeaseEnd::Shutdown).await;
@@ -119,8 +123,7 @@ impl RunWorker {
                     return LeaseEnd::Dropped;
                 }
             };
-            let started = Instant::now();
-            match self.run_claim(&keeper, &inbox, &claim, shutdown).await {
+            match self.run_claim(&keeper, &inbox, &claim, shutdown, started).await {
                 Step::Next => {}
                 Step::Drop => return LeaseEnd::Dropped,
                 Step::Shutdown => {
@@ -139,7 +142,7 @@ impl RunWorker {
     }
 
     /// Step 4 of spec §6.1 for one claim: resolve, screen, run and end the run.
-    async fn run_claim(&self, keeper: &LeaseKeeper, inbox: &InboxId, claim: &Claim, shutdown: &CancellationToken) -> Step {
+    async fn run_claim(&self, keeper: &LeaseKeeper, inbox: &InboxId, claim: &Claim, shutdown: &CancellationToken, run_started: Instant) -> Step {
         let p = &self.ports;
         let agent = match p.resolver.resolve(inbox).await {
             Ok(agent) => agent,
@@ -214,7 +217,6 @@ impl RunWorker {
         };
         // The run token is a child of the keeper token, and a shutdown cancels it too. A select
         // keeps the same run future, so the run ends in its own way after the cancel.
-        let run_started = Instant::now();
         let run = p.runner.run(spec);
         tokio::pin!(run);
         let out = tokio::select! {
@@ -878,6 +880,32 @@ mod tests {
         let faults = r.committer.host_faults();
         assert_eq!(faults.len(), 1);
         assert!(faults[0].retry.iter().all(|d| d.delay == Duration::from_secs(3600)), "{:?}", faults[0].retry);
+    }
+
+    /// Ruling F2: a run that took its claim before the pause began does not double the pause, even
+    /// when it reaches the runner after the pause began.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_claimed_before_the_pause_does_not_double_it() {
+        let r = rig(Parts {
+            runner: FakeRunner::ending(RunEnd::HostFault { error: "x".into(), retry_after: None }),
+            memory: TestMemoryStore {
+                get_delay: Duration::from_secs(2),
+                ..TestMemoryStore::default()
+            },
+            ..Parts::default()
+        });
+        let begin_pause = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let now = tokio::time::Instant::now();
+            for _ in 0..3 {
+                r.worker.breaker.record_host_fault(now, now);
+            }
+        };
+        let (end, ()) = bounded(async { tokio::join!(r.serve(), begin_pause) }).await;
+        assert_eq!(end, LeaseEnd::Released);
+        assert_eq!(r.runner.calls(), 1);
+        let left = r.worker.pause_left().expect("the pause runs");
+        assert!(left <= Duration::from_secs(30), "the late fault doubled the pause: {left:?}");
     }
 
     #[tokio::test(start_paused = true)]
