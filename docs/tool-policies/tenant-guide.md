@@ -405,8 +405,11 @@ When you opt out, the change applies to requests that start after the gateway re
 cache. A request that is already in progress keeps the policy snapshot from when it was screened.
 The later tool calls of that request can still go to the provider until the request ends.
 
-During an IAM outage with fail mode `open`, the change can take up to `max_stale_secs` to reach a
-gateway. The gateway then uses the last known list until it expires.
+During an IAM outage, a changed opt-in list does not reach a gateway. The gateway gets the new list
+only when IAM is reachable again and a refresh loads it.
+
+With fail mode `open`, the gateway uses its last known list for at most `max_stale_secs`. After that,
+the tenant part is unavailable and the gateway sends no webhook request for that tenant.
 
 ## 5. Held versions
 
