@@ -20,7 +20,16 @@ prefix is `AGENT_HOST_`. A double underscore sets a nested key, for example
 | `metrics.enabled` | `AGENT_HOST_METRICS__ENABLED` | `true` | Serve `/metrics`. |
 | `metrics.addr` | `AGENT_HOST_METRICS__ADDR` | none | Separate metrics listener. Its port must differ from the port of `http_addr`. |
 | `migration.lock_wait_secs` | `AGENT_HOST_MIGRATION__LOCK_WAIT_SECS` | `120` | Seconds to wait for the migration lock. Range 1 to 3600. |
-| `worker.enabled` | `AGENT_HOST_WORKER__ENABLED` | `true` | The service reads and validates this value. It has no effect until SMA-790. |
+| `worker.enabled` | `AGENT_HOST_WORKER__ENABLED` | `true` | Start the worker. The value `false` starts no worker. |
+| `worker.host_fault_pause_after` | `AGENT_HOST_WORKER__HOST_FAULT_PAUSE_AFTER` | `3` | Number of host faults in a row after which the worker pool pauses its claims. Range 1 to 100. |
+| `worker.host_fault_pause_secs` | `AGENT_HOST_WORKER__HOST_FAULT_PAUSE_SECS` | `30` | Length of the first pause. Each next pause is double, up to 600 seconds. Range 1 to 600. |
+| `gateway.base_url` | `AGENT_HOST_GATEWAY__BASE_URL` | none (required in `[gateway]`) | URL of the AI Gateway. The scheme is `https`, or `http` for a loopback host. No user name, password, query or fragment. A path prefix is allowed. |
+| `gateway.api_key_file` | `AGENT_HOST_GATEWAY__API_KEY_FILE` | none (required in `[gateway]`) | Path of the file that holds the gateway API key. No config key holds the key. The path has no space at the start or end. |
+| `gateway.ca_file` | `AGENT_HOST_GATEWAY__CA_FILE` | none | PEM file of trust anchors. The file REPLACES the platform roots. It must hold every root that the gateway chain needs. |
+| `gateway.connect_timeout_ms` | `AGENT_HOST_GATEWAY__CONNECT_TIMEOUT_MS` | `5000` | Time limit to make the connection. Range 100 to 60000. |
+| `gateway.read_timeout_ms` | `AGENT_HOST_GATEWAY__READ_TIMEOUT_MS` | `60000` | Time limit of each read. Range 1000 to 600000. Three times this value must be less than `run.timeout_secs` in milliseconds. |
+| `models` | none (TOML only) | none | List of `[[models]]` tables. See the Model gateway section. Each table has `name`, `provider`, `model` and `max_output_tokens`. |
+| `models.max_output_tokens` | none (TOML only) | none (required) | Most output tokens of one model call. Range 1 to 128000. |
 | `lease.ttl_secs` | `AGENT_HOST_LEASE__TTL_SECS` | `30` | Time to live of an inbox lease. Range 3 to 600, and at least 3 times `lease.heartbeat_interval_secs`. |
 | `lease.heartbeat_interval_secs` | `AGENT_HOST_LEASE__HEARTBEAT_INTERVAL_SECS` | `10` | Seconds between two lease heartbeats. Range 1 to 200. |
 | `claim.batch_limit` | `AGENT_HOST_CLAIM__BATCH_LIMIT` | `20` | Maximum number of events in one claim. Range 1 to 500. |
@@ -108,6 +117,74 @@ A `Put` has no race: the store checks its condition, so a stale `Put` never over
 
 The `[iam]`, `[nats]` and `[timers]` sections are optional. A nested value that has no default, for example
 `iam.tls`, is easiest to set in the TOML file. `agent-host.toml.example` shows every key.
+
+## Model gateway
+
+The agent host calls Claude only through the gateway route `POST /v1/messages`. It never calls
+`api.anthropic.com`. An `[[agents]]` entry uses a gateway model when its `model` names a `[[models]]` entry.
+The `[gateway]` section and the `[[models]]` list go together. The service refuses one without the other.
+
+Each `[[models]]` table has these keys:
+
+- `name`: the name that an `[[agents]]` entry uses. It is unique and not empty. The name `scripted` is reserved.
+- `provider`: the only value is `anthropic`.
+- `model`: the model id that the gateway gets. It is not empty.
+- `max_output_tokens`: required. Range 1 to 128000.
+
+The `[gateway]` keys, their defaults and their ranges are in the configuration table above.
+The agent host sends no `cache_control` and no native tool types. A model call has 3 attempts: the first call and 2 retries.
+A retry obeys `retry_after_ms` when the gateway sends it.
+
+**Gateway prerequisites.** The gateway needs these settings.
+
+- `[messages] enabled = true`.
+- An `[upstream.anthropic]` section.
+- Streaming on.
+- A service-account API key with the `gateway_user` role on the target scope.
+
+**The organization rule.** Every agent on a gateway model has the same organization. The key must have the scope of that organization or a project in it.
+When two such agents have different organizations, the service refuses the config at boot with the error `GatewayAgentsOrgMismatch`.
+
+**The link.** The HTTP client of the gateway follows these rules.
+
+- `ca_file` REPLACES the platform roots, as `nats.ca_file` does. The file must hold every root of the gateway chain.
+- The client uses no proxy. `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` do not apply to the gateway link.
+- The client follows no redirect. A redirect is an error of the link, so it is a host fault.
+
+**The key file.** The file holds one key on one line. The host reads it once at boot.
+The host removes a trailing newline. A byte order mark or a space inside the key stops the boot.
+The error text names the path and never the key. To rotate the key, issue the new key, restart every host, then revoke the old key.
+
+**Rollback.** The gateway model writes `provider_data` (signed thinking blocks) into the session rows.
+A rollback of the agent host to a build with Helikon core below 0.8 needs a database restore.
+
+### Host faults
+
+A host fault is a fault of the host or of the gateway link. It is not a fault of the event.
+A host fault gives the attempt back and never moves an event to `dead`. The run row gets `status = 'failed'` and `error_class = 'host_fault'`.
+The event gets a delay of at least `retry_after`, up to 86400 seconds. No memory commit happens.
+The worker writes one `error` log line for each host fault. The line never holds the key.
+
+| Error of the model call | Class |
+|---|---|
+| Status 401 or 403 (the gateway rejected the agent host credential) | host fault |
+| Status 404 (the route is off or missing) | host fault |
+| Rate limit or budget refusal, after the in-run retries | host fault, delay at least `retry_after` |
+| `Unavailable` or `Transport`, after the in-run retries (connect failure, read timeout, redirect) | host fault |
+| Status 400 or 413 | deterministic |
+| `Refused` (a model refusal) | deterministic |
+| `ContextLengthExceeded` | deterministic, and the thread closes |
+| Other error | transient |
+
+**The pool pause.** The worker pool counts host faults in a row. After `worker.host_fault_pause_after` faults (default 3), every worker waits before its next claim.
+The first pause is `worker.host_fault_pause_secs` (default 30). Each further host fault doubles the pause, up to 600 seconds.
+A completed or stopped run resets the count and ends the pause. The pause check runs before every claim, also between claims inside one lease.
+A host fault of a run that started before the current pause began does not double the pause.
+
+**Metrics.** The counter `agent_host_runs_total{class="host_fault"}` counts the host faults. The gauge `agent_host_worker_host_fault_paused` is 1 during a pause and 0 at other times.
+
+**The boot probe.** At boot, the host sends `GET <base_url>/v1/models` with the key. A status 401, 403 or 404, or a connect failure, writes one `warn` line.
+The boot does not stop, because the gateway can be down for a short time during a deploy. A 404 means that `[messages] enabled = true` is missing on the gateway.
 
 ## Event ingress
 

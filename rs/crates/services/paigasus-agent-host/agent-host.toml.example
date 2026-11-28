@@ -20,6 +20,8 @@
 #                           # max_connections (default 100).
 # poll_interval_ms = 1000   # the time between two claim polls. Range 100 to 60000
 # max_runs_per_lease = 8    # the most runs that one lease serves. Range 1 to 1000
+# host_fault_pause_after = 3   # host faults in a row before the pool pauses its claims. Range 1 to 100
+# host_fault_pause_secs = 30   # the first pause. Each next pause is double, up to 600. Range 1 to 600
 
 # [run]
 # max_turns = 16            # the most model turns of one run. Range 1 to 256
@@ -34,9 +36,27 @@
 # [[agents]]
 # id = "prn:pgs:agents::00000000-0000-0000-0000-000000000001:agent/00000000-0000-0000-0000-000000000002"
 # name = "triage"
-# model = "scripted"        # a model name; boot checks it against the model registry
+# model = "claude"          # a model name: "scripted" or a [[models]] name. Boot checks it against the model registry
 # instructions = "Sort the request and answer it."
 # tools = ["memory"]        # optional
+
+# The gateway and the models are optional. Use both sections or neither.
+# The agent host calls Claude only through the gateway route POST /v1/messages.
+# The gateway needs [messages] enabled = true, an [upstream.anthropic] section and streaming on.
+# The key needs the gateway_user role. Every agent on a gateway model has the same organization.
+# [gateway]
+# base_url = "https://gateway.internal.example.com"   # https, or http for a loopback host. No user name, query or fragment
+# api_key_file = "/etc/agent-host/gateway.key"        # one line, read once at boot. No config key holds the key
+# ca_file = "/etc/agent-host/gateway-ca.pem"          # optional; REPLACES the platform roots, so it must hold every root the gateway chain needs
+# connect_timeout_ms = 5000     # 100 to 60000
+# read_timeout_ms = 60000       # 1000 to 600000. 3 x this value must be less than run.timeout_secs in milliseconds
+#
+# One table per model. The provider "anthropic" is the only value. The name "scripted" is reserved.
+# [[models]]
+# name = "claude"
+# provider = "anthropic"
+# model = "claude-sonnet-4-5"   # the model id that the gateway gets
+# max_output_tokens = 4096      # required. Range 1 to 128000
 
 # [lease]
 # ttl_secs = 30             # 3 to 600, and at least 3 x heartbeat_interval_secs

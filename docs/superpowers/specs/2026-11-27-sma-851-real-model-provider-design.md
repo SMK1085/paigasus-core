@@ -421,3 +421,15 @@ Not folded in:
 - The `cargo tree -i` checks in paigasus-core: replaced by `repo:deny` and a lock-file check,
   because cargo fails on a package that is not in the lock.
 - A kind or compose route to the gateway: out of scope (N7).
+
+## 14. Deviations during implementation (2026-11-28)
+
+- **Redirect (§7.3).** The client uses `redirect::Policy::custom`. It refuses every redirect with an
+  error. It does not use `Policy::none()`. So a redirect is a `Transport` error and a host fault.
+  Reqwest 0.13.5 keeps `x-api-key` on a redirect to another host. So the refusal also protects the key.
+- **Read timeout (§7.4).** The config refuses the value when `3 x gateway.read_timeout_ms` is
+  greater than or equal to `run.timeout_secs x 1000`. The 3 is the number of attempts of one turn.
+- **Stale faults (§7.5).** A host fault of a run that started before the current pause began does
+  not count. It does not double the pause.
+- **Pause check (§7.5).** The pause check runs before every claim, also between claims inside one lease.
+- **Run duration metric.** `agent_host_run_duration_seconds` now starts just before the claim.
