@@ -364,7 +364,15 @@ async fn a_403_is_a_host_fault() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_404_is_a_host_fault() {
-    let _ = class_case(vec![error_reply(404, "not_found_error", "no route", None)], host_fault_want(1)).await;
+    let Some((_rig, got)) = class_case(vec![error_reply(404, "not_found_error", "no route", None)], host_fault_want(1)).await else {
+        return;
+    };
+    assert!(
+        got.error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("the gateway route is off, or the gateway does not know the model (status 404")),
+        "{got:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

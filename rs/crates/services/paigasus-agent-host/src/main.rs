@@ -305,7 +305,6 @@ async fn connect(url: &str, max_connections: u32) -> Result<DatabaseConnection, 
 /// `worker.enabled` is false. The `test-model` feature adds the file-scripted `scripted` model. The
 /// probe is `None` without a gateway.
 fn model_registry(config: &Config) -> anyhow::Result<(ModelRegistry, Option<GatewayProbe>)> {
-    #[cfg_attr(not(feature = "test-model"), allow(unused_mut))]
     let mut models = ModelRegistry::default();
     let probe = match &config.gateway {
         Some(gateway) => Some(gateway_model::register(&mut models, gateway, &config.models)?),
@@ -543,7 +542,10 @@ fn describe_agent_host_metrics() {
         names::AGENT_HOST_RUNS_TOTAL,
         "Runs that ended, labeled by class (completed, stopped, deterministic, transient, host_fault, screened, discarded or shutdown)."
     );
-    describe_histogram!(names::AGENT_HOST_RUN_DURATION_SECONDS, "Duration of one run, from the claim to the end of the commit, in seconds.");
+    describe_histogram!(
+        names::AGENT_HOST_RUN_DURATION_SECONDS,
+        "Duration of one run, from just before the claim to the end of the commit, in seconds."
+    );
     describe_counter!(names::AGENT_HOST_EVENTS_SCREENED_TOTAL, "Inbox events that the screen flagged.");
     describe_counter!(names::AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL, "Run commits that the memory store refused with a version conflict.");
     describe_counter!(names::AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL, "Run commits whose COMMIT statement failed, so the outcome is unknown.");

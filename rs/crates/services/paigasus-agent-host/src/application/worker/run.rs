@@ -882,6 +882,22 @@ mod tests {
         assert!(faults[0].retry.iter().all(|d| d.delay == Duration::from_secs(3600)), "{:?}", faults[0].retry);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_host_fault_delay_never_passes_the_cap() {
+        let r = rig(Parts {
+            runner: FakeRunner::ending(RunEnd::HostFault {
+                error: "x".into(),
+                retry_after: Some(Duration::from_secs(30 * 86_400)),
+            }),
+            ..Parts::default()
+        });
+        assert_eq!(r.serve().await, LeaseEnd::Released);
+        let faults = r.committer.host_faults();
+        assert_eq!(faults.len(), 1);
+        assert!(!faults[0].retry.is_empty());
+        assert!(faults[0].retry.iter().all(|d| d.delay == Duration::from_secs(86_400)), "{:?}", faults[0].retry);
+    }
+
     /// Ruling F2: a run that took its claim before the pause began does not double the pause, even
     /// when it reaches the runner after the pause began.
     #[tokio::test(start_paused = true)]

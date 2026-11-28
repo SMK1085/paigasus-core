@@ -45,6 +45,8 @@ pub struct HostFaultBreaker {
 impl HostFaultBreaker {
     #[must_use]
     pub fn new(settings: HostFaultSettings) -> Self {
+        // The series exists from boot, so a dashboard shows 0 and not "no data".
+        metrics::gauge!(names::AGENT_HOST_WORKER_HOST_FAULT_PAUSED).set(0.0);
         Self {
             settings,
             state: Mutex::new(State::default()),
@@ -153,6 +155,14 @@ mod tests {
         assert_eq!(b.record_host_fault(now, now), None);
         assert_eq!(b.record_host_fault(now, now), None);
         assert_eq!(b.record_host_fault(now, now), secs(30));
+    }
+
+    #[test]
+    fn the_pause_gauge_is_zero_from_boot() {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let _b = breaker();
+        assert_eq!(gauge(&recorder, names::AGENT_HOST_WORKER_HOST_FAULT_PAUSED), Some(0.0));
     }
 
     #[tokio::test(start_paused = true)]

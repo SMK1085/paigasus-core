@@ -60,7 +60,7 @@ pub enum GatewayModelError {
     KeyNotUtf8 { path: String },
     #[error("the gateway key file \"{path}\" starts with a byte order mark")]
     KeyBom { path: String },
-    #[error("the gateway key file \"{path}\" has a space inside the key")]
+    #[error("the gateway key file \"{path}\" has a space, a tab or another white-space character inside the key")]
     KeyInnerWhitespace { path: String },
     #[error("the gateway key file \"{path}\" holds a key that is not valid in an HTTP header")]
     KeyNotHeaderValue { path: String },
@@ -169,7 +169,8 @@ pub fn register(models: &mut ModelRegistry, gateway: &GatewayConfig, entries: &[
     let key = read_key(&gateway.api_key_file)?;
     let client = gateway_client(gateway)?;
     for entry in entries {
-        // Without a provider TLS feature, `build()` needs `http_client`: the client is always passed.
+        // Pass the gateway client: the client that `build()` makes has no redirect refusal, no proxy
+        // rule, no timeouts and no CA file.
         let model = AnthropicModel::messages(&entry.model)
             .base_url(&gateway.base_url)
             .api_key(key.as_str())

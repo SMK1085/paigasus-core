@@ -124,15 +124,15 @@ fn model_error(e: ModelError, text: String) -> RunEnd {
                 } else {
                     format!("the gateway rejected the agent host credential (status {status}, {error_type})")
                 };
-                host_fault(host_fault_text(&head, Some(&message)), None)
+                host_fault(host_fault_text(&head, Some(message.as_str()).filter(|m| !m.is_empty())), None)
             }
             404 => {
                 let head = if error_type.is_empty() {
-                    "the gateway route is off or missing (status 404)".to_owned()
+                    "the gateway route is off, or the gateway does not know the model (status 404)".to_owned()
                 } else {
-                    format!("the gateway route is off or missing (status 404, {error_type})")
+                    format!("the gateway route is off, or the gateway does not know the model (status 404, {error_type})")
                 };
-                host_fault(host_fault_text(&head, Some(&message)), None)
+                host_fault(host_fault_text(&head, Some(message.as_str()).filter(|m| !m.is_empty())), None)
             }
             // The request is wrong. The same request fails again.
             400 | 413 => deterministic(text, false),
@@ -140,7 +140,7 @@ fn model_error(e: ModelError, text: String) -> RunEnd {
         },
         ModelError::RateLimited { retry_after_ms } => host_fault(host_fault_text("the gateway rate limit or budget refused the call", None), retry_after_ms.map(Duration::from_millis)),
         ModelError::Unavailable => host_fault(host_fault_text("the gateway link failed", None), None),
-        ModelError::Transport(m) => host_fault(host_fault_text("the gateway link failed", Some(&m)), None),
+        ModelError::Transport(m) => host_fault(host_fault_text("the gateway link failed", Some(m.as_str()).filter(|m| !m.is_empty())), None),
         ModelError::Other(e) => match e.downcast_ref::<GatewayBackOff>() {
             Some(back_off) => host_fault(
                 host_fault_text("the gateway rate limit or budget refused the call", None),
@@ -268,9 +268,22 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_message_leaves_no_trailing_separator() {
+        let empty = ModelError::Rejected {
+            status: 401,
+            error_type: String::new(),
+            message: String::new(),
+        };
+        match classify(Err(agent_model(empty))) {
+            RunEnd::HostFault { error, .. } => assert_eq!(error, "the gateway rejected the agent host credential (status 401)"),
+            other => panic!("expected a host fault, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_missing_route_and_a_failed_link_say_so() {
         match classify(Err(agent_model(rejected(404)))) {
-            RunEnd::HostFault { error, .. } => assert!(error.starts_with("the gateway route is off or missing (status 404, e)"), "{error}"),
+            RunEnd::HostFault { error, .. } => assert!(error.starts_with("the gateway route is off, or the gateway does not know the model (status 404, e)"), "{error}"),
             other => panic!("expected a host fault, got {other:?}"),
         }
         match classify(Err(agent_model(ModelError::Transport("refused".into())))) {
