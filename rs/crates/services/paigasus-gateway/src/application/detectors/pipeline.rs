@@ -739,6 +739,8 @@ mod tests {
             detector_error("hook_a"),
             // Another detector name.
             failure_finding("hook_b", Severity::Low, WebhookFailure::Transport),
+            // The pipeline's own `check` reason is not an adapter reason.
+            failure_finding("hook_a", Severity::Low, WebhookFailure::Check),
         ];
         for f in forged {
             assert_eq!(two_sided(Severity::Low, vec![f.clone()]), vec![check.clone()], "{f:?}");
@@ -831,5 +833,60 @@ mod tests {
             }
         }
         assert_eq!((series, count), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn a_strict_check_replaces_a_finding_under_another_name_a_built_in_kind_or_an_undeclared_kind() {
+        let bad = [
+            Finding::new("kernel", "pii_email", Severity::Medium, "v1"),
+            Finding::new("hook_a", SECRET_IN_ARGS, Severity::Medium, "v1"),
+            Finding::new("hook_a", "pii_iban", Severity::Medium, "v1"),
+            Finding::new("hook_a", "pii_email", Severity::Medium, "V1!"),
+            Finding::new("hook_a", "pii_email", Severity::Medium, "v".repeat(33)),
+        ];
+        for bad in bad {
+            let d = DeclaredDetector {
+                name: "hook_a",
+                kinds: ["pii_email".to_owned()].into(),
+                severity: Severity::Low,
+                found: vec![bad.clone()],
+            };
+            let out = pipeline(built_ins(), vec![Arc::new(d)], None, Duration::from_millis(500)).run(batch(vec![call(0, "{}")]), far()).await;
+            assert_eq!(out.findings[0], vec![failure_finding("hook_a", Severity::Low, WebhookFailure::Check)], "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_judge_finding_with_a_bad_version_is_replaced() {
+        for version in ["V1!".to_owned(), "v".repeat(33)] {
+            let judge: Arc<dyn Detector> = Arc::new(FixedDetector("judge", vec![Finding::new("judge", "fine_kind", Severity::Medium, version.as_str())]));
+            let out = pipeline(built_ins(), vec![], Some(judge), Duration::from_millis(500)).run(batch(vec![call(0, "{}")]), far()).await;
+            assert_eq!(out.findings[0], vec![failure_finding("judge", Severity::High, WebhookFailure::Check)], "{version}");
+        }
+        let judge: Arc<dyn Detector> = Arc::new(FixedDetector("judge", vec![Finding::new("judge", "fine_kind", Severity::Medium, "v1")]));
+        let out = pipeline(built_ins(), vec![], Some(judge), Duration::from_millis(500)).run(batch(vec![call(0, "{}")]), far()).await;
+        assert_eq!(pairs(&out.findings[0]), [("judge", "fine_kind")], "a good version stays");
+    }
+
+    /// The `check` reason counts once for a webhook bad finding, with its provider, and never for the judge.
+    #[tokio::test]
+    async fn a_check_failure_counts_once_for_a_webhook_and_not_for_the_judge() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let hook: Arc<dyn Detector> = Arc::new(FixedDetector("hook_a", vec![other("hook_a", "fine_kind"), other("hook_a", "Bad-Kind"), other("hook_a", "also bad")]));
+        let judge: Arc<dyn Detector> = Arc::new(FixedDetector("judge", vec![other("judge", "Bad-Kind")]));
+        pipeline(built_ins(), vec![hook], Some(judge), Duration::from_millis(500)).run(batch(vec![call(0, "{}")]), far()).await;
+        let mut series = Vec::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            if key.name() == names::GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL
+                && let metrics_util::debugging::DebugValue::Counter(c) = value
+            {
+                let label = |k: &str| key.labels().find(|l| l.key() == k).map(|l| l.value().to_owned()).unwrap_or_default();
+                series.push((label("provider"), label("reason"), c));
+            }
+        }
+        assert_eq!(series, vec![("hook_a".to_owned(), "check".to_owned(), 1)]);
     }
 }
