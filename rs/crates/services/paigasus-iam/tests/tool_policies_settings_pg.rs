@@ -377,3 +377,38 @@ async fn two_overlapping_settings_writes_record_a_chain_of_predecessors() {
     assert_eq!(second_before, ["b"]);
     assert_eq!(repo.settings(org).await.unwrap().unwrap().webhooks, ["c"]);
 }
+
+#[tokio::test]
+async fn two_first_ever_settings_writes_record_a_chain_of_predecessors() {
+    let Some((_node, db)) = support::start_migrated_postgres().await else {
+        return;
+    };
+    let org = seed_org(&db).await;
+    let repo = PgToolPolicies::new(db.clone());
+    let uow = SeaOrmUnitOfWork::new(db.clone());
+    assert_eq!(repo.settings(org).await.unwrap(), None);
+
+    // The first writer has no row yet and holds the lock from its read until its commit.
+    let tx = uow.begin().await.unwrap();
+    assert_eq!(repo.webhooks_for_update_in(&*tx, org).await.unwrap(), Vec::<String>::new());
+    let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
+    let second = {
+        let (repo, uow) = (repo.clone(), uow.clone());
+        tokio::spawn(async move { locked_write(&repo, &uow, org, "y", Some(entered_tx)).await })
+    };
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(1500), &mut entered_rx).await;
+    assert!(waited.is_err(), "the second first-ever writer did not wait for the first one");
+    // No other session sees the default row.
+    assert_eq!(repo.settings(org).await.unwrap(), None);
+    let mut s = settings(ToolPolicyMode::Enforce, FailMode::Open, "alice");
+    s.first_enabled_at = Some(Utc::now());
+    let stored = repo.upsert_settings_in(&*tx, org, &s, list(&["x"])).await.unwrap();
+    assert_eq!(stored, ["x"]);
+    tx.commit().await.unwrap();
+
+    assert_eq!(second.await.unwrap(), ["x"]);
+    let row = repo.settings(org).await.unwrap().unwrap();
+    assert_eq!(row.webhooks, ["y"]);
+    // The first write still sets `first_enabled_at`: the default row did not hold a value.
+    assert_eq!(row.first_enabled_at, s.first_enabled_at);
+}

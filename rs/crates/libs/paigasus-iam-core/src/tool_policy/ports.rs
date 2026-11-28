@@ -106,8 +106,9 @@ pub trait ToolPolicyRepository: Send + Sync {
     /// The stored webhook opt-in list of an organization, read inside `tx` under a row lock
     /// (`SELECT ... FOR UPDATE`). The lock lasts until `tx` ends, so a second settings write for
     /// the same organization waits, and the list that this call returns is the list that the
-    /// write of `tx` replaces. An organization with no settings row gives an empty list (and no
-    /// row to lock).
+    /// write of `tx` replaces. An organization with no settings row gives an empty list. The
+    /// adapter makes a default row inside `tx` first, so the first write is locked too. The
+    /// caller must write the settings in `tx` afterwards.
     async fn webhooks_for_update_in(&self, tx: &dyn Transaction, org: Uuid) -> Result<Vec<String>, RepositoryError>;
 }
 

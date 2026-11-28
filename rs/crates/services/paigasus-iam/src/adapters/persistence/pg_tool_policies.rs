@@ -632,6 +632,18 @@ impl ToolPolicyRepository for PgToolPolicies {
 
     async fn webhooks_for_update_in(&self, tx: &dyn Transaction, org: Uuid) -> Result<Vec<String>, RepositoryError> {
         let txn = recover_txn(tx)?;
+        // An absent row has nothing to lock. Insert the default row first: a concurrent first
+        // writer then waits on the unique key until this transaction ends. The upsert of the
+        // same transaction overwrites the row, and no other session sees it before the commit.
+        // `first_enabled_at` stays NULL, so the upsert still sees "no stored value". A missing
+        // organization gives a foreign-key violation, which `map_err` reports as `NotFound`.
+        txn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tool_policy_settings (org_id, mode, fail_mode, updated_at, updated_by) VALUES ($1, 'off', 'closed', now(), 'system') ON CONFLICT DO NOTHING",
+            [org.into()],
+        ))
+        .await
+        .map_err(map_err)?;
         let row = settings_rows::Entity::find_by_id(org).lock_exclusive().one(txn).await.map_err(map_err)?;
         row.map(|m| parse_webhooks(&m.webhooks)).transpose().map(Option::unwrap_or_default)
     }
