@@ -35,6 +35,10 @@ against the code. They change the spec as follows.
   webhook when its `version` is an adapter reason, its severity is that provider's
   `failure_severity()` (or `high` for D7 and D25), and it has no evidence. Any other
   `detector_error` from a webhook is still a `check` failure.
+- P8. § 7 / C2: in the end-to-end setup the hold cut never comes before the decision start on
+  OpenAI routes, so the provider timeout always fires first. The end-to-end test
+  `a_timeout_stops_one_call_only` proves that one slow call fails alone, with reason `timeout`. The
+  Task 5 and Task 8 unit tests prove the `deadline` reason.
 
 ## Revision 2 changelog
 
@@ -544,7 +548,8 @@ impl Detector for WebhookDetector {
   `pool_max_idle_per_host` and `pool_idle_timeout` (D26). No request-level read timeout is
   needed: the call bound covers it.
 - Hex encoding and decoding are hand-written (no new dependency).
-- `WebhookDetector` has a hand-written `Debug` that prints the name and the URL host only.
+- `WebhookDetector` has a hand-written `Debug` that prints the name, the URL host, the `timeout` and
+  `max_in_flight`. These last two are not sensitive.
 
 ### 6.6 The tenant opt-in
 

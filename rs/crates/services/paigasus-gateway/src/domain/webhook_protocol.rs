@@ -97,7 +97,8 @@ fn finding_body(f: &Finding) -> FindingBody<'_> {
 
 /// The request body of one tool call, shared by every provider (§ 6.3). `None` for a result subject.
 ///
-/// `args` holds the argument text byte for byte when it passes the kernel strict parse. In every
+/// `args` holds the argument text when it passes the kernel strict parse. Surrounding whitespace of
+/// the text is removed (`RawValue` trims it). The rest of the text is not changed. In every
 /// other case `args` is `null` and `args_text` holds the raw text. `built` is the built-in findings
 /// of this call.
 #[must_use]
@@ -332,6 +333,11 @@ mod tests {
         assert_eq!(request_signature_header(T, REQUEST_MAC), format!("t={T},v1={REQUEST_MAC}"));
         assert_eq!(response_mac(SECRET, NAME, NONCE, RESPONSE.as_bytes()), RESPONSE_MAC);
         assert_eq!(verify_response(&[SECRET], NAME, NONCE, RESPONSE.as_bytes(), &format!("v1={RESPONSE_MAC}")), Ok(()));
+        // The protocol doc holds the same values. A change of one of them reds this test.
+        let doc = include_str!("../../../../../../docs/tool-policies/webhook-protocol.md");
+        for value in [REQUEST_MAC, RESPONSE_MAC, NONCE, BODY, RESPONSE] {
+            assert!(doc.contains(value), "the protocol doc lacks: {value}");
+        }
     }
 
     #[test]

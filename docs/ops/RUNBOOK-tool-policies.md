@@ -599,6 +599,9 @@ flight, the measured p99 was 17.5 to 19.0 ms in 5 of 5 runs. The host was a deve
 Redis in Docker Desktop. A change of the storage layout is expected to lower the Redis time. It is a
 follow-up.
 
+The 15 ms limit excludes the wait time of the late stages (the webhook providers and the judge).
+`gateway_tool_policy_detector_seconds{stage="webhook"}` measures the webhook time.
+
 Watch the time of the hold read. When it grows, move the history to its own Redis instance. Do not
 share it with the limits Redis. A long hold read on a shared instance delays the rate-limit calls.
 
@@ -765,3 +768,120 @@ These limits apply after PR 2.
   that other session.
 - At shutdown the gateway waits at most 5 seconds for the settle and append tasks. A settle that is
   lost leaves its events `pending`. Pending events still count.
+
+## 11. Webhook providers (SMA-856)
+
+A webhook provider is a service that you register in the gateway configuration. The gateway sends
+it one signed request for each tool call. The provider answers with findings. The protocol is in
+[`docs/tool-policies/webhook-protocol.md`](../tool-policies/webhook-protocol.md).
+
+### Register a provider
+
+Add one `[[tool_policy.detectors.webhook]]` table for each provider. You can register at most 8.
+
+```toml
+[[tool_policy.detectors.webhook]]
+name = "acme_dlp"
+url = "https://dlp.acme.example/v1/findings"
+orgs = ["6f1c0000-0000-4000-8000-000000000001"]
+secret_env = "ACME_DLP_WEBHOOK_SECRET"
+kinds = ["pii_email", "pii_iban"]
+failure_severity = "high"
+```
+
+- `orgs` is required. It lists the organizations that may use the provider. Use `"*"` for a shared
+  provider. An opt-in from another organization sends no request. It gives a `not_permitted`
+  failure.
+- `secret_env` names an environment variable. The exact bytes of its value are the key. The value
+  has at least 32 bytes and no whitespace at its ends. The name must not start with `GATEWAY_`. A
+  missing or short secret stops the boot.
+- `url` uses `https`. It has no user information and no query. Redirects are off.
+- `failure_severity` is the severity of the finding that the gateway makes when the provider
+  fails. The default is `high`.
+- `extra_ca_bundle_path` ADDS certificates to the trust store. It does not replace the trust store.
+  The bundle holds roots only. The gateway reads it once at boot. An unreadable, malformed or
+  empty bundle stops the boot.
+- `timeout_ms` (default 300) is at most `[tool_policy.detectors] timeout_ms` minus 50.
+- The webhook clients use no proxy. The gateway ignores `HTTP_PROXY`, `HTTPS_PROXY` and
+  `ALL_PROXY` for the providers. The provider must be reachable directly from the gateway.
+- The gateway uses HTTP/1.1 with a connection pool. A request after an idle period pays for a new
+  TLS handshake. The first requests are slower.
+
+### Data that leaves the gateway
+
+The gateway sends the tool arguments to the provider as the model sent them. It does not redact
+them. It does this also when `secret_in_args` found a secret. The request also holds the PRN of the
+caller (`subject`), the organization and the session. Register only a provider that may see tool
+arguments and these identifiers.
+
+### Reserved names and kinds
+
+- A provider name is `[a-z0-9_]{1,64}`. It must not be a built-in detector name (`kernel`,
+  `built_in`, `undeclared_tool`, `invalid_args`, `unseen_host`, `secret_in_args`,
+  `injection_markers`). It must not be `judge`, `webhook` or `other`.
+- A declared kind must not be a kind that the gateway already uses (see the table of finding kinds
+  in the tenant guide). A later release can reserve a new kind. It lists the kind in its
+  changelog. A configuration that declares it then fails at boot.
+
+### What a tenant sees
+
+Cedar sees the kinds of the findings and `max_severity`. It does not see the provider name. So a
+`low` failure finding does not trigger a policy that blocks on `high`. Set `failure_severity` to
+the level that your tenants block on.
+
+### Failures and the counter
+
+A failure gives one `detector_error` finding for the affected call. Its detector is the provider
+name. Its severity is `failure_severity`. Its `version` is the reason. A failure of one call does
+not change the other calls.
+
+- The adapter reasons are `request_too_large`, `overloaded`, `transport`, `timeout`, `deadline`,
+  `status`, `response_too_large`, `signature` and `malformed`.
+- The pipeline reasons are `deadline`, `panic`, `error`, `shape`, `check`, `unknown_provider`,
+  `not_permitted` and `retired`. `unknown_provider` and `not_permitted` always give severity
+  `high`. `retired` uses `failure_severity`.
+- `gateway_tool_policy_webhook_failures_total{provider, reason}` counts each failed call once. It
+  is primed at zero for each provider. `provider` is `unknown` for `unknown_provider`.
+- The gateway writes at most one `warn` event for each provider and reason in 10 seconds. The event
+  has no body, no header value and no URL path.
+- A failure in mode `log_only` does not block a call.
+
+### Load and time
+
+- A hold sends at most 8 requests at one time to one provider. More calls wait in a queue.
+- `max_in_flight` (default 64) limits the open requests of one provider in one gateway process.
+  A call that gets no permit in time fails with `overloaded`.
+- A slow provider can reach the deadline of the hold. Then its calls fail with `deadline` or
+  `timeout`.
+- The 15 ms limit of `gateway_tool_policy_overhead_seconds` excludes the wait time of the late
+  stages (the webhook providers and the judge). `gateway_tool_policy_detector_seconds{stage="webhook"}`
+  measures the webhook time.
+
+### The rollout order
+
+1. Add the provider to every gateway pod. Set its secret in every pod.
+2. Roll out the gateway.
+3. Tell the tenants to opt in. A tenant opts in with `webhooks` in its tool policy settings.
+
+To remove a provider:
+
+1. Set `retired = true` on the entry. The provider gets no request. Each call of a tenant that is
+   still opted in gets a `retired` failure.
+2. Tell the tenants to opt out.
+3. Remove the entry.
+
+Keep the secret env var set until you remove the entry. A retired provider still needs its secret
+at boot.
+
+### Rotate a secret
+
+Use the order in the protocol document. In short: the provider accepts both secrets. Set
+`secret_env` to the new secret and `previous_secret_env` to the old secret, then roll out the
+gateway. The provider then signs with the new secret. Last, remove `previous_secret_env`.
+
+### The IAM rollback hazard
+
+Migration m0016 adds the column `webhooks` to `tool_policy_settings`. A down migration, or an older
+IAM, gives every tenant an empty list. Then no provider runs, and no finding shows it. An older IAM
+also ignores the `webhooks` key of a REST write and answers 200 without it stored. Roll out the new
+IAM before you tell a tenant to opt in.

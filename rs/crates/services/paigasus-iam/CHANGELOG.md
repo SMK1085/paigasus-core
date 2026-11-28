@@ -10,6 +10,18 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
 
 ## [Unreleased]
 
+### Added
+
+- The tool policy settings hold a list of webhook providers that the tenant opts in to. Migration
+  m0016 adds the column `webhooks` to `tool_policy_settings`. `ToolPolicySettings` has the new
+  field `webhooks`. `PutToolPolicySettingsRequest` has the new field `WebhookOptIn webhooks`. When
+  the field is absent, the list does not change. An empty list clears it. In REST, an absent key
+  and `null` keep the list. A name must match `[a-z0-9_]{1,64}`, and a list has at most 16 distinct
+  names. Else the error reason is `invalid-webhook-opt-in` (reason 64, field `webhooks`). The
+  audit detail and the `iam.policy.tool_settings.changed` event carry the list.
+- Rollout note: a down migration, or an older IAM, gives every tenant an empty list. An older IAM
+  ignores the REST key `webhooks` and answers 200 without it stored (SMA-856).
+
 ### Fixed
 
 - Boot does not overwrite an operator policy at a starter policy id any more. A release that adds

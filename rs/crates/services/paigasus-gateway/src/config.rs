@@ -1071,6 +1071,8 @@ pub struct WebhookConfig {
     #[serde(default = "default_webhook_max_in_flight")]
     pub max_in_flight: usize,
     /// `true` sends no request; every call of an opted-in tenant gets a `retired` failure (D27).
+    /// Keep the secret env var set until you remove the entry. A retired provider still needs its
+    /// secret at boot (D20).
     #[serde(default)]
     pub retired: bool,
     /// This ADDS to the trust store, it does not replace it. The client trusts the operating-system
