@@ -119,6 +119,14 @@ impl WorkerTask {
             return;
         }
         while !self.token.is_cancelled() {
+            // A pause after host faults in a row takes no claim. `serve` checks it again before
+            // each further claim of a lease.
+            if let Some(left) = self.worker.pause_left() {
+                if !self.pause(left).await {
+                    return;
+                }
+                continue;
+            }
             let pause = match self.leases.acquire_next(&holder, self.settings.lease_ttl).await {
                 Ok(Some(handle)) => match self.worker.serve(handle, &self.token).await {
                     LeaseEnd::Shutdown => return,
@@ -178,9 +186,10 @@ mod tests {
 
     use super::{PoolSettings, holder_prefix, poll_sleep, run_worker_pool};
     use crate::application::lease_keeper::KeeperTiming;
+    use crate::application::worker::breaker::HostFaultSettings;
     use crate::application::worker::ports::{RunEnd, RunLimits};
     use crate::application::worker::run::{RunWorker, WorkerPorts, WorkerSettings};
-    use crate::application::worker::test_fakes::{FakeClaims, FakeCommitter, FakeLeases, FakeResolver, FakeRunner, FakeScreen, TestMemoryStore, counter, resolved_agent};
+    use crate::application::worker::test_fakes::{FakeClaims, FakeCommitter, FakeLeases, FakeResolver, FakeRunner, FakeScreen, TestMemoryStore, counter, gauge, resolved_agent};
 
     const PREFIX: &str = "host/7";
 
@@ -239,6 +248,10 @@ mod tests {
             },
             max_runs_per_lease: 8,
             caps: MemoryCaps::default(),
+            host_fault: HostFaultSettings {
+                pause_after: 3,
+                pause: Duration::from_secs(30),
+            },
         }
     }
 
@@ -252,19 +265,26 @@ mod tests {
 
     /// A real `RunWorker` on the fakes. It returns the lease store too, to read its holder log.
     fn worker(leases: FakeLeases, claims: Vec<Claim>, runner: FakeRunner) -> (Arc<RunWorker>, Arc<FakeLeases>) {
+        let (worker, leases, _runner) = worker_and_runner(leases, claims, runner);
+        (worker, leases)
+    }
+
+    /// The same, with the runner too, to read its call count.
+    fn worker_and_runner(leases: FakeLeases, claims: Vec<Claim>, runner: FakeRunner) -> (Arc<RunWorker>, Arc<FakeLeases>, Arc<FakeRunner>) {
         let leases = Arc::new(leases);
+        let runner = Arc::new(runner);
         let ports = WorkerPorts {
             leases: leases.clone(),
             claims: Arc::new(FakeClaims::new(claims)),
             committer: Arc::new(FakeCommitter::default()),
             resolver: Arc::new(FakeResolver(Ok(resolved_agent(AgentId::new(u(1), u(5)), PrincipalId::from_uuid(u(6)))))),
             screen: Arc::new(FakeScreen::default()),
-            runner: Arc::new(runner),
+            runner: runner.clone(),
             memory: Arc::new(TestMemoryStore::default()),
             faults: Arc::new(NoFaults),
             nonce: || "N1".to_owned(),
         };
-        (Arc::new(RunWorker::new(ports, worker_settings())), leases)
+        (Arc::new(RunWorker::new(ports, worker_settings())), leases, runner)
     }
 
     fn completed() -> FakeRunner {
@@ -341,6 +361,62 @@ mod tests {
         let holders: HashSet<String> = leases.holders().into_iter().collect();
         let want: HashSet<String> = (0..3).map(|i| format!("{PREFIX}/{i}")).collect();
         assert_eq!(holders, want);
+        tx.send(()).expect("send the shutdown");
+        join_within(Duration::from_secs(5), task).await;
+    }
+
+    fn host_fault_end() -> RunEnd {
+        RunEnd::HostFault {
+            error: "link down".into(),
+            retry_after: None,
+        }
+    }
+
+    fn three_faults_then_completed() -> FakeRunner {
+        FakeRunner::sequence(vec![
+            host_fault_end(),
+            host_fault_end(),
+            host_fault_end(),
+            RunEnd::Completed {
+                output: "done".into(),
+                usage: RunUsage::default(),
+            },
+        ])
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn three_host_faults_pause_the_pool_and_a_completed_run_resets_it() {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let (tx, rx) = watch::channel(());
+        let leases = FakeLeases::new(Ok(())).with_next(vec![handle(), handle(), handle(), handle()]);
+        let (worker, leases, runner) = worker_and_runner(leases, vec![claim(), claim(), claim(), claim()], three_faults_then_completed());
+        let task = tokio::spawn(run_worker_pool(worker, leases, pool_settings(1, Duration::from_secs(1)), PREFIX.to_owned(), rx));
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(runner.calls(), 3);
+        assert_eq!(gauge(&recorder, names::AGENT_HOST_WORKER_HOST_FAULT_PAUSED), Some(1.0));
+        tokio::time::sleep(Duration::from_secs(19)).await;
+        assert_eq!(runner.calls(), 3, "no claim during the pause");
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        assert_eq!(runner.calls(), 4, "the first claim after the pause completes");
+        assert_eq!(gauge(&recorder, names::AGENT_HOST_WORKER_HOST_FAULT_PAUSED), Some(0.0));
+        tx.send(()).expect("send the shutdown");
+        join_within(Duration::from_secs(5), task).await;
+    }
+
+    /// Ruling F1: one lease serves up to `max_runs_per_lease` (8) claims, and the pause stops the
+    /// claims inside that lease too. Without the check in `serve`, the fourth claim runs at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_pause_stops_a_further_claim_inside_the_same_lease() {
+        let (tx, rx) = watch::channel(());
+        let leases = FakeLeases::new(Ok(())).with_next(vec![handle()]);
+        let (worker, leases, runner) = worker_and_runner(leases, vec![claim(), claim(), claim(), claim()], three_faults_then_completed());
+        let task = tokio::spawn(run_worker_pool(worker, leases.clone(), pool_settings(1, Duration::from_secs(1)), PREFIX.to_owned(), rx));
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(runner.calls(), 3, "the fourth claim of the same lease waits for the pause to end");
+        assert_eq!(leases.releases(), 1, "the worker released the lease at the pause");
         tx.send(()).expect("send the shutdown");
         join_within(Duration::from_secs(5), task).await;
     }

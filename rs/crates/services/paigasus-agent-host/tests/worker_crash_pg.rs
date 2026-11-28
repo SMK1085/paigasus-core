@@ -27,6 +27,7 @@ use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
 use paigasus_agent_host::application::lease_keeper::KeeperTiming;
+use paigasus_agent_host::application::worker::breaker::HostFaultSettings;
 use paigasus_agent_host::application::worker::ports::RunLimits;
 use paigasus_agent_host::application::worker::run::{LeaseEnd, RunWorker, WorkerPorts, WorkerSettings};
 use paigasus_agent_host_core::agent::AgentDefinition;
@@ -262,6 +263,10 @@ fn worker(w: &World, store: Arc<PgLeaseStore>, committer: Arc<dyn RunCommitter>,
         },
         max_runs_per_lease: 8,
         caps: MemoryCaps::default(),
+        host_fault: HostFaultSettings {
+            pause_after: 3,
+            pause: Duration::from_secs(30),
+        },
     };
     RunWorker::new(ports, settings)
 }

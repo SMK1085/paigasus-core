@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::breaker::{HostFaultBreaker, HostFaultSettings};
 use super::ports::{AgentRunner, RunEnd, RunLimits, RunSpec, UserTurn};
 use crate::application::lease_keeper::{KeeperTiming, LeaseKeeper};
 
@@ -38,6 +39,8 @@ pub struct WorkerSettings {
     /// The runs of one lease before the worker releases it (spec §6.1 step 5).
     pub max_runs_per_lease: u32,
     pub caps: MemoryCaps,
+    /// The pause of the pool after host faults in a row.
+    pub host_fault: HostFaultSettings,
 }
 
 /// The ports of a worker.
@@ -75,12 +78,21 @@ pub enum LeaseEnd {
 pub struct RunWorker {
     ports: WorkerPorts,
     settings: WorkerSettings,
+    breaker: HostFaultBreaker,
 }
 
 impl RunWorker {
     #[must_use]
     pub fn new(ports: WorkerPorts, settings: WorkerSettings) -> Self {
-        Self { ports, settings }
+        let breaker = HostFaultBreaker::new(settings.host_fault);
+        Self { ports, settings, breaker }
+    }
+
+    /// The rest of the pause after host faults in a row, or `None`. The pool claims nothing while
+    /// it is `Some`.
+    #[must_use]
+    pub fn pause_left(&self) -> Option<Duration> {
+        self.breaker.pause_left(Instant::now())
     }
 
     /// Steps 2 to 6 of spec §6.1 for one taken lease.
@@ -93,6 +105,11 @@ impl RunWorker {
             // A shutdown takes no new claim. Nothing is claimed, so a plain release is enough.
             if shutdown.is_cancelled() {
                 return release(keeper, &inbox, LeaseEnd::Shutdown).await;
+            }
+            // A pause after host faults takes no new claim, also inside a lease (Ruling F1). Nothing
+            // is claimed, so a plain release is enough. The pool then waits out the pause.
+            if self.pause_left().is_some() {
+                return release(keeper, &inbox, LeaseEnd::Released).await;
             }
             let claim = match keeper.claim(&self.settings.claim).await {
                 Ok(Some(claim)) => claim,
@@ -197,6 +214,7 @@ impl RunWorker {
         };
         // The run token is a child of the keeper token, and a shutdown cancels it too. A select
         // keeps the same run future, so the run ends in its own way after the cancel.
+        let run_started = Instant::now();
         let run = p.runner.run(spec);
         tokio::pin!(run);
         let out = tokio::select! {
@@ -225,7 +243,7 @@ impl RunWorker {
         let (class, session, close_thread) = match out.end {
             RunEnd::Cancelled => return self.transient(keeper, claim, &passed, "the run was cancelled".to_owned(), None).await,
             RunEnd::Transient { error, retry_after } => return self.transient(keeper, claim, &passed, error, retry_after).await,
-            RunEnd::HostFault { error, retry_after } => return self.host_fault(keeper, claim, &passed, error, retry_after).await,
+            RunEnd::HostFault { error, retry_after } => return self.host_fault(keeper, claim, &passed, error, retry_after, run_started).await,
             RunEnd::Completed { output, usage } => (RunClass::Completed { output: Some(output), usage }, out.session, false),
             RunEnd::Stopped { output, reason, usage } => (RunClass::Stopped { output: Some(output), reason, usage }, out.session, false),
             RunEnd::Deterministic { error, close_thread } => (
@@ -270,9 +288,13 @@ impl RunWorker {
             RunClass::Stopped { .. } => "stopped",
             RunClass::Deterministic { .. } => "deterministic",
         };
+        let ends_a_row = matches!(record.class, RunClass::Completed { .. } | RunClass::Stopped { .. });
         match keeper.commit(record).await {
             Ok(_) => {
                 count_run(class);
+                if ends_a_row {
+                    self.breaker.record_completed();
+                }
                 self.ports.faults.reach(FaultStage::AfterCommit).await;
                 Committed::Yes(Step::Next)
             }
@@ -312,7 +334,7 @@ impl RunWorker {
 
     /// A host fault end: fail the run as `host_fault`, delay `targets` and give back their
     /// attempts. A failed back-off drops the keeper, and the events become free by lease expiry.
-    async fn host_fault(&self, keeper: &LeaseKeeper, claim: &Claim, targets: &[InboxEvent], error: String, retry_after: Option<Duration>) -> Step {
+    async fn host_fault(&self, keeper: &LeaseKeeper, claim: &Claim, targets: &[InboxEvent], error: String, retry_after: Option<Duration>, run_started: Instant) -> Step {
         let back_off = BackOff {
             run: claim.run.clone(),
             token: claim.lease_token,
@@ -323,6 +345,7 @@ impl RunWorker {
             Ok(()) => {
                 count_run("host_fault");
                 tracing::error!(run = %claim.run.uuid(), %error, "a host fault ended the run; the attempt is given back");
+                self.breaker.record_host_fault(run_started, Instant::now());
                 Step::Next
             }
             Err(e) => {
@@ -432,6 +455,7 @@ mod tests {
 
     use super::{LeaseEnd, RunWorker, WorkerPorts, WorkerSettings};
     use crate::application::lease_keeper::KeeperTiming;
+    use crate::application::worker::breaker::HostFaultSettings;
     use crate::application::worker::ports::{RunEnd, RunLimits, RunOutput};
     use crate::application::worker::test_fakes::{CommitterCall, Counters, FakeClaims, FakeCommitter, FakeLeases, FakeResolver, FakeRunner, FakeScreen, TestMemoryStore, counter, resolved_agent};
 
@@ -511,6 +535,10 @@ mod tests {
             },
             max_runs_per_lease,
             caps: MemoryCaps::default(),
+            host_fault: HostFaultSettings {
+                pause_after: 3,
+                pause: Duration::from_secs(30),
+            },
         }
     }
 

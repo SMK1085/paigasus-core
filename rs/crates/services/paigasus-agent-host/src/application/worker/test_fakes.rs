@@ -277,6 +277,8 @@ pub(crate) struct FakeRunner {
     calls: AtomicUsize,
     turns: StdMutex<Vec<UserTurn>>,
     panic_next: AtomicBool,
+    /// The outputs of the next calls, in order. The last one repeats. Empty: `output` repeats.
+    sequence: StdMutex<VecDeque<RunOutput>>,
 }
 
 impl FakeRunner {
@@ -288,7 +290,17 @@ impl FakeRunner {
             calls: AtomicUsize::new(0),
             turns: StdMutex::new(Vec::new()),
             panic_next: AtomicBool::new(false),
+            sequence: StdMutex::new(VecDeque::new()),
         }
+    }
+
+    /// A runner that ends with these ends in order, with no session rows. The last end repeats.
+    pub fn sequence(ends: Vec<RunEnd>) -> Self {
+        let outputs: VecDeque<RunOutput> = ends.into_iter().map(|end| RunOutput { end, session: Vec::new() }).collect();
+        let first = outputs.front().expect("a sequence has at least one end").clone();
+        let runner = Self::new(first);
+        *lock(&runner.sequence) = outputs;
+        runner
     }
 
     /// The same runner, but its first call panics.
@@ -325,7 +337,12 @@ impl AgentRunner for FakeRunner {
         if self.wait_for_cancel {
             spec.cancel.cancelled().await;
         }
-        self.output.clone()
+        let mut sequence = lock(&self.sequence);
+        match sequence.len() {
+            0 => self.output.clone(),
+            1 => sequence[0].clone(),
+            _ => sequence.pop_front().expect("a non-empty queue"),
+        }
     }
 }
 
@@ -426,4 +443,12 @@ impl Counters {
 /// resets every counter: read two counters with one `Counters::take`.
 pub(crate) fn counter(recorder: &DebuggingRecorder, name: &str, label: Option<(&str, &str)>) -> u64 {
     Counters::take(recorder).get(name, label)
+}
+
+/// The value of a gauge with no label, or `None` when it was never set.
+pub(crate) fn gauge(recorder: &DebuggingRecorder, name: &str) -> Option<f64> {
+    recorder.snapshotter().snapshot().into_vec().into_iter().find_map(|(key, _, _, v)| match v {
+        DebugValue::Gauge(g) if key.key().name() == name => Some(g.into_inner()),
+        _ => None,
+    })
 }

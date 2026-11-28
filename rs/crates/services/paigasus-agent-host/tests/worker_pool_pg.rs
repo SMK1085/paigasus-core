@@ -17,6 +17,7 @@ use paigasus_agent_host::adapters::helikon::scripted::{CancelWaitingModel, Scrip
 use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host::adapters::persistence::memory::PgMemoryStore;
 use paigasus_agent_host::application::lease_keeper::KeeperTiming;
+use paigasus_agent_host::application::worker::breaker::HostFaultSettings;
 use paigasus_agent_host::application::worker::pool::{PoolSettings, run_worker_pool};
 use paigasus_agent_host::application::worker::ports::RunLimits;
 use paigasus_agent_host::application::worker::run::{RunWorker, WorkerPorts, WorkerSettings};
@@ -103,6 +104,10 @@ fn worker(db: &DatabaseConnection, store: Arc<PgLeaseStore>, agents: Vec<AgentDe
         },
         max_runs_per_lease,
         caps: MemoryCaps::default(),
+        host_fault: HostFaultSettings {
+            pause_after: 3,
+            pause: Duration::from_secs(30),
+        },
     };
     RunWorker::new(ports, settings)
 }

@@ -347,6 +347,7 @@ fn worker_pool_task(
         retry: config.retry.to_policy(),
         max_runs_per_lease: config.worker.max_runs_per_lease,
         caps,
+        host_fault: config.worker.host_fault_settings(),
     };
     Ok(WorkerPoolTask {
         worker: Arc::new(RunWorker::new(ports, settings)),
@@ -531,6 +532,7 @@ fn describe_agent_host_metrics() {
     describe_counter!(names::AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL, "Run commits that the memory store refused with a version conflict.");
     describe_counter!(names::AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL, "Run commits whose COMMIT statement failed, so the outcome is unknown.");
     describe_counter!(names::AGENT_HOST_WORKER_RESTARTS_TOTAL, "Restarts of a worker task of the pool.");
+    describe_gauge!(names::AGENT_HOST_WORKER_HOST_FAULT_PAUSED, "1 while the worker pool pauses after host faults in a row, else 0.");
     describe_gauge!(
         names::AGENT_HOST_INBOX_LAG_SECONDS,
         "Age in seconds of the oldest due pending event of the agents that this host serves. It is 0 when nothing is due."

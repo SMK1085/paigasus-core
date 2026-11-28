@@ -180,6 +180,8 @@ pub const AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL: &str = "agent_host_commit_me
 pub const AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL: &str = "agent_host_commit_outcome_unknown_total";
 /// Restarts of a worker of the pool. No label.
 pub const AGENT_HOST_WORKER_RESTARTS_TOTAL: &str = "agent_host_worker_restarts_total";
+/// A gauge: 1 while the worker pool pauses after host faults in a row, else 0. No label.
+pub const AGENT_HOST_WORKER_HOST_FAULT_PAUSED: &str = "agent_host_worker_host_fault_paused";
 /// The age in seconds of the oldest due pending event (`status = 'pending'`, `not_before <= now()`)
 /// of every inbox of an agent that this host serves, on the database clock, or 0 when there is
 /// none. An event in a leased or locked inbox counts too. Read in each poll of `acquire_next`.
@@ -459,6 +461,7 @@ pub const ALL: &[&str] = &[
     AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL,
     AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
     AGENT_HOST_WORKER_RESTARTS_TOTAL,
+    AGENT_HOST_WORKER_HOST_FAULT_PAUSED,
     AGENT_HOST_INBOX_LAG_SECONDS,
     AGENT_HOST_EVENT_ATTEMPTS,
     AGENT_HOST_MEMORY_S3_SKIPPED_OBJECTS_TOTAL,
@@ -583,6 +586,7 @@ mod tests {
             AGENT_HOST_COMMIT_MEMORY_CONFLICTS_TOTAL,
             AGENT_HOST_COMMIT_OUTCOME_UNKNOWN_TOTAL,
             AGENT_HOST_WORKER_RESTARTS_TOTAL,
+            AGENT_HOST_WORKER_HOST_FAULT_PAUSED,
             AGENT_HOST_INBOX_LAG_SECONDS,
             AGENT_HOST_EVENT_ATTEMPTS,
         ] {

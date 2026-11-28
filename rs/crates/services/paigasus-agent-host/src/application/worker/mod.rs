@@ -2,6 +2,7 @@
 
 //! The worker run loop (spec §6.1): the ports that hold a tokio type, the run worker and the pool.
 
+pub mod breaker;
 pub mod pool;
 pub mod ports;
 pub mod run;

@@ -23,6 +23,7 @@ use crate::adapters::nats::{DURABLE_NAME, STREAM_NAME};
 use crate::adapters::persistence::scheduler::SchedulerSettings;
 use crate::application::lease_keeper::{KeeperTiming, KeeperTimingError};
 use crate::application::scheduler_loop::LoopSettings;
+use crate::application::worker::breaker::HostFaultSettings;
 
 /// A connection URL that can hold a password. `Debug` and `Serialize` print a fixed placeholder.
 /// Read the real value with [`RedactedUrl::as_str`].
@@ -383,6 +384,17 @@ pub struct WorkerConfig {
     /// The first pause after a series of host faults, in seconds. Each next pause is double, up to
     /// 600 seconds. Range 1 to 600.
     pub host_fault_pause_secs: u64,
+}
+
+impl WorkerConfig {
+    /// The settings of the pause after host faults in a row.
+    #[must_use]
+    pub fn host_fault_settings(&self) -> HostFaultSettings {
+        HostFaultSettings {
+            pause_after: self.host_fault_pause_after,
+            pause: Duration::from_secs(self.host_fault_pause_secs),
+        }
+    }
 }
 
 /// The limits of one run. Every number has a range that [`Config::validate`] checks.
@@ -2454,6 +2466,20 @@ mod tests {
         assert_eq!(cfg.models.len(), 1);
         assert_eq!(cfg.models[0].provider, ModelProvider::Anthropic);
         assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn host_fault_settings_come_from_the_worker_keys() {
+        let mut cfg = valid_gateway_cfg();
+        cfg.worker.host_fault_pause_after = 3;
+        cfg.worker.host_fault_pause_secs = 30;
+        assert_eq!(
+            cfg.worker.host_fault_settings(),
+            HostFaultSettings {
+                pause_after: 3,
+                pause: Duration::from_secs(30)
+            }
+        );
     }
 
     #[test]
