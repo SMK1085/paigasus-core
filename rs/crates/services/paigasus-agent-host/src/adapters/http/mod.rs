@@ -9,6 +9,7 @@ pub mod bytes;
 pub mod error;
 pub mod ingress;
 pub mod path;
+pub mod query;
 pub mod service_info;
 
 use std::sync::Arc;

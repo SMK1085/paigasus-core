@@ -12,7 +12,7 @@ pub mod error;
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
@@ -25,6 +25,7 @@ use self::dto::{BindBody, CreateBody, JsonBody, ListQuery, PageQuery, UpdateBody
 use self::error::AgentApiError;
 use super::auth::{authenticate, bearer_token};
 use super::path::{AgentIdField, InboxIdField, UuidPath};
+use super::query::EnvelopeQuery;
 use crate::application::agents::{AdminError, AgentAdmin, ResourceKey};
 use crate::application::auth::Caller;
 
@@ -74,8 +75,7 @@ async fn create(State(admin): Admin, Extension(caller): Extension<Caller>, JsonB
     Ok((StatusCode::CREATED, Json(agent_json(&record))))
 }
 
-async fn list(State(admin): Admin, Extension(caller): Extension<Caller>, query: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>) -> Answer {
-    let Query(q) = query.map_err(|_| AgentApiError(AdminError::InvalidRequestSchema))?;
+async fn list(State(admin): Admin, Extension(caller): Extension<Caller>, EnvelopeQuery(q): EnvelopeQuery<ListQuery>) -> Answer {
     let org = parse_org_prn(q.org.as_deref().unwrap_or_default())?;
     let archived = include_archived(q.include_archived.as_deref())?;
     let size = page_size(q.page_size.as_deref())?;
@@ -104,13 +104,7 @@ async fn bind(State(admin): Admin, Extension(caller): Extension<Caller>, UuidPat
     Ok((StatusCode::CREATED, Json(inbox_json(&record))))
 }
 
-async fn list_inboxes(
-    State(admin): Admin,
-    Extension(caller): Extension<Caller>,
-    UuidPath { id, .. }: UuidPath<AgentIdField>,
-    query: Result<Query<PageQuery>, axum::extract::rejection::QueryRejection>,
-) -> Answer {
-    let Query(q) = query.map_err(|_| AgentApiError(AdminError::InvalidRequestSchema))?;
+async fn list_inboxes(State(admin): Admin, Extension(caller): Extension<Caller>, UuidPath { id, .. }: UuidPath<AgentIdField>, EnvelopeQuery(q): EnvelopeQuery<PageQuery>) -> Answer {
     let size = page_size(q.page_size.as_deref())?;
     let (items, next) = admin.list_inboxes(&caller, key(id), size, q.page_token.as_deref().unwrap_or_default()).await.map_err(AgentApiError)?;
     Ok((StatusCode::OK, Json(page_json(items.iter().map(inbox_json).collect(), next))))
