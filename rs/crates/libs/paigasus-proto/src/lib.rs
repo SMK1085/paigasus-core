@@ -19,6 +19,7 @@ pub mod paigasus {
             // Generated code is excluded from the strict lint gate.
             #![allow(clippy::all, warnings)]
             include!("generated/paigasus/agents/v1/paigasus.agents.v1.rs");
+            include!("generated/paigasus/agents/v1/paigasus.agents.v1.tonic.rs");
         }
     }
     pub mod gateway {

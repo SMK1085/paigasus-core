@@ -4,8 +4,8 @@
 // @generated from file paigasus/agents/v1/agents.proto (package paigasus.agents.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
-import { enumDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file paigasus/agents/v1/agents.proto.
  */
 export const file_paigasus_agents_v1_agents: GenFile = /*@__PURE__*/
-  fileDesc("Ch9wYWlnYXN1cy9hZ2VudHMvdjEvYWdlbnRzLnByb3RvEhJwYWlnYXN1cy5hZ2VudHMudjEiLgoNT3V0Ym94TWVzc2FnZRIPCgdydW5fcHJuGAEgASgJEgwKBHRleHQYAiABKAki6wEKClRpbWVyRmlyZWQSEAoIdGltZXJfaWQYASABKAkSKwoEa2luZBgCIAEoDjIdLnBhaWdhc3VzLmFnZW50cy52MS5UaW1lcktpbmQSLwoGb3JpZ2luGAMgASgOMh8ucGFpZ2FzdXMuYWdlbnRzLnYxLlRpbWVyT3JpZ2luEisKB2ZpcmVfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgwKBG5vdGUYBSABKAkSEQoEY3JvbhgGIAEoCUgAiAEBEg8KAnR6GAcgASgJSAGIAQFCBwoFX2Nyb25CBQoDX3R6KloKCVRpbWVyS2luZBIaChZUSU1FUl9LSU5EX1VOU1BFQ0lGSUVEEAASGAoUVElNRVJfS0lORF9GT0xMT1dfVVAQARIXChNUSU1FUl9LSU5EX1NDSEVEVUxFEAIqXAoLVGltZXJPcmlnaW4SHAoYVElNRVJfT1JJR0lOX1VOU1BFQ0lGSUVEEAASFgoSVElNRVJfT1JJR0lOX0FHRU5UEAESFwoTVElNRVJfT1JJR0lOX1NZU1RFTRACYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("Ch9wYWlnYXN1cy9hZ2VudHMvdjEvYWdlbnRzLnByb3RvEhJwYWlnYXN1cy5hZ2VudHMudjEiLgoNT3V0Ym94TWVzc2FnZRIPCgdydW5fcHJuGAEgASgJEgwKBHRleHQYAiABKAki6wEKClRpbWVyRmlyZWQSEAoIdGltZXJfaWQYASABKAkSKwoEa2luZBgCIAEoDjIdLnBhaWdhc3VzLmFnZW50cy52MS5UaW1lcktpbmQSLwoGb3JpZ2luGAMgASgOMh8ucGFpZ2FzdXMuYWdlbnRzLnYxLlRpbWVyT3JpZ2luEisKB2ZpcmVfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgwKBG5vdGUYBSABKAkSEQoEY3JvbhgGIAEoCUgAiAEBEg8KAnR6GAcgASgJSAGIAQFCBwoFX2Nyb25CBQoDX3R6IpICCgVBZ2VudBIRCglhZ2VudF9wcm4YASABKAkSDwoHb3JnX3BybhgCIAEoCRIMCgRuYW1lGAMgASgJEg0KBW1vZGVsGAQgASgJEhQKDGluc3RydWN0aW9ucxgFIAEoCRINCgV0b29scxgGIAMoCRIPCgd2ZXJzaW9uGAcgASgDEi8KC2NyZWF0ZV90aW1lGAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgt1cGRhdGVfdGltZRgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoMYXJjaGl2ZV90aW1lGAogASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCKtAQoFSW5ib3gSEQoJaW5ib3hfcHJuGAEgASgJEhEKCWFnZW50X3BybhgCIAEoCRIVCg1wcmluY2lwYWxfcHJuGAMgASgJEi8KC2NyZWF0ZV90aW1lGAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBI2ChJhZ2VudF9hcmNoaXZlX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wImcKEkNyZWF0ZUFnZW50UmVxdWVzdBIPCgdvcmdfcHJuGAEgASgJEgwKBG5hbWUYAiABKAkSDQoFbW9kZWwYAyABKAkSFAoMaW5zdHJ1Y3Rpb25zGAQgASgJEg0KBXRvb2xzGAUgAygJIj8KE0NyZWF0ZUFnZW50UmVzcG9uc2USKAoFYWdlbnQYASABKAsyGS5wYWlnYXN1cy5hZ2VudHMudjEuQWdlbnQiJAoPR2V0QWdlbnRSZXF1ZXN0EhEKCWFnZW50X3BybhgBIAEoCSI8ChBHZXRBZ2VudFJlc3BvbnNlEigKBWFnZW50GAEgASgLMhkucGFpZ2FzdXMuYWdlbnRzLnYxLkFnZW50ImUKEUxpc3RBZ2VudHNSZXF1ZXN0Eg8KB29yZ19wcm4YASABKAkSGAoQaW5jbHVkZV9hcmNoaXZlZBgCIAEoCBIRCglwYWdlX3NpemUYAyABKA0SEgoKcGFnZV90b2tlbhgEIAEoCSJYChJMaXN0QWdlbnRzUmVzcG9uc2USKQoGYWdlbnRzGAEgAygLMhkucGFpZ2FzdXMuYWdlbnRzLnYxLkFnZW50EhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSJ6ChJVcGRhdGVBZ2VudFJlcXVlc3QSEQoJYWdlbnRfcHJuGAEgASgJEg8KB3ZlcnNpb24YAiABKAMSDAoEbmFtZRgDIAEoCRINCgVtb2RlbBgEIAEoCRIUCgxpbnN0cnVjdGlvbnMYBSABKAkSDQoFdG9vbHMYBiADKAkiPwoTVXBkYXRlQWdlbnRSZXNwb25zZRIoCgVhZ2VudBgBIAEoCzIZLnBhaWdhc3VzLmFnZW50cy52MS5BZ2VudCIoChNBcmNoaXZlQWdlbnRSZXF1ZXN0EhEKCWFnZW50X3BybhgBIAEoCSJAChRBcmNoaXZlQWdlbnRSZXNwb25zZRIoCgVhZ2VudBgBIAEoCzIZLnBhaWdhc3VzLmFnZW50cy52MS5BZ2VudCI+ChJDcmVhdGVJbmJveFJlcXVlc3QSEQoJYWdlbnRfcHJuGAEgASgJEhUKDXByaW5jaXBhbF9wcm4YAiABKAkiPwoTQ3JlYXRlSW5ib3hSZXNwb25zZRIoCgVpbmJveBgBIAEoCzIZLnBhaWdhc3VzLmFnZW50cy52MS5JbmJveCIkCg9HZXRJbmJveFJlcXVlc3QSEQoJaW5ib3hfcHJuGAEgASgJIjwKEEdldEluYm94UmVzcG9uc2USKAoFaW5ib3gYASABKAsyGS5wYWlnYXN1cy5hZ2VudHMudjEuSW5ib3giTgoSTGlzdEluYm94ZXNSZXF1ZXN0EhEKCWFnZW50X3BybhgBIAEoCRIRCglwYWdlX3NpemUYAiABKA0SEgoKcGFnZV90b2tlbhgDIAEoCSJaChNMaXN0SW5ib3hlc1Jlc3BvbnNlEioKB2luYm94ZXMYASADKAsyGS5wYWlnYXN1cy5hZ2VudHMudjEuSW5ib3gSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJKloKCVRpbWVyS2luZBIaChZUSU1FUl9LSU5EX1VOU1BFQ0lGSUVEEAASGAoUVElNRVJfS0lORF9GT0xMT1dfVVAQARIXChNUSU1FUl9LSU5EX1NDSEVEVUxFEAIqXAoLVGltZXJPcmlnaW4SHAoYVElNRVJfT1JJR0lOX1VOU1BFQ0lGSUVEEAASFgoSVElNRVJfT1JJR0lOX0FHRU5UEAESFwoTVElNRVJfT1JJR0lOX1NZU1RFTRACMvwFCgxBZ2VudFNlcnZpY2USXgoLQ3JlYXRlQWdlbnQSJi5wYWlnYXN1cy5hZ2VudHMudjEuQ3JlYXRlQWdlbnRSZXF1ZXN0GicucGFpZ2FzdXMuYWdlbnRzLnYxLkNyZWF0ZUFnZW50UmVzcG9uc2USVQoIR2V0QWdlbnQSIy5wYWlnYXN1cy5hZ2VudHMudjEuR2V0QWdlbnRSZXF1ZXN0GiQucGFpZ2FzdXMuYWdlbnRzLnYxLkdldEFnZW50UmVzcG9uc2USWwoKTGlzdEFnZW50cxIlLnBhaWdhc3VzLmFnZW50cy52MS5MaXN0QWdlbnRzUmVxdWVzdBomLnBhaWdhc3VzLmFnZW50cy52MS5MaXN0QWdlbnRzUmVzcG9uc2USXgoLVXBkYXRlQWdlbnQSJi5wYWlnYXN1cy5hZ2VudHMudjEuVXBkYXRlQWdlbnRSZXF1ZXN0GicucGFpZ2FzdXMuYWdlbnRzLnYxLlVwZGF0ZUFnZW50UmVzcG9uc2USYQoMQXJjaGl2ZUFnZW50EicucGFpZ2FzdXMuYWdlbnRzLnYxLkFyY2hpdmVBZ2VudFJlcXVlc3QaKC5wYWlnYXN1cy5hZ2VudHMudjEuQXJjaGl2ZUFnZW50UmVzcG9uc2USXgoLQ3JlYXRlSW5ib3gSJi5wYWlnYXN1cy5hZ2VudHMudjEuQ3JlYXRlSW5ib3hSZXF1ZXN0GicucGFpZ2FzdXMuYWdlbnRzLnYxLkNyZWF0ZUluYm94UmVzcG9uc2USVQoIR2V0SW5ib3gSIy5wYWlnYXN1cy5hZ2VudHMudjEuR2V0SW5ib3hSZXF1ZXN0GiQucGFpZ2FzdXMuYWdlbnRzLnYxLkdldEluYm94UmVzcG9uc2USXgoLTGlzdEluYm94ZXMSJi5wYWlnYXN1cy5hZ2VudHMudjEuTGlzdEluYm94ZXNSZXF1ZXN0GicucGFpZ2FzdXMuYWdlbnRzLnYxLkxpc3RJbmJveGVzUmVzcG9uc2ViBnByb3RvMw", [file_google_protobuf_timestamp]);
 
 /**
  * A message that the host sends out to the user of a run.
@@ -111,6 +111,474 @@ export const TimerFiredSchema: GenMessage<TimerFired> = /*@__PURE__*/
   messageDesc(file_paigasus_agents_v1_agents, 1);
 
 /**
+ * An agent definition.
+ *
+ * @generated from message paigasus.agents.v1.Agent
+ */
+export type Agent = Message<"paigasus.agents.v1.Agent"> & {
+  /**
+   * @generated from field: string agent_prn = 1;
+   */
+  agentPrn: string;
+
+  /**
+   * @generated from field: string org_prn = 2;
+   */
+  orgPrn: string;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string model = 4;
+   */
+  model: string;
+
+  /**
+   * @generated from field: string instructions = 5;
+   */
+  instructions: string;
+
+  /**
+   * @generated from field: repeated string tools = 6;
+   */
+  tools: string[];
+
+  /**
+   * The version of the definition. It increases with each update.
+   *
+   * @generated from field: int64 version = 7;
+   */
+  version: bigint;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp create_time = 8;
+   */
+  createTime?: Timestamp | undefined;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp update_time = 9;
+   */
+  updateTime?: Timestamp | undefined;
+
+  /**
+   * Not set while the agent is active.
+   *
+   * @generated from field: google.protobuf.Timestamp archive_time = 10;
+   */
+  archiveTime?: Timestamp | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.Agent.
+ * Use `create(AgentSchema)` to create a new message.
+ */
+export const AgentSchema: GenMessage<Agent> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 2);
+
+/**
+ * The inbox of one principal at one agent.
+ *
+ * @generated from message paigasus.agents.v1.Inbox
+ */
+export type Inbox = Message<"paigasus.agents.v1.Inbox"> & {
+  /**
+   * @generated from field: string inbox_prn = 1;
+   */
+  inboxPrn: string;
+
+  /**
+   * @generated from field: string agent_prn = 2;
+   */
+  agentPrn: string;
+
+  /**
+   * @generated from field: string principal_prn = 3;
+   */
+  principalPrn: string;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp create_time = 4;
+   */
+  createTime?: Timestamp | undefined;
+
+  /**
+   * The archive time of the agent. Not set while the agent is active.
+   *
+   * @generated from field: google.protobuf.Timestamp agent_archive_time = 5;
+   */
+  agentArchiveTime?: Timestamp | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.Inbox.
+ * Use `create(InboxSchema)` to create a new message.
+ */
+export const InboxSchema: GenMessage<Inbox> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 3);
+
+/**
+ * @generated from message paigasus.agents.v1.CreateAgentRequest
+ */
+export type CreateAgentRequest = Message<"paigasus.agents.v1.CreateAgentRequest"> & {
+  /**
+   * @generated from field: string org_prn = 1;
+   */
+  orgPrn: string;
+
+  /**
+   * @generated from field: string name = 2;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string model = 3;
+   */
+  model: string;
+
+  /**
+   * @generated from field: string instructions = 4;
+   */
+  instructions: string;
+
+  /**
+   * @generated from field: repeated string tools = 5;
+   */
+  tools: string[];
+};
+
+/**
+ * Describes the message paigasus.agents.v1.CreateAgentRequest.
+ * Use `create(CreateAgentRequestSchema)` to create a new message.
+ */
+export const CreateAgentRequestSchema: GenMessage<CreateAgentRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 4);
+
+/**
+ * @generated from message paigasus.agents.v1.CreateAgentResponse
+ */
+export type CreateAgentResponse = Message<"paigasus.agents.v1.CreateAgentResponse"> & {
+  /**
+   * @generated from field: paigasus.agents.v1.Agent agent = 1;
+   */
+  agent?: Agent | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.CreateAgentResponse.
+ * Use `create(CreateAgentResponseSchema)` to create a new message.
+ */
+export const CreateAgentResponseSchema: GenMessage<CreateAgentResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 5);
+
+/**
+ * @generated from message paigasus.agents.v1.GetAgentRequest
+ */
+export type GetAgentRequest = Message<"paigasus.agents.v1.GetAgentRequest"> & {
+  /**
+   * @generated from field: string agent_prn = 1;
+   */
+  agentPrn: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.GetAgentRequest.
+ * Use `create(GetAgentRequestSchema)` to create a new message.
+ */
+export const GetAgentRequestSchema: GenMessage<GetAgentRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 6);
+
+/**
+ * @generated from message paigasus.agents.v1.GetAgentResponse
+ */
+export type GetAgentResponse = Message<"paigasus.agents.v1.GetAgentResponse"> & {
+  /**
+   * @generated from field: paigasus.agents.v1.Agent agent = 1;
+   */
+  agent?: Agent | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.GetAgentResponse.
+ * Use `create(GetAgentResponseSchema)` to create a new message.
+ */
+export const GetAgentResponseSchema: GenMessage<GetAgentResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 7);
+
+/**
+ * @generated from message paigasus.agents.v1.ListAgentsRequest
+ */
+export type ListAgentsRequest = Message<"paigasus.agents.v1.ListAgentsRequest"> & {
+  /**
+   * @generated from field: string org_prn = 1;
+   */
+  orgPrn: string;
+
+  /**
+   * @generated from field: bool include_archived = 2;
+   */
+  includeArchived: boolean;
+
+  /**
+   * @generated from field: uint32 page_size = 3;
+   */
+  pageSize: number;
+
+  /**
+   * @generated from field: string page_token = 4;
+   */
+  pageToken: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.ListAgentsRequest.
+ * Use `create(ListAgentsRequestSchema)` to create a new message.
+ */
+export const ListAgentsRequestSchema: GenMessage<ListAgentsRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 8);
+
+/**
+ * @generated from message paigasus.agents.v1.ListAgentsResponse
+ */
+export type ListAgentsResponse = Message<"paigasus.agents.v1.ListAgentsResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.agents.v1.Agent agents = 1;
+   */
+  agents: Agent[];
+
+  /**
+   * @generated from field: string next_page_token = 2;
+   */
+  nextPageToken: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.ListAgentsResponse.
+ * Use `create(ListAgentsResponseSchema)` to create a new message.
+ */
+export const ListAgentsResponseSchema: GenMessage<ListAgentsResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 9);
+
+/**
+ * @generated from message paigasus.agents.v1.UpdateAgentRequest
+ */
+export type UpdateAgentRequest = Message<"paigasus.agents.v1.UpdateAgentRequest"> & {
+  /**
+   * @generated from field: string agent_prn = 1;
+   */
+  agentPrn: string;
+
+  /**
+   * The version that the caller read. A different current version fails the update.
+   *
+   * @generated from field: int64 version = 2;
+   */
+  version: bigint;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string model = 4;
+   */
+  model: string;
+
+  /**
+   * @generated from field: string instructions = 5;
+   */
+  instructions: string;
+
+  /**
+   * @generated from field: repeated string tools = 6;
+   */
+  tools: string[];
+};
+
+/**
+ * Describes the message paigasus.agents.v1.UpdateAgentRequest.
+ * Use `create(UpdateAgentRequestSchema)` to create a new message.
+ */
+export const UpdateAgentRequestSchema: GenMessage<UpdateAgentRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 10);
+
+/**
+ * @generated from message paigasus.agents.v1.UpdateAgentResponse
+ */
+export type UpdateAgentResponse = Message<"paigasus.agents.v1.UpdateAgentResponse"> & {
+  /**
+   * @generated from field: paigasus.agents.v1.Agent agent = 1;
+   */
+  agent?: Agent | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.UpdateAgentResponse.
+ * Use `create(UpdateAgentResponseSchema)` to create a new message.
+ */
+export const UpdateAgentResponseSchema: GenMessage<UpdateAgentResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 11);
+
+/**
+ * @generated from message paigasus.agents.v1.ArchiveAgentRequest
+ */
+export type ArchiveAgentRequest = Message<"paigasus.agents.v1.ArchiveAgentRequest"> & {
+  /**
+   * @generated from field: string agent_prn = 1;
+   */
+  agentPrn: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.ArchiveAgentRequest.
+ * Use `create(ArchiveAgentRequestSchema)` to create a new message.
+ */
+export const ArchiveAgentRequestSchema: GenMessage<ArchiveAgentRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 12);
+
+/**
+ * @generated from message paigasus.agents.v1.ArchiveAgentResponse
+ */
+export type ArchiveAgentResponse = Message<"paigasus.agents.v1.ArchiveAgentResponse"> & {
+  /**
+   * @generated from field: paigasus.agents.v1.Agent agent = 1;
+   */
+  agent?: Agent | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.ArchiveAgentResponse.
+ * Use `create(ArchiveAgentResponseSchema)` to create a new message.
+ */
+export const ArchiveAgentResponseSchema: GenMessage<ArchiveAgentResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 13);
+
+/**
+ * @generated from message paigasus.agents.v1.CreateInboxRequest
+ */
+export type CreateInboxRequest = Message<"paigasus.agents.v1.CreateInboxRequest"> & {
+  /**
+   * @generated from field: string agent_prn = 1;
+   */
+  agentPrn: string;
+
+  /**
+   * @generated from field: string principal_prn = 2;
+   */
+  principalPrn: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.CreateInboxRequest.
+ * Use `create(CreateInboxRequestSchema)` to create a new message.
+ */
+export const CreateInboxRequestSchema: GenMessage<CreateInboxRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 14);
+
+/**
+ * @generated from message paigasus.agents.v1.CreateInboxResponse
+ */
+export type CreateInboxResponse = Message<"paigasus.agents.v1.CreateInboxResponse"> & {
+  /**
+   * @generated from field: paigasus.agents.v1.Inbox inbox = 1;
+   */
+  inbox?: Inbox | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.CreateInboxResponse.
+ * Use `create(CreateInboxResponseSchema)` to create a new message.
+ */
+export const CreateInboxResponseSchema: GenMessage<CreateInboxResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 15);
+
+/**
+ * @generated from message paigasus.agents.v1.GetInboxRequest
+ */
+export type GetInboxRequest = Message<"paigasus.agents.v1.GetInboxRequest"> & {
+  /**
+   * @generated from field: string inbox_prn = 1;
+   */
+  inboxPrn: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.GetInboxRequest.
+ * Use `create(GetInboxRequestSchema)` to create a new message.
+ */
+export const GetInboxRequestSchema: GenMessage<GetInboxRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 16);
+
+/**
+ * @generated from message paigasus.agents.v1.GetInboxResponse
+ */
+export type GetInboxResponse = Message<"paigasus.agents.v1.GetInboxResponse"> & {
+  /**
+   * @generated from field: paigasus.agents.v1.Inbox inbox = 1;
+   */
+  inbox?: Inbox | undefined;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.GetInboxResponse.
+ * Use `create(GetInboxResponseSchema)` to create a new message.
+ */
+export const GetInboxResponseSchema: GenMessage<GetInboxResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 17);
+
+/**
+ * @generated from message paigasus.agents.v1.ListInboxesRequest
+ */
+export type ListInboxesRequest = Message<"paigasus.agents.v1.ListInboxesRequest"> & {
+  /**
+   * @generated from field: string agent_prn = 1;
+   */
+  agentPrn: string;
+
+  /**
+   * @generated from field: uint32 page_size = 2;
+   */
+  pageSize: number;
+
+  /**
+   * @generated from field: string page_token = 3;
+   */
+  pageToken: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.ListInboxesRequest.
+ * Use `create(ListInboxesRequestSchema)` to create a new message.
+ */
+export const ListInboxesRequestSchema: GenMessage<ListInboxesRequest> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 18);
+
+/**
+ * @generated from message paigasus.agents.v1.ListInboxesResponse
+ */
+export type ListInboxesResponse = Message<"paigasus.agents.v1.ListInboxesResponse"> & {
+  /**
+   * @generated from field: repeated paigasus.agents.v1.Inbox inboxes = 1;
+   */
+  inboxes: Inbox[];
+
+  /**
+   * @generated from field: string next_page_token = 2;
+   */
+  nextPageToken: string;
+};
+
+/**
+ * Describes the message paigasus.agents.v1.ListInboxesResponse.
+ * Use `create(ListInboxesResponseSchema)` to create a new message.
+ */
+export const ListInboxesResponseSchema: GenMessage<ListInboxesResponse> = /*@__PURE__*/
+  messageDesc(file_paigasus_agents_v1_agents, 19);
+
+/**
  * The kind of a timer.
  *
  * @generated from enum paigasus.agents.v1.TimerKind
@@ -173,4 +641,77 @@ export enum TimerOrigin {
  */
 export const TimerOriginSchema: GenEnum<TimerOrigin> = /*@__PURE__*/
   enumDesc(file_paigasus_agents_v1_agents, 1);
+
+/**
+ * The registry of agent definitions and their inboxes.
+ *
+ * @generated from service paigasus.agents.v1.AgentService
+ */
+export const AgentService: GenService<{
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.CreateAgent
+   */
+  createAgent: {
+    methodKind: "unary";
+    input: typeof CreateAgentRequestSchema;
+    output: typeof CreateAgentResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.GetAgent
+   */
+  getAgent: {
+    methodKind: "unary";
+    input: typeof GetAgentRequestSchema;
+    output: typeof GetAgentResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.ListAgents
+   */
+  listAgents: {
+    methodKind: "unary";
+    input: typeof ListAgentsRequestSchema;
+    output: typeof ListAgentsResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.UpdateAgent
+   */
+  updateAgent: {
+    methodKind: "unary";
+    input: typeof UpdateAgentRequestSchema;
+    output: typeof UpdateAgentResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.ArchiveAgent
+   */
+  archiveAgent: {
+    methodKind: "unary";
+    input: typeof ArchiveAgentRequestSchema;
+    output: typeof ArchiveAgentResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.CreateInbox
+   */
+  createInbox: {
+    methodKind: "unary";
+    input: typeof CreateInboxRequestSchema;
+    output: typeof CreateInboxResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.GetInbox
+   */
+  getInbox: {
+    methodKind: "unary";
+    input: typeof GetInboxRequestSchema;
+    output: typeof GetInboxResponseSchema;
+  },
+  /**
+   * @generated from rpc paigasus.agents.v1.AgentService.ListInboxes
+   */
+  listInboxes: {
+    methodKind: "unary";
+    input: typeof ListInboxesRequestSchema;
+    output: typeof ListInboxesResponseSchema;
+  },
+}> = /*@__PURE__*/
+  serviceDesc(file_paigasus_agents_v1_agents, 0);
 

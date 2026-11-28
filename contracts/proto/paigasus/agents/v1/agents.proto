@@ -9,7 +9,8 @@ package paigasus.agents.v1;
 //    can be added.
 // 2. JSON `data` uses the proto3 JSON lowerCamelCase field names.
 // 3. Each message is the `data` of one CloudEvents event. The comment of each message gives
-//    its direction and its CloudEvents `type`.
+//    its direction and its CloudEvents `type`. The request and response messages of
+//    `AgentService` are not event data.
 // 4. Envelope rule: a message never repeats a CloudEvents envelope attribute (`id`, `source`,
 //    `type`, `time`, `subject`) or an extension (`threadid`, `actorprn`, `correlationid`,
 //    `schemaversion`). The envelope is the only place for those values.
@@ -64,4 +65,124 @@ message TimerFired {
   optional string cron = 6;
   // The IANA time zone name of the schedule. Only a schedule has it.
   optional string tz = 7;
+}
+
+// The registry of agent definitions and their inboxes.
+service AgentService {
+  rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
+  rpc GetAgent(GetAgentRequest) returns (GetAgentResponse);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc UpdateAgent(UpdateAgentRequest) returns (UpdateAgentResponse);
+  rpc ArchiveAgent(ArchiveAgentRequest) returns (ArchiveAgentResponse);
+  rpc CreateInbox(CreateInboxRequest) returns (CreateInboxResponse);
+  rpc GetInbox(GetInboxRequest) returns (GetInboxResponse);
+  rpc ListInboxes(ListInboxesRequest) returns (ListInboxesResponse);
+}
+
+// An agent definition.
+message Agent {
+  string agent_prn = 1;
+  string org_prn = 2;
+  string name = 3;
+  string model = 4;
+  string instructions = 5;
+  repeated string tools = 6;
+  // The version of the definition. It increases with each update.
+  int64 version = 7;
+  google.protobuf.Timestamp create_time = 8;
+  google.protobuf.Timestamp update_time = 9;
+  // Not set while the agent is active.
+  google.protobuf.Timestamp archive_time = 10;
+}
+
+// The inbox of one principal at one agent.
+message Inbox {
+  string inbox_prn = 1;
+  string agent_prn = 2;
+  string principal_prn = 3;
+  google.protobuf.Timestamp create_time = 4;
+  // The archive time of the agent. Not set while the agent is active.
+  google.protobuf.Timestamp agent_archive_time = 5;
+}
+
+message CreateAgentRequest {
+  string org_prn = 1;
+  string name = 2;
+  string model = 3;
+  string instructions = 4;
+  repeated string tools = 5;
+}
+
+message CreateAgentResponse {
+  Agent agent = 1;
+}
+
+message GetAgentRequest {
+  string agent_prn = 1;
+}
+
+message GetAgentResponse {
+  Agent agent = 1;
+}
+
+message ListAgentsRequest {
+  string org_prn = 1;
+  bool include_archived = 2;
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListAgentsResponse {
+  repeated Agent agents = 1;
+  string next_page_token = 2;
+}
+
+message UpdateAgentRequest {
+  string agent_prn = 1;
+  // The version that the caller read. A different current version fails the update.
+  int64 version = 2;
+  string name = 3;
+  string model = 4;
+  string instructions = 5;
+  repeated string tools = 6;
+}
+
+message UpdateAgentResponse {
+  Agent agent = 1;
+}
+
+message ArchiveAgentRequest {
+  string agent_prn = 1;
+}
+
+message ArchiveAgentResponse {
+  Agent agent = 1;
+}
+
+message CreateInboxRequest {
+  string agent_prn = 1;
+  string principal_prn = 2;
+}
+
+message CreateInboxResponse {
+  Inbox inbox = 1;
+}
+
+message GetInboxRequest {
+  string inbox_prn = 1;
+}
+
+message GetInboxResponse {
+  Inbox inbox = 1;
+}
+
+message ListInboxesRequest {
+  string agent_prn = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListInboxesResponse {
+  repeated Inbox inboxes = 1;
+  string next_page_token = 2;
 }

@@ -29,6 +29,10 @@ pub static IAM_DOMAIN: LazyLock<String> = LazyLock::new(|| ErrorDomain::Iam.as_w
 /// SMA-507's two-way drift gate and SMA-508's TS SDK are both expected to consume it.
 pub static GATEWAY_DOMAIN: LazyLock<String> = LazyLock::new(|| ErrorDomain::Gateway.as_wire_domain().expect("ErrorDomain::Gateway is not the Unspecified sentinel"));
 
+/// The canonical wire `domain` for agent-host-produced errors, `"agents.paigasus.io"`. See
+/// [`IAM_DOMAIN`].
+pub static AGENTS_DOMAIN: LazyLock<String> = LazyLock::new(|| ErrorDomain::Agents.as_wire_domain().expect("ErrorDomain::Agents is not the Unspecified sentinel"));
+
 /// The suffix every canonical error domain carries.
 const DOMAIN_SUFFIX: &str = ".paigasus.io";
 
@@ -260,6 +264,13 @@ mod tests {
         "invalid-path-segment",
         "invalid-dpop-proof",
         "store-unavailable",
+        "agent-name-taken",
+        "inbox-exists",
+        "agent-version-mismatch",
+        "agent-archived",
+        "unknown-model",
+        "unknown-tool",
+        "invalid-agent-field",
     ];
 
     #[test]
@@ -271,13 +282,13 @@ mod tests {
         let unexpected: Vec<_> = actual.difference(&expected).collect();
         assert!(missing.is_empty(), "declared in the test but not in the registry: {missing:?}");
         assert!(unexpected.is_empty(), "in the registry but not declared in the test: {unexpected:?}");
-        assert_eq!(actual.len(), 93, "the registry should hold 93 reasons");
+        assert_eq!(actual.len(), 100, "the registry should hold 100 reasons");
     }
 
     #[test]
     fn the_registry_contains_exactly_the_expected_domains() {
         let actual: Vec<String> = all_domains().iter().filter_map(|d| d.as_wire_domain()).collect();
-        assert_eq!(actual, vec!["iam.paigasus.io".to_string(), "gateway.paigasus.io".to_string()]);
+        assert_eq!(actual, vec!["iam.paigasus.io".to_string(), "gateway.paigasus.io".to_string(), "agents.paigasus.io".to_string()]);
     }
 
     #[test]
@@ -385,6 +396,7 @@ mod tests {
     fn the_domain_constants_match_the_registry() {
         assert_eq!(&*crate::error::IAM_DOMAIN, "iam.paigasus.io");
         assert_eq!(&*crate::error::GATEWAY_DOMAIN, "gateway.paigasus.io");
+        assert_eq!(&*crate::error::AGENTS_DOMAIN, "agents.paigasus.io");
     }
 
     /// SMA-586: the six request-validation reasons that replace `invalid-prn`'s catch-all duty.

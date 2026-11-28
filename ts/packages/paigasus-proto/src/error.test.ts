@@ -54,10 +54,10 @@ describe('the reason codec round-trips the whole registry', () => {
   it('covers every non-sentinel value declared in error.proto', () => {
     const values = ErrorReasonSchema.values.filter((v) => v.name !== 'ERROR_REASON_UNSPECIFIED');
 
-    // Cardinality guard. The Rust mirror asserts 93 at
+    // Cardinality guard. The Rust mirror asserts 100 at
     // rs/crates/libs/paigasus-proto/src/error.rs:270; the two must agree,
     // because both derive from the same proto.
-    expect(values).toHaveLength(93);
+    expect(values).toHaveLength(100);
 
     for (const value of values) {
       const reason = value.number;
@@ -97,7 +97,7 @@ describe('the domain codec', () => {
 
   it('round-trips every non-sentinel domain the registry declares', () => {
     const values = ErrorDomainSchema.values.filter((v) => v.name !== 'ERROR_DOMAIN_UNSPECIFIED');
-    expect(values).toHaveLength(2);
+    expect(values).toHaveLength(3);
     for (const value of values) {
       const domain = value.number;
       const wire = asWireDomain(domain);

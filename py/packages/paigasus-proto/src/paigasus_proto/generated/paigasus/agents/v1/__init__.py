@@ -3,14 +3,44 @@
 # plugin: python-betterproto2
 # This file has been @generated
 
-__all__ = ("OutboxMessage", "TimerFired", "TimerKind", "TimerOrigin")
+__all__ = (
+    "Agent",
+    "AgentServiceStub",
+    "ArchiveAgentRequest",
+    "ArchiveAgentResponse",
+    "CreateAgentRequest",
+    "CreateAgentResponse",
+    "CreateInboxRequest",
+    "CreateInboxResponse",
+    "GetAgentRequest",
+    "GetAgentResponse",
+    "GetInboxRequest",
+    "GetInboxResponse",
+    "Inbox",
+    "ListAgentsRequest",
+    "ListAgentsResponse",
+    "ListInboxesRequest",
+    "ListInboxesResponse",
+    "OutboxMessage",
+    "TimerFired",
+    "TimerKind",
+    "TimerOrigin",
+    "UpdateAgentRequest",
+    "UpdateAgentResponse",
+)
 
 import datetime
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import betterproto2
+from betterproto2 import grpclib as betterproto2_grpclib
 
 from ....message_pool import default_message_pool
+
+if TYPE_CHECKING:
+    from betterproto2.grpclib.grpclib_client import MetadataLike
+    from grpclib.metadata import Deadline
 
 _COMPILER_VERSION = "0.10.1"
 betterproto2.check_compiler_version(_COMPILER_VERSION)
@@ -82,6 +112,268 @@ class TimerOrigin(betterproto2.Enum):
             "TIMER_ORIGIN_AGENT": 1,
             "TIMER_ORIGIN_SYSTEM": 2,
         }
+
+
+@dataclass(eq=False, repr=False)
+class Agent(betterproto2.Message):
+    """
+    An agent definition.
+    """
+
+    agent_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    org_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    model: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    instructions: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    tools: "list[str]" = betterproto2.field(6, betterproto2.TYPE_STRING, repeated=True)
+
+    version: "int" = betterproto2.field(7, betterproto2.TYPE_INT64)
+    """
+    The version of the definition. It increases with each update.
+    """
+
+    create_time: "datetime.datetime | None" = betterproto2.field(
+        8,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    update_time: "datetime.datetime | None" = betterproto2.field(
+        9,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    archive_time: "datetime.datetime | None" = betterproto2.field(
+        10,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+    """
+    Not set while the agent is active.
+    """
+
+
+default_message_pool.register_message("paigasus.agents.v1", "Agent", Agent)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveAgentRequest(betterproto2.Message):
+    agent_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "ArchiveAgentRequest", ArchiveAgentRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ArchiveAgentResponse(betterproto2.Message):
+    agent: "Agent | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "ArchiveAgentResponse", ArchiveAgentResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateAgentRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    name: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    model: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    instructions: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    tools: "list[str]" = betterproto2.field(5, betterproto2.TYPE_STRING, repeated=True)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "CreateAgentRequest", CreateAgentRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateAgentResponse(betterproto2.Message):
+    agent: "Agent | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "CreateAgentResponse", CreateAgentResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateInboxRequest(betterproto2.Message):
+    agent_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    principal_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "CreateInboxRequest", CreateInboxRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class CreateInboxResponse(betterproto2.Message):
+    inbox: "Inbox | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "CreateInboxResponse", CreateInboxResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetAgentRequest(betterproto2.Message):
+    agent_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "GetAgentRequest", GetAgentRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetAgentResponse(betterproto2.Message):
+    agent: "Agent | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "GetAgentResponse", GetAgentResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetInboxRequest(betterproto2.Message):
+    inbox_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "GetInboxRequest", GetInboxRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class GetInboxResponse(betterproto2.Message):
+    inbox: "Inbox | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "GetInboxResponse", GetInboxResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class Inbox(betterproto2.Message):
+    """
+    The inbox of one principal at one agent.
+    """
+
+    inbox_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    agent_prn: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+    principal_prn: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    create_time: "datetime.datetime | None" = betterproto2.field(
+        4,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+
+    agent_archive_time: "datetime.datetime | None" = betterproto2.field(
+        5,
+        betterproto2.TYPE_MESSAGE,
+        unwrap=lambda: ___google__protobuf__.Timestamp,
+        optional=True,
+    )
+    """
+    The archive time of the agent. Not set while the agent is active.
+    """
+
+
+default_message_pool.register_message("paigasus.agents.v1", "Inbox", Inbox)
+
+
+@dataclass(eq=False, repr=False)
+class ListAgentsRequest(betterproto2.Message):
+    org_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    include_archived: "bool" = betterproto2.field(2, betterproto2.TYPE_BOOL)
+
+    page_size: "int" = betterproto2.field(3, betterproto2.TYPE_UINT32)
+
+    page_token: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "ListAgentsRequest", ListAgentsRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListAgentsResponse(betterproto2.Message):
+    agents: "list[Agent]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    next_page_token: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "ListAgentsResponse", ListAgentsResponse
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListInboxesRequest(betterproto2.Message):
+    agent_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    page_size: "int" = betterproto2.field(2, betterproto2.TYPE_UINT32)
+
+    page_token: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "ListInboxesRequest", ListInboxesRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class ListInboxesResponse(betterproto2.Message):
+    inboxes: "list[Inbox]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+    next_page_token: "str" = betterproto2.field(2, betterproto2.TYPE_STRING)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "ListInboxesResponse", ListInboxesResponse
+)
 
 
 @dataclass(eq=False, repr=False)
@@ -158,6 +450,191 @@ class TimerFired(betterproto2.Message):
 
 
 default_message_pool.register_message("paigasus.agents.v1", "TimerFired", TimerFired)
+
+
+@dataclass(eq=False, repr=False)
+class UpdateAgentRequest(betterproto2.Message):
+    agent_prn: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
+
+    version: "int" = betterproto2.field(2, betterproto2.TYPE_INT64)
+    """
+    The version that the caller read. A different current version fails the update.
+    """
+
+    name: "str" = betterproto2.field(3, betterproto2.TYPE_STRING)
+
+    model: "str" = betterproto2.field(4, betterproto2.TYPE_STRING)
+
+    instructions: "str" = betterproto2.field(5, betterproto2.TYPE_STRING)
+
+    tools: "list[str]" = betterproto2.field(6, betterproto2.TYPE_STRING, repeated=True)
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "UpdateAgentRequest", UpdateAgentRequest
+)
+
+
+@dataclass(eq=False, repr=False)
+class UpdateAgentResponse(betterproto2.Message):
+    agent: "Agent | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message(
+    "paigasus.agents.v1", "UpdateAgentResponse", UpdateAgentResponse
+)
+
+
+class AgentServiceStub(betterproto2_grpclib.ServiceStub):
+    """
+    The registry of agent definitions and their inboxes.
+    """
+
+    async def create_agent(
+        self,
+        message: "CreateAgentRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CreateAgentResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/CreateAgent",
+            message,
+            CreateAgentResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_agent(
+        self,
+        message: "GetAgentRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetAgentResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/GetAgent",
+            message,
+            GetAgentResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_agents(
+        self,
+        message: "ListAgentsRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListAgentsResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/ListAgents",
+            message,
+            ListAgentsResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def update_agent(
+        self,
+        message: "UpdateAgentRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "UpdateAgentResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/UpdateAgent",
+            message,
+            UpdateAgentResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def archive_agent(
+        self,
+        message: "ArchiveAgentRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ArchiveAgentResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/ArchiveAgent",
+            message,
+            ArchiveAgentResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def create_inbox(
+        self,
+        message: "CreateInboxRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "CreateInboxResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/CreateInbox",
+            message,
+            CreateInboxResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def get_inbox(
+        self,
+        message: "GetInboxRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "GetInboxResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/GetInbox",
+            message,
+            GetInboxResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
+    async def list_inboxes(
+        self,
+        message: "ListInboxesRequest",
+        *,
+        timeout: "float | None" = None,
+        deadline: "Deadline | None" = None,
+        metadata: "MetadataLike | None" = None,
+    ) -> "ListInboxesResponse":
+
+        return await self._unary_unary(
+            "/paigasus.agents.v1.AgentService/ListInboxes",
+            message,
+            ListInboxesResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
 
 
 from ....google import protobuf as ___google__protobuf__

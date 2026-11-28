@@ -9,7 +9,7 @@
 // refactor to `Partial<Record<…>>`, which the test notices; the test alone runs later.
 //
 // The `Exclude` is load-bearing: UNSPECIFIED is the zero sentinel, the test skips it, and
-// demanding an entry for it would make the table 93 keys rather than 92.
+// demanding an entry for it would make the table 100 keys rather than 99.
 import { ErrorReason } from '@paigasus/proto';
 
 import type { Presentation } from './types';
@@ -105,6 +105,14 @@ export const PRESENTATION: Record<Exclude<ErrorReason, ErrorReason.UNSPECIFIED>,
   [ErrorReason.INVALID_DPOP_PROOF]: 'from-transport',
   // SMA-787. A 503 from the agent host. The transport status table already presents it.
   [ErrorReason.STORE_UNAVAILABLE]: 'from-transport',
+  // SMA-852. The agent registry reasons. The transport status table already presents each status.
+  [ErrorReason.AGENT_NAME_TAKEN]: 'from-transport',
+  [ErrorReason.INBOX_EXISTS]: 'from-transport',
+  [ErrorReason.AGENT_VERSION_MISMATCH]: 'from-transport',
+  [ErrorReason.AGENT_ARCHIVED]: 'from-transport',
+  [ErrorReason.UNKNOWN_MODEL]: 'from-transport',
+  [ErrorReason.UNKNOWN_TOOL]: 'from-transport',
+  [ErrorReason.INVALID_AGENT_FIELD]: 'from-transport',
   // SMA-774. The IAM tool catalog and tool policy set calls. The transport status table already
   // presents each of their statuses (invalid input, conflict, not found, unavailable).
   [ErrorReason.TOOL_POLICY_INVALID]: 'from-transport',
