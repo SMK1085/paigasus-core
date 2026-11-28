@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! An in-process stub of the `Iam` port for the HTTP route tests. It answers at the trait level,
-//! so it starts no gRPC server. It records each call by name. (A tonic fake IAM server is a
-//! separate file, `fake_iam.rs`, for the tests that need a real gRPC link.)
+//! so it starts no gRPC server. It records each call by name, and it records every self-query as
+//! `(credential, principal PRN, action, org PRN)`. It can grant per org and per action. (A tonic
+//! fake IAM server is a separate file, `fake_iam.rs`, for the tests that need a real gRPC link.)
 
 use std::sync::Mutex;
 
@@ -50,7 +51,29 @@ pub struct StubIam {
     key: Leg<IntrospectApiKeyResponse>,
     token: Leg<IntrospectResponse>,
     allowed: Leg<bool>,
+    /// When set, the self-query answers from this table and not from `allowed`. An error leg of
+    /// `allowed` still wins, so an outage stays an outage.
+    grants: Option<Grants>,
     calls: Mutex<Vec<&'static str>>,
+    self_queries: Mutex<Vec<SelfQuery>>,
+}
+
+/// One self-query as IAM received it: `(credential, principal PRN, action, org PRN)`.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub type SelfQuery = (CallerCredential, String, String, String);
+
+/// The actions that a self-query is granted on one org.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+#[derive(Clone)]
+struct Grants {
+    org_prn: String,
+    actions: &'static [&'static str],
+}
+
+/// The PRN of an organization.
+#[allow(dead_code, reason = "each test binary compiles this file and uses a part of it")]
+pub fn org_prn(id: Uuid) -> String {
+    format!("prn:pgs:iam:::organization/{id}")
 }
 
 /// The PRN of a principal.
@@ -66,7 +89,9 @@ impl StubIam {
             key,
             token,
             allowed: Leg::Ok(true),
+            grants: None,
             calls: Mutex::new(Vec::new()),
+            self_queries: Mutex::new(Vec::new()),
         }
     }
 
@@ -103,6 +128,21 @@ impl StubIam {
         self
     }
 
+    /// Grant `actions` on `org` only. Every other action or org is denied. An outage set by
+    /// [`StubIam::self_query_outage`] still wins.
+    pub fn granting(mut self, org: Uuid, actions: &'static [&'static str]) -> Self {
+        self.grants = Some(Grants { org_prn: org_prn(org), actions });
+        self
+    }
+
+    /// Change the scope PRN of the API key.
+    pub fn with_key_scope(mut self, scope_prn: &str) -> Self {
+        if let Leg::Ok(resp) = &mut self.key {
+            resp.scope_prn = scope_prn.to_owned();
+        }
+        self
+    }
+
     /// Introspection works, and the self-query finds IAM unavailable.
     pub fn self_query_outage(mut self) -> Self {
         self.allowed = Leg::Rpc(Code::Unavailable, None);
@@ -112,6 +152,16 @@ impl StubIam {
     /// The names of the calls, in order.
     pub fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// Every self-query, in order: `(credential, principal PRN, action, org PRN)`.
+    pub fn self_query_log(&self) -> Vec<SelfQuery> {
+        self.self_queries.lock().unwrap().clone()
+    }
+
+    /// Every self-query, in order, as `(principal PRN, action, org PRN)`.
+    pub fn self_query_args(&self) -> Vec<(String, String, String)> {
+        self.self_query_log().into_iter().map(|(_, principal, action, org)| (principal, action, org)).collect()
     }
 
     /// How many self-queries ran.
@@ -134,8 +184,16 @@ impl Iam for StubIam {
         self.token.answer()
     }
 
-    async fn is_authorized_self(&self, _caller: &CallerCredential, _principal_prn: &str, _action: &str, _resource_prn: &str) -> Result<bool, IamError> {
+    async fn is_authorized_self(&self, caller: &CallerCredential, principal_prn: &str, action: &str, resource_prn: &str) -> Result<bool, IamError> {
         self.calls.lock().unwrap().push("is_authorized_self");
-        self.allowed.answer()
+        self.self_queries
+            .lock()
+            .unwrap()
+            .push((caller.clone(), principal_prn.to_owned(), action.to_owned(), resource_prn.to_owned()));
+        let allowed = self.allowed.answer()?;
+        match &self.grants {
+            Some(g) => Ok(g.actions.contains(&action) && g.org_prn == resource_prn),
+            None => Ok(allowed),
+        }
     }
 }

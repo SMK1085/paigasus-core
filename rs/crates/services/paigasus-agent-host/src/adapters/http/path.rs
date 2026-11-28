@@ -31,6 +31,13 @@ impl PathField for InboxIdField {
     const NAME: &'static str = "inbox";
 }
 
+/// `{agent}` on the agent routes.
+pub struct AgentIdField;
+
+impl PathField for AgentIdField {
+    const NAME: &'static str = "agent";
+}
+
 fn malformed_uuid(field: &'static str) -> Response {
     tracing::debug!(field, "a path segment is not a UUID");
     ApiError::InvalidUuid.into_response()

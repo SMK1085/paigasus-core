@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The HTTP surface: `/healthz`, `/readyz`, the 404 envelope (spec §6.7), and, when IAM is
-//! configured, the event ingress and `GET /v1/service-info` (spec §5).
+//! configured, the event ingress, `GET /v1/service-info` (spec §5) and the REST agent API.
 
+pub mod agents;
 pub mod auth;
 pub mod bytes;
 pub mod error;
@@ -38,6 +39,9 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub inboxes: Arc<dyn InboxRepository>,
     pub ingress: Option<Arc<Ingress>>,
+    /// The agent API. It is `None` when no `[iam]` section is set: the agent routes are then not
+    /// mounted, and they answer 404.
+    pub agents: Option<Arc<crate::application::agents::AgentAdmin>>,
     /// How the memory changes of a run commit. Chosen at boot from `memory.backend`.
     pub memory: crate::adapters::memory_commit::MemoryCommit,
 }
@@ -67,6 +71,9 @@ pub fn app_router(state: AppState, metrics: Option<Router>) -> Router {
     let mut api = Router::new();
     if let Some(ingress) = &state.ingress {
         api = api.merge(ingress_routes(state.inboxes.clone(), ingress.clone()));
+    }
+    if let Some(admin) = &state.agents {
+        api = api.merge(agents::agent_routes(admin.clone()));
     }
     let probes = Router::new().route("/healthz", get(healthz)).route("/readyz", get(readyz)).with_state(state);
     let api = api
@@ -110,6 +117,7 @@ mod tests {
                 db: DatabaseConnection::default(),
                 inboxes: Arc::new(PgInboxRepository::new(DatabaseConnection::default())),
                 ingress: None,
+                agents: None,
                 memory: crate::adapters::memory_commit::MemoryCommit::InTransaction(crate::adapters::persistence::memory::PgMemoryStore::new(DatabaseConnection::default())),
             },
             None,

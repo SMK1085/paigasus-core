@@ -122,6 +122,8 @@ MANIFEST = (
      "the_migrating_code_is_in_the_registry", "MIGRATING — the boot router's 503 while migrations run"),
     ("rs/crates/services/paigasus-agent-host/src/adapters/http/error.rs", "emits",
      "every_agent_host_http_code_is_in_the_registry", "not_found() and ApiError::parts()"),
+    ("rs/crates/services/paigasus-agent-host/src/adapters/http/agents/error.rs", "emits",
+     "every_agent_api_code_is_in_the_registry", "AgentApiError::parts() — the agent API (SMA-852)"),
     ("rs/crates/services/paigasus-iam/src/adapters/http/system_retirement.rs", "emits",
      "every_system_retirement_code_is_declared_in_the_canonical_registry", "the two 409 refusals"),
     ("rs/crates/libs/paigasus-iam-core/src/tool_policy/check.rs", "emits",

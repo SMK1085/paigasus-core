@@ -25,7 +25,8 @@ use paigasus_agent_host::adapters::helikon::memory_tool::run_nonce;
 use paigasus_agent_host::adapters::helikon::model_registry::ModelRegistry;
 use paigasus_agent_host::adapters::helikon::runner::HelikonAgentRunner;
 use paigasus_agent_host::adapters::http::{AppState, Ingress, app_router};
-use paigasus_agent_host::adapters::iam::IamClient;
+use paigasus_agent_host::adapters::iam::{Iam, IamClient};
+use paigasus_agent_host::adapters::id::MintIds;
 use paigasus_agent_host::adapters::memory_commit::MemoryCommit;
 use paigasus_agent_host::adapters::nats::consumer::{NatsSource, bind_channels, connect_and_check};
 use paigasus_agent_host::adapters::persistence::agent_registry::{PgAgentRegistry, warn_unknown_models};
@@ -34,6 +35,7 @@ use paigasus_agent_host::adapters::persistence::lease_store::PgLeaseStore;
 use paigasus_agent_host::adapters::persistence::migration_lock::migrate_under_lock;
 use paigasus_agent_host::adapters::persistence::run_commit::PgRunCommitter;
 use paigasus_agent_host::adapters::persistence::scheduler::PgScheduler;
+use paigasus_agent_host::application::agents::AgentAdmin;
 use paigasus_agent_host::application::scheduler_loop::run_scheduler_loop;
 use paigasus_agent_host::application::worker::pool::{PoolSettings, holder_prefix, run_worker_pool};
 use paigasus_agent_host::application::worker::ports::RunLimits;
@@ -382,14 +384,25 @@ async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, con
             None
         }
     };
-    let ingress = match &config.iam {
-        Some(iam) => Some(Arc::new(Ingress {
-            iam: Arc::new(IamClient::connect(iam)?),
-            max_body_bytes: config.ingress.max_body_bytes,
-        })),
+    let (ingress, agents) = match &config.iam {
+        Some(iam) => {
+            let iam: Arc<dyn Iam> = Arc::new(IamClient::connect(iam)?);
+            let ingress = Arc::new(Ingress {
+                iam: Arc::clone(&iam),
+                max_body_bytes: config.ingress.max_body_bytes,
+            });
+            // SMA-852: the agent API shares the IAM link with the ingress.
+            let admin = Arc::new(AgentAdmin::new(
+                Arc::new(PgAgentRegistry::new(db.clone())),
+                Arc::new(HelikonCapabilities::new(Arc::clone(&models))),
+                iam,
+                Arc::new(MintIds),
+            ));
+            (Some(ingress), Some(admin))
+        }
         None => {
-            tracing::info!("no [iam] section is set; the event ingress and the service-info route are off");
-            None
+            tracing::info!("no [iam] section is set; the event ingress, the service-info route and the agent API are off");
+            (None, None)
         }
     };
     // Only the resolver and the scheduler: the timer store has no caller in this binary yet.
@@ -412,6 +425,7 @@ async fn boot(db: &DatabaseConnection, lease_db: Option<DatabaseConnection>, con
         db: db.clone(),
         inboxes,
         ingress,
+        agents,
         memory,
     };
     slot.install(app_router(state, None))?;

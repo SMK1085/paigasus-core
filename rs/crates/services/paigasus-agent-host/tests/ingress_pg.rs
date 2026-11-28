@@ -43,6 +43,7 @@ fn app_with(db: &DatabaseConnection, iam: StubIam) -> Router {
                 iam: Arc::new(iam),
                 max_body_bytes: 262_144,
             })),
+            agents: None,
             memory: MemoryCommit::InTransaction(PgMemoryStore::new(DatabaseConnection::default())),
         },
         None,
