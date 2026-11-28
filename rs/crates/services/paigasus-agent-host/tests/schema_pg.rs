@@ -429,6 +429,9 @@ async fn m0006_down_drops_the_agent_table_and_the_constraint() {
         eprintln!("skipping schema test: Docker unavailable");
         return;
     };
+    assert!(support::scalar_bool(&db, "SELECT to_regclass('agent') IS NOT NULL AS v").await, "agent must exist before down");
+    let err = db.execute_unprepared(&raw_inbox_sql(id(100), id(1), id(10))).await.expect_err("must fail");
+    assert!(matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_))), "expected 23503, got {err:?}");
     Migrator::down(&db, Some(1)).await.expect("down of m0006");
     db.execute_unprepared(&raw_inbox_sql(id(100), id(1), id(10))).await.expect("an inbox without an agent");
     assert!(support::scalar_bool(&db, "SELECT to_regclass('agent') IS NULL AS v").await, "agent must be gone");
@@ -446,6 +449,10 @@ async fn m0006_fails_on_an_inbox_without_an_agent() {
     let err = Migrator::up(&db, None).await.expect_err("m0006 must fail");
     assert!(format!("{err}").contains("inbox_agent_fk"), "the error must name the constraint: {err}");
     assert_eq!(support::scalar_i64(&db, "SELECT count(*) AS n FROM agent_host_migrations").await, 5);
+    assert!(
+        support::scalar_bool(&db, "SELECT to_regclass('agent') IS NULL AS v").await,
+        "the failed m0006 must roll back the agent table"
+    );
 }
 
 #[tokio::test]
