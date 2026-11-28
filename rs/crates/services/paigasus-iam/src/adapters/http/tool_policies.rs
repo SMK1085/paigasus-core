@@ -292,6 +292,7 @@ fn settings_json(s: &ToolPolicySettings) -> Value {
         "fail_mode": s.fail_mode.as_str(),
         "updated_at": s.updated_at.map(|t| t.to_rfc3339()),
         "updated_by": s.updated_by,
+        "webhooks": s.webhooks,
     })
 }
 
@@ -319,7 +320,7 @@ async fn put_settings(
         FailModeDto::Open => FailMode::Open,
         FailModeDto::Closed => FailMode::Closed,
     };
-    let accepted = svc.put_settings(&actor_prn(&ctx), path.id, mode, fail_mode).await?;
+    let accepted = svc.put_settings(&actor_prn(&ctx), path.id, mode, fail_mode, b.webhooks).await?;
     Ok(Json(json!({"settings": settings_json(&accepted.settings), "starter_version": accepted.starter_version})))
 }
 

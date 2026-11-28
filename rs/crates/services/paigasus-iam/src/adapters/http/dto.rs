@@ -1126,10 +1126,14 @@ pub enum FailModeDto {
 }
 
 /// Body of `PUT .../tool-policy-settings`.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PutToolPolicySettingsBody {
     pub mode: ToolPolicyModeDto,
     pub fail_mode: FailModeDto,
+    /// The webhook opt-in list (SMA-856). Absent and `null` keep the stored list. A list
+    /// replaces it, and `[]` clears it.
+    #[serde(default)]
+    pub webhooks: Option<Vec<String>>,
 }
 
 /// Query of the two `GET` set routes.

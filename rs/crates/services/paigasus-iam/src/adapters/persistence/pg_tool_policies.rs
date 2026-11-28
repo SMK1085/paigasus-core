@@ -578,12 +578,13 @@ impl ToolPolicyRepository for PgToolPolicies {
                 updated_at: Some(m.updated_at),
                 updated_by: Some(m.updated_by),
                 first_enabled_at: m.first_enabled_at,
+                webhooks: parse_webhooks(&m.webhooks)?,
             })
         })
         .transpose()
     }
 
-    async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings) -> Result<(), RepositoryError> {
+    async fn upsert_settings_in(&self, tx: &dyn Transaction, org: Uuid, s: &ToolPolicySettings, webhooks: Option<Vec<String>>) -> Result<Vec<String>, RepositoryError> {
         let (Some(updated_at), Some(updated_by)) = (s.updated_at, s.updated_by.as_ref()) else {
             return Err(corrupt("upsert_settings_in needs updated_at and updated_by"));
         };
@@ -595,16 +596,27 @@ impl ToolPolicyRepository for PgToolPolicies {
             updated_at: Set(updated_at),
             updated_by: Set(updated_by.clone()),
             first_enabled_at: Set(s.first_enabled_at),
+            // `NotSet` on an absent list: a new row takes the column default `'[]'`.
+            webhooks: match &webhooks {
+                Some(list) => Set(serde_json::to_string(list).map_err(|_| corrupt("the webhook opt-in list does not serialize"))?),
+                None => sea_orm::ActiveValue::NotSet,
+            },
         };
-        settings_rows::Entity::insert(row)
+        let mut update = vec![
+            settings_rows::Column::Mode,
+            settings_rows::Column::FailMode,
+            settings_rows::Column::UpdatedAt,
+            settings_rows::Column::UpdatedBy,
+        ];
+        // An absent list stays out of the update columns, so a stale struct cannot undo a
+        // concurrent write.
+        if webhooks.is_some() {
+            update.push(settings_rows::Column::Webhooks);
+        }
+        let stored = settings_rows::Entity::insert(row)
             .on_conflict(
                 OnConflict::column(settings_rows::Column::OrgId)
-                    .update_columns([
-                        settings_rows::Column::Mode,
-                        settings_rows::Column::FailMode,
-                        settings_rows::Column::UpdatedAt,
-                        settings_rows::Column::UpdatedBy,
-                    ])
+                    .update_columns(update)
                     // Written once: a stored value wins over the new one, also under a race.
                     .value(
                         settings_rows::Column::FirstEnabledAt,
@@ -612,9 +624,14 @@ impl ToolPolicyRepository for PgToolPolicies {
                     )
                     .to_owned(),
             )
-            .exec_without_returning(txn)
+            .exec_with_returning(txn)
             .await
             .map_err(map_err)?;
-        Ok(())
+        parse_webhooks(&stored.webhooks)
     }
+}
+
+/// Reads the stored opt-in list. A value that is not a JSON array of strings is corrupt.
+fn parse_webhooks(raw: &str) -> Result<Vec<String>, RepositoryError> {
+    serde_json::from_str::<Vec<String>>(raw).map_err(|_| corrupt("a settings row has a malformed webhook opt-in list"))
 }

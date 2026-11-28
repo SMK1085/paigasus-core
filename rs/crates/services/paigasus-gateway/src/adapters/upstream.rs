@@ -246,17 +246,20 @@ fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
     parts.join(": ")
 }
 
-/// The client's non-TLS options, in ONE place so the control build differs from the real one by
-/// exactly the added anchors (SMA-570 D6). `ClientBuilder` is not `Clone`, hence a function.
-fn base_builder(connect_timeout: Duration, stream_idle_timeout: Duration) -> reqwest::ClientBuilder {
+/// The client's non-TLS options shared by every egress client, in ONE place so the control build
+/// differs from the real one by exactly the added anchors (SMA-570 D6). `ClientBuilder` is not
+/// `Clone`, hence a function.
+fn plain_builder(connect_timeout: Duration) -> reqwest::ClientBuilder {
     // reqwest 0.13 `rustls-no-provider` panics at `build()` unless a provider is installed. Every
     // build goes through here (SMA-809). `Err` means one is already installed: fine.
     let _ = rustls::crypto::ring::default_provider().install_default();
     // D16: never follow a redirect; the clients turn a `3xx` into `UpstreamError::Redirect`.
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(connect_timeout)
-        .read_timeout(stream_idle_timeout)
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(connect_timeout)
+}
+
+/// The options of an upstream client: [`plain_builder`] and the idle read timeout.
+fn base_builder(connect_timeout: Duration, stream_idle_timeout: Duration) -> reqwest::ClientBuilder {
+    plain_builder(connect_timeout).read_timeout(stream_idle_timeout)
 }
 
 fn log_loaded(provider: Provider, path: &str, count: usize) {
@@ -273,30 +276,55 @@ fn log_build_failed(provider: Provider, path: &str, attribution: &str, cause: &s
     }
 }
 
-/// Build the shared `reqwest::Client` for `provider`: no redirects, split timeouts (connect and
-/// idle between bytes; the first-byte budget is per request) and the optional extra CA bundle.
-/// NO global `.timeout()` is set, because it would cap a legitimate long stream.
-pub fn build_client(provider: Provider, extra_ca_bundle_path: Option<&str>, connect_timeout: Duration, read_timeout: Duration) -> Result<reqwest::Client, UpstreamError> {
-    build_client_with_control(provider, extra_ca_bundle_path, connect_timeout, read_timeout, || {
-        base_builder(connect_timeout, read_timeout).build().is_ok()
-    })
+/// Why [`build_extra_ca_client`] failed. A boot-time fault. `label` names the config key that holds
+/// the bundle path (for a webhook: `tool_policy.detectors.webhook[<name>].extra_ca_bundle_path`).
+#[derive(Debug, thiserror::Error)]
+pub enum ExtraCaError {
+    /// The `reqwest::Client` could not be built, with no bundle configured. An empty or
+    /// unparseable platform trust store is a reachable cause (SMA-558 D1).
+    #[error("failed to build the HTTP client for {label} — this can also mean the platform trust store contains no parseable certificates")]
+    Build { label: String, source: reqwest::Error },
+    /// The bundle could not be read, parsed or built into a client, or it held no certificates.
+    #[error("failed to load {label} {path:?}")]
+    CaBundle {
+        label: String,
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
-/// `build_client` with the control build injected, so both attribution arms are reachable in tests
-/// without mutating `SSL_CERT_FILE` (`unsafe` in edition 2024) or depending on the host's trust
-/// store.
-pub(crate) fn build_client_with_control(
-    provider: Provider,
+/// Build a `reqwest::Client` with no redirects, a connect timeout, the options of `configure` and
+/// the optional extra CA bundle. The upstream clients and the webhook clients share it. `label` is
+/// the config key of the bundle path, for the error text.
+///
+/// # Errors
+/// [`ExtraCaError`] when the bundle is unreadable, malformed or empty, or when the build fails.
+pub fn build_extra_ca_client(
+    label: &str,
     extra_ca_bundle_path: Option<&str>,
     connect_timeout: Duration,
-    read_timeout: Duration,
+    configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+) -> Result<reqwest::Client, ExtraCaError> {
+    build_extra_ca_client_with_control(label, extra_ca_bundle_path, connect_timeout, &configure, || configure(plain_builder(connect_timeout)).build().is_ok()).map(|(client, _loaded)| client)
+}
+
+/// [`build_extra_ca_client`] with the control build injected, so both attribution arms are
+/// reachable in tests without mutating `SSL_CERT_FILE` (`unsafe` in edition 2024) or depending on
+/// the host's trust store. It also returns the number of added anchors (0 with no bundle).
+pub(crate) fn build_extra_ca_client_with_control(
+    label: &str,
+    extra_ca_bundle_path: Option<&str>,
+    connect_timeout: Duration,
+    configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
     control_build_ok: impl FnOnce() -> bool,
-) -> Result<reqwest::Client, UpstreamError> {
-    let mut builder = base_builder(connect_timeout, read_timeout);
+) -> Result<(reqwest::Client, usize), ExtraCaError> {
+    let mut builder = configure(plain_builder(connect_timeout));
+    let mut loaded = 0;
 
     if let Some(path) = extra_ca_bundle_path {
-        let ca_bundle = |source: Box<dyn std::error::Error + Send + Sync>| UpstreamError::CaBundle {
-            provider,
+        let ca_bundle = |source: Box<dyn std::error::Error + Send + Sync>| ExtraCaError::CaBundle {
+            label: label.to_string(),
             path: path.to_string(),
             source,
         };
@@ -312,33 +340,67 @@ pub(crate) fn build_client_with_control(
                 "contained no PEM certificates — a DER file, a key-only PEM or an empty file parses as an empty bundle".into(),
             ));
         }
-        log_loaded(provider, path, certs.len());
+        loaded = certs.len();
         for cert in certs {
             builder = builder.add_root_certificate(cert);
         }
     }
 
-    builder.build().map_err(|e| match attribute_build_failure(extra_ca_bundle_path, control_build_ok) {
-        Attribution::NoBundle => UpstreamError::Build { provider, source: e },
-        Attribution::Bundle { path } => {
-            // `cause` carries the rendered chain: reqwest's build-error `Display` is the bare
-            // string "builder error", and a log aggregator indexes this field.
-            log_build_failed(provider, path, "bundle", &describe_error(&e));
-            UpstreamError::CaBundle {
-                provider,
+    match builder.build() {
+        Ok(client) => Ok((client, loaded)),
+        Err(e) => Err(match attribute_build_failure(extra_ca_bundle_path, control_build_ok) {
+            Attribution::NoBundle => ExtraCaError::Build { label: label.to_string(), source: e },
+            Attribution::Bundle { path } => ExtraCaError::CaBundle {
+                label: label.to_string(),
                 path: path.to_string(),
                 source: Box::new(InvalidBundleCertificate { source: e }),
-            }
-        }
-        Attribution::BundleAndStore { path } => {
-            log_build_failed(provider, path, "bundle_and_store", &describe_error(&e));
-            UpstreamError::CaBundle {
-                provider,
+            },
+            Attribution::BundleAndStore { path } => ExtraCaError::CaBundle {
+                label: label.to_string(),
                 path: path.to_string(),
                 source: Box::new(BundleAndStoreUnusable { source: e }),
-            }
-        }
+            },
+        }),
+    }
+}
+
+/// Build the shared `reqwest::Client` for `provider`: no redirects, split timeouts (connect and
+/// idle between bytes; the first-byte budget is per request) and the optional extra CA bundle.
+/// NO global `.timeout()` is set, because it would cap a legitimate long stream.
+pub fn build_client(provider: Provider, extra_ca_bundle_path: Option<&str>, connect_timeout: Duration, read_timeout: Duration) -> Result<reqwest::Client, UpstreamError> {
+    build_client_with_control(provider, extra_ca_bundle_path, connect_timeout, read_timeout, || {
+        base_builder(connect_timeout, read_timeout).build().is_ok()
     })
+}
+
+/// `build_client` with the control build injected (see [`build_extra_ca_client_with_control`]).
+pub(crate) fn build_client_with_control(
+    provider: Provider,
+    extra_ca_bundle_path: Option<&str>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    control_build_ok: impl FnOnce() -> bool,
+) -> Result<reqwest::Client, UpstreamError> {
+    let built = build_extra_ca_client_with_control(provider.ca_key(), extra_ca_bundle_path, connect_timeout, |b| b.read_timeout(read_timeout), control_build_ok);
+    match built {
+        Ok((client, loaded)) => {
+            if let Some(path) = extra_ca_bundle_path {
+                log_loaded(provider, path, loaded);
+            }
+            Ok(client)
+        }
+        Err(ExtraCaError::Build { source, .. }) => Err(UpstreamError::Build { provider, source }),
+        Err(ExtraCaError::CaBundle { path, source, .. }) => {
+            // `cause` carries the rendered chain: reqwest's build-error `Display` is the bare
+            // string "builder error", and a log aggregator indexes this field.
+            if let Some(e) = source.downcast_ref::<InvalidBundleCertificate>() {
+                log_build_failed(provider, &path, "bundle", &describe_error(&e.source));
+            } else if let Some(e) = source.downcast_ref::<BundleAndStoreUnusable>() {
+                log_build_failed(provider, &path, "bundle_and_store", &describe_error(&e.source));
+            }
+            Err(UpstreamError::CaBundle { provider, path, source })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +546,55 @@ mod tests {
         assert!(rendered.contains("platform trust store"), "the store is the primary fault: {rendered}");
         assert!(rendered.contains("upstream.openai.extra_ca_bundle_path"), "the bundle must still be named: {rendered}");
         assert!(rendered.contains("fix that first"), "the operator needs an order of operations: {rendered}");
+    }
+
+    // ---- the webhook clients (SMA-856 § 7.5, PD16) ---------------------------------------------
+    // Like the tests above, these prove the build and the error attribution, not trust itself.
+    const WEBHOOK_LABEL: &str = "tool_policy.detectors.webhook[acme_dlp].extra_ca_bundle_path";
+
+    fn webhook_client(path: Option<&str>) -> Result<reqwest::Client, ExtraCaError> {
+        build_extra_ca_client(WEBHOOK_LABEL, path, TEN, |b| b.pool_max_idle_per_host(4).pool_idle_timeout(Duration::from_secs(90)))
+    }
+
+    #[test]
+    fn a_webhook_client_with_an_rcgen_bundle_builds() {
+        let f = tmp_file_with(test_ca_pem().as_bytes());
+        webhook_client(Some(f.path().to_str().unwrap())).expect("a valid bundle must build");
+        webhook_client(None).expect("no bundle builds");
+    }
+
+    #[test]
+    fn a_bad_webhook_bundle_names_the_provider_and_the_path() {
+        let key_only = tmp_file_with(b"-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n");
+        let undecodable = tmp_file_with(b"-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n");
+        let missing = "/nonexistent/paigasus-sma856/ca.pem".to_owned();
+        let paths = [missing, key_only.path().to_str().unwrap().to_owned(), undecodable.path().to_str().unwrap().to_owned()];
+        for path in &paths {
+            let err = webhook_client(Some(path)).expect_err("a bad bundle must fail");
+            assert!(matches!(err, ExtraCaError::CaBundle { .. }), "{err:?}");
+            let text = err.to_string();
+            assert!(text.contains(WEBHOOK_LABEL) && text.contains(&format!("{path:?}")), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_webhook_bundle_attribution_follows_the_control_build() {
+        let f = tmp_file_with(INVALID_DER_PEM);
+        let path = f.path().to_str().unwrap();
+        let build = |control: bool| build_extra_ca_client_with_control(WEBHOOK_LABEL, Some(path), TEN, |b| b, || control).map(|(c, _)| c);
+        let only_bundle = build(true).expect_err("an invalid anchor must fail the build");
+        let rendered = describe_error(&only_bundle);
+        assert!(matches!(only_bundle, ExtraCaError::CaBundle { .. }), "{only_bundle:?}");
+        assert!(
+            rendered.contains("not valid DER") && rendered.contains(WEBHOOK_LABEL) && rendered.contains(&format!("{path:?}")),
+            "{rendered}"
+        );
+        let both = build(false).expect_err("an invalid anchor must fail the build");
+        let rendered = describe_error(&both);
+        assert!(
+            rendered.contains("platform trust store") && rendered.contains("fix that first") && rendered.contains(WEBHOOK_LABEL),
+            "{rendered}"
+        );
     }
 
     /// A throwaway CA certificate, minted fresh per test run. Used ONLY to prove the bundle path

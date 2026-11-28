@@ -19,7 +19,7 @@
 //! the decision log. The recorder writes the per-decision line (SMA-755). Metrics never hold the arguments
 //! (ADR-0027 (i)).
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use metrics::counter;
@@ -38,7 +38,7 @@ use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::ToolHistory;
 use crate::application::tool_policy::slots::{HoldSlots, StoreOutcome, count_missing, hold_slots};
 use crate::config::DetectorSettings;
-use crate::domain::detectors::{DetectBatch, PipelineOutput, Side, Stage, Subject};
+use crate::domain::detectors::{Caller, DetectBatch, PipelineOutput, Stage, Subject};
 
 /// The `ToolCallDecider` that evaluates the tool policies. It holds the one shared recorder, for
 /// the argument digest (SMA-755), and the detector pipeline when the detectors are on (SMA-855).
@@ -47,6 +47,8 @@ pub struct CedarDecider {
     detectors: Option<Detectors>,
     /// The tool history (SMA-753). `None`: the decider reserves nothing.
     history: Option<Arc<ToolHistory>>,
+    /// The metric labels of the findings (SMA-856 D17). The default is the built-in table.
+    labels: Arc<FindingLabels>,
 }
 
 /// The detector pipeline of the decider and what its deadline needs (D35).
@@ -74,6 +76,7 @@ impl CedarDecider {
             recorder,
             detectors: None,
             history: None,
+            labels: Arc::new(FindingLabels::built_in()),
         }
     }
 
@@ -97,6 +100,13 @@ impl CedarDecider {
     #[must_use]
     pub fn with_history(mut self, history: Arc<ToolHistory>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    /// Label the findings with `labels`: the webhook kinds of the config (SMA-856 D17).
+    #[must_use]
+    pub fn with_finding_labels(mut self, labels: Arc<FindingLabels>) -> Self {
+        self.labels = labels;
         self
     }
 
@@ -176,41 +186,99 @@ pub fn finding_label(kind: &str) -> &'static str {
     FINDING_KINDS.iter().find(|k| **k == kind).copied().unwrap_or("other")
 }
 
-/// The `(kind, detector, severity)` labels of a finding. `stage` is the pipeline stage that gave
-/// the finding, `None` for a finding of the kernel or the gateway core. A webhook finding is
-/// labelled `webhook` and a judge finding `judge`, whatever detector name it gives (A2, D37): the
-/// name of a webhook is not a label, and a webhook that names `kernel` is not counted as the
-/// kernel. A finding outside [`FINDING_TRIPLES`] is `(other, other, <severity>)`. No severity
-/// counts as `high`.
-#[must_use]
-pub fn finding_labels(f: &FindingRecord, stage: Option<Stage>) -> (&'static str, &'static str, &'static str) {
-    let severity = f.severity.map_or("high", |s| s.as_str());
-    let severity = SEVERITY_LABELS.iter().find(|s| **s == severity).copied().unwrap_or("high");
-    let detector = match stage {
-        Some(Stage::Webhook) => "webhook",
-        Some(Stage::Judge) => "judge",
-        None | Some(Stage::BuiltIn) => DETECTOR_LABELS.iter().find(|d| **d == f.detector).copied().unwrap_or("other"),
-    };
-    FINDING_TRIPLES
-        .iter()
-        .find(|(k, d, s)| *k == f.kind && *d == detector && *s == severity)
-        .copied()
-        .unwrap_or(("other", "other", severity))
+/// The label values of `gateway_tool_policy_findings_total`. It holds the finding kinds that the
+/// configured webhooks declare (SMA-856 D17): a kind of a webhook is a label value only when the
+/// config names it, so the metric stays bounded. The built-in table is fixed.
+#[derive(Clone, Debug, Default)]
+pub struct FindingLabels {
+    /// The declared kinds of all webhooks, sorted and unique.
+    webhook_kinds: Vec<String>,
+}
+
+impl FindingLabels {
+    /// The labels with no webhook kind.
+    #[must_use]
+    pub fn built_in() -> Self {
+        Self::default()
+    }
+
+    /// The labels with the kinds that the configured webhooks declare. A kind that two providers
+    /// declare is one label value.
+    #[must_use]
+    pub fn with_webhook_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Self {
+        let set: std::collections::BTreeSet<&str> = kinds.into_iter().collect();
+        Self {
+            webhook_kinds: set.into_iter().map(str::to_owned).collect(),
+        }
+    }
+
+    /// The labels with no webhook kind, shared by the code that has no config (the tool history).
+    #[must_use]
+    pub fn shared_built_in() -> &'static FindingLabels {
+        static BUILT_IN: LazyLock<FindingLabels> = LazyLock::new(FindingLabels::built_in);
+        &BUILT_IN
+    }
+
+    /// The `(kind, detector, severity)` labels of a finding. `stage` is the pipeline stage that gave
+    /// the finding, `None` for a finding of the kernel or the gateway core. A webhook finding is
+    /// labelled `webhook` and a judge finding `judge`, whatever detector name it gives (A2, D37): the
+    /// name of a webhook is not a label, and a webhook that names `kernel` is not counted as the
+    /// kernel. A webhook finding of a declared kind, or a `detector_error`, keeps its severity.
+    /// Any other finding outside [`FINDING_TRIPLES`] is `(other, other, <severity>)`. No severity
+    /// counts as `high`.
+    #[must_use]
+    pub fn labels(&self, f: &FindingRecord, stage: Option<Stage>) -> (&str, &'static str, &'static str) {
+        let severity = f.severity.map_or("high", |s| s.as_str());
+        let severity = SEVERITY_LABELS.iter().find(|s| **s == severity).copied().unwrap_or("high");
+        let detector = match stage {
+            Some(Stage::Webhook) => {
+                if f.kind == "detector_error" {
+                    return ("detector_error", "webhook", severity);
+                }
+                if let Ok(at) = self.webhook_kinds.binary_search_by(|k| k.as_str().cmp(f.kind.as_str())) {
+                    return (self.webhook_kinds[at].as_str(), "webhook", severity);
+                }
+                "webhook"
+            }
+            Some(Stage::Judge) => "judge",
+            None | Some(Stage::BuiltIn) => DETECTOR_LABELS.iter().find(|d| **d == f.detector).copied().unwrap_or("other"),
+        };
+        FINDING_TRIPLES
+            .iter()
+            .find(|(k, d, s)| *k == f.kind && *d == detector && *s == severity)
+            .map_or(("other", "other", severity), |(k, d, s)| (*k, *d, *s))
+    }
+
+    /// The triples to prime at zero on `side`: the table, the four `other` triples, and on the
+    /// response side, when a webhook kind exists, the webhook triples (four severities per declared
+    /// kind, and `detector_error` with the three severities that the table lacks). Request side: 20.
+    /// Response side: 20, or 20 + 4 x kinds + 3 with webhook kinds.
+    #[must_use]
+    pub fn triples(&self, side: &'static str) -> Vec<(&str, &'static str, &'static str)> {
+        let mut out: Vec<(&str, &'static str, &'static str)> = FINDING_TRIPLES.to_vec();
+        out.extend(SEVERITY_LABELS.map(|s| ("other", "other", s)));
+        // With no webhook kind there is no webhook, so no webhook series.
+        if side == "response" && !self.webhook_kinds.is_empty() {
+            for kind in &self.webhook_kinds {
+                out.extend(SEVERITY_LABELS.map(|s| (kind.as_str(), "webhook", s)));
+            }
+            out.extend(SEVERITY_LABELS.iter().filter(|s| **s != "high").map(|s| ("detector_error", "webhook", *s)));
+        }
+        out
+    }
 }
 
 /// Increment `gateway_tool_policy_findings_total` for a finding.
-pub(crate) fn count_finding(side: &'static str, f: &FindingRecord, stage: Option<Stage>) {
-    let (kind, detector, severity) = finding_labels(f, stage);
-    counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind, "detector" => detector, "severity" => severity).increment(1);
+pub(crate) fn count_finding(labels: &FindingLabels, side: &'static str, f: &FindingRecord, stage: Option<Stage>) {
+    let (kind, detector, severity) = labels.labels(f, stage);
+    counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind.to_owned(), "detector" => detector, "severity" => severity).increment(1);
 }
 
-/// Prime `gateway_tool_policy_findings_total` at zero for every valid triple and the four `other`
-/// triples, on each side: 2 x 20 = 40 series.
-pub fn prime_tool_policy_metrics() {
+/// Prime `gateway_tool_policy_findings_total` at zero for every triple of `labels`, on each side.
+pub fn prime_tool_policy_metrics(labels: &FindingLabels) {
     for side in ["request", "response"] {
-        let others = SEVERITY_LABELS.map(|s| ("other", "other", s));
-        for (kind, detector, severity) in FINDING_TRIPLES.into_iter().chain(others) {
-            counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind, "detector" => detector, "severity" => severity).absolute(0);
+        for (kind, detector, severity) in labels.triples(side) {
+            counter!(names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, "side" => side, "kind" => kind.to_owned(), "detector" => detector, "severity" => severity).absolute(0);
         }
     }
 }
@@ -262,7 +330,7 @@ fn take_stage(pending: &mut Vec<Staged>, f: &FindingRecord) -> Option<Stage> {
 /// The detector batch of the calls of one hold: one call subject per call, in call order (§ 6.9).
 /// The seen hosts are those of the request screen, `None` when no screen ran, so `unseen_host` does
 /// not run then (S1).
-fn call_batch(snapshot: &PolicySnapshot, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall]) -> DetectBatch {
+fn call_batch(snapshot: &PolicySnapshot, ctx: &DecisionContext, turn: &ToolTurn, calls: &[ToolCall], tenant_unavailable: bool) -> DetectBatch {
     let org = match &snapshot.set {
         PolicySet::Available { facts, .. } => Some(facts.org),
         _ => None,
@@ -277,7 +345,15 @@ fn call_batch(snapshot: &PolicySnapshot, ctx: &DecisionContext, turn: &ToolTurn,
         })
         .collect();
     let seen = snapshot.seen_hosts.as_ref().map(|s| Arc::clone(&s.0));
-    DetectBatch::new(Side::Response, org, ctx.request_id.clone(), subjects, seen)
+    // SMA-753 P7, SMA-856 P6: when the tenant part is unavailable for this hold, the hold sends no
+    // webhook, so the opt-in list is empty.
+    let opt_in = if tenant_unavailable { Arc::from(Vec::<String>::new()) } else { Arc::clone(&snapshot.webhooks) };
+    let caller = Caller {
+        principal: Arc::from(ctx.principal.as_str()),
+        session: ctx.session.as_ref().map(|s| s.session_id),
+        opt_in,
+    };
+    DetectBatch::for_calls(org, ctx.request_id.clone(), subjects, seen, caller)
 }
 
 /// The snapshot of `ctx` when its policy set is available: the only case in which the pipeline
@@ -293,6 +369,7 @@ struct HoldFacts {
     extra: Findings,
     ids: Vec<Uuid>,
     slots: HoldSlots,
+    labels: Arc<FindingLabels>,
 }
 
 /// Add every kind of `from` to `into`, each with its severity.
@@ -321,7 +398,7 @@ fn decide_now(
     hold: HoldFacts,
     started: tokio::time::Instant,
 ) -> Vec<DecidedCall> {
-    let HoldFacts { extra, ids, slots } = hold;
+    let HoldFacts { extra, ids, slots, labels } = hold;
     let fallback;
     let snapshot = match ctx.policy.as_deref() {
         Some(s) => s,
@@ -331,6 +408,7 @@ fn decide_now(
         }
     };
     // No scan when no pipeline ran: the kernel then reads the hosts of each call itself.
+    let late_elapsed = found.as_ref().map_or(Duration::ZERO, |o| o.late_elapsed);
     let (scans, mut late) = found.map(scans_of).unwrap_or_default();
     count_missing(&slots.missing);
     // Spec P7: a tenant part with a condition whose window is not readable is unavailable for this
@@ -354,7 +432,7 @@ fn decide_now(
         if let Some(c) = &o.cedar {
             let mut pending = late.get_mut(i).map(std::mem::take).unwrap_or_default();
             for f in &c.findings {
-                count_finding("response", f, take_stage(&mut pending, f));
+                count_finding(&labels, "response", f, take_stage(&mut pending, f));
             }
         }
     }
@@ -362,7 +440,7 @@ fn decide_now(
     // and the gateway records one sample per request (`OverheadSample`), however many holds. It is
     // the snapshot of `ctx`, never the tenant-unavailable copy, so the sample keeps this time.
     if let Some(s) = ctx.policy.as_deref() {
-        s.add_decide_elapsed(started.elapsed());
+        s.add_decide_elapsed(started.elapsed().saturating_sub(late_elapsed));
     }
     // Every call gets a detail for the decision log (SMA-755).
     outcomes
@@ -384,6 +462,7 @@ impl ToolCallDecider for CedarDecider {
         let hold = Hold {
             recorder: Arc::clone(&self.recorder),
             history: self.history.clone(),
+            labels: Arc::clone(&self.labels),
             // D27: the pipeline runs only with the detectors on and an available policy set.
             detectors: self.detectors.clone().filter(|_| available(&ctx).is_some()),
             hold_start,
@@ -410,6 +489,7 @@ impl ToolCallDecider for CedarDecider {
 /// What the future of one hold needs from the decider.
 struct Hold {
     recorder: Arc<DecisionRecorder>,
+    labels: Arc<FindingLabels>,
     history: Option<Arc<ToolHistory>>,
     detectors: Option<Detectors>,
     hold_start: Instant,
@@ -445,10 +525,20 @@ impl Hold {
         // Spec P1: the slots of every call are computed once, before any decision.
         let slots = hold_slots(history_policy, &store, calls.len());
         let found = match (&self.detectors, available(ctx)) {
-            (Some(detectors), Some(snapshot)) => Some(detectors.pipeline.run(call_batch(snapshot, ctx, turn, calls), detectors.deadline(self.hold_start)).await),
+            (Some(detectors), Some(snapshot)) => Some(
+                detectors
+                    .pipeline
+                    .run(call_batch(snapshot, ctx, turn, calls, slots.tenant_unavailable), detectors.deadline(self.hold_start))
+                    .await,
+            ),
             _ => None,
         };
-        let hold = HoldFacts { extra, ids: ids.to_vec(), slots };
+        let hold = HoldFacts {
+            extra,
+            ids: ids.to_vec(),
+            slots,
+            labels: Arc::clone(&self.labels),
+        };
         decide_now(&self.recorder, ctx, turn, calls, found, hold, started)
     }
 }
@@ -623,6 +713,12 @@ mod tests {
         Arc::new(DetectorPipeline::new(built_in, webhooks, None, PIPELINE_TIMEOUT))
     }
 
+    /// `ctx` for an org that opted in to `names` (SMA-856 D8).
+    fn opted(ctx: DecisionContext, names: &[&str]) -> DecisionContext {
+        let snapshot = PolicySnapshot::clone(ctx.policy.as_ref().expect("a snapshot")).with_webhooks(names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>().into());
+        ctx.with_policy(Arc::new(snapshot))
+    }
+
     fn detecting(webhooks: Vec<Arc<dyn Detector>>) -> CedarDecider {
         CedarDecider::new(Arc::new(DecisionRecorder::tracing())).with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), webhooks), DECIDE_TIMEOUT, detector_settings())
     }
@@ -715,14 +811,43 @@ mod tests {
         assert!(kinds(&out[0]).contains(&(UNSEEN_HOST.to_owned(), UNSEEN_HOST.to_owned())), "{:?}", kinds(&out[0]));
     }
 
+    /// D28: the wait for a webhook is not the overhead of the gateway. The webhook time stays in
+    /// `detector_seconds{stage="webhook"}`.
     #[tokio::test(start_paused = true)]
-    async fn the_overhead_includes_the_pipeline_time() {
+    async fn the_overhead_excludes_the_webhook_time() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
         let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
+        let ctx = opted(ctx, &["hook_slow"]);
         let snapshot = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
         let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_millis(50)));
         let out = detecting(vec![slow]).decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
         assert_eq!(out[0].decision, Decision::Allow);
-        assert!(snapshot.decide_elapsed() >= Duration::from_millis(50), "{:?}", snapshot.decide_elapsed());
+        assert!(snapshot.decide_elapsed() < Duration::from_millis(50), "{:?}", snapshot.decide_elapsed());
+        let samples: Vec<f64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(k, ..)| k.key().name() == names::GATEWAY_TOOL_POLICY_DETECTOR_SECONDS && k.key().labels().any(|l| l.key() == "stage" && l.value() == "webhook"))
+            .flat_map(|(_, _, _, v)| match v {
+                DebugValue::Histogram(h) => h.into_iter().map(|x| x.into_inner()).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(samples.len(), 1, "{samples:?}");
+        assert!((samples[0] - 0.05).abs() < 0.01, "the webhook stage time is about 0.05 s: {samples:?}");
+    }
+
+    /// A built-in stage that blocks for a fixed time.
+    struct SlowBuiltIn(Duration, BuiltInDetector);
+
+    impl BuiltInStage for SlowBuiltIn {
+        fn run(&self, batch: &DetectBatch) -> PipelineOutput {
+            std::thread::sleep(self.0);
+            self.1.run(batch)
+        }
     }
 
     /// A built-in stage that counts its runs.
@@ -767,15 +892,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_webhook_finding_that_names_the_kernel_counts_as_webhook() {
+    async fn a_webhook_finding_that_names_the_kernel_is_replaced_and_counts_as_webhook() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
         let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
         // A test-only webhook that gives a finding with the detector name `kernel` (a spoof).
         let spoof: Arc<dyn Detector> = Arc::new(FixedDetector("hook_a", vec![detector_error(DETECTOR_KERNEL)]));
-        let out = detecting(vec![spoof]).decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
-        assert!(kinds(&out[0]).contains(&("detector_error".to_owned(), DETECTOR_KERNEL.to_owned())), "the record keeps the name it gave");
+        let out = detecting(vec![spoof])
+            .decide(Arc::new(opted(ctx, &["hook_a"])), Arc::new(turn), calls_with(&[("ok", "{}")]))
+            .await
+            .expect("decide");
+        // The strict check replaces the spoof: the record holds the failure finding of `hook_a`.
+        let got = kinds(&out[0]);
+        assert!(got.contains(&("detector_error".to_owned(), "hook_a".to_owned())), "{got:?}");
+        assert!(!got.contains(&("detector_error".to_owned(), DETECTOR_KERNEL.to_owned())), "{got:?}");
+        let cedar = out[0].detail.as_ref().and_then(|x| x.cedar.as_ref()).expect("a cedar record");
+        let hook = cedar.findings.iter().find(|f| f.kind == "detector_error" && f.detector == "hook_a").expect("the failure finding");
+        assert_eq!(hook.version, "check");
         let m = testing::Snap::take(&snapshotter);
         let finding = |detector: &str| {
             m.counter(
@@ -796,6 +930,7 @@ mod tests {
         let has_timeout = |d: &DecidedCall| kinds(d).contains(&("detector_error".to_owned(), "hook_slow".to_owned()));
 
         let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
+        let ctx = opted(ctx, &["hook_slow"]);
         let snapshot = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
         let (ctx, turn) = (Arc::new(ctx), Arc::new(turn));
         let hold_start = tokio::time::Instant::now().into_std() - (DECIDE_TIMEOUT - margin - left);
@@ -812,6 +947,53 @@ mod tests {
         assert!(!has_timeout(&out[0]), "{:?}", kinds(&out[0]));
     }
 
+    /// The webhook of the tests, and its recorded batches.
+    fn recording(name: &'static str) -> Arc<crate::application::tool_policy::testing::RecordingDetector> {
+        crate::application::tool_policy::testing::RecordingDetector::new(name, vec![])
+    }
+
+    #[tokio::test]
+    async fn the_call_batch_carries_the_caller() {
+        let (ctx, turn) = request_side(testing::PERMIT_ALL, TenantMode::Enforce).await;
+        let hook = recording("hook_a");
+        let s = session(Findings::new());
+        let session_id = s.session_id;
+        let ctx = opted(ctx, &["hook_a"]).with_session(s);
+        let decider = detecting(vec![hook.clone() as Arc<dyn Detector>]);
+        decider.decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
+        let batches = hook.batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].caller.principal.as_ref(), PRINCIPAL);
+        assert_eq!(batches[0].caller.session, Some(session_id), "the session id travels");
+        assert_eq!(&*batches[0].caller.opt_in, ["hook_a"]);
+        assert!(batches[0].webhook_bodies.is_some());
+    }
+
+    /// PD5 (SMA-856 P6, SMA-753 P7): a hold whose tenant part is unavailable sends no webhook.
+    #[tokio::test]
+    async fn a_hold_with_an_unavailable_tenant_part_sends_no_webhook() {
+        let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
+        let hook = recording("hook_a");
+        let ctx = opted(ctx, &["hook_a"]).with_session(session(Findings::new()));
+        let decider = with_store(Arc::new(Down)).with_detectors(
+            pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![hook.clone() as Arc<dyn Detector>]),
+            DECIDE_TIMEOUT,
+            detector_settings(),
+        );
+        assert_eq!(hold_of(&decider, &ctx, &turn, &[SEND_100]).await, [OBSERVE_UNAVAILABLE]);
+        assert!(hook.batches().is_empty(), "no webhook for a hold with an unavailable tenant part");
+        // Control: with a readable store, the same opt-in sends the webhook.
+        let ok = with_store(Arc::new(MemorySessionStore::new())).with_detectors(
+            pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![hook.clone() as Arc<dyn Detector>]),
+            DECIDE_TIMEOUT,
+            detector_settings(),
+        );
+        // The session of the first hold has a reserved intent, so the control uses a new session.
+        let fresh = ctx.clone().with_session(session(Findings::new()));
+        hold_of(&ok, &fresh, &turn, &[SEND_100]).await;
+        assert_eq!(hook.batches().len(), 1);
+    }
+
     #[test]
     fn the_decider_future_is_send() {
         fn send<T: Send>(_: &T) {}
@@ -825,23 +1007,49 @@ mod tests {
     }
 
     #[test]
+    fn webhook_kinds_get_four_triples_and_detector_error_gets_every_severity() {
+        use paigasus_kernel::detect::Severity;
+        let rec = |kind: &str, sev: Option<Severity>, detector: &str| FindingRecord::new(kind, sev, detector, "v1");
+        let l = FindingLabels::with_webhook_kinds(["pii_email", "pii_iban", "pii_email"]);
+        assert_eq!(l.labels(&rec("pii_email", Some(Severity::Low), "acme_dlp"), Some(Stage::Webhook)), ("pii_email", "webhook", "low"));
+        assert_eq!(
+            l.labels(&rec("detector_error", Some(Severity::Info), "acme_dlp"), Some(Stage::Webhook)),
+            ("detector_error", "webhook", "info")
+        );
+        assert_eq!(
+            l.labels(&rec("pii_email", Some(Severity::Low), "kernel"), None),
+            ("other", "other", "low"),
+            "a webhook kind is a webhook triple only"
+        );
+        assert_eq!(l.triples("request").len(), 20);
+        assert_eq!(l.triples("response").len(), 31, "20 + 2 kinds x 4 + 3 detector_error severities; a kind of two providers is one triple");
+        assert_eq!(FindingLabels::built_in().triples("response").len(), 20);
+    }
+
+    #[test]
     fn labels_follow_the_table() {
         use paigasus_kernel::detect::Severity;
         let rec = |kind: &str, sev: Option<Severity>, detector: &str| FindingRecord::new(kind, sev, detector, "v1");
         assert_eq!(
-            finding_labels(&rec("secret_in_args", Some(Severity::High), "secret_in_args"), None),
+            FindingLabels::built_in().labels(&rec("secret_in_args", Some(Severity::High), "secret_in_args"), None),
             ("secret_in_args", "secret_in_args", "high")
         );
         assert_eq!(
-            finding_labels(&rec("detector_error", Some(Severity::High), "slow"), Some(Stage::Webhook)),
+            FindingLabels::built_in().labels(&rec("detector_error", Some(Severity::High), "slow"), Some(Stage::Webhook)),
             ("detector_error", "webhook", "high")
         );
-        assert_eq!(finding_labels(&rec("detector_error", Some(Severity::High), "judge"), None), ("detector_error", "judge", "high"));
+        assert_eq!(
+            FindingLabels::built_in().labels(&rec("detector_error", Some(Severity::High), "judge"), None),
+            ("detector_error", "judge", "high")
+        );
         // A kind outside the table, and a severity that the table does not hold for the kind.
-        assert_eq!(finding_labels(&rec("custom_x", Some(Severity::Medium), "kernel"), None), ("other", "other", "medium"));
-        assert_eq!(finding_labels(&rec("secret_in_args", Some(Severity::Info), "secret_in_args"), None), ("other", "other", "info"));
+        assert_eq!(FindingLabels::built_in().labels(&rec("custom_x", Some(Severity::Medium), "kernel"), None), ("other", "other", "medium"));
+        assert_eq!(
+            FindingLabels::built_in().labels(&rec("secret_in_args", Some(Severity::Info), "secret_in_args"), None),
+            ("other", "other", "info")
+        );
         // No severity (an old event) counts as high. A host-like detector name never reaches a label.
-        assert_eq!(finding_labels(&rec("custom_x", None, "evil.example.com"), None), ("other", "other", "high"));
+        assert_eq!(FindingLabels::built_in().labels(&rec("custom_x", None, "evil.example.com"), None), ("other", "other", "high"));
         for t in FINDING_TRIPLES {
             assert!(FINDING_KINDS.contains(&t.0) && DETECTOR_LABELS.contains(&t.1), "{t:?}");
         }
@@ -867,9 +1075,9 @@ mod tests {
         assert_eq!(finding_label("something_new"), "other");
         assert_eq!(FINDING_KINDS[FINDING_KINDS.len() - 1], "other");
         let rec = |k: &str, s| FindingRecord::new(k, Some(s), "kernel", "");
-        assert_eq!(finding_labels(&rec(FORGED_HISTORY, Severity::High), None), ("forged_history", "kernel", "high"));
-        assert_eq!(finding_labels(&rec(MIXED_SESSIONS, Severity::Medium), None), ("mixed_sessions", "kernel", "medium"));
-        assert_eq!(finding_labels(&rec(HISTORY_TRUNCATED, Severity::Low), None), ("history_truncated", "kernel", "low"));
+        assert_eq!(FindingLabels::built_in().labels(&rec(FORGED_HISTORY, Severity::High), None), ("forged_history", "kernel", "high"));
+        assert_eq!(FindingLabels::built_in().labels(&rec(MIXED_SESSIONS, Severity::Medium), None), ("mixed_sessions", "kernel", "medium"));
+        assert_eq!(FindingLabels::built_in().labels(&rec(HISTORY_TRUNCATED, Severity::Low), None), ("history_truncated", "kernel", "low"));
     }
 
     #[tokio::test]
@@ -1509,10 +1717,20 @@ mod tests {
         (during, has_intent(&s, &facts))
     }
 
-    /// `decider` with a pipeline whose one webhook sleeps 1 s: the pipeline timeout (500 ms) ends it.
+    /// A pipeline whose judge sleeps `sleep`. The judge needs no opt-in, so any context waits for it.
+    fn judge_pipeline(sleep: Duration) -> Arc<DetectorPipeline> {
+        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("judge", sleep));
+        Arc::new(DetectorPipeline::new(
+            Arc::new(BuiltInDetector::new(1 << 24)),
+            Vec::<Arc<dyn Detector>>::new(),
+            Some(slow),
+            PIPELINE_TIMEOUT,
+        ))
+    }
+
+    /// `decider` with a pipeline whose judge sleeps 1 s: the pipeline timeout (500 ms) ends it.
     fn slow_pipeline(decider: CedarDecider) -> CedarDecider {
-        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_secs(1)));
-        decider.with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![slow]), DECIDE_TIMEOUT, detector_settings())
+        decider.with_detectors(judge_pipeline(Duration::from_secs(1)), DECIDE_TIMEOUT, detector_settings())
     }
 
     /// The memory store, and whether a reserve asked for a window read.
@@ -1564,14 +1782,15 @@ mod tests {
         assert!(read.load(std::sync::atomic::Ordering::SeqCst), "the read-window row read a window");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn the_decide_time_of_an_unavailable_tenant_hold_is_in_the_request_snapshot() {
         // `with_tenant_unavailable` copies the snapshot with its time sums. The decide time goes to
         // the snapshot of the request, not to the copy.
         let (ctx, turn) = cap_ctx(OnUnavailable::Open).await;
         let snap = Arc::clone(ctx.policy.as_ref().expect("a snapshot"));
-        let slow: Arc<dyn Detector> = Arc::new(SlowDetector("hook_slow", Duration::from_millis(50)));
-        let decider = with_store(Arc::new(Down)).with_detectors(pipeline_with(Arc::new(BuiltInDetector::new(1 << 24)), vec![slow]), DECIDE_TIMEOUT, detector_settings());
+        // A slow built-in stage: its time is in the overhead, and a late stage (D28) would not be.
+        let slow = Arc::new(SlowBuiltIn(Duration::from_millis(50), BuiltInDetector::new(1 << 24)));
+        let decider = with_store(Arc::new(Down)).with_detectors(pipeline_with(slow, Vec::new()), DECIDE_TIMEOUT, detector_settings());
         let ctx = ctx.with_session(session(Findings::new()));
         assert_eq!(hold_of(&decider, &ctx, &turn, &[SEND_100]).await, [OBSERVE_UNAVAILABLE]);
         assert!(snap.decide_elapsed() >= Duration::from_millis(50), "{:?}", snap.decide_elapsed());

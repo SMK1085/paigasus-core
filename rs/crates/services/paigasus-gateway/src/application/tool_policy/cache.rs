@@ -19,7 +19,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use futures::future::{BoxFuture, Shared};
@@ -34,6 +34,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::config::ToolPolicySettings;
+use crate::domain::detectors::{OptIn, WebhookRegistry, valid_name};
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
 
 /// How many tenant reloads one refresh pass runs at the same time.
@@ -242,6 +243,9 @@ pub struct PolicyCache {
     /// The size of `Inner::last_known`, written under the lock. With no floor condition and no
     /// known org, [`Self::floor_history`] returns at once and takes no lock.
     known_orgs: AtomicUsize,
+    /// The webhook providers of the gateway (SMA-856 P4). A load of a tenant entry reads it to warn
+    /// about an opt-in that the gateway cannot run. Without it, no warn is written.
+    registry: OnceLock<Arc<WebhookRegistry>>,
 }
 
 impl PolicyCache {
@@ -262,7 +266,31 @@ impl PolicyCache {
                 last_known: HashMap::new(),
             }),
             known_orgs: AtomicUsize::new(0),
+            registry: OnceLock::new(),
         })
+    }
+
+    /// Set the webhook registry (SMA-856 P4). The first call wins.
+    pub fn set_webhook_registry(&self, registry: Arc<WebhookRegistry>) {
+        let _ = self.registry.set(registry);
+    }
+
+    /// Write one warn for each opt-in name of a new tenant entry that the gateway cannot run for
+    /// the org: an unknown provider or a provider that does not serve the org. A name that is not
+    /// a valid provider name is logged as `invalid`, never as itself (A4).
+    fn warn_unrunnable_opt_ins(&self, org: Uuid, names: &[String]) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
+        for name in names {
+            let reason = match registry.resolve(name, Some(org)) {
+                OptIn::Unknown => "unknown_provider",
+                OptIn::NotPermitted => "not_permitted",
+                OptIn::Run(_) | OptIn::Retired(_) => continue,
+            };
+            let shown = if valid_name(name) { name.as_str() } else { "invalid" };
+            tracing::warn!(org = %org, name = shown, reason, "a tenant opts in to a webhook provider that this gateway cannot run for it");
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -310,7 +338,7 @@ impl PolicyCache {
     /// the settings of another load (CodeRabbit, PR 485).
     pub async fn tenant_with_settings_until(self: &Arc<Self>, org: Uuid, floor: &FloorEntry, on_unavailable: OnUnavailable, deadline: Instant) -> (Lookup<CompiledTenant>, Option<TenantSettings>) {
         match self.lookup(Key::Tenant(org), Some(floor.clone()), on_unavailable, true, deadline).await {
-            Ok(Data::Tenant(data)) => (self.tenant_set(org, &data, floor), data.source.settings),
+            Ok(Data::Tenant(data)) => (self.tenant_set(org, &data, floor), data.source.settings.clone()),
             Ok(Data::Floor(_)) => (Lookup::Unavailable, None),
             Err(seen) => (Lookup::Unavailable, seen),
         }
@@ -418,7 +446,7 @@ impl PolicyCache {
     pub fn tenant_settings(&self, org: Uuid) -> Option<TenantSettings> {
         let mut inner = self.lock();
         match &inner.existing(Key::Tenant(org))?.good.as_ref()?.data {
-            Data::Tenant(t) => t.source.settings,
+            Data::Tenant(t) => t.source.settings.clone(),
             Data::Floor(_) => None,
         }
     }
@@ -485,10 +513,10 @@ impl PolicyCache {
             return Err(None);
         };
         let seen = match &good.data {
-            Data::Tenant(t) if follow_entry => t.source.settings,
+            Data::Tenant(t) if follow_entry => t.source.settings.clone(),
             _ => None,
         };
-        let on = seen.map_or(on_unavailable, |s| s.on_unavailable);
+        let on = seen.as_ref().map_or(on_unavailable, |s| s.on_unavailable);
         if on == OnUnavailable::Open && now.saturating_duration_since(good.loaded_at) <= self.settings.max_stale {
             Ok(good.data.clone())
         } else {
@@ -619,11 +647,21 @@ impl PolicyCache {
             return ok;
         }
 
+        // The opt-in names of a new tenant entry, for the warn after the build.
+        let opt_ins = match &fetched {
+            Fetched::Tenant(org, t) => t.settings.as_ref().map(|s| (*org, Arc::clone(&s.webhooks))),
+            Fetched::Floor(_) => None,
+        };
         let compile_started = Instant::now();
         // The floor that this load compiles the tenant set against.
         let compiled_on = floor.clone();
         let built = self.build(key, fetched, floor);
         histogram!(names::GATEWAY_TOOL_POLICY_COMPILE_SECONDS).record(compile_started.elapsed().as_secs_f64());
+        if let Some((org, names)) = &opt_ins
+            && (built.is_ok() || matches!(&built, Err(Some(_))))
+        {
+            self.warn_unrunnable_opt_ins(*org, names);
+        }
         match built {
             Ok(data) => {
                 let known = match (&data, key) {
@@ -953,7 +991,7 @@ mod tests {
                 text,
                 catalog: self.catalog.lock().unwrap().clone(),
                 version,
-                settings: *self.tenant_settings.lock().unwrap(),
+                settings: self.tenant_settings.lock().unwrap().clone(),
                 conditions: self.tenant_conditions.lock().unwrap().clone(),
                 max_window_ms: MAX_WINDOW_MS,
             };
@@ -1371,43 +1409,82 @@ mod tests {
         assert_eq!(s.loads("ok"), 1, "only the floor reload is ok");
         assert_eq!(s.gauge(names::GATEWAY_TOOL_POLICY_STALE_ENTRIES), Some(1.0));
     }
-    const ENFORCE_OPEN: TenantSettings = TenantSettings {
-        mode: TenantMode::Enforce,
-        on_unavailable: OnUnavailable::Open,
-    };
+    fn enforce_open() -> TenantSettings {
+        TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: OnUnavailable::Open,
+            webhooks: Arc::from([]),
+        }
+    }
+
+    /// SMA-856 P4: one warn for each name that the gateway cannot run for the org, once per new entry.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_entry_warns_once_per_unknown_or_forbidden_name() {
+        use crate::application::tool_policy::testing::RecordingDetector;
+        use crate::domain::detectors::{OrgScope, WebhookEntry};
+        use paigasus_logging::test_support::capture_logs;
+        let other_org = Uuid::from_u128(0xb);
+        let registry = Arc::new(WebhookRegistry::new(vec![WebhookEntry {
+            detector: RecordingDetector::new("acme_dlp", vec![]),
+            orgs: OrgScope::Only([other_org].into()),
+            retired: false,
+        }]));
+        let src = FakeSource::new();
+        src.set_settings(TenantSettings {
+            mode: TenantMode::Enforce,
+            on_unavailable: OnUnavailable::Open,
+            webhooks: Arc::from(vec!["acme_dlp".to_owned(), "nobody".to_owned(), "Bad\u{7}".to_owned()]),
+        });
+        let cache = PolicyCache::new(src.clone(), settings(), keyless());
+        cache.set_webhook_registry(registry);
+        let (logs, _guard) = capture_logs();
+        let floor = ready_floor(&cache, OnUnavailable::Closed).await;
+        assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
+        let text = logs.text();
+        let warns: Vec<&str> = text.lines().filter(|l| l.contains("cannot run for it")).collect();
+        assert_eq!(warns.len(), 3, "{text}");
+        let has = |l: &str, name: &str, reason: &str| l.contains(&format!("name=\"{name}\"")) && l.contains(&format!("reason=\"{reason}\""));
+        assert!(warns.iter().any(|l| has(l, "acme_dlp", "not_permitted")), "{text}");
+        assert!(warns.iter().any(|l| has(l, "nobody", "unknown_provider")), "{text}");
+        assert!(warns.iter().any(|l| has(l, "invalid", "unknown_provider")), "{text}");
+        assert!(!text.contains("Bad"), "{text}");
+        // A second load with the same token stores nothing new, so it writes no warn.
+        assert!(cache.refresh_entry(Key::Tenant(ORG), Some(floor.clone())).await);
+        assert_eq!(logs.text().lines().filter(|l| l.contains("cannot run for it")).count(), 3);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn tenant_settings_are_none_before_the_first_load() {
         let src = FakeSource::new();
-        src.set_settings(ENFORCE_OPEN);
+        src.set_settings(enforce_open());
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         assert_eq!(cache.tenant_settings(ORG), None);
         assert_eq!(src.tenant_calls(), 0, "the read starts no load");
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert_eq!(cache.tenant_settings(ORG), None, "the floor load is not a tenant load");
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
-        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN));
+        assert_eq!(cache.tenant_settings(ORG), Some(enforce_open()));
     }
 
     #[tokio::test(start_paused = true)]
     async fn tenant_settings_survive_a_failed_reload() {
         let src = FakeSource::new();
-        src.set_settings(ENFORCE_OPEN);
+        src.set_settings(enforce_open());
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
         src.set_fail(true);
         cache.invalidate_all();
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Unavailable));
-        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN), "the last known value");
+        assert_eq!(cache.tenant_settings(ORG), Some(enforce_open()), "the last known value");
         tokio::time::advance(secs(400)).await;
-        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN), "whatever its age");
+        assert_eq!(cache.tenant_settings(ORG), Some(enforce_open()), "whatever its age");
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_evicted_tenant_has_no_settings() {
         let src = FakeSource::new();
-        src.set_settings(ENFORCE_OPEN);
+        src.set_settings(enforce_open());
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Closed).await, Lookup::Ready(_)));
@@ -1420,27 +1497,33 @@ mod tests {
     async fn a_bad_set_with_new_settings_replaces_the_last_good_set() {
         // A new answer with new settings and a set that does not compile: the new settings decide,
         // and the set is unavailable (I-1).
-        const LOG_ONLY_OPEN: TenantSettings = TenantSettings {
-            mode: TenantMode::LogOnly,
-            on_unavailable: OnUnavailable::Open,
-        };
-        const ENFORCE_CLOSED: TenantSettings = TenantSettings {
-            mode: TenantMode::Enforce,
-            on_unavailable: OnUnavailable::Closed,
-        };
+        fn log_only_open() -> TenantSettings {
+            TenantSettings {
+                mode: TenantMode::LogOnly,
+                on_unavailable: OnUnavailable::Open,
+                webhooks: Arc::from([]),
+            }
+        }
+        fn enforce_closed() -> TenantSettings {
+            TenantSettings {
+                mode: TenantMode::Enforce,
+                on_unavailable: OnUnavailable::Closed,
+                webhooks: Arc::from([]),
+            }
+        }
         let src = FakeSource::new();
-        src.set_settings(LOG_ONLY_OPEN);
+        src.set_settings(log_only_open());
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_tenant(&cache, &floor, OnUnavailable::Open).await;
-        src.set_settings(ENFORCE_CLOSED);
+        src.set_settings(enforce_closed());
         src.set_tenant("permit((", "t2:enforce:closed");
         cache.invalidate_all();
         let deadline = Instant::now() + secs(5);
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline).await;
         assert!(matches!(set, Lookup::Unavailable), "not the last good set");
-        assert_eq!(got, Some(ENFORCE_CLOSED), "the settings of the new answer");
-        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_CLOSED));
+        assert_eq!(got, Some(enforce_closed()), "the settings of the new answer");
+        assert_eq!(cache.tenant_settings(ORG), Some(enforce_closed()));
         // The bad answer is stored: the next lookup makes no source call.
         assert!(matches!(cache.tenant(ORG, &floor, OnUnavailable::Open).await, Lookup::Unavailable));
         assert_eq!(src.tenant_calls(), 2);
@@ -1465,14 +1548,17 @@ mod tests {
         // CodeRabbit, PR 485: the caller reads its fail mode before the floor wait. A load that
         // lands after that read stores new settings. When the next reload fails, the fallback must
         // use the fail mode of the stored entry, not the caller's older value.
-        const ENFORCE_CLOSED: TenantSettings = TenantSettings {
-            mode: TenantMode::Enforce,
-            on_unavailable: OnUnavailable::Closed,
-        };
+        fn enforce_closed() -> TenantSettings {
+            TenantSettings {
+                mode: TenantMode::Enforce,
+                on_unavailable: OnUnavailable::Closed,
+                webhooks: Arc::from([]),
+            }
+        }
         let deadline = || Instant::now() + secs(5);
         // Closed -> Open: the caller still has `closed`, the entry says `open`. The last good set serves.
         let src = FakeSource::new();
-        src.set_settings(ENFORCE_OPEN);
+        src.set_settings(enforce_open());
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let good = ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
@@ -1480,10 +1566,10 @@ mod tests {
         cache.invalidate_all();
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
         assert!(matches!(&set, Lookup::Ready(t) if Arc::ptr_eq(&t.policies, &good)), "the entry's `open` keeps the last good set");
-        assert_eq!(got, Some(ENFORCE_OPEN));
+        assert_eq!(got, Some(enforce_open()));
         // Open -> Closed: the caller still has `open`, the entry says `closed`. Nothing serves.
         let src = FakeSource::new();
-        src.set_settings(ENFORCE_CLOSED);
+        src.set_settings(enforce_closed());
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         ready_tenant(&cache, &floor, OnUnavailable::Closed).await;
@@ -1491,36 +1577,39 @@ mod tests {
         cache.invalidate_all();
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline()).await;
         assert!(matches!(set, Lookup::Unavailable), "the entry's `closed` serves nothing");
-        assert_eq!(got, Some(ENFORCE_CLOSED));
+        assert_eq!(got, Some(enforce_closed()));
     }
 
     #[tokio::test(start_paused = true)]
     async fn the_set_and_the_settings_come_from_one_entry() {
-        const LOG_ONLY_CLOSED: TenantSettings = TenantSettings {
-            mode: TenantMode::LogOnly,
-            on_unavailable: OnUnavailable::Closed,
-        };
+        fn log_only_closed() -> TenantSettings {
+            TenantSettings {
+                mode: TenantMode::LogOnly,
+                on_unavailable: OnUnavailable::Closed,
+                webhooks: Arc::from([]),
+            }
+        }
         let src = FakeSource::new();
-        src.set_settings(ENFORCE_OPEN);
+        src.set_settings(enforce_open());
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let deadline = || Instant::now() + secs(5);
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
         assert!(matches!(set, Lookup::Ready(_)));
-        assert_eq!(got, Some(ENFORCE_OPEN), "the settings of the load that gave the set");
+        assert_eq!(got, Some(enforce_open()), "the settings of the load that gave the set");
         // I-1: an answer with a set that does not compile gives no set and its own settings.
-        src.set_settings(LOG_ONLY_CLOSED);
+        src.set_settings(log_only_closed());
         src.set_tenant("permit((", "t2:log_only:closed");
         cache.invalidate_all();
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, deadline()).await;
         assert!(matches!(set, Lookup::Unavailable));
-        assert_eq!(got, Some(LOG_ONLY_CLOSED), "the settings of the bad answer");
+        assert_eq!(got, Some(log_only_closed()), "the settings of the bad answer");
         // A failed reload under `closed` serves no entry: the settings are the last known value.
         src.set_fail(true);
         cache.invalidate_all();
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Closed, deadline()).await;
         assert!(matches!(set, Lookup::Unavailable));
-        assert_eq!(got, Some(LOG_ONLY_CLOSED), "the last known value");
+        assert_eq!(got, Some(log_only_closed()), "the last known value");
         assert_eq!(got, cache.tenant_settings(ORG));
     }
 
@@ -1577,14 +1666,14 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
         let src = FakeSource::new();
-        src.set_settings(ENFORCE_OPEN);
+        src.set_settings(enforce_open());
         src.set_tenant_conditions(vec![malformed("t_a")], &["send"]);
         let cache = PolicyCache::new(src.clone(), settings(), keyless());
         let floor = ready_floor(&cache, OnUnavailable::Closed).await;
         let (set, got) = cache.tenant_with_settings_until(ORG, &floor, OnUnavailable::Open, Instant::now() + secs(5)).await;
         assert!(matches!(set, Lookup::Unavailable), "a malformed condition is a compile failure of the set");
-        assert_eq!(got, Some(ENFORCE_OPEN), "the settings of the answer stay");
-        assert_eq!(cache.tenant_settings(ORG), Some(ENFORCE_OPEN));
+        assert_eq!(got, Some(enforce_open()), "the settings of the answer stay");
+        assert_eq!(cache.tenant_settings(ORG), Some(enforce_open()));
         assert_eq!(snap(&snapshotter).loads("compile_error"), 1);
         assert!(matches!(cache.floor(OnUnavailable::Closed).await, Lookup::Ready(_)), "the floor stays ready");
     }

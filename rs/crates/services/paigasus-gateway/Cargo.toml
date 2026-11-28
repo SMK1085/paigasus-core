@@ -24,7 +24,7 @@ paigasus-observability = { workspace = true }
 metrics = { workspace = true }
 # `adapters::http` — axum liveness/readiness routes; serde_json builds the JSON bodies.
 axum = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "fs"] }
 figment = { workspace = true }
 serde = { workspace = true }

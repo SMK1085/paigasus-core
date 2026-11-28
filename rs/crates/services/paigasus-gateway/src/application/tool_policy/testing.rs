@@ -3,7 +3,8 @@
 //! Test helpers for the request side and the decider: an in-memory policy source, settings, chat
 //! request bodies and a metrics reader.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,10 +21,10 @@ use super::{CacheSettings, PolicyCache, RequestToolPolicy};
 use crate::application::decision_log::DecisionRecorder;
 use crate::config::ToolPolicySettings;
 use crate::domain::decision_log::{MemoryDecisionLog, OsEntropy};
-use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput};
+use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, WebhookFailure, failure_finding};
 use crate::domain::limits::SystemClock;
 use crate::domain::tool_policy::{PolicySource, PolicyText, SourceError, TenantPolicies, TenantSettings};
-use paigasus_kernel::detect::Finding;
+use paigasus_kernel::detect::{Finding, Severity};
 use paigasus_kernel::tool_policy::history::{Digest, FieldPath, HistoryDigester, KeyId, Scalar};
 
 pub(crate) const ORG_A: Uuid = Uuid::from_u128(0x0190a100_0000_7000_8000_0000000000a1);
@@ -438,6 +439,98 @@ impl Detector for PanicDetector {
     }
     async fn detect(&self, _batch: Arc<DetectBatch>) -> Found {
         std::panic::panic_any(self.1.to_owned())
+    }
+}
+
+/// A detector with declared kinds and a failure severity. It gives the same fixed findings for
+/// every call (SMA-856).
+pub(crate) struct DeclaredDetector {
+    pub(crate) name: &'static str,
+    pub(crate) kinds: BTreeSet<String>,
+    pub(crate) severity: Severity,
+    pub(crate) found: Vec<Finding>,
+}
+
+#[async_trait]
+impl Detector for DeclaredDetector {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn failure_severity(&self) -> Severity {
+        self.severity
+    }
+    fn kinds(&self) -> Option<&BTreeSet<String>> {
+        Some(&self.kinds)
+    }
+    async fn detect(&self, batch: Arc<DetectBatch>) -> Found {
+        Ok(vec![self.found.clone(); batch.subjects.len()])
+    }
+}
+
+/// A detector that sleeps, with a failure severity.
+pub(crate) struct SeveritySlowDetector(pub(crate) &'static str, pub(crate) Duration, pub(crate) Severity);
+
+#[async_trait]
+impl Detector for SeveritySlowDetector {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn failure_severity(&self) -> Severity {
+        self.2
+    }
+    async fn detect(&self, batch: Arc<DetectBatch>) -> Found {
+        tokio::time::sleep(self.1).await;
+        Ok(vec![Vec::new(); batch.subjects.len()])
+    }
+}
+
+/// A detector whose `detect` panics before it returns a future (D15). Its failure severity is
+/// `low`, so a test can tell the severity of the guard from the default.
+pub(crate) struct EagerPanicDetector(pub(crate) &'static str, pub(crate) &'static str);
+
+impl Detector for EagerPanicDetector {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn failure_severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn detect<'a, 'async_trait>(&'a self, _batch: Arc<DetectBatch>) -> Pin<Box<dyn Future<Output = Found> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        std::panic::panic_any(self.1.to_owned())
+    }
+}
+
+/// An adapter-like detector that honours `batch.deadline` (D24). It answers the first `answered`
+/// calls at once with kind `fine_kind` and version `ok`. For the others it waits until
+/// `deadline - 10 ms`, then gives a `deadline` failure finding.
+pub(crate) struct DeadlineDetector {
+    pub(crate) name: &'static str,
+    pub(crate) answered: usize,
+}
+
+#[async_trait]
+impl Detector for DeadlineDetector {
+    fn name(&self) -> &str {
+        self.name
+    }
+    async fn detect(&self, batch: Arc<DetectBatch>) -> Found {
+        let n = batch.subjects.len();
+        if n > self.answered {
+            tokio::time::sleep_until(batch.deadline - Duration::from_millis(10)).await;
+        }
+        Ok((0..n)
+            .map(|i| {
+                if i < self.answered {
+                    vec![Finding::new(self.name, "fine_kind", Severity::Low, "ok")]
+                } else {
+                    vec![failure_finding(self.name, Severity::High, WebhookFailure::Deadline)]
+                }
+            })
+            .collect())
     }
 }
 

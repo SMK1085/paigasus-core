@@ -356,7 +356,7 @@ mod tests {
         use crate::application::detectors::DetectorPipeline;
         use crate::application::tool_policy::testing::FixedDetector;
         use crate::application::tool_policy::{FINDING_KINDS, finding_label};
-        use crate::domain::detectors::{DetectBatch, Detector, Side, Subject};
+        use crate::domain::detectors::{DetectBatch, Detector, Subject};
         use paigasus_gateway_core::decision_log::{CedarDetail, FindingRecord};
         use paigasus_kernel::detect::{Finding, Severity, ToolInput};
         use paigasus_kernel::tool_policy::{ActionGroup, Declared, Effect, ToolInvocation};
@@ -377,7 +377,16 @@ mod tests {
         };
         let out = pipeline
             .run(
-                DetectBatch::new(Side::Response, None, None, vec![subject], None),
+                DetectBatch::for_calls(
+                    None,
+                    None,
+                    vec![subject],
+                    None,
+                    crate::domain::detectors::Caller {
+                        opt_in: Arc::from(vec!["hook_a".to_owned()]),
+                        ..crate::domain::detectors::Caller::none()
+                    },
+                ),
                 tokio::time::Instant::now() + std::time::Duration::from_secs(60),
             )
             .await;

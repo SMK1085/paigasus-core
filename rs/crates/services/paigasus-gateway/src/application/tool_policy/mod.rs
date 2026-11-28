@@ -13,6 +13,6 @@ pub mod slots;
 pub(crate) mod testing;
 
 pub use cache::{CacheSettings, CompiledTenant, FloorEntry, Invalidate, Lookup, PolicyCache};
-pub use decider::{CedarDecider, DETECTOR_LABELS, FINDING_KINDS, FINDING_TRIPLES, finding_label, finding_labels, prime_tool_policy_metrics};
+pub use decider::{CedarDecider, DETECTOR_LABELS, FINDING_KINDS, FINDING_TRIPLES, FindingLabels, finding_label, prime_tool_policy_metrics};
 pub use request::{OverheadSample, Refusal, Refused, RequestOutcome, RequestToolPolicy};
 pub use slots::{HoldSlots, StoreOutcome, hold_slots};

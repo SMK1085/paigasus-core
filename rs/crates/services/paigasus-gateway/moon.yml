@@ -63,6 +63,8 @@ tasks:
   lint:
     inputs:
       - 'tool-policies/**/*'
+      # SMA-856: the worked-example test embeds this file with `include_str!`.
+      - '/docs/tool-policies/webhook-protocol.md'
   test:
     deps: ['^:build']
     inputs:
@@ -71,6 +73,8 @@ tasks:
       - '/ops/nats/subjects.env'
       # SMA-855: the e2e tests read the detector policies of the tenant guide from this file.
       - '/docs/tool-policies/detector-policies.cedar'
+      # SMA-856: a unit test pins the worked example to this file.
+      - '/docs/tool-policies/webhook-protocol.md'
     # SMA-677 D22. This task now starts Redis containers. It shares one CI runner with the two
     # console e2e tasks, and SMA-718 showed that such overlap starves the browser, so it takes the
     # same mutex as paigasus-iam-rs:test.

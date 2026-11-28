@@ -604,6 +604,12 @@ class ErrorReason(betterproto2.Enum):
     compile failed. Discard it, or save the set again. gRPC FAILED_PRECONDITION, HTTP 409.
     """
 
+    INVALID_WEBHOOK_OPT_IN = 64
+    """
+    "invalid-webhook-opt-in" — a webhook opt-in name breaks [a-z0-9_]{1,64}, or the list holds
+    more than 16 distinct names (SMA-856). The field is "webhooks". gRPC INVALID_ARGUMENT, HTTP 400.
+    """
+
     MISSING_AUTHORIZATION = 300
     """
     ---- Gateway (300-599) ---------------------------------------------------
@@ -876,6 +882,7 @@ class ErrorReason(betterproto2.Enum):
             61: "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID",
             62: "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED",
             63: "ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE",
+            64: "ERROR_REASON_INVALID_WEBHOOK_OPT_IN",
             300: "ERROR_REASON_MISSING_AUTHORIZATION",
             301: "ERROR_REASON_INVALID_API_KEY",
             302: "ERROR_REASON_INSUFFICIENT_PERMISSIONS",
@@ -975,6 +982,7 @@ class ErrorReason(betterproto2.Enum):
             "ERROR_REASON_TOOL_POLICY_MODE_TRANSITION_INVALID": 61,
             "ERROR_REASON_TOOL_POLICY_HISTORY_UNSUPPORTED": 62,
             "ERROR_REASON_TOOL_POLICY_HELD_NOT_ACCEPTABLE": 63,
+            "ERROR_REASON_INVALID_WEBHOOK_OPT_IN": 64,
             "ERROR_REASON_MISSING_AUTHORIZATION": 300,
             "ERROR_REASON_INVALID_API_KEY": 301,
             "ERROR_REASON_INSUFFICIENT_PERMISSIONS": 302,

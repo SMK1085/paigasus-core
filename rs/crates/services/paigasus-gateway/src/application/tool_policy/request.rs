@@ -25,7 +25,7 @@ use paigasus_observability::names;
 use uuid::Uuid;
 
 use super::cache::{CompiledTenant, FloorEntry, Lookup, PolicyCache};
-use super::decider::count_finding;
+use super::decider::{FindingLabels, count_finding};
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::{PendingWrite, ToolHistory};
@@ -200,6 +200,22 @@ pub struct RequestToolPolicy {
     detectors: DetectorSettings,
     /// The tool history (SMA-753). `None`: no request links to a session.
     history: Option<Arc<ToolHistory>>,
+    /// The webhook opt-in list of each org of the config file (SMA-856 D9). The IAM path reads the
+    /// list from the tenant settings instead.
+    org_webhooks: HashMap<Uuid, Arc<[String]>>,
+    /// The metric labels of the findings (SMA-856 D17). The default is the built-in table.
+    labels: Arc<FindingLabels>,
+}
+
+/// The opt-in list that a snapshot holds (SMA-856 D8): the list of the org only when the mode is
+/// `log_only` or `enforce` and the tenant part is evaluated. Otherwise it is empty.
+fn opt_in_for(set: &PolicySet, mode: TenantMode, list: Arc<[String]>) -> Arc<[String]> {
+    let evaluated = matches!(set, PolicySet::Available { tenant: TenantPart::Evaluated, .. });
+    if evaluated && matches!(mode, TenantMode::LogOnly | TenantMode::Enforce) {
+        list
+    } else {
+        Arc::from(Vec::<String>::new())
+    }
 }
 
 /// Count and log a refusal, or a refusal that enforce mode would make (P-10, D17: log-only is
@@ -262,7 +278,24 @@ impl RequestToolPolicy {
                 margin: Duration::from_millis(crate::config::DETECTOR_MARGIN_MS),
             },
             history: None,
+            org_webhooks: HashMap::new(),
+            labels: Arc::new(FindingLabels::built_in()),
         }
+    }
+
+    /// Label the findings with `labels`: the webhook kinds of the config (SMA-856 D17).
+    #[must_use]
+    pub fn with_finding_labels(mut self, labels: Arc<FindingLabels>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Set the webhook opt-in list of each org of the config file (SMA-856 D9). An org with no
+    /// entry opts in to nothing.
+    #[must_use]
+    pub fn with_org_webhooks(mut self, map: HashMap<Uuid, Arc<[String]>>) -> Self {
+        self.org_webhooks = map;
+        self
     }
 
     /// Screen the tool results of each request with `pipeline` (SMA-855 § 6.8). `settings` is
@@ -353,8 +386,9 @@ impl RequestToolPolicy {
         let pre = self.cache.tenant_settings(org).unwrap_or(TenantSettings {
             mode: TenantMode::Enforce,
             on_unavailable: global,
+            webhooks: Arc::from([]),
         });
-        let fin_of = || self.cache.tenant_settings(org).unwrap_or(pre);
+        let fin_of = || self.cache.tenant_settings(org).unwrap_or_else(|| pre.clone());
         let Ok(principal) = Prn::parse(&ctx.principal) else {
             return (PolicySet::Unavailable, None, fin_of());
         };
@@ -491,7 +525,7 @@ impl RequestToolPolicy {
 
     async fn apply_inner(&self, ctx: &DecisionContext, model: &str, format: Format, turn: &ToolTurn, body: Bytes, started: Instant) -> Result<RequestOutcome, Refused> {
         let org = org_of(&ctx.scope);
-        let (mut set, history, mode, on) = match org {
+        let (mut set, history, mode, on, list) = match org {
             // The source returns the tenant settings: they decide the mode and the fail mode. The
             // turn check follows the lookup, because the lookup can change the mode.
             Some(o) if self.settings.settings_from_source => {
@@ -503,14 +537,15 @@ impl RequestToolPolicy {
                     fin.on_unavailable
                 };
                 self.check_turn(ctx, turn, fin.mode)?;
-                (set, history, fin.mode, on)
+                (set, history, fin.mode, on, Arc::clone(&fin.webhooks))
             }
             _ => {
                 // D7, D34: the settings of the scope's org; without an org, the global values.
                 let (mode, on) = org.map_or((self.settings.default_mode, self.settings.on_policy_unavailable), |o| self.settings.tenant(o));
                 self.check_turn(ctx, turn, mode)?;
                 let (set, history) = self.policy_set(ctx, org, mode, on, model, format).await;
-                (set, history, mode, on)
+                let list = org.and_then(|o| self.org_webhooks.get(&o)).cloned().unwrap_or_else(|| Arc::from(Vec::<String>::new()));
+                (set, history, mode, on, list)
             }
         };
         // Spec D4, D5, F14, P7: link only when the history is on, the org is known, and the mode is
@@ -537,7 +572,8 @@ impl RequestToolPolicy {
         } else {
             ctx
         };
-        let mut snapshot = PolicySnapshot::new(set, mode, on);
+        let opt_in = opt_in_for(&set, mode, list);
+        let mut snapshot = PolicySnapshot::new(set, mode, on).with_webhooks(opt_in);
         if let Some(h) = history {
             snapshot = snapshot.with_history(h);
         }
@@ -545,13 +581,18 @@ impl RequestToolPolicy {
         let (body, entries, seen) = if let ToolTurn::Parsed(facts) = turn {
             // One finding per colliding tool name (SMA-755 § 5.9).
             for _ in name_collisions(&facts.definitions) {
-                count_finding("request", &FindingRecord::new(NAME_COLLISION, Some(Severity::High), DETECTOR_KERNEL, ""), None);
+                count_finding(&self.labels, "request", &FindingRecord::new(NAME_COLLISION, Some(Severity::High), DETECTOR_KERNEL, ""), None);
             }
             let screened = self.screen(ctx, &snapshot, format, &body, facts).await;
             if let Some(s) = &screened {
                 for (found, stages) in s.findings.iter().zip(&s.stages) {
                     for (f, stage) in found.iter().zip(stages) {
-                        count_finding("request", &FindingRecord::new(f.kind.clone(), Some(f.severity), f.detector.clone(), f.version.clone()), Some(*stage));
+                        count_finding(
+                            &self.labels,
+                            "request",
+                            &FindingRecord::new(f.kind.clone(), Some(f.severity), f.detector.clone(), f.version.clone()),
+                            Some(*stage),
+                        );
                     }
                 }
             }
@@ -965,6 +1006,60 @@ mod tests {
         assert!(out.entries.is_empty());
     }
 
+    fn acme() -> Arc<[String]> {
+        Arc::from(vec!["acme_dlp".to_owned()])
+    }
+
+    fn with_acme(policy: RequestToolPolicy) -> RequestToolPolicy {
+        policy.with_org_webhooks(HashMap::from([(testing::ORG_A, acme())]))
+    }
+
+    /// D8, D9 on the file path: the snapshot holds the list for `log_only` and `enforce` with an
+    /// evaluated tenant part. Mode `off`, an org with no entry and an unavailable tenant part give none.
+    #[tokio::test(start_paused = true)]
+    async fn the_snapshot_holds_the_opt_in_only_for_an_evaluated_log_only_or_enforce_tenant() {
+        for mode in [TenantMode::Enforce, TenantMode::LogOnly] {
+            let source = FakeSource::new(testing::FLOOR, FORBID_X);
+            let out = run(&with_acme(testing::policy(&source, settings(mode))), chat_request(&["y"], "")).await.expect("apply");
+            assert_eq!(&*out.snapshot.webhooks, ["acme_dlp"], "{mode:?}");
+        }
+        let source = FakeSource::new(testing::FLOOR, FORBID_X);
+        let out = run(&with_acme(testing::policy(&source, settings(TenantMode::Off))), chat_request(&["y"], "")).await.expect("apply");
+        assert!(out.snapshot.webhooks.is_empty(), "mode off");
+        let out = run(&testing::policy(&source, settings(TenantMode::Enforce)), chat_request(&["y"], "")).await.expect("apply");
+        assert!(out.snapshot.webhooks.is_empty(), "an org with no entry (D9)");
+        // The tenant part is unavailable: nothing is evaluated, so nothing opts in.
+        let slow = FakeSource::new(testing::FLOOR, FORBID_X);
+        slow.set_tenant_delay(Duration::from_secs(30));
+        let out = run(&with_acme(testing::policy(&slow, settings(TenantMode::Enforce))), chat_request(&["y"], "")).await.expect("apply");
+        assert!(matches!(out.snapshot.set, PolicySet::Available { tenant: TenantPart::Unavailable, .. }));
+        assert!(out.snapshot.webhooks.is_empty(), "an unavailable tenant part");
+    }
+
+    /// D8 on the IAM path: the list comes from the tenant settings.
+    #[tokio::test(start_paused = true)]
+    async fn the_iam_snapshot_holds_the_opt_in_from_the_tenant_settings() {
+        let settings_of = |mode| {
+            Some(TenantSettings {
+                mode,
+                on_unavailable: OnUnavailable::Closed,
+                webhooks: acme(),
+            })
+        };
+        for (mode, want) in [(TenantMode::Enforce, vec!["acme_dlp"]), (TenantMode::LogOnly, vec!["acme_dlp"]), (TenantMode::Off, vec![])] {
+            let source = FakeSource::new(testing::FLOOR, FORBID_X);
+            source.set_settings(settings_of(mode));
+            let policy = testing::policy(&source, settings_from_source(TenantMode::Off));
+            let out = run(&policy, chat_request(&["y"], "")).await.expect("apply");
+            assert_eq!(&*out.snapshot.webhooks, want.as_slice(), "{mode:?}");
+        }
+        let slow = FakeSource::new(testing::FLOOR, FORBID_X);
+        slow.set_settings(settings_of(TenantMode::Enforce));
+        slow.set_tenant_delay(Duration::from_secs(30));
+        let out = run(&testing::policy(&slow, settings_from_source(TenantMode::Off)), chat_request(&["y"], "")).await.expect("apply");
+        assert!(out.snapshot.webhooks.is_empty(), "an unavailable tenant part");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn the_floor_and_the_tenant_share_one_load_timeout() {
         // D31: a slow floor and a slow tenant together still wait at most `load_timeout`.
@@ -1061,7 +1156,11 @@ mod tests {
         assert_eq!(Snap::take(&snapshotter).histogram(names::GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS).len(), 1);
     }
     fn from_source(mode: TenantMode, on_unavailable: OnUnavailable) -> Option<TenantSettings> {
-        Some(TenantSettings { mode, on_unavailable })
+        Some(TenantSettings {
+            mode,
+            on_unavailable,
+            webhooks: Arc::from([]),
+        })
     }
 
     #[tokio::test]
@@ -1734,6 +1833,7 @@ mod tests {
             findings: vec![vec![medium.clone()]],
             hosts: vec![None],
             stages: Vec::new(),
+            late_elapsed: Duration::ZERO,
         };
         let mut findings = vec![Vec::new(); 4];
         let mut stages = vec![Vec::new(); 4];

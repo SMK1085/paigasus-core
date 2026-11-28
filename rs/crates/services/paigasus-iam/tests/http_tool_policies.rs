@@ -475,6 +475,43 @@ async fn a_mode_transition_error_is_409_with_its_code() {
     assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("tool-policy-mode-transition-invalid")), "{body}");
 }
 
+/// SMA-856: absent and `null` keep the list, a list replaces it, `[]` clears it.
+#[tokio::test]
+async fn the_rest_opt_in_absent_and_null_keep_the_list() {
+    let Some(env) = setup(true, &tenant_accepted()).await else { return };
+    let put = |body: Value| {
+        let (app, uri, token) = (env.app.clone(), env.settings(), env.admin.clone());
+        async move { send(&app, "PUT", &uri, Some(body), Some(&token)).await }
+    };
+    let (status, body) = put(json!({"mode": "log_only", "fail_mode": "closed", "webhooks": ["a"]})).await;
+    assert_eq!((status, &body["settings"]["webhooks"]), (StatusCode::OK, &json!(["a"])), "{body}");
+    let (_, body) = put(json!({"mode": "log_only", "fail_mode": "open"})).await;
+    assert_eq!(body["settings"]["webhooks"], json!(["a"]), "an absent key keeps the list: {body}");
+    let (_, body) = put(json!({"mode": "log_only", "fail_mode": "open", "webhooks": null})).await;
+    assert_eq!(body["settings"]["webhooks"], json!(["a"]), "null keeps the list: {body}");
+    let (_, body) = put(json!({"mode": "log_only", "fail_mode": "open", "webhooks": []})).await;
+    assert_eq!(body["settings"]["webhooks"], json!([]), "an empty list clears it: {body}");
+    let (_, read) = send(&env.app, "GET", &env.settings(), None, Some(&env.admin)).await;
+    assert_eq!(read["webhooks"], json!([]), "{read}");
+}
+
+#[tokio::test]
+async fn a_bad_rest_opt_in_is_400_invalid_webhook_opt_in() {
+    let Some(env) = setup(true, &tenant_accepted()).await else { return };
+    let seventeen: Vec<String> = (0..17).map(|i| format!("p{i}")).collect();
+    for bad in [json!(seventeen), json!(["a b"])] {
+        let (status, body) = send(
+            &env.app,
+            "PUT",
+            &env.settings(),
+            Some(json!({"mode": "log_only", "fail_mode": "closed", "webhooks": bad})),
+            Some(&env.admin),
+        )
+        .await;
+        assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid-webhook-opt-in")), "{body}");
+    }
+}
+
 // ---- the held versions and the re-compile run (SMA-781 Task 8) ---------------------------------
 
 const OTHER_SOURCE: &str = "@id(\"other\")\nforbid(principal, action, resource);\n";

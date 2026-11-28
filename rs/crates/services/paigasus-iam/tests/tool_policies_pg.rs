@@ -705,8 +705,8 @@ async fn two_concurrent_first_enables_write_one_starter() {
     });
 
     let (a, b) = tokio::join!(
-        svc.put_settings(&actor, org, ToolPolicyMode::LogOnly, FailMode::Closed),
-        svc.put_settings(&actor, org, ToolPolicyMode::LogOnly, FailMode::Closed),
+        svc.put_settings(&actor, org, ToolPolicyMode::LogOnly, FailMode::Closed, None),
+        svc.put_settings(&actor, org, ToolPolicyMode::LogOnly, FailMode::Closed, None),
     );
     let (ok, err) = match (a, b) {
         (Ok(ok), Err(err)) | (Err(err), Ok(ok)) => (ok, err),

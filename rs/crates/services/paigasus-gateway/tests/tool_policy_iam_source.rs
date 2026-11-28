@@ -15,7 +15,7 @@ use paigasus_gateway::adapters::policy_source::iam::IamPolicySource;
 use paigasus_gateway::application::tool_policy::{CacheSettings, Lookup, PolicyCache, RequestToolPolicy};
 use paigasus_gateway::config::{GatewayConfig, IamClientConfig, IamTlsConfig, ToolPolicySettings};
 use paigasus_gateway::domain::tool_policy::{PolicySource, SourceError};
-use paigasus_gateway::runtime::build_tool_policy;
+use paigasus_gateway::runtime::{ToolPolicyRuntime, build_tool_policy, build_tool_policy_with_env};
 use paigasus_gateway_core::{BlockCode, Decision, DecisionContext, Format, OnUnavailable, PolicyBasis, TenantMode, decide_calls, parse_body, parse_request};
 use paigasus_proto::paigasus::iam::v1 as pb;
 use paigasus_proto::paigasus::iam::v1::tool_policy_service_server::{ToolPolicyService, ToolPolicyServiceServer};
@@ -23,6 +23,9 @@ use tonic::codegen::http;
 use tonic::transport::{Endpoint, Server};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
+
+#[path = "support/webhook_mock.rs"]
+mod webhook_mock;
 
 const ORG: &str = "0190a100-0000-7000-8000-0000000000a1";
 const ORG_PRN: &str = "prn:pgs:iam:::organization/0190a100-0000-7000-8000-0000000000a1";
@@ -244,7 +247,7 @@ async fn the_fetch_sends_the_service_credential_as_bearer() {
     let source = s.source(&path);
 
     let tenant = source.tenant(org()).await.expect("tenant");
-    assert_eq!(tenant.version, "t2:enforce:closed");
+    assert_eq!(tenant.version, "t2:enforce:closed:");
     let floor = source.floor().await.expect("floor");
     assert_eq!(floor.version, "f1");
 
@@ -620,4 +623,123 @@ async fn a_negated_slot_forbid_also_denies() {
     let d = decide_through_iam(&s, &["ls", "rm", "del"], &["ls", "rm", "del"]).await;
     assert_eq!(d.decisions, [Decision::Allow, BLOCK, BLOCK]);
     assert_eq!(d.bases, [PolicyBasis::Policy, PolicyBasis::ErroredForbid, PolicyBasis::ErroredForbid]);
+}
+
+// --- SMA-856: the webhook opt-in from IAM reaches the provider --------------------------------
+
+/// A tenant answer of IAM in mode enforce with the webhook opt-in `webhooks`.
+fn tenant_with_webhooks(version: u64, webhooks: &[&str]) -> pb::GetCompiledToolPoliciesResponse {
+    let mut r = tenant_response(version, pb::ToolPolicyMode::Enforce, "@id(\"p\") permit(principal, action, resource);");
+    r.settings.as_mut().expect("settings").webhooks = webhooks.iter().map(|w| (*w).to_owned()).collect();
+    r
+}
+
+/// A gateway config with the IAM source and one webhook provider.
+// `figment::Jail::expect_with` fixes its closure's `Err` type to `figment::Error`.
+#[allow(clippy::result_large_err)]
+fn gateway_config(addr: std::net::SocketAddr, credential_file: &std::path::Path, webhook_url: &str, orgs: &str) -> GatewayConfig {
+    let toml = format!(
+        "[upstream.openai]\napi_key = \"sk-test-key\"\n[iam]\ngrpc_addr = \"http://{addr}\"\nservice_credential_file = {:?}\n[iam.tls]\nmode = \"loopback_insecure\"\n[tool_interception]\nenabled = true\n[tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\nsource = {{ kind = \"iam\" }}\n[[tool_policy.detectors.webhook]]\nname = \"acme_dlp\"\nurl = {webhook_url:?}\norgs = [\"{orgs}\"]\nsecret_env = \"ACME_DLP_SECRET\"\nkinds = [\"pii_email\"]\n",
+        credential_file.to_string_lossy()
+    );
+    let mut out = None;
+    figment::Jail::expect_with(|jail| {
+        jail.create_file("gateway.toml", &toml)?;
+        let cfg: GatewayConfig = GatewayConfig::figment().extract()?;
+        cfg.validate().expect("the config validates");
+        out = Some(cfg);
+        Ok(())
+    });
+    out.expect("a config")
+}
+
+#[tokio::test]
+async fn an_opt_in_from_iam_reaches_the_provider_and_an_empty_list_stops_it() {
+    const SECRET: &str = "paigasus-webhook-example-secret-0001";
+    let s = start().await;
+    s.script_floor(Ok(floor_response(1, "")));
+    s.script_tenant(Ok(tenant_with_webhooks(1, &["acme_dlp"])));
+    let mock = webhook_mock::MockProvider::spawn("acme_dlp", SECRET, |_, _| webhook_mock::Reply::signed(r#"{"findings":[]}"#));
+    let (_dir, path) = credential("K");
+    let cfg = gateway_config(s.addr, &path, &mock.url, ORG);
+    let env: HashMap<String, String> = HashMap::from([("ACME_DLP_SECRET".to_owned(), SECRET.to_owned())]);
+    let rt = build_tool_policy_with_env(&cfg, Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing()), None, &env).expect("builds");
+    let (cache, policy) = rt.policy.clone().expect("the request side");
+
+    let hold = |request_id: &'static str| hold_once(&rt, &policy, request_id);
+
+    hold("req-1").await;
+    let seen = mock.requests();
+    assert_eq!(seen.len(), 1, "the opt-in from IAM runs the provider once");
+    assert!(seen[0].signature_ok);
+
+    // IAM drops the opt-in. The set version stays 1, so the list is the only change in the cache identity. The token changes, so the next load takes the empty list.
+    s.script_tenant(Ok(tenant_with_webhooks(1, &[])));
+    cache.invalidate_all();
+    hold("req-2").await;
+    assert_eq!(mock.requests().len(), 1, "an empty opt-in list stops the provider");
+}
+
+/// One request with the function tool `ls` and one call to `ls`, through the request side and the decider of `rt`.
+async fn hold_once(rt: &ToolPolicyRuntime, policy: &Arc<RequestToolPolicy>, request_id: &'static str) -> Vec<paigasus_gateway_core::DecidedCall> {
+    let body = Bytes::from(serde_json::json!({"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"ls","parameters":{}}}]}).to_string());
+    let turn = parse_request(Format::OpenAiChat, &body);
+    let ctx = DecisionContext::new(PRINCIPAL, ORG_PRN, Some(request_id.into()));
+    let out = policy.apply(&ctx, "m", Format::OpenAiChat, &turn, body).await.expect("apply");
+    let answer = serde_json::json!({"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c0","type":"function","function":{"name":"ls","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}).to_string();
+    let calls = parse_body(Format::OpenAiChat, answer.as_bytes(), 1 << 20).expect("answer").calls;
+    rt.decider.decide(Arc::new(ctx.with_policy(out.snapshot)), Arc::new(turn), calls).await.expect("decide")
+}
+
+/// `(severity, version)` of each finding `detector_error` of `detector` in the decided calls.
+fn failure_of(decided: &[paigasus_gateway_core::DecidedCall], detector: &str) -> Vec<(Option<paigasus_kernel::detect::Severity>, String)> {
+    decided
+        .iter()
+        .filter_map(|d| d.detail.as_ref())
+        .filter_map(|d| d.cedar.as_ref())
+        .flat_map(|c| c.findings.iter())
+        .filter(|f| f.kind == "detector_error" && f.detector == detector)
+        .map(|f| (f.severity, f.version.clone()))
+        .collect()
+}
+
+/// IAM gives an opt-in that this gateway cannot run for the org. The pipeline gives a high
+/// `detector_error` with the reason as its version, and sends no request. The cache warns once and
+/// the warn names the reason (not the URL, the secret or the answer).
+async fn an_unrunnable_opt_in(opt_in: &[&str], provider_orgs: &str, name: &str, reason: &str) {
+    const SECRET: &str = "paigasus-webhook-example-secret-0001";
+    let s = start().await;
+    s.script_floor(Ok(floor_response(1, "")));
+    s.script_tenant(Ok(tenant_with_webhooks(1, opt_in)));
+    let mock = webhook_mock::MockProvider::spawn("acme_dlp", SECRET, |_, _| webhook_mock::Reply::signed(r#"{"findings":[]}"#));
+    let (_dir, path) = credential("K");
+    let cfg = gateway_config(s.addr, &path, &mock.url, provider_orgs);
+    let env: HashMap<String, String> = HashMap::from([("ACME_DLP_SECRET".to_owned(), SECRET.to_owned())]);
+    let recorder = Arc::new(paigasus_gateway::application::decision_log::DecisionRecorder::tracing());
+    let rt = build_tool_policy_with_env(&cfg, recorder, None, &env).expect("builds");
+    let (_cache, policy) = rt.policy.clone().expect("the request side");
+    let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+
+    let decided = hold_once(&rt, &policy, "req-1").await;
+
+    assert_eq!(mock.requests().len(), 0, "{reason}: no request");
+    assert_eq!(failure_of(&decided, name), [(Some(paigasus_kernel::detect::Severity::High), reason.to_owned())], "{reason}");
+    let text = logs.text();
+    let warns: Vec<&str> = text.lines().filter(|l| l.contains("cannot run for it")).collect();
+    assert_eq!(warns.len(), 1, "{text}");
+    assert!(
+        warns[0].contains(&format!("name=\"{name}\"")) && warns[0].contains(&format!("reason=\"{reason}\"")),
+        "the warn names the reason: {}",
+        warns[0]
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_opt_in_from_iam_gives_unknown_provider() {
+    an_unrunnable_opt_in(&["nobody"], ORG, "nobody", "unknown_provider").await;
+}
+
+#[tokio::test]
+async fn an_opt_in_outside_orgs_gives_not_permitted() {
+    an_unrunnable_opt_in(&["acme_dlp"], "0190a100-0000-7000-8000-0000000000b2", "acme_dlp", "not_permitted").await;
 }

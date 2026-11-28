@@ -44,6 +44,7 @@ impl BuiltInStage for BuiltInDetector {
             findings: Vec::with_capacity(batch.subjects.len()),
             hosts: Vec::with_capacity(batch.subjects.len()),
             stages: Vec::new(),
+            late_elapsed: std::time::Duration::ZERO,
         };
         // The budget runs over the argument bytes in subject order. A call that does not fit in
         // full is not scanned, and a later call that fits is still scanned.

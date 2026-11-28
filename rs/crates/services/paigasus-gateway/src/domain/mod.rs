@@ -9,6 +9,7 @@ pub mod detectors;
 pub mod limits;
 pub mod tool_history;
 pub mod tool_policy;
+pub mod webhook_protocol;
 
 /// Which credential authenticated the request. `Oidc`, not `User`: an OIDC bearer can belong to a
 /// machine client, and IAM uses the same name (`paigasus-iam` `authn.rs:230`).

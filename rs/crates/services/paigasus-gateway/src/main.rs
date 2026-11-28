@@ -351,6 +351,10 @@ fn describe_gateway_metrics() {
         "Seconds one detector stage takes, labeled by side (request, response) and stage (built_in, webhook, judge)."
     );
     describe_counter!(
+        names::GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL,
+        "Tool calls whose webhook provider failed, and opt-ins that were rejected, labelled by the configured provider name and a fixed reason. The provider is \"unknown\" for an opt-in name that is not registered or not valid (SMA-856)."
+    );
+    describe_counter!(
         names::GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
         "Tool-history store calls that failed or ran past the request budget, labeled by op (lookup, write, reserve, settle, append) and kind (io, server, decode, deadline)."
     );

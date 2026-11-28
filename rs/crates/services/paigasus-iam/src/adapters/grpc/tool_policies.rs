@@ -129,6 +129,7 @@ fn settings_to_pb(s: &ToolPolicySettings) -> pb::ToolPolicySettings {
         } as i32,
         updated_at: s.updated_at.map(convert::ts),
         updated_by: s.updated_by.clone().unwrap_or_default(),
+        webhooks: s.webhooks.clone(),
     }
 }
 
@@ -398,7 +399,7 @@ impl ToolPolicyService for ToolPolicyGrpc {
             let org = org_uuid(&req.org_prn)?;
             let mode = mode_from_wire(req.mode)?;
             let fail_mode = fail_mode_from_wire(req.fail_mode)?;
-            let accepted = svc.put_settings(&actor, org, mode, fail_mode).await.map_err(convert::status_to_grpc)?;
+            let accepted = svc.put_settings(&actor, org, mode, fail_mode, req.webhooks.map(|w| w.names)).await.map_err(convert::status_to_grpc)?;
             Ok(Response::new(pb::PutToolPolicySettingsResponse {
                 settings: Some(settings_to_pb(&accepted.settings)),
                 starter_version: accepted.starter_version,

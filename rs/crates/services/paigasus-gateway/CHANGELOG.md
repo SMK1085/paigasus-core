@@ -19,11 +19,24 @@ manifest sets `publish = false` (SMA-658, spec § 3.1).
   `models` are pass-through routes. They charge zero tokens. Two new tables
   turn them on: `[upstream.anthropic]` and `[messages]`. With `[messages] enabled = false`, the
   default, the routes answer 404. See `docs/ops/RUNBOOK-anthropic-messages.md` (SMA-750).
+- The signed webhook detector. An operator registers up to 8 providers in
+  `[[tool_policy.detectors.webhook]]`. The gateway sends each tool call to the providers that the
+  tenant opted in to, with an HMAC signature, and checks the signature of the answer. A failure of
+  a provider gives a `detector_error` finding for that call. The new counter
+  `gateway_tool_policy_webhook_failures_total{provider, reason}` counts the failures. A tenant
+  opts in with the new `webhooks` setting of IAM. See `docs/ops/RUNBOOK-tool-policies.md` section
+  11 and `docs/tool-policies/webhook-protocol.md` (SMA-856).
+- Rollout note: add a provider to every gateway pod before a tenant opts in. Roll out the new IAM
+  before the new gateway. An older IAM ignores the `webhooks` setting and gives every tenant an
+  empty list. Then no provider runs, and no finding shows it (SMA-856).
 
 ### Changed
 
 - The OpenAI upstream client no longer follows redirects. An upstream 3xx answer now gives a 502
   `UpstreamUnavailable` (SMA-750).
+- `gateway_tool_policy_overhead_seconds` no longer includes the wait time of the late stages (the
+  webhook providers and the judge). `gateway_tool_policy_detector_seconds{stage="webhook"}`
+  measures the webhook time (SMA-856).
 
 ## [0.3.0] - 2026-11-20
 
