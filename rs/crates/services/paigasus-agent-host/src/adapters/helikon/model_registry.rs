@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The model registry (spec §6.2). In production it is empty: the real provider is SMA-851.
-//! A test registers a scripted model.
+//! The model registry (spec §6.2). In production it holds the models of the `[[models]]` list,
+//! which `gateway_model::register` adds (SMA-851). A test registers a scripted model. A model
+//! can have an output token limit, which `build_agent` sets as the `max_output_tokens` setting.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,11 +55,25 @@ pub struct UnknownModel {
 #[derive(Clone, Default)]
 pub struct ModelRegistry {
     models: HashMap<String, SharedModel>,
+    max_output_tokens: HashMap<String, u32>,
 }
 
 impl ModelRegistry {
     pub fn register(&mut self, id: impl Into<String>, model: SharedModel) {
         self.models.insert(id.into(), model);
+    }
+
+    /// Register a model with the limit of output tokens of one call.
+    pub fn register_with_limit(&mut self, id: impl Into<String>, model: SharedModel, max_output_tokens: u32) {
+        let id = id.into();
+        self.max_output_tokens.insert(id.clone(), max_output_tokens);
+        self.models.insert(id, model);
+    }
+
+    /// The output token limit of a model. `None` when `register` added it.
+    #[must_use]
+    pub fn max_output_tokens(&self, id: &str) -> Option<u32> {
+        self.max_output_tokens.get(id).copied()
     }
 
     #[must_use]
@@ -129,6 +144,16 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert_eq!(model.provider(), "counting");
         assert_eq!(model.model(), "counting-1");
+    }
+
+    #[test]
+    fn a_limit_is_stored_per_model() {
+        let mut registry = ModelRegistry::default();
+        registry.register_with_limit("m", SharedModel::new(Counting(Arc::new(AtomicUsize::new(0)))), 512);
+        registry.register("n", SharedModel::new(Counting(Arc::new(AtomicUsize::new(0)))));
+        assert_eq!(registry.max_output_tokens("m"), Some(512));
+        assert_eq!(registry.max_output_tokens("n"), None);
+        assert!(registry.model("m").is_some());
     }
 
     #[test]

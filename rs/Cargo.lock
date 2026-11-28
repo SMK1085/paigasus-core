@@ -1577,6 +1577,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eventsource-stream"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
+dependencies = [
+ "futures-core",
+ "nom",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "evmap"
 version = "11.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3334,6 +3345,7 @@ dependencies = [
  "paigasus-agent-host-core",
  "paigasus-cloudevents",
  "paigasus-helikon",
+ "paigasus-helikon-providers-anthropic",
  "paigasus-helikon-sessions-testkit",
  "paigasus-kernel",
  "paigasus-logging",
@@ -3489,6 +3501,29 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "paigasus-helikon-providers-anthropic"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1cd117787b65e3bca4bdd2176d355f657f914963a70e98063b21bd7f51f2c1e"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "eventsource-stream",
+ "futures-core",
+ "futures-util",
+ "paigasus-helikon-core",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@
 //! The Helikon adapter: the only place where the agent host meets the agent runtime.
 
 pub mod classify;
+pub mod gateway_model;
 pub mod memory_tool;
 pub mod model_registry;
 pub mod runner;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 use paigasus_agent_host_core::agent::AgentDefinition;
 use paigasus_agent_host_core::memory::MemoryWorkspace;
-use paigasus_helikon::core::LlmAgent;
+use paigasus_helikon::core::{LlmAgent, ModelSettings};
 use tokio::sync::Mutex;
 
 use self::memory_tool::MemoryTool;
@@ -28,9 +29,18 @@ pub const MEMORY_TOOL_NAME: &str = "memory";
 /// The name and the instructions come from the definition: the system role carries only the
 /// instructions (spec §6.4). The agent gets the `memory` tool over `ws` only when its tool names
 /// hold `memory`. No other tool name is mapped (timers are out of scope, spec N4). The caller
-/// resolves `model_id` through the model registry.
-pub fn build_agent(def: &AgentDefinition, model: SharedModel, ws: Arc<Mutex<MemoryWorkspace>>) -> LlmAgent<(), SharedModel, String> {
+/// resolves `model_id` through the model registry. With `Some(n)`, the model settings carry
+/// `max_output_tokens = n`; the provider sends it as `max_tokens`.
+pub fn build_agent(def: &AgentDefinition, model: SharedModel, max_output_tokens: Option<u32>, ws: Arc<Mutex<MemoryWorkspace>>) -> LlmAgent<(), SharedModel, String> {
     let builder = LlmAgent::builder::<()>().name(def.name.clone()).model(model).instructions(def.instructions.clone());
+    let builder = match max_output_tokens {
+        Some(n) => {
+            let mut settings = ModelSettings::default();
+            settings.max_output_tokens = Some(n);
+            builder.model_settings(settings)
+        }
+        None => builder,
+    };
     let builder = if def.tool_names.iter().any(|t| t == MEMORY_TOOL_NAME) {
         builder.tool(MemoryTool::new(ws))
     } else {
@@ -76,7 +86,7 @@ mod tests {
 
     #[test]
     fn build_agent_maps_the_name_and_the_instructions() {
-        let agent = build_agent(&def(&["t"]), model(), workspace());
+        let agent = build_agent(&def(&["t"]), model(), None, workspace());
         assert_eq!(Agent::name(&agent), "triage");
         let ctx = RunContext::<()>::new(Arc::new(()), Arc::new(MemorySession::new()), HookRegistry::new(), TracerHandle::default(), CancellationToken::new());
         assert_eq!(agent.instructions.render(&ctx), "Be brief.");
@@ -84,8 +94,16 @@ mod tests {
     }
 
     #[test]
+    fn build_agent_sets_the_output_limit() {
+        let agent = build_agent(&def(&[]), model(), Some(512), workspace());
+        assert_eq!(agent.model_settings.max_output_tokens, Some(512));
+        let agent = build_agent(&def(&[]), model(), None, workspace());
+        assert_eq!(agent.model_settings.max_output_tokens, None);
+    }
+
+    #[test]
     fn the_memory_tool_name_adds_the_memory_tool() {
-        let agent = build_agent(&def(&["memory"]), model(), workspace());
+        let agent = build_agent(&def(&["memory"]), model(), None, workspace());
         let names: Vec<&str> = agent.tools.iter().map(|t| t.name()).collect();
         assert_eq!(names, ["memory"]);
     }

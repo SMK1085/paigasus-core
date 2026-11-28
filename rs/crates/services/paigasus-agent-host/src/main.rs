@@ -2,8 +2,9 @@
 
 //! paigasus-agent-host composition root (spec §6.5). The boot order is:
 //!
-//! 1. load and validate the configuration, 2. start logging, 3. read the `[[agents]]` list and
-//!    check each model against the model registry (spec §6.2), 4. install the metrics recorder,
+//! 1. load and validate the configuration, 2. start logging, 3. build the model registry (the
+//!    gateway models of `[[models]]` when `[gateway]` is set, SMA-851), read the `[[agents]]` list
+//!    and check each model against the registry (spec §6.2), 4. install the metrics recorder,
 //! 5. connect to the database (and, when the worker pool starts, the lease pool), 6. bind the HTTP
 //!    listener (and the metrics listener), 7. serve the boot router, 8. start the Prometheus
 //!    upkeep task, 9. migrate under the advisory lock, 10. when `[nats]` is set, check each
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 use paigasus_agent_host::adapters::agents::ConfigAgentResolver;
 use paigasus_agent_host::adapters::boot::{BootSlot, boot_http_router};
+use paigasus_agent_host::adapters::helikon::gateway_model::{self, GatewayProbe};
 use paigasus_agent_host::adapters::helikon::memory_tool::run_nonce;
 use paigasus_agent_host::adapters::helikon::model_registry::ModelRegistry;
 use paigasus_agent_host::adapters::helikon::runner::HelikonAgentRunner;
@@ -92,7 +94,8 @@ async fn serve() -> anyhow::Result<()> {
     // Spec §6.2: an agent that names an unregistered model is a config error. It stops the boot
     // before the database is touched.
     let agents = config.agent_definitions()?;
-    let models = Arc::new(model_registry()?);
+    let (models, gateway_probe) = model_registry(&config)?;
+    let models = Arc::new(models);
     models.check(&agents)?;
     let pool_starts = if !config.worker.enabled {
         tracing::info!("worker.enabled is false; the worker pool is off");
@@ -180,6 +183,14 @@ async fn serve() -> anyhow::Result<()> {
         });
     }
     tracing::info!(%config.http_addr, "paigasus-agent-host listener bound; migrating");
+
+    // The probe is detached and is not in `servers`: an ended task there stops the process. The
+    // boot does not fail on the probe.
+    if let Some(probe) = gateway_probe {
+        tokio::spawn(async move {
+            let _ = probe.run().await;
+        });
+    }
 
     // One signal registration for the whole life of the process. A second registration can lose a
     // signal that arrives in the gap between the two.
@@ -290,14 +301,19 @@ async fn connect(url: &str, max_connections: u32) -> Result<DatabaseConnection, 
     Database::connect(options).await
 }
 
-/// The model registry. In production it is empty (spec §6.2): the real provider is SMA-851. The
-/// `test-model` feature registers the file-scripted `scripted` model.
-fn model_registry() -> anyhow::Result<ModelRegistry> {
+/// The model registry. With `[gateway]` set, it holds each `[[models]]` entry (SMA-851), also when
+/// `worker.enabled` is false. The `test-model` feature adds the file-scripted `scripted` model. The
+/// probe is `None` without a gateway.
+fn model_registry(config: &Config) -> anyhow::Result<(ModelRegistry, Option<GatewayProbe>)> {
     #[cfg_attr(not(feature = "test-model"), allow(unused_mut))]
     let mut models = ModelRegistry::default();
+    let probe = match &config.gateway {
+        Some(gateway) => Some(gateway_model::register(&mut models, gateway, &config.models)?),
+        None => None,
+    };
     #[cfg(feature = "test-model")]
     paigasus_agent_host::adapters::test_model::register(&mut models)?;
-    Ok(models)
+    Ok((models, probe))
 }
 
 /// The fault point of the run commit and the run worker. Only the `test-model` feature has one:

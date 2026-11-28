@@ -46,6 +46,10 @@ anyhow = { workspace = true }
 # Exact pin (SMA-786 §6.9): the facade re-exports the core, and one facade PATCH release
 # already moved the core from 0.5 to 0.6. A facade bump re-checks §6.9 of the spec.
 paigasus-helikon = { version = "=0.10.0", default-features = false, features = ["runtime-tokio"] }
+# `adapters::helikon::gateway_model` — the Anthropic Messages provider (SMA-851). No default
+# features: the default `rustls-aws-lc` links aws-lc-rs, which `rs/deny.toml` bans. The provider's
+# `rustls-no-provider` feature keeps aws-lc out; the client constructor installs `ring`.
+paigasus-helikon-providers-anthropic = { version = "=0.4.0", default-features = false, features = ["rustls-no-provider"] }
 # `application::lease_keeper` — the cancellation token. It is the type that Helikon re-exports.
 tokio-util = { workspace = true }
 paigasus-agent-host-core = { workspace = true }
@@ -114,6 +118,8 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 # `adapters::memory_s3::client` tests write a throwaway CA bundle (SMA-829), as the gateway does.
 tempfile = "3"
+# `adapters::helikon::gateway_model` tests read the log capture, as the gateway and IAM do.
+paigasus-logging = { path = "../../libs/paigasus-logging", version = "0.0.0", features = ["test-support"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [lints]
