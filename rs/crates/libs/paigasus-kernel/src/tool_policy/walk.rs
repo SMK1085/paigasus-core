@@ -121,3 +121,28 @@ pub(crate) fn parse_arguments(input: &ToolInput) -> Parsed {
         },
     }
 }
+
+/// Whether the arguments of a call pass the strict parse: one JSON object with no duplicate key at
+/// any depth. It is the exact opposite of the `unparsed` flag of the walk. A webhook gets the
+/// arguments byte for byte only when this is true (SMA-856).
+#[must_use]
+pub fn parses_strictly(input: &ToolInput) -> bool {
+    !parse_arguments(input).unparsed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_strictly_follows_the_unparsed_rule() {
+        let json = |s: &str| ToolInput::Json(s.to_owned());
+        assert!(parses_strictly(&json(r#"{"a":1}"#)));
+        assert!(!parses_strictly(&json(r#"{"a":1,"a":2}"#)));
+        assert!(!parses_strictly(&json("[1]")));
+        assert!(!parses_strictly(&json("not json")));
+        assert!(!parses_strictly(&ToolInput::Text(r#"{"a":1}"#.to_owned())));
+        // A big integer is kept as text, so it still parses strictly (SMA-856 P1).
+        assert!(parses_strictly(&json(r#"{"n":1234567890123456789012345}"#)));
+    }
+}
