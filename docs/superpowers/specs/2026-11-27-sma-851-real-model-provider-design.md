@@ -56,6 +56,8 @@ keeps `cache_control` available for SMA-791 (prompt caching).
   error text.
 - A5. A fault of the shared gateway link (a bad key, a missing grant, the route off, the gateway
   down or stalled, an exhausted budget) that moves events to `dead`. See §9 D1.
+  One exception: a stall that lasts until the outer run timeout ends as the deterministic
+  `Timeout`. See §14, the known limit.
 
 ## 5. Constraints
 
@@ -139,8 +141,8 @@ reqwest = { workspace = true, features = ["json", "stream"] }
   the Helikon repo. The provider default feature `rustls-aws-lc` needs `aws-lc-rs`, so a lockfile
   absence check is wrong there. In Helikon, check the `rustls-no-provider` build with the normal
   dependency graph (`cargo tree -e normal` with that feature set), as A2 says. In paigasus-core,
-  check absence with `grep -E '^name = "aws-lc-rs"' Cargo.lock`, and the same for `ring`. Both must
-  print nothing. `cargo tree -i` fails with "did not match any packages" when the crate is absent,
+  check absence with `grep -E '^name = "(aws-lc-rs|aws-lc-sys|openssl-sys|native-tls)"' Cargo.lock`.
+  It must print nothing. Do not apply this check to `ring`: `ring` is the required provider. `cargo tree -i` fails with "did not match any packages" when the crate is absent,
   so it does not print nothing.
 
 **Credential safety.**
@@ -246,7 +248,8 @@ max_output_tokens = 16000       # required, range 1 to 128000
   host. No user name, no password, no query, no fragment. A path prefix is allowed.
 - `api_key_file` and `ca_file`: not blank and no surrounding whitespace, as `MemoryS3CaPathBlank`
   does.
-- `read_timeout_ms` must be less than `run.timeout_secs × 1000`. It must also be more than the
+- `IN_RUN_ATTEMPTS × (connect_timeout_ms + read_timeout_ms) + (IN_RUN_ATTEMPTS − 1) × 5000` must be
+  less than `run.timeout_secs × 1000`. `read_timeout_ms` must also be more than the
   gateway's longest silent gap during a stream (the SMA-750 D12 `ping` interval). The builder
   reads that interval and sets the default from it.
 - `[[models]].name`: unique, not empty, not `scripted` (reserved for `test-model`).
@@ -432,11 +435,13 @@ Not folded in:
   error. It does not use `Policy::none()`. So a redirect is a `Transport` error and a host fault.
   Reqwest 0.13.5 keeps `x-api-key` on a redirect to another host. So the refusal also protects the key.
 - **Read timeout (§7.4).** The config refuses the value when
-  `IN_RUN_ATTEMPTS x gateway.read_timeout_ms + (IN_RUN_ATTEMPTS - 1) x 5000` is greater than or
-  equal to `run.timeout_secs x 1000`. `IN_RUN_ATTEMPTS` is 3, the number of attempts of one turn.
+  `IN_RUN_ATTEMPTS x (gateway.connect_timeout_ms + gateway.read_timeout_ms) + (IN_RUN_ATTEMPTS - 1) x 5000`
+  is greater than or equal to `run.timeout_secs x 1000`. `IN_RUN_ATTEMPTS` is 3, the number of attempts of one turn.
   The 5000 ms is the longest wait between two attempts: the maximum retry delay and
-  `IN_RUN_RETRY_AFTER_MAX` are both 5 s. With the default values, 3 x 60000 + 2 x 5000 = 190000 ms
-  is less than 300000 ms.
+  `IN_RUN_RETRY_AFTER_MAX` are both 5 s. With the default values, 3 x (5000 + 60000) + 2 x 5000 =
+  205000 ms is less than 300000 ms. This check is a lower bound, not a guarantee: a read timeout
+  bounds one read, and a stream that keeps sending data resets the read timer. So one attempt can
+  last longer than the sum. A total deadline for each attempt is part of the follow-up sweep.
 - **Stale faults (§7.5).** A host fault of a run that started before the current pause began does
   not count. It does not double the pause.
 - **Pause check (§7.5).** The pause check runs before every claim, also between claims inside one lease.
@@ -446,7 +451,9 @@ Not folded in:
 - **Known limit: stall on a later turn (§7.4, §7.5).** A gateway stall on a later model turn can
   last until the outer run timeout, because the per-read timeout does not shrink to the time left
   in the run. The run then ends as `RunError::Timeout`. This error stays deterministic and costs an
-  attempt, so a long gateway outage can move an event to `dead`. The author (Sven) chose to keep
-  this behavior for this PR and to handle it in the follow-up sweep. The sweep also covers a
+  attempt, so a long gateway outage can move an event to `dead`. **This is an explicit exception to
+  the host-fault rule** (a host fault never moves an event toward `dead`): after repeated outages of
+  this kind, an event can reach `dead` through the deterministic `Timeout`. The author (Sven) chose
+  to keep this behavior for this PR and to handle it in the follow-up sweep. The sweep also covers a
   related risk: an in-stream request-class error, or a stream protocol violation, maps to
   `Transport`. This is a host fault, and it can retry without end.

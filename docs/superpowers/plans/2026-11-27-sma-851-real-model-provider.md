@@ -300,7 +300,7 @@ git commit -m "build(rs): upgrade Helikon to <facade> with jiff 1 and croner 5 (
   - `pub enum ModelProvider { Anthropic }` with `#[serde(rename_all = "lowercase")]`.
   - `WorkerConfig.host_fault_pause_after: u32` (default 3, range 1 to 100) and `WorkerConfig.host_fault_pause_secs: u64` (default 30, range 1 to 600).
   - `pub const RESERVED_MODEL_NAME: &str = "scripted";` and `pub const IN_RUN_ATTEMPTS: u32 = 3;` (the first call and 2 retries; Task 6 uses it).
-  - New `ConfigError` variants: `GatewayMissing`, `GatewayUnused`, `GatewayBaseUrlUnparsable`, `GatewayBaseUrlScheme`, `GatewayBaseUrlUserinfo`, `GatewayBaseUrlQuery`, `GatewayBaseUrlFragment`, `GatewayKeyPathBlank`, `GatewayCaPathBlank`, `GatewayReadTimeoutTooLong { read_timeout_ms: u64, run_timeout_secs: u64 }`, `ModelNameEmpty`, `ModelNameDuplicate(String)`, `ModelNameReserved`, `ModelIdEmpty(String)`, `GatewayAgentsOrgMismatch { first: String, other: String }`. The ranges use the existing `ValueOutOfRange { key, … }` with the keys `gateway.connect_timeout_ms`, `gateway.read_timeout_ms`, `models.max_output_tokens`, `worker.host_fault_pause_after`, `worker.host_fault_pause_secs`.
+  - New `ConfigError` variants: `GatewayMissing`, `GatewayUnused`, `GatewayBaseUrlUnparsable`, `GatewayBaseUrlScheme`, `GatewayBaseUrlUserinfo`, `GatewayBaseUrlQuery`, `GatewayBaseUrlFragment`, `GatewayKeyPathBlank`, `GatewayCaPathBlank`, `GatewayReadTimeoutTooLong { connect_timeout_ms: u64, read_timeout_ms: u64, run_timeout_secs: u64 }`, `ModelNameEmpty`, `ModelNameDuplicate(String)`, `ModelNameReserved`, `ModelIdEmpty(String)`, `GatewayAgentsOrgMismatch { first: String, other: String }`. The ranges use the existing `ValueOutOfRange { key, … }` with the keys `gateway.connect_timeout_ms`, `gateway.read_timeout_ms`, `models.max_output_tokens`, `worker.host_fault_pause_after`, `worker.host_fault_pause_secs`.
 
 The rules (spec §7.4), all in `validate()`, with no I/O:
 
@@ -309,9 +309,10 @@ The rules (spec §7.4), all in `validate()`, with no I/O:
   only when `is_loopback_host(base_url)` is true (else `GatewayBaseUrlScheme`). No user name or
   password, no query, no fragment. A path prefix is allowed.
 - `api_key_file` and `ca_file`: not empty and equal to their `trim()` (as `MemoryS3CaPathBlank`).
-- `IN_RUN_ATTEMPTS × read_timeout_ms + (IN_RUN_ATTEMPTS − 1) × 5000 < run.timeout_secs × 1000`
+- `IN_RUN_ATTEMPTS × (connect_timeout_ms + read_timeout_ms) + (IN_RUN_ATTEMPTS − 1) × 5000 < run.timeout_secs × 1000`
   (Review Focus 3; the 5000 ms is `IN_RUN_RETRY_AFTER_MAX` and the largest back-off delay; the
-  spec rule `read_timeout_ms < run.timeout_secs × 1000` follows from it). Else
+  spec rule `read_timeout_ms < run.timeout_secs × 1000` follows from it). The check is a lower
+  bound: a read timeout bounds one read, not one attempt. Else
   `GatewayReadTimeoutTooLong`.
 - `[[models]].name`: not empty, unique, not `scripted`. `model`: not empty after `trim()`.
 - D3: every agent whose `model` is a `[[models]].name` has the same org (`AgentId::org()`). Else
@@ -335,7 +336,7 @@ const MODEL: &str = "[[models]]\nname = \"claude\"\nprovider = \"anthropic\"\nmo
 #[test] fn the_base_url_rules_hold()
 #[test] fn blank_key_and_ca_paths_are_refused()            // "" and " /k" -> GatewayKeyPathBlank; ca_file "" and "/c " -> GatewayCaPathBlank
 #[test] fn the_gateway_timeouts_have_ranges()              // connect 99, 60001; read 999, 600001 -> ValueOutOfRange{key, ..}; 100, 60000, 1000 pass
-#[test] fn three_read_timeouts_must_fit_in_the_run_timeout()
+#[test] fn the_connect_and_read_timeouts_must_fit_in_the_run_timeout()
 #[test] fn model_names_are_unique_not_empty_and_not_scripted()
 #[test] fn the_model_id_must_not_be_empty()                // model = " " -> ModelIdEmpty("claude")
 #[test] fn max_output_tokens_is_required_and_in_range()    // missing -> load error text contains "max_output_tokens"; 0, 128001 -> ValueOutOfRange; 1, 128000 pass
@@ -360,11 +361,12 @@ The table of `the_base_url_rules_hold` (input → result):
 | `https://gw.example/#f` | `GatewayBaseUrlFragment` |
 | `not a url` | `GatewayBaseUrlUnparsable` |
 
-`three_read_timeouts_must_fit_in_the_run_timeout`: the rule refuses the value when
-`IN_RUN_ATTEMPTS x read + (IN_RUN_ATTEMPTS - 1) x 5000 >= run x 1000`. With `run.timeout_secs = 60`,
-`read_timeout_ms = 16667` gives
-`Err(GatewayReadTimeoutTooLong { read_timeout_ms: 16667, run_timeout_secs: 60 })`, and `16666`
-gives `Ok(())`. The default pair (60000, 300) gives `Ok(())`.
+`the_connect_and_read_timeouts_must_fit_in_the_run_timeout`: the rule refuses the value when
+`IN_RUN_ATTEMPTS x (connect + read) + (IN_RUN_ATTEMPTS - 1) x 5000 >= run x 1000`. With
+`run.timeout_secs = 60` and `connect_timeout_ms = 5000`, `read_timeout_ms = 11667` gives
+`Err(GatewayReadTimeoutTooLong { connect_timeout_ms: 5000, read_timeout_ms: 11667, run_timeout_secs: 60 })`,
+and `11666` gives `Ok(())`. A large connect timeout is refused: connect 60000, read 1000 and
+`run.timeout_secs = 150` give `Err`. The default values (5000, 60000, 300) give `Ok(())`.
 
 `model_names_are_unique_not_empty_and_not_scripted`: two entries `claude` give
 `ModelNameDuplicate("claude")`. `name = ""` gives `ModelNameEmpty`. `name = "scripted"` gives
@@ -1140,7 +1142,8 @@ The amendment says:
   `retry-after` longer than 5 s. The worker fails the run with `error_class = 'host_fault'`, backs
   off the events with the delay `max(retry delay, retry_after)` (cap 24 h), and gives back the
   attempt in the same transaction, as `release_after_shutdown` does. No memory commit. A host
-  fault never moves an event toward `dead`. This changes the SMA-790 rule "every failed attempt
+  fault never moves an event toward `dead`, except a gateway stall that lasts until the outer run
+  timeout: that ends as the deterministic `Timeout` (spec §14, the known limit). This changes the SMA-790 rule "every failed attempt
   counts".
 - **Pool pause.** After `worker.host_fault_pause_after` host faults in a row (default 3), every
   worker task waits `worker.host_fault_pause_secs` (default 30 s, doubling to 600 s) before its
