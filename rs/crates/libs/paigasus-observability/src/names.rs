@@ -82,6 +82,10 @@ pub const GATEWAY_TOOL_POLICY_FINDINGS_TOTAL: &str = "gateway_tool_policy_findin
 /// `side` = `request` | `response`; `stage` = `built_in` | `webhook` | `judge`. No label carries a
 /// detector name, a host or any content.
 pub const GATEWAY_TOOL_POLICY_DETECTOR_SECONDS: &str = "gateway_tool_policy_detector_seconds";
+/// Tool calls whose webhook provider failed (SMA-856 D17). `provider` = the configured provider name
+/// (at most 8, set by the operator, never tenant content; `unknown` for `unknown_provider`);
+/// `reason` = one of the 16 fixed failure reasons. No label carries tenant content.
+pub const GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL: &str = "gateway_tool_policy_webhook_failures_total";
 /// Tool-history store calls that failed or ran past the request budget (SMA-753 D13). `op` = `lookup` |
 /// `write` | `reserve` | `settle` | `append`; `kind` = `io` | `server` | `decode` | `deadline`. Primed at 0
 /// for all twenty pairs.
@@ -494,6 +498,7 @@ pub const ALL: &[&str] = &[
     GATEWAY_TOOL_POLICY_NATS_CONNECTED,
     GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
     GATEWAY_TOOL_POLICY_DETECTOR_SECONDS,
+    GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL,
     GATEWAY_TOOL_HISTORY_STORE_ERRORS_TOTAL,
     GATEWAY_TOOL_HISTORY_IDS_CAPPED_TOTAL,
     GATEWAY_TOOL_HISTORY_EVENTS_TRIMMED_TOTAL,
@@ -645,6 +650,7 @@ mod tests {
             GATEWAY_TOOL_POLICY_OVERHEAD_SECONDS,
             GATEWAY_TOOL_POLICY_FINDINGS_TOTAL,
             GATEWAY_TOOL_POLICY_DETECTOR_SECONDS,
+            GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL,
         ] {
             assert!(ALL.contains(&name), "{name} is missing from ALL");
         }

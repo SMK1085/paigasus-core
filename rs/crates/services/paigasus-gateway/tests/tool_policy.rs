@@ -2276,10 +2276,13 @@ mod detectors {
         s.run(Ep::ChatJson, &Ep::ChatJson.tools_body(&["fetch"]), &[("fetch", "{}")]).await;
         let after = counters(&snapshotter);
         assert_eq!(after.get(&finding_series("response", "detector_error", "webhook", "high")), Some(&1), "{after:?}");
+        // Only the failure counter carries the provider name (SMA-856 D17). No other series does.
+        let failures = "gateway_tool_policy_webhook_failures_total";
         assert!(
-            after.keys().all(|(_, labels)| labels.iter().all(|(_, v)| v != "hook_err")),
-            "a webhook name is never a label: {after:?}"
+            after.keys().filter(|(name, _)| name != failures).all(|(_, labels)| labels.iter().all(|(_, v)| v != "hook_err")),
+            "a webhook name is never a label of another series: {after:?}"
         );
+        assert_eq!(after.iter().filter(|((name, _), v)| name == failures && **v == 1).count(), 1, "{after:?}");
 
         // The overhead sample holds the pipeline time: a webhook that takes 300 ms and finishes.
         let recorder = DebuggingRecorder::new();

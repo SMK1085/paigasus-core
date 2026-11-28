@@ -38,7 +38,7 @@ use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::ToolHistory;
 use crate::application::tool_policy::slots::{HoldSlots, StoreOutcome, count_missing, hold_slots};
 use crate::config::DetectorSettings;
-use crate::domain::detectors::{DetectBatch, PipelineOutput, Side, Stage, Subject};
+use crate::domain::detectors::{Caller, DetectBatch, PipelineOutput, Stage, Subject};
 
 /// The `ToolCallDecider` that evaluates the tool policies. It holds the one shared recorder, for
 /// the argument digest (SMA-755), and the detector pipeline when the detectors are on (SMA-855).
@@ -277,7 +277,7 @@ fn call_batch(snapshot: &PolicySnapshot, ctx: &DecisionContext, turn: &ToolTurn,
         })
         .collect();
     let seen = snapshot.seen_hosts.as_ref().map(|s| Arc::clone(&s.0));
-    DetectBatch::new(Side::Response, org, ctx.request_id.clone(), subjects, seen)
+    DetectBatch::for_calls(org, ctx.request_id.clone(), subjects, seen, Caller::none())
 }
 
 /// The snapshot of `ctx` when its policy set is available: the only case in which the pipeline
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_webhook_finding_that_names_the_kernel_counts_as_webhook() {
+    async fn a_webhook_finding_that_names_the_kernel_is_replaced_and_counts_as_webhook() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
@@ -775,7 +775,13 @@ mod tests {
         // A test-only webhook that gives a finding with the detector name `kernel` (a spoof).
         let spoof: Arc<dyn Detector> = Arc::new(FixedDetector("hook_a", vec![detector_error(DETECTOR_KERNEL)]));
         let out = detecting(vec![spoof]).decide(Arc::new(ctx), Arc::new(turn), calls_with(&[("ok", "{}")])).await.expect("decide");
-        assert!(kinds(&out[0]).contains(&("detector_error".to_owned(), DETECTOR_KERNEL.to_owned())), "the record keeps the name it gave");
+        // The strict check replaces the spoof: the record holds the failure finding of `hook_a`.
+        let got = kinds(&out[0]);
+        assert!(got.contains(&("detector_error".to_owned(), "hook_a".to_owned())), "{got:?}");
+        assert!(!got.contains(&("detector_error".to_owned(), DETECTOR_KERNEL.to_owned())), "{got:?}");
+        let cedar = out[0].detail.as_ref().and_then(|x| x.cedar.as_ref()).expect("a cedar record");
+        let hook = cedar.findings.iter().find(|f| f.kind == "detector_error" && f.detector == "hook_a").expect("the failure finding");
+        assert_eq!(hook.version, "check");
         let m = testing::Snap::take(&snapshotter);
         let finding = |detector: &str| {
             m.counter(

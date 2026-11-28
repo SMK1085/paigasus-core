@@ -14,11 +14,12 @@ use std::time::Duration;
 use futures::FutureExt;
 use futures::future::join_all;
 use metrics::histogram;
-use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_KERNEL, Finding, INJECTION_MARKERS, INVALID_ARGS, SECRET_IN_ARGS, UNDECLARED_TOOL, UNSEEN_HOST, detector_error};
+use paigasus_kernel::detect::{DETECTOR_BUILT_IN, DETECTOR_ERROR, DETECTOR_KERNEL, Finding, INJECTION_MARKERS, INVALID_ARGS, SECRET_IN_ARGS, UNDECLARED_TOOL, UNSEEN_HOST, detector_error};
 use paigasus_observability::names;
 use tokio::time::Instant;
 
-use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, Side, Stage};
+use super::count_webhook_failure;
+use crate::domain::detectors::{ADAPTER, BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, Side, Stage, WebhookFailure, failure_finding, valid_version};
 
 /// The detector names that are always known (D37): the kernel, the built-in stage and the five
 /// built-ins.
@@ -129,7 +130,7 @@ impl DetectorPipeline {
                 stages: Vec::new(),
             },
             Err(e) => PipelineOutput {
-                findings: failed("built_in", DETECTOR_BUILT_IN, e, n),
+                findings: failed_built_in(e, n),
                 hosts: vec![None; n],
                 stages: Vec::new(),
             },
@@ -161,6 +162,9 @@ impl DetectorPipeline {
         let side = batch.side;
         let call_batch = Arc::new(DetectBatch {
             earlier: Vec::new(),
+            caller: batch.caller.clone(),
+            deadline: cut,
+            webhook_bodies: batch.webhook_bodies.clone(),
             ..DetectBatch::new(
                 batch.side,
                 batch.org,
@@ -178,8 +182,8 @@ impl DetectorPipeline {
                 let b = Arc::clone(&call_batch);
                 async move {
                     let _timer = StageTimer::start(side, "webhook");
-                    let got = guarded("webhook", d.detect(b)).await;
-                    *lock(slot) = Some(self.accept("webhook", d.name(), got, m));
+                    let got = guarded("webhook", async move { d.detect(b).await }).await;
+                    *lock(slot) = Some(self.accept(Stage::Webhook, d.as_ref(), got, m));
                 }
             }))
             .await;
@@ -195,6 +199,9 @@ impl DetectorPipeline {
                     .collect();
                 let judge_batch = Arc::new(DetectBatch {
                     earlier,
+                    caller: call_batch.caller.clone(),
+                    deadline: call_batch.deadline,
+                    webhook_bodies: call_batch.webhook_bodies.clone(),
                     ..DetectBatch::new(
                         call_batch.side,
                         call_batch.org,
@@ -204,8 +211,8 @@ impl DetectorPipeline {
                     )
                 });
                 let _timer = StageTimer::start(side, "judge");
-                let got = guarded("judge", judge.detect(judge_batch)).await;
-                *lock(&judged) = Some(self.accept("judge", judge.name(), got, m));
+                let got = guarded("judge", async move { judge.detect(judge_batch).await }).await;
+                *lock(&judged) = Some(self.accept(Stage::Judge, judge.as_ref(), got, m));
             }
         };
         // At the deadline the future of each unfinished detector is dropped.
@@ -214,25 +221,25 @@ impl DetectorPipeline {
             .webhooks
             .iter()
             .zip(&hooks)
-            .map(|(d, slot)| lock(slot).take().unwrap_or_else(|| failed("webhook", d.name(), DetectorError::Timeout, m)))
+            .map(|(d, slot)| lock(slot).take().unwrap_or_else(|| failed(Stage::Webhook, d.as_ref(), DetectorError::Timeout, m)))
             .collect();
         if let Some(judge) = &self.judge {
-            late.push(lock(&judged).take().unwrap_or_else(|| failed("judge", judge.name(), DetectorError::Timeout, m)));
+            late.push(lock(&judged).take().unwrap_or_else(|| failed(Stage::Judge, judge.as_ref(), DetectorError::Timeout, m)));
         }
         late
     }
 
     /// The checked findings of one detector of `stage`, with `m` subjects.
-    fn accept(&self, stage: &'static str, name: &str, got: Found, m: usize) -> Vec<Vec<Finding>> {
+    fn accept(&self, stage: Stage, d: &dyn Detector, got: Found, m: usize) -> Vec<Vec<Finding>> {
         match got {
-            Ok(found) if found.len() == m => found.into_iter().map(|f| self.check(name, f)).collect(),
-            Ok(_) => failed(stage, name, DetectorError::WrongShape, m),
-            Err(e) => failed(stage, name, e, m),
+            Ok(found) if found.len() == m => found.into_iter().map(|f| self.check_late(stage, d, f)).collect(),
+            Ok(_) => failed(stage, d, DetectorError::WrongShape, m),
+            Err(e) => failed(stage, d, e, m),
         }
     }
 
-    /// The D37 check on the findings of one subject: every finding with a bad kind or an unknown
-    /// detector name is dropped, and together they give one `detector_error` of `name`.
+    /// The D37 check on the findings of one subject of the built-in stage: every finding with a bad
+    /// kind or an unknown detector name is dropped, and together they give one `detector_error`.
     fn check(&self, name: &str, found: Vec<Finding>) -> Vec<Finding> {
         let before = found.len();
         let mut kept: Vec<Finding> = found.into_iter().filter(|f| valid_kind(&f.kind) && self.known_detector(&f.detector)).collect();
@@ -241,6 +248,42 @@ impl DetectorPipeline {
         }
         kept
     }
+
+    /// The strict check on the findings of one subject of a webhook or the judge (D14, D37, P7). A
+    /// webhook finding must carry the name of its detector, a valid kind that the detector declares
+    /// and a valid version. A webhook `detector_error` is kept only when it is the adapter's own
+    /// failure finding. The judge keeps the D37 rule and the version rule. All dropped findings
+    /// together give one `check` failure finding with the failure severity of the detector.
+    fn check_late(&self, stage: Stage, d: &dyn Detector, found: Vec<Finding>) -> Vec<Finding> {
+        let before = found.len();
+        let mut kept: Vec<Finding> = found
+            .into_iter()
+            .filter(|f| match stage {
+                Stage::Webhook => webhook_finding_ok(d, f),
+                _ => valid_kind(&f.kind) && self.known_detector(&f.detector) && valid_version(&f.version),
+            })
+            .collect();
+        if kept.len() < before {
+            kept.push(failure_finding(d.name(), d.failure_severity(), WebhookFailure::Check));
+            if stage == Stage::Webhook {
+                count_webhook_failure(d.name(), WebhookFailure::Check);
+            }
+        }
+        kept
+    }
+}
+
+/// Whether one finding of a webhook passes the strict check (P7).
+fn webhook_finding_ok(d: &dyn Detector, f: &Finding) -> bool {
+    if f.detector != d.name() || !valid_kind(&f.kind) || !valid_version(&f.version) {
+        return false;
+    }
+    if f.kind == DETECTOR_ERROR {
+        // The failure finding of the adapter itself (P7): an adapter reason, the failure severity
+        // of the detector, no evidence. Any other `detector_error` is a forgery.
+        return ADAPTER.iter().any(|r| r.as_str() == f.version) && f.severity == d.failure_severity() && f.evidence.is_empty();
+    }
+    d.kinds().is_none_or(|k| k.contains(&f.kind))
 }
 
 /// Poll the future of one async detector of `stage` and catch a panic (D22). A panic gives
@@ -255,13 +298,38 @@ async fn guarded(stage: &'static str, detect: impl Future<Output = Found>) -> Fo
     }
 }
 
-/// One `detector_error` of `name` per subject. The event names the stage and the error variant,
-/// never the detector name or any content.
-fn failed(stage: &'static str, name: &str, error: DetectorError, n: usize) -> Vec<Vec<Finding>> {
-    if error != DetectorError::Panicked {
-        tracing::warn!(stage, error = ?error, "a detector gave no findings");
+/// The reason that a [`DetectorError`] gives.
+fn reason_of(error: DetectorError) -> WebhookFailure {
+    match error {
+        DetectorError::Failed => WebhookFailure::Error,
+        DetectorError::WrongShape => WebhookFailure::Shape,
+        DetectorError::Timeout => WebhookFailure::Deadline,
+        DetectorError::Panicked => WebhookFailure::Panic,
     }
-    vec![vec![detector_error(name)]; n]
+}
+
+/// One `detector_error` of the built-in stage per subject.
+fn failed_built_in(error: DetectorError, n: usize) -> Vec<Vec<Finding>> {
+    if error != DetectorError::Panicked {
+        tracing::warn!(stage = "built_in", error = ?error, "a detector gave no findings");
+    }
+    vec![vec![detector_error(DETECTOR_BUILT_IN)]; n]
+}
+
+/// One failure finding of `d` per subject, with its failure severity (D16). A webhook counts the
+/// failure once per subject. The event names the stage and the error variant, never the detector
+/// name or any content.
+fn failed(stage: Stage, d: &dyn Detector, error: DetectorError, n: usize) -> Vec<Vec<Finding>> {
+    let reason = reason_of(error);
+    if error != DetectorError::Panicked {
+        tracing::warn!(stage = if stage == Stage::Webhook { "webhook" } else { "judge" }, error = ?error, "a detector gave no findings");
+    }
+    if stage == Stage::Webhook {
+        for _ in 0..n {
+            count_webhook_failure(d.name(), reason);
+        }
+    }
+    vec![vec![failure_finding(d.name(), d.failure_severity(), reason)]; n]
 }
 
 /// The value of a slot. A poisoned lock still holds a usable value.
@@ -273,8 +341,11 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::adapters::detectors::BuiltInDetector;
-    use crate::application::tool_policy::testing::{ErrDetector, FixedDetector, PanicDetector, PanicStage, RecordingDetector, SlowDetector};
-    use crate::domain::detectors::{Side, Subject};
+    use crate::application::tool_policy::testing::{
+        DeadlineDetector, DeclaredDetector, EagerPanicDetector, ErrDetector, FixedDetector, PanicDetector, PanicStage, RecordingDetector, SeveritySlowDetector, SlowDetector,
+    };
+    use crate::domain::detectors::{ADAPTER, WebhookFailure, failure_finding};
+    use crate::domain::detectors::{Caller, Subject};
     use metrics_util::debugging::DebuggingRecorder;
     use paigasus_kernel::detect::{DETECTOR_ERROR, Declared, Severity, ToolInput};
     use paigasus_kernel::tool_policy::ToolInvocation;
@@ -304,7 +375,7 @@ mod tests {
     }
 
     fn batch(subjects: Vec<Subject>) -> DetectBatch {
-        DetectBatch::new(Side::Response, None, None, subjects, None)
+        DetectBatch::for_calls(None, None, subjects, None, Caller::none())
     }
 
     fn built_ins() -> Arc<dyn BuiltInStage> {
@@ -414,7 +485,7 @@ mod tests {
     async fn an_erroring_detector_gives_its_named_detector_error() {
         let p = pipeline(built_ins(), vec![Arc::new(ErrDetector("hook_a"))], None, Duration::from_millis(500));
         let out = p.run(batch(vec![call(0, "{}"), call(1, "{}")]), far()).await;
-        assert_eq!(out.findings, vec![vec![detector_error("hook_a")]; 2]);
+        assert_eq!(out.findings, vec![vec![failure_finding("hook_a", Severity::High, WebhookFailure::Error)]; 2]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -426,6 +497,7 @@ mod tests {
         let out = p.run(batch(vec![call(0, "{}")]), far()).await;
         assert_eq!(start.elapsed(), Duration::from_millis(500));
         assert_eq!(pairs(&out.findings[0]), [("hook_fast", "fast_kind"), ("hook_slow", DETECTOR_ERROR)]);
+        assert_eq!(out.findings[0][1], failure_finding("hook_slow", Severity::High, WebhookFailure::Deadline));
     }
 
     /// The samples of the stage timer of `stage`, side `response`. One snapshot drains them.
@@ -496,7 +568,7 @@ mod tests {
         let start = Instant::now();
         let out = p.run(batch(vec![call(0, "{}")]), start + Duration::from_millis(100)).await;
         assert_eq!(start.elapsed(), Duration::from_millis(100));
-        assert_eq!(out.findings, vec![vec![detector_error("hook_slow")]]);
+        assert_eq!(out.findings, vec![vec![failure_finding("hook_slow", Severity::High, WebhookFailure::Deadline)]]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -572,23 +644,25 @@ mod tests {
             other("hook_a", &format!("sk_{}", aws())),
             other("hook_a", "k\u{e9}"),
             other("nobody", "fine_kind"),
+            other("kernel", "fine_kind"),
         ];
         for one in &bad {
             let p = pipeline(built_ins(), vec![Arc::new(FixedDetector("hook_a", vec![one.clone()]))], None, Duration::from_millis(500));
             let out = p.run(batch(vec![call(0, "{}")]), far()).await;
-            assert_eq!(out.findings, vec![vec![detector_error("hook_a")]], "{one:?}");
+            assert_eq!(out.findings, vec![vec![failure_finding("hook_a", Severity::High, WebhookFailure::Check)]], "{one:?}");
         }
         let mut all = bad.to_vec();
         all.push(other("hook_a", "fine_kind"));
-        all.push(other("kernel", &"k".repeat(64)));
+        all.push(other("hook_a", &"k".repeat(64)));
         let p = pipeline(built_ins(), vec![Arc::new(FixedDetector("hook_a", all))], None, Duration::from_millis(500));
         let out = p.run(batch(vec![call(0, "{}")]), far()).await;
         let long64 = "k".repeat(64);
         assert_eq!(
             pairs(&out.findings[0]),
-            [("hook_a", "fine_kind"), ("kernel", long64.as_str()), ("hook_a", DETECTOR_ERROR)],
+            [("hook_a", "fine_kind"), ("hook_a", long64.as_str()), ("hook_a", DETECTOR_ERROR)],
             "one detector_error for all bad findings"
         );
+        assert_eq!(out.findings[0][2].version, "check");
     }
 
     #[test]
@@ -616,12 +690,146 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_kind_from_two_stages_keeps_both() {
-        let hook: Arc<dyn Detector> = Arc::new(FixedDetector("hook_a", vec![Finding::new("hook_a", SECRET_IN_ARGS, Severity::Low, "h1")]));
+    async fn a_webhook_finding_under_a_built_in_kind_is_replaced() {
+        let hook: Arc<dyn Detector> = Arc::new(DeclaredDetector {
+            name: "hook_a",
+            kinds: ["pii_email".to_owned()].into(),
+            severity: Severity::Low,
+            found: vec![Finding::new("hook_a", SECRET_IN_ARGS, Severity::Low, "h1")],
+        });
         let p = pipeline(built_ins(), vec![hook], None, Duration::from_millis(500));
         let args = format!(r#"{{"k":"{}"}}"#, aws());
         let out = p.run(batch(vec![call(0, &args)]), far()).await;
-        assert_eq!(pairs(&out.findings[0]), [(SECRET_IN_ARGS, SECRET_IN_ARGS), ("hook_a", SECRET_IN_ARGS)]);
-        assert_eq!(out.findings[0].iter().map(|f| f.severity).collect::<Vec<_>>(), [Severity::High, Severity::Low]);
+        assert_eq!(out.findings[0], vec![out.findings[0][0].clone(), failure_finding("hook_a", Severity::Low, WebhookFailure::Check)]);
+        assert_eq!(pairs(&out.findings[0])[0], (SECRET_IN_ARGS, SECRET_IN_ARGS), "the built-in finding stays");
+        assert_eq!(out.findings[0][0].severity, Severity::High);
+    }
+
+    fn two_sided(severity: Severity, found: Vec<Finding>) -> Vec<Finding> {
+        let hook: Arc<dyn Detector> = Arc::new(DeclaredDetector {
+            name: "hook_a",
+            kinds: ["pii_email".to_owned()].into(),
+            severity,
+            found,
+        });
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(pipeline(built_ins(), vec![hook], None, Duration::from_millis(500)).run(batch(vec![call(0, "{}")]), far()))
+            .findings
+            .remove(0)
+    }
+
+    /// P7: the failure finding of the adapter itself survives the strict check. Any other
+    /// `detector_error` of a webhook is a `check` failure.
+    #[test]
+    fn a_webhook_failure_finding_of_the_adapter_is_kept_and_a_forged_one_is_replaced() {
+        for reason in ADAPTER {
+            let own = failure_finding("hook_a", Severity::Low, reason);
+            assert_eq!(two_sided(Severity::Low, vec![own.clone()]), vec![own], "{reason:?}");
+        }
+        let check = failure_finding("hook_a", Severity::Low, WebhookFailure::Check);
+        let own = failure_finding("hook_a", Severity::Low, WebhookFailure::Transport);
+        let forged = [
+            // A pipeline reason, not an adapter reason.
+            failure_finding("hook_a", Severity::Low, WebhookFailure::Panic),
+            // The wrong severity.
+            failure_finding("hook_a", Severity::High, WebhookFailure::Transport),
+            // Evidence.
+            own.clone().with_evidence(paigasus_kernel::detect::Evidence::host("r", None, "h.example".to_owned())),
+            // An empty version, as the built-in `detector_error` has.
+            detector_error("hook_a"),
+            // Another detector name.
+            failure_finding("hook_b", Severity::Low, WebhookFailure::Transport),
+        ];
+        for f in forged {
+            assert_eq!(two_sided(Severity::Low, vec![f.clone()]), vec![check.clone()], "{f:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_detector_that_panics_before_its_future_gives_its_failure_severity() {
+        let eager: Arc<dyn Detector> = Arc::new(EagerPanicDetector("hook_eager", CANARY));
+        let fixed: Arc<dyn Detector> = Arc::new(FixedDetector("hook_fixed", vec![other("hook_fixed", "fixed_kind")]));
+        let (logs, _guard) = capture_logs();
+        let out = pipeline(built_ins(), vec![eager, fixed], None, Duration::from_millis(500)).run(batch(vec![call(0, "{}")]), far()).await;
+        assert_eq!(pairs(&out.findings[0]), [("hook_eager", DETECTOR_ERROR), ("hook_fixed", "fixed_kind")]);
+        // The detector has `failure_severity = Low`, so `Low` proves that D16 picks it (a default
+        // `High` would also pass for a guard that ignores it).
+        assert_eq!((out.findings[0][0].severity, out.findings[0][0].version.as_str()), (Severity::Low, "panic"));
+        assert!(!logs.text().contains(CANARY));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_backstop_cut_uses_the_failure_severity() {
+        let slow: Arc<dyn Detector> = Arc::new(SeveritySlowDetector("hook_slow", Duration::from_secs(10), Severity::Low));
+        let out = pipeline(built_ins(), vec![slow], None, Duration::from_millis(500)).run(batch(vec![call(0, "{}")]), far()).await;
+        assert_eq!(out.findings, vec![vec![failure_finding("hook_slow", Severity::Low, WebhookFailure::Deadline)]]);
+        assert_eq!((out.findings[0][0].severity, out.findings[0][0].version.as_str()), (Severity::Low, "deadline"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_adapter_that_honours_the_deadline_returns_per_call_results() {
+        let d: Arc<dyn Detector> = Arc::new(DeadlineDetector { name: "hook_dl", answered: 2 });
+        let start = Instant::now();
+        let out = pipeline(built_ins(), vec![d], None, Duration::from_millis(500))
+            .run(batch(vec![call(0, "{}"), call(1, "{}"), call(2, "{}")]), far())
+            .await;
+        assert_eq!(out.findings[0].iter().map(|f| f.version.as_str()).collect::<Vec<_>>(), ["ok"]);
+        assert_eq!(out.findings[1].iter().map(|f| f.version.as_str()).collect::<Vec<_>>(), ["ok"]);
+        assert_eq!(pairs(&out.findings[2]), [("hook_dl", DETECTOR_ERROR)]);
+        assert_eq!(out.findings[2][0].version, "deadline");
+        // The detector returned 10 ms before the cut, so the pipeline backstop did not fire.
+        assert_eq!(start.elapsed(), Duration::from_millis(490));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_rebuild_keeps_the_caller_the_deadline_and_the_bodies() {
+        let hook = RecordingDetector::new("hook_a", vec![]);
+        let judge = RecordingDetector::new("judge", vec![]);
+        let bodies: Arc<[bytes::Bytes]> = Arc::from(vec![bytes::Bytes::from_static(b"{}")]);
+        let mut source = batch(vec![call(0, "{}")]);
+        source.caller = Caller {
+            principal: Arc::from("prn:x"),
+            session: Some(uuid::Uuid::nil()),
+            opt_in: Arc::from(Vec::<String>::new()),
+        };
+        source.webhook_bodies = Some(Arc::clone(&bodies));
+        let start = Instant::now();
+        let p = pipeline(
+            built_ins(),
+            vec![hook.clone() as Arc<dyn Detector>],
+            Some(judge.clone() as Arc<dyn Detector>),
+            Duration::from_millis(500),
+        );
+        p.run(source, far()).await;
+        for got in [hook.batches(), judge.batches()] {
+            assert_eq!(got.len(), 1);
+            assert_eq!((got[0].caller.principal.as_ref(), got[0].caller.session), ("prn:x", Some(uuid::Uuid::nil())));
+            assert_eq!(got[0].deadline, start + Duration::from_millis(500));
+            assert!(Arc::ptr_eq(got[0].webhook_bodies.as_ref().expect("bodies"), &bodies));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_webhook_failure_counts_its_provider_and_reason() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let p = pipeline(built_ins(), vec![Arc::new(ErrDetector("hook_a"))], None, Duration::from_millis(500));
+        p.run(batch(vec![call(0, "{}"), call(1, "{}")]), far()).await;
+        let mut count = 0;
+        let mut series = 0;
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            if key.name() != names::GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL {
+                continue;
+            }
+            series += 1;
+            let has = |k: &str, v: &str| key.labels().any(|l| l.key() == k && l.value() == v);
+            assert!(has("provider", "hook_a") && has("reason", "error") && key.labels().count() == 2, "{key:?}");
+            if let metrics_util::debugging::DebugValue::Counter(c) = value {
+                count += c;
+            }
+        }
+        assert_eq!((series, count), (1, 2));
     }
 }
