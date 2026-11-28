@@ -40,9 +40,13 @@ pub(crate) fn normalise_opt_in(names: Vec<String>) -> Result<Vec<String>, Tenanc
     if !names.iter().all(|n| valid(n)) {
         return Err(TenancyError::InvalidWebhookOptIn);
     }
-    let unique: std::collections::BTreeSet<String> = names.into_iter().collect();
-    if unique.len() > WEBHOOK_OPT_IN_MAX {
-        return Err(TenancyError::InvalidWebhookOptIn);
+    let mut unique = std::collections::BTreeSet::new();
+    for name in names {
+        unique.insert(name);
+        // Stop at the first excess entry. Duplicates do not count.
+        if unique.len() > WEBHOOK_OPT_IN_MAX {
+            return Err(TenancyError::InvalidWebhookOptIn);
+        }
     }
     Ok(unique.into_iter().collect())
 }

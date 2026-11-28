@@ -377,11 +377,11 @@ impl<I: IdGenerator, C: Clock> ToolPolicyService<I, C> {
     /// `off` stores `first_enabled_at` in the same transaction.
     ///
     /// `webhooks` is the opt-in list (SMA-856). `None` keeps the stored list. `Some` replaces it,
-    /// and `Some` of an empty list clears it. An invalid list is `InvalidWebhookOptIn` and
-    /// nothing is read or written.
+    /// and `Some` of an empty list clears it. After authorization, an invalid list is
+    /// `InvalidWebhookOptIn` and nothing is read or written.
     pub async fn put_settings(&self, actor: &Prn, org: Uuid, mode: ToolPolicyMode, fail_mode: FailMode, webhooks: Option<Vec<String>>) -> Result<SettingsAccepted, TenancyError> {
-        let webhooks = webhooks.map(normalise_opt_in).transpose()?;
         let org_prn = self.authorize_org(actor, org, Action::ManageToolPolicySettings).await?;
+        let webhooks = webhooks.map(normalise_opt_in).transpose()?;
         let key = ToolPolicySetKey::Tenant(org);
 
         // Step 1: the state, and the decision.
@@ -2087,6 +2087,13 @@ mod tests {
         let detail = settings_audit(&h);
         assert_eq!(detail["webhooks_before"], json!(["a"]));
         assert_eq!(detail["webhooks_after"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_caller_with_a_bad_opt_in_gets_forbidden() {
+        let h = bare_harness();
+        let err = h.svc.put_settings(&h.actor, h.org, ToolPolicyMode::LogOnly, FailMode::Closed, names(&["Bad"])).await.unwrap_err();
+        assert_eq!(err, TenancyError::Forbidden);
     }
 
     #[tokio::test]

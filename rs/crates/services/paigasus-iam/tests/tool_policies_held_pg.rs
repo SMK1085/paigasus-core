@@ -430,6 +430,7 @@ async fn down_removes_held_rows_above_the_live_version_and_a_pr2_save_succeeds()
     e.put_live(&live(key, 1, VersionOrigin::Save)).await.unwrap();
     e.put_held(&held(key, 2, 1)).await.unwrap(); // becomes discarded
     e.put_held(&held(key, 3, 1)).await.unwrap(); // stays held
+    // The count depends on the number of later migrations: raise it when one is added.
     Migrator::down(&e.db, Some(2)).await.unwrap(); // m0016, then m0015
     assert_eq!(scalar(&e.db, "SELECT count(*) AS n FROM tool_policy_set_version".into(), "n").await, 1, "only the live row stays");
     raw(&e.db, "UPDATE tool_policy_set_version SET status = 'superseded'".into()).await.unwrap();

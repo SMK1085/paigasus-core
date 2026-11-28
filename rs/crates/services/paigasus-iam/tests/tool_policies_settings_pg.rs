@@ -304,7 +304,7 @@ async fn the_down_migration_drops_the_column() {
     let repo = PgToolPolicies::new(db.clone());
     let uow = SeaOrmUnitOfWork::new(db.clone());
     write_with(&repo, &uow, org, &settings(ToolPolicyMode::Off, FailMode::Closed, "alice"), list(&["a"])).await;
-    // m0016 is the last migration of this change; `down(Some(1))` is its `down`.
+    // The count depends on the number of later migrations: raise it when one is added.
     Migrator::down(&db, Some(1)).await.expect("m0016 down must succeed");
     let columns = db
         .query_all_raw(Statement::from_string(
