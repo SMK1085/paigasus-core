@@ -8,6 +8,7 @@
 //! Every type here that holds a subject, a host or a finding has a hand-written `Debug` that prints
 //! counts and fixed names only (§ 6.2.4, A2).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -24,6 +25,26 @@ pub const SCAN_LIMIT: &str = "scan_limit";
 /// The rule of the `detector_error` finding for a tool result that holds content the request screen
 /// cannot read as text (an object `content`, a `document` block).
 pub const UNSCANNED_SHAPE: &str = "unscanned_shape";
+
+/// The orgs that a webhook provider serves (SMA-856 D7): every org (a shared provider) or a fixed set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrgScope {
+    /// Every org.
+    All,
+    /// Only these orgs.
+    Only(BTreeSet<Uuid>),
+}
+
+impl OrgScope {
+    /// Whether the scope holds the org.
+    #[must_use]
+    pub fn permits(&self, org: Uuid) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(set) => set.contains(&org),
+        }
+    }
+}
 
 /// The side of the relay that screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

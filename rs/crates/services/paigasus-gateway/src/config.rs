@@ -5,15 +5,21 @@
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::{Figment, error::Error as FigmentError};
 use paigasus_gateway_core::{OnUnavailable, TenantMode};
+use paigasus_kernel::detect::Severity;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
 use crate::application::decision_log::DigestKey;
+use crate::application::detectors::pipeline::BUILT_IN_NAMES;
+use crate::application::tool_policy::FINDING_KINDS;
+use crate::domain::detectors::OrgScope;
 use crate::domain::limits::{BudgetPeriod, LimitRules, MAX_REQUESTS_PER_MINUTE, MAX_TOKENS_PER_PERIOD, OrgOverride};
 use crate::domain::parse_org_uuid;
 
@@ -892,6 +898,10 @@ impl GatewayConfig {
             return Err("messages.enabled = true requires the [upstream.anthropic] table (set GATEWAY_UPSTREAM__ANTHROPIC__API_KEY)".to_string());
         }
         self.tool_policy.validate(&self.tool_interception)?;
+        // SMA-856: the provider table is validated even when the detectors are off.
+        self.tool_policy
+            .detectors
+            .validate_webhooks(self.tool_policy.detectors.max_scan_bytes.unwrap_or(self.default_detector_scan_bytes()))?;
         if let Some(tool_history) = &self.tool_history {
             tool_history.validate(&self.tool_interception)?;
         }
@@ -975,6 +985,9 @@ pub struct DetectorsConfig {
     /// the largest request cap of any route, so a request at the default caps is scanned in full
     /// (S12). There is no upper bound (R10).
     pub max_scan_bytes: Option<usize>,
+    /// SMA-856: the webhook providers, one `[[tool_policy.detectors.webhook]]` table each.
+    #[serde(default)]
+    pub webhook: Vec<WebhookConfig>,
 }
 
 impl Default for DetectorsConfig {
@@ -983,8 +996,326 @@ impl Default for DetectorsConfig {
             enabled: true,
             timeout_ms: 500,
             max_scan_bytes: None,
+            webhook: Vec::new(),
         }
     }
+}
+
+/// The orgs of a webhook provider as the config spells them: `"*"` (a shared provider) or a list of
+/// org UUIDs. `All` is valid only as `"*"`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum WebhookOrgs {
+    All(String),
+    List(Vec<String>),
+}
+
+/// The severity of the finding that a failed provider gives (D16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureSeverityConfig {
+    Info,
+    Low,
+    Medium,
+    High,
+}
+
+impl From<FailureSeverityConfig> for Severity {
+    fn from(s: FailureSeverityConfig) -> Self {
+        match s {
+            FailureSeverityConfig::Info => Severity::Info,
+            FailureSeverityConfig::Low => Severity::Low,
+            FailureSeverityConfig::Medium => Severity::Medium,
+            FailureSeverityConfig::High => Severity::High,
+        }
+    }
+}
+
+fn default_webhook_timeout_ms() -> u64 {
+    300
+}
+fn default_webhook_max_request_bytes() -> usize {
+    1_048_576
+}
+fn default_webhook_max_in_flight() -> usize {
+    64
+}
+fn default_failure_severity() -> FailureSeverityConfig {
+    FailureSeverityConfig::High
+}
+
+/// One `[[tool_policy.detectors.webhook]]` provider (SMA-856 § 6.2). `Serialize` and `Debug` are
+/// written by hand: they print the name, the URL host, the count of orgs and the limits. They never
+/// print the URL path, a secret env name, a secret or the CA path (A4).
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookConfig {
+    /// `[a-z0-9_]{1,64}`, unique, not reserved.
+    pub name: String,
+    /// `https`, no userinfo, no query. `http` only for a loopback host.
+    pub url: String,
+    pub orgs: WebhookOrgs,
+    /// The env var that holds the secret (the exact bytes are the key). Not `GATEWAY_*`.
+    pub secret_env: String,
+    /// The env var that holds the previous secret, for a rotation.
+    #[serde(default)]
+    pub previous_secret_env: Option<String>,
+    #[serde(default = "default_webhook_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_failure_severity")]
+    pub failure_severity: FailureSeverityConfig,
+    /// The finding kinds that the provider may return.
+    pub kinds: Vec<String>,
+    #[serde(default = "default_webhook_max_request_bytes")]
+    pub max_request_bytes: usize,
+    #[serde(default = "default_webhook_max_in_flight")]
+    pub max_in_flight: usize,
+    /// `true` sends no request; every call of an opted-in tenant gets a `retired` failure (D27).
+    #[serde(default)]
+    pub retired: bool,
+    /// This ADDS to the trust store, it does not replace it. The client trusts the operating-system
+    /// store and every certificate here. Roots only. Read once at boot. An unreadable, malformed or
+    /// empty bundle is a hard boot failure.
+    #[serde(default)]
+    pub extra_ca_bundle_path: Option<String>,
+}
+
+impl WebhookConfig {
+    fn host(&self) -> String {
+        reqwest::Url::parse(&self.url).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default()
+    }
+
+    /// The orgs of the provider. Meaningful after `validate`.
+    #[must_use]
+    pub fn org_scope(&self) -> OrgScope {
+        match &self.orgs {
+            WebhookOrgs::All(_) => OrgScope::All,
+            WebhookOrgs::List(list) => OrgScope::Only(list.iter().filter_map(|s| parse_org_uuid(s)).collect()),
+        }
+    }
+
+    /// The parsed URL.
+    ///
+    /// # Panics
+    /// Panics when the URL does not parse, which `validate` refuses.
+    #[must_use]
+    pub fn parsed_url(&self) -> reqwest::Url {
+        reqwest::Url::parse(&self.url).expect("validate accepted the URL")
+    }
+
+    /// The declared kinds as a set.
+    #[must_use]
+    pub fn kind_set(&self) -> BTreeSet<String> {
+        self.kinds.iter().cloned().collect()
+    }
+}
+
+impl fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let orgs = match &self.orgs {
+            WebhookOrgs::All(_) => "*".to_string(),
+            WebhookOrgs::List(l) => l.len().to_string(),
+        };
+        f.debug_struct("WebhookConfig")
+            .field("name", &self.name)
+            .field("host", &self.host())
+            .field("orgs", &orgs)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("retired", &self.retired)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Serialize for WebhookConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum OrgsDump {
+            All(&'static str),
+            Count(usize),
+        }
+        let orgs = match &self.orgs {
+            WebhookOrgs::All(_) => OrgsDump::All("*"),
+            WebhookOrgs::List(l) => OrgsDump::Count(l.len()),
+        };
+        let mut st = serializer.serialize_struct("WebhookConfig", 7)?;
+        st.serialize_field("name", &self.name)?;
+        st.serialize_field("host", &self.host())?;
+        st.serialize_field("orgs", &orgs)?;
+        st.serialize_field("timeout_ms", &self.timeout_ms)?;
+        st.serialize_field("max_request_bytes", &self.max_request_bytes)?;
+        st.serialize_field("max_in_flight", &self.max_in_flight)?;
+        st.serialize_field("retired", &self.retired)?;
+        st.end()
+    }
+}
+
+/// The most providers (D18).
+const MAX_WEBHOOK_PROVIDERS: usize = 8;
+/// The shortest webhook secret in bytes (D20).
+const MIN_WEBHOOK_SECRET_BYTES: usize = 32;
+
+fn is_snake_ident(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// D20: `[A-Z][A-Z0-9_]{0,127}`, not starting with `GATEWAY_`.
+fn is_secret_env_name(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_uppercase()) && s.len() <= 128 && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') && !s.starts_with("GATEWAY_")
+}
+
+impl DetectorsConfig {
+    /// SMA-856 § 6.2: every rule of the provider table. Each message names the provider and the
+    /// field. `max_scan_bytes` is the effective scan budget.
+    pub fn validate_webhooks(&self, max_scan_bytes: usize) -> Result<(), String> {
+        const P: &str = "tool_policy.detectors";
+        if self.webhook.len() > MAX_WEBHOOK_PROVIDERS {
+            return Err(format!("{P}.webhook has {} providers, at most {MAX_WEBHOOK_PROVIDERS} are allowed", self.webhook.len()));
+        }
+        let timeout_max = self.timeout_ms.saturating_sub(50);
+        let mut names = HashSet::new();
+        let mut urls = HashSet::new();
+        for (i, w) in self.webhook.iter().enumerate() {
+            if !is_snake_ident(&w.name, 64) {
+                return Err(format!("{P}.webhook[{i}].name must match [a-z0-9_]{{1,64}}; got {:?}", w.name));
+            }
+            if BUILT_IN_NAMES.contains(&w.name.as_str()) || ["judge", "webhook", "other"].contains(&w.name.as_str()) {
+                return Err(format!("{P}.webhook[{i}].name {:?} is a reserved detector name", w.name));
+            }
+            if !names.insert(w.name.as_str()) {
+                return Err(format!("{P}.webhook[{i}].name {:?} is already used by an earlier provider", w.name));
+            }
+            let at = format!("{P}.webhook[{}]", w.name);
+            match reqwest::Url::parse(&w.url) {
+                Err(_) => return Err(format!("{at}.url must be an absolute URL")),
+                Ok(u) => {
+                    let scheme_ok = u.scheme() == "https" || (u.scheme() == "http" && is_loopback_host(u.as_str()));
+                    if !scheme_ok || u.host_str().is_none() {
+                        return Err(format!("{at}.url must use https (http is accepted only for a loopback host)"));
+                    }
+                    if !u.username().is_empty() || u.password().is_some() {
+                        return Err(format!("{at}.url must not hold user information"));
+                    }
+                    if u.query().is_some() {
+                        return Err(format!("{at}.url must not hold a query"));
+                    }
+                    if !urls.insert(u.as_str().to_owned()) {
+                        return Err(format!("{at}.url is already used by an earlier provider"));
+                    }
+                }
+            }
+            match &w.orgs {
+                WebhookOrgs::All(s) if s == "*" => {}
+                WebhookOrgs::All(_) => return Err(format!("{at}.orgs must be \"*\" or a list of org UUIDs")),
+                WebhookOrgs::List(l) if l.is_empty() => return Err(format!("{at}.orgs must not be empty")),
+                WebhookOrgs::List(l) => {
+                    if let Some(bad) = l.iter().find(|s| parse_org_uuid(s).is_none()) {
+                        return Err(format!("{at}.orgs holds {bad:?}, which is not an org UUID in the 36-character form"));
+                    }
+                }
+            }
+            if !is_secret_env_name(&w.secret_env) {
+                return Err(format!("{at}.secret_env must match [A-Z][A-Z0-9_]{{0,127}} and must not start with GATEWAY_"));
+            }
+            if w.previous_secret_env.as_deref().is_some_and(|n| !is_secret_env_name(n)) {
+                return Err(format!("{at}.previous_secret_env must match [A-Z][A-Z0-9_]{{0,127}} and must not start with GATEWAY_"));
+            }
+            if w.timeout_ms == 0 || w.timeout_ms > timeout_max {
+                return Err(format!("{at}.timeout_ms must be from 1 to {timeout_max} ({P}.timeout_ms minus 50); got {}", w.timeout_ms));
+            }
+            if w.kinds.is_empty() || w.kinds.len() > 16 {
+                return Err(format!("{at}.kinds must hold 1 to 16 kinds; got {}", w.kinds.len()));
+            }
+            let mut seen = HashSet::new();
+            for k in &w.kinds {
+                if !is_snake_ident(k, 64) {
+                    return Err(format!("{at}.kinds holds {k:?}, which does not match [a-z0-9_]{{1,64}}"));
+                }
+                if FINDING_KINDS.contains(&k.as_str()) {
+                    return Err(format!("{at}.kinds holds {k:?}, which is a reserved finding kind"));
+                }
+                if !seen.insert(k.as_str()) {
+                    return Err(format!("{at}.kinds holds {k:?} more than once"));
+                }
+            }
+            if w.max_request_bytes == 0 || w.max_request_bytes > max_scan_bytes {
+                return Err(format!("{at}.max_request_bytes must be from 1 to {max_scan_bytes} ({P}.max_scan_bytes); got {}", w.max_request_bytes));
+            }
+            if w.max_in_flight == 0 || w.max_in_flight > 1024 {
+                return Err(format!("{at}.max_in_flight must be from 1 to 1024; got {}", w.max_in_flight));
+            }
+            if let Some(path) = w.extra_ca_bundle_path.as_deref() {
+                if path.trim().is_empty() {
+                    return Err(format!("{at}.extra_ca_bundle_path must not be empty (omit the key to use the default trust store)"));
+                }
+                if path != path.trim() {
+                    return Err(format!("{at}.extra_ca_bundle_path has leading or trailing whitespace, which is never valid config"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reads environment variables. Tests inject a map, so they need no `set_var`.
+pub trait EnvReader {
+    fn var(&self, name: &str) -> Option<String>;
+}
+
+/// The process environment.
+pub struct ProcessEnv;
+
+impl EnvReader for ProcessEnv {
+    fn var(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+}
+
+impl EnvReader for HashMap<String, String> {
+    fn var(&self, name: &str) -> Option<String> {
+        self.get(name).cloned()
+    }
+}
+
+/// The secrets of one provider. `Debug` prints no value.
+pub struct ProviderSecrets {
+    pub current: SecretString,
+    pub previous: Option<SecretString>,
+}
+
+impl fmt::Debug for ProviderSecrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderSecrets").field("previous", &self.previous.is_some()).finish_non_exhaustive()
+    }
+}
+
+/// D20: reads and checks the secret of each provider. An error names the provider, the field and the
+/// env var, and never holds the value.
+pub fn load_webhook_secrets(config: &GatewayConfig, env: &dyn EnvReader) -> Result<BTreeMap<String, ProviderSecrets>, String> {
+    let read = |provider: &str, field: &str, var: &str| -> Result<SecretString, String> {
+        let at = format!("tool_policy.detectors.webhook[{provider}].{field}");
+        let Some(value) = env.var(var) else {
+            return Err(format!("{at}: the environment variable {var} is not set (or is not valid UTF-8)"));
+        };
+        if value.len() < MIN_WEBHOOK_SECRET_BYTES {
+            return Err(format!("{at}: the environment variable {var} must hold at least {MIN_WEBHOOK_SECRET_BYTES} bytes"));
+        }
+        if value != value.trim() {
+            return Err(format!("{at}: the environment variable {var} has leading or trailing whitespace"));
+        }
+        Ok(SecretString::from(value))
+    };
+    let mut out = BTreeMap::new();
+    for w in &config.tool_policy.detectors.webhook {
+        let current = read(&w.name, "secret_env", &w.secret_env)?;
+        let previous = w.previous_secret_env.as_deref().map(|v| read(&w.name, "previous_secret_env", v)).transpose()?;
+        out.insert(w.name.clone(), ProviderSecrets { current, previous });
+    }
+    Ok(out)
 }
 
 /// What the gateway reads at run time from `[tool_policy.detectors]` (built by
@@ -1157,6 +1488,10 @@ pub struct OrgToolPolicyConfig {
     pub mode: TenantModeConfig,
     #[serde(default)]
     pub on_policy_unavailable: Option<OnUnavailableConfig>,
+    /// SMA-856 D9: the webhook providers that this org opts in to. Used only when the policy source
+    /// is not IAM (with IAM, the org settings in IAM hold the opt-in list).
+    #[serde(default)]
+    pub webhooks: Vec<String>,
 }
 
 impl From<TenantModeConfig> for TenantMode {
@@ -1231,6 +1566,16 @@ impl ToolPolicyConfig {
             if !seen.insert(id) {
                 return Err(format!("tool_policy.org[{i}].id {:?} names an org that an earlier [[tool_policy.org]] entry already lists", entry.id));
             }
+            for name in &entry.webhooks {
+                let Some(provider) = self.detectors.webhook.iter().find(|w| &w.name == name) else {
+                    return Err(format!(
+                        "tool_policy.org[{i}].webhooks names {name:?}, which is not a registered [[tool_policy.detectors.webhook]] provider"
+                    ));
+                };
+                if !provider.org_scope().permits(id) {
+                    return Err(format!("tool_policy.org[{i}].webhooks names {name:?}, but the orgs of webhook[{name}] do not hold org {:?}", entry.id));
+                }
+            }
         }
         // SMA-775: with the IAM source, IAM holds the mode and the fail mode of each org. An entry
         // here would look as if it applied, so it is refused.
@@ -1270,6 +1615,21 @@ impl ToolPolicyConfig {
             }
         }
         Ok(())
+    }
+
+    /// SMA-856 D9: the opt-in list of each org in the TOML, sorted and unique. An org with an empty
+    /// list has no entry. Meaningful only after `validate` returned `Ok`.
+    #[must_use]
+    pub fn org_webhooks(&self) -> HashMap<Uuid, Arc<[String]>> {
+        let mut out = HashMap::new();
+        for entry in &self.org {
+            let Some(id) = parse_org_uuid(&entry.id) else { continue };
+            let names: BTreeSet<&String> = entry.webhooks.iter().collect();
+            if !names.is_empty() {
+                out.insert(id, names.into_iter().cloned().collect::<Arc<[String]>>());
+            }
+        }
+        out
     }
 
     /// The runtime view of `[tool_policy.detectors]`. Meaningful only after `validate` returned `Ok`.
@@ -2570,6 +2930,276 @@ mod tests {
         assert!(s.enabled);
         assert_eq!(s.timeout, Duration::from_millis(500));
         assert_eq!(s.max_scan_bytes, 16_777_216);
+    }
+
+    // --- SMA-856 `[[tool_policy.detectors.webhook]]` and the secret loader --------------------------
+
+    const WH_ORG_A: &str = "6f1c0000-0000-4000-8000-000000000001";
+    const WH_ORG_B: &str = "6f1c0000-0000-4000-8000-000000000002";
+
+    /// `det_toml(5, "timeout_ms = 2000")` plus one valid webhook table. `fields` replaces a key (matched by its name).
+    fn wh_toml(fields: &str) -> String {
+        let mut lines: Vec<String> = vec![
+            "name = \"acme_dlp\"".to_string(),
+            "url = \"https://dlp.acme.example/v1/findings\"".to_string(),
+            format!("orgs = [\"{WH_ORG_A}\"]"),
+            "secret_env = \"ACME_DLP_WEBHOOK_SECRET\"".to_string(),
+            "kinds = [\"pii_email\", \"pii_iban\"]".to_string(),
+        ];
+        for extra in fields.lines().filter(|l| !l.trim().is_empty()) {
+            let key = extra.split('=').next().unwrap_or("").trim().to_owned();
+            lines.retain(|l| l.split('=').next().unwrap_or("").trim() != key);
+            lines.push(extra.to_owned());
+        }
+        format!("{}\n[[tool_policy.detectors.webhook]]\n{}\n", det_toml(5, "timeout_ms = 2000"), lines.join("\n"))
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+    }
+
+    #[test]
+    fn a_valid_webhook_table_loads_with_its_defaults() {
+        let cfg = tp_load(&wh_toml("")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let w = &cfg.tool_policy.detectors.webhook[0];
+        assert_eq!((w.timeout_ms, w.max_request_bytes, w.max_in_flight, w.retired), (300, 1_048_576, 64, false));
+        assert_eq!(Severity::from(w.failure_severity), Severity::High);
+        assert_eq!(w.kind_set().len(), 2);
+        assert_eq!(w.org_scope(), OrgScope::Only(BTreeSet::from([parse_org_uuid(WH_ORG_A).unwrap()])));
+    }
+
+    #[test]
+    fn each_webhook_rule_fails_and_names_the_provider_and_the_field() {
+        let cases: &[(&str, &str)] = &[
+            ("name = \"Acme\"", "webhook[0].name"),
+            ("name = \"kernel\"", "webhook[0].name"),
+            ("name = \"webhook\"", "webhook[0].name"),
+            ("name = \"judge\"", "webhook[0].name"),
+            ("name = \"other\"", "webhook[0].name"),
+            ("name = \"built_in\"", "webhook[0].name"),
+            ("name = \"secret_in_args\"", "webhook[0].name"),
+            ("url = \"http://dlp.acme.example/x\"", "webhook[acme_dlp].url"),
+            ("url = \"https://u:p@dlp.acme.example/x\"", "webhook[acme_dlp].url"),
+            ("url = \"https://dlp.acme.example/x?a=1\"", "webhook[acme_dlp].url"),
+            ("url = \"not a url\"", "webhook[acme_dlp].url"),
+            ("orgs = []", "webhook[acme_dlp].orgs"),
+            ("orgs = \"all\"", "webhook[acme_dlp].orgs"),
+            ("orgs = [\"not-a-uuid\"]", "webhook[acme_dlp].orgs"),
+            ("secret_env = \"GATEWAY_X_SECRET\"", "webhook[acme_dlp].secret_env"),
+            ("secret_env = \"lower\"", "webhook[acme_dlp].secret_env"),
+            ("previous_secret_env = \"1BAD\"", "webhook[acme_dlp].previous_secret_env"),
+            ("timeout_ms = 0", "webhook[acme_dlp].timeout_ms"),
+            ("timeout_ms = 1951", "webhook[acme_dlp].timeout_ms"),
+            ("kinds = []", "webhook[acme_dlp].kinds"),
+            ("kinds = [\"secret_in_args\"]", "webhook[acme_dlp].kinds"),
+            ("kinds = [\"other\"]", "webhook[acme_dlp].kinds"),
+            ("kinds = [\"a\", \"a\"]", "webhook[acme_dlp].kinds"),
+            ("kinds = [\"Bad\"]", "webhook[acme_dlp].kinds"),
+            ("max_request_bytes = 0", "webhook[acme_dlp].max_request_bytes"),
+            ("max_request_bytes = 16777217", "webhook[acme_dlp].max_request_bytes"),
+            ("max_in_flight = 0", "webhook[acme_dlp].max_in_flight"),
+            ("max_in_flight = 1025", "webhook[acme_dlp].max_in_flight"),
+            ("extra_ca_bundle_path = \"\"", "webhook[acme_dlp].extra_ca_bundle_path"),
+            ("extra_ca_bundle_path = \" /x\"", "webhook[acme_dlp].extra_ca_bundle_path"),
+        ];
+        for (field, want) in cases {
+            let err = tp_load(&wh_toml(field)).and_then(|c| c.validate()).expect_err(field);
+            assert!(err.contains(want), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_webhook_limits_hold_at_their_edges() {
+        for field in [
+            "timeout_ms = 1950",
+            "timeout_ms = 1",
+            "max_request_bytes = 16777216",
+            "max_in_flight = 1024",
+            "failure_severity = \"info\"",
+            "retired = true",
+            "extra_ca_bundle_path = \"/etc/ca.pem\"",
+            "secret_env = \"A\"",
+        ] {
+            let cfg = tp_load(&wh_toml(field)).expect(field);
+            assert!(cfg.validate().is_ok(), "{field}: {:?}", cfg.validate());
+        }
+        let sixteen: Vec<String> = (0..16).map(|i| format!("\"k{i}\"")).collect();
+        let cfg = tp_load(&wh_toml(&format!("kinds = [{}]", sixteen.join(",")))).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn too_many_kinds_providers_names_and_urls_fail() {
+        let seventeen: Vec<String> = (0..17).map(|i| format!("\"k{i}\"")).collect();
+        let err = tp_load(&wh_toml(&format!("kinds = [{}]", seventeen.join(",")))).and_then(|c| c.validate()).expect_err("17 kinds");
+        assert!(err.contains("webhook[acme_dlp].kinds"), "{err}");
+
+        let table = |name: &str, url: &str| {
+            format!(
+                "\n[[tool_policy.detectors.webhook]]\nname = \"{name}\"\nurl = \"{url}\"\norgs = \"*\"\nsecret_env = \"S_{}\"\nkinds = [\"k_{name}\"]\n",
+                name.to_uppercase()
+            )
+        };
+        let base = det_toml(5, "timeout_ms = 2000");
+        let nine: String = (0..9).map(|i| table(&format!("p{i}"), &format!("https://p{i}.example/x"))).collect();
+        let err = tp_load(&format!("{base}{nine}")).and_then(|c| c.validate()).expect_err("9 providers");
+        assert!(err.contains("at most 8"), "{err}");
+        let eight: String = (0..8).map(|i| table(&format!("p{i}"), &format!("https://p{i}.example/x"))).collect();
+        let cfg = tp_load(&format!("{base}{eight}")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+
+        let dup_name = format!("{base}{}{}", table("p0", "https://a.example/x"), table("p0", "https://b.example/x"));
+        let err = tp_load(&dup_name).and_then(|c| c.validate()).expect_err("duplicate name");
+        assert!(err.contains("webhook[1].name") && err.contains("p0"), "{err}");
+        let dup_url = format!("{base}{}{}", table("p0", "https://a.example/x"), table("p1", "https://a.example/x"));
+        let err = tp_load(&dup_url).and_then(|c| c.validate()).expect_err("duplicate url");
+        assert!(err.contains("webhook[p1].url"), "{err}");
+    }
+
+    #[test]
+    fn http_is_accepted_only_for_a_loopback_host() {
+        for url in ["http://127.0.0.1:9/x", "http://localhost:9/x"] {
+            let cfg = tp_load(&wh_toml(&format!("url = \"{url}\""))).expect("loads");
+            assert!(cfg.validate().is_ok(), "{url}: {:?}", cfg.validate());
+        }
+        let err = tp_load(&wh_toml("url = \"http://10.0.0.1/x\"")).and_then(|c| c.validate()).expect_err("non-loopback http");
+        assert!(err.contains("webhook[acme_dlp].url"), "{err}");
+    }
+
+    #[test]
+    fn orgs_star_is_a_shared_provider() {
+        let cfg = tp_load(&wh_toml("orgs = \"*\"")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        assert_eq!(cfg.tool_policy.detectors.webhook[0].org_scope(), OrgScope::All);
+    }
+
+    #[test]
+    fn the_webhook_table_is_validated_when_the_detectors_are_off() {
+        let toml = wh_toml("name = \"Acme\"").replace("[tool_policy.detectors]\ntimeout_ms = 2000", "[tool_policy.detectors]\nenabled = false\ntimeout_ms = 2000");
+        assert!(toml.contains("enabled = false"));
+        let err = tp_load(&toml).and_then(|c| c.validate()).expect_err("still validated");
+        assert!(err.contains("webhook[0].name"), "{err}");
+    }
+
+    #[test]
+    fn the_timeout_bound_follows_the_detectors_timeout() {
+        let with = |detectors_ms: u64, provider_ms: u64| {
+            let toml = wh_toml(&format!("timeout_ms = {provider_ms}")).replace("timeout_ms = 2000", &format!("timeout_ms = {detectors_ms}"));
+            tp_load(&toml).and_then(|c| c.validate())
+        };
+        assert!(with(500, 450).is_ok(), "{:?}", with(500, 450));
+        let err = with(500, 451).expect_err("451 > 450");
+        assert!(err.contains("webhook[acme_dlp].timeout_ms"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_webhook_key_fails() {
+        let err = tp_load(&wh_toml("typo = 1")).expect_err("deny_unknown_fields");
+        assert!(err.contains("typo"), "{err}");
+    }
+
+    #[test]
+    fn org_webhooks_must_name_a_registered_permitted_provider() {
+        let org = |id: &str, webhooks: &str| format!("\n[[tool_policy.org]]\nid = \"{id}\"\nmode = \"enforce\"\nwebhooks = {webhooks}\n");
+        let load = |fields: &str, org_entry: &str| tp_load(&format!("{}{org_entry}", wh_toml(fields)));
+        let err = load("", &org(WH_ORG_A, "[\"nobody\"]")).and_then(|c| c.validate()).expect_err("unregistered");
+        assert!(err.contains("tool_policy.org[0].webhooks"), "{err}");
+        let err = load(&format!("orgs = [\"{WH_ORG_B}\"]"), &org(WH_ORG_A, "[\"acme_dlp\"]"))
+            .and_then(|c| c.validate())
+            .expect_err("not permitted");
+        assert!(err.contains("tool_policy.org[0].webhooks"), "{err}");
+        let cfg = load("", &org(WH_ORG_A, "[\"acme_dlp\"]")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let cfg = load("orgs = \"*\"", &org(WH_ORG_A, "[\"acme_dlp\"]")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let cfg = load("", &org(WH_ORG_A, "[\"acme_dlp\", \"acme_dlp\"]")).expect("loads");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let map = cfg.tool_policy.org_webhooks();
+        assert_eq!(map.len(), 1);
+        assert_eq!(&*map[&parse_org_uuid(WH_ORG_A).unwrap()], ["acme_dlp".to_string()]);
+    }
+
+    #[test]
+    fn the_secret_loader_checks_each_secret() {
+        let ok = "k".repeat(32);
+        let cfg = tp_load(&wh_toml("previous_secret_env = \"ACME_DLP_WEBHOOK_SECRET_OLD\"")).unwrap();
+        let got = load_webhook_secrets(&cfg, &env_of(&[("ACME_DLP_WEBHOOK_SECRET", &ok), ("ACME_DLP_WEBHOOK_SECRET_OLD", &ok)])).unwrap();
+        assert_eq!(got["acme_dlp"].current.expose_secret(), ok);
+        assert_eq!(got["acme_dlp"].previous.as_ref().map(|p| p.expose_secret().to_owned()), Some(ok.clone()));
+        for (value, why) in [
+            (None, "is not set"),
+            (Some("k".repeat(31)), "at least 32 bytes"),
+            (Some(format!("{ok}\n")), "whitespace"),
+            (Some(format!(" {ok}")), "whitespace"),
+        ] {
+            let e = value.map_or_else(HashMap::new, |v| env_of(&[("ACME_DLP_WEBHOOK_SECRET", &v), ("ACME_DLP_WEBHOOK_SECRET_OLD", &ok)]));
+            let err = load_webhook_secrets(&cfg, &e).expect_err(why);
+            assert!(err.contains("webhook[acme_dlp].secret_env") && err.contains(why), "{err}");
+            assert!(!err.contains(&ok), "the error holds no secret");
+        }
+        // A bad previous secret names `previous_secret_env`.
+        let err = load_webhook_secrets(&cfg, &env_of(&[("ACME_DLP_WEBHOOK_SECRET", &ok)])).expect_err("missing previous");
+        assert!(err.contains("webhook[acme_dlp].previous_secret_env") && err.contains("is not set"), "{err}");
+        let short = "p".repeat(5);
+        let err = load_webhook_secrets(&cfg, &env_of(&[("ACME_DLP_WEBHOOK_SECRET", &ok), ("ACME_DLP_WEBHOOK_SECRET_OLD", &short)])).expect_err("short previous");
+        assert!(err.contains("previous_secret_env") && !err.contains(&short), "{err}");
+    }
+
+    #[test]
+    fn the_secret_loader_gives_one_entry_per_provider_and_a_secret_has_no_debug_value() {
+        let ok = "canary-secret-value-0123456789abcdefXYZ";
+        let cfg = tp_load(&wh_toml("")).unwrap();
+        let got = load_webhook_secrets(&cfg, &env_of(&[("ACME_DLP_WEBHOOK_SECRET", ok)])).unwrap();
+        assert_eq!(got.keys().collect::<Vec<_>>(), ["acme_dlp"]);
+        assert!(got["acme_dlp"].previous.is_none());
+        let dbg = format!("{:?}", got["acme_dlp"]);
+        assert!(!dbg.contains("canary") && !dbg.contains(ok), "{dbg}");
+        let none = load_webhook_secrets(&tp_load(valid_toml()).unwrap(), &HashMap::new()).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn the_process_env_reader_reads_the_process_environment() {
+        assert!(ProcessEnv.var("PAIGASUS_SMA856_SURELY_UNSET_VARIABLE").is_none());
+        assert!(ProcessEnv.var("PATH").is_some());
+    }
+
+    #[test]
+    fn the_readiness_dump_holds_no_secret_and_no_path() {
+        let secret = "canary-secret-value-0123456789abcdefXYZ";
+        let cfg = tp_load(&wh_toml("url = \"https://dlp.acme.example/v1/canary-path-77\"\nextra_ca_bundle_path = \"/etc/canary-ca.pem\"")).unwrap();
+        assert!(cfg.validate().is_ok());
+        let w = &cfg.tool_policy.detectors.webhook[0];
+        assert_eq!(w.parsed_url().host_str(), Some("dlp.acme.example"));
+        let json = serde_json::to_string(&cfg).unwrap();
+        let dbg = format!("{cfg:?}");
+        for text in [&json, &dbg] {
+            assert!(text.contains("acme_dlp") && text.contains("dlp.acme.example"), "{text}");
+            assert!(!text.contains("canary-path-77") && !text.contains("canary-ca.pem") && !text.contains(secret), "{text}");
+            assert!(!text.contains("ACME_DLP_WEBHOOK_SECRET"), "the env var name is not dumped either: {text}");
+        }
+        assert!(json.contains("\"orgs\":1"), "{json}");
+        let star = tp_load(&wh_toml("orgs = \"*\"")).unwrap();
+        assert!(serde_json::to_string(&star).unwrap().contains("\"orgs\":\"*\""));
+    }
+
+    #[test]
+    fn the_example_webhook_block_parses() {
+        let example = include_str!("../gateway.toml.example");
+        let start = example.find("# [[tool_policy.detectors.webhook]]").expect("the example holds the webhook block");
+        let block: Vec<String> = example[start..]
+            .lines()
+            .take_while(|l| l.starts_with('#') && !l.trim_start_matches('#').trim().is_empty() || l.trim() == "#")
+            .map(|l| l.strip_prefix("# ").or_else(|| l.strip_prefix('#')).unwrap_or(l).to_string())
+            .collect();
+        let cfg = tp_load(&format!("{}\n[tool_policy.detectors]\ntimeout_ms = 500\n\n{}\n", valid_toml(), block.join("\n"))).expect("the uncommented block parses");
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        let list = &cfg.tool_policy.detectors.webhook;
+        assert_eq!(list.len(), 1);
+        let w = &list[0];
+        assert_eq!((w.name.as_str(), w.timeout_ms, w.max_in_flight, w.retired), ("acme_dlp", 300, 64, false));
+        assert_eq!(Severity::from(w.failure_severity), Severity::High);
     }
 
     // --- SMA-750 `[upstream.anthropic]` and `[messages]` ----------------------------------------

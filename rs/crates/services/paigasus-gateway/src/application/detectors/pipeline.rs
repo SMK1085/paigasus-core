@@ -22,7 +22,7 @@ use crate::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorErro
 
 /// The detector names that are always known (D37): the kernel, the built-in stage and the five
 /// built-ins.
-const BUILT_IN_NAMES: [&str; 7] = [DETECTOR_KERNEL, DETECTOR_BUILT_IN, UNDECLARED_TOOL, INVALID_ARGS, UNSEEN_HOST, SECRET_IN_ARGS, INJECTION_MARKERS];
+pub(crate) const BUILT_IN_NAMES: [&str; 7] = [DETECTOR_KERNEL, DETECTOR_BUILT_IN, UNDECLARED_TOOL, INVALID_ARGS, UNSEEN_HOST, SECRET_IN_ARGS, INJECTION_MARKERS];
 
 /// The longest kind that the pipeline accepts (D37).
 const MAX_KIND: usize = 64;

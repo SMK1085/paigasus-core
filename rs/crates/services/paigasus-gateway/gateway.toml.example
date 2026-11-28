@@ -266,6 +266,22 @@
 # max_scan_bytes = 16777216          # at least 65536, no upper bound; the text that one run scans.
 #                                    # The default is responses.max_request_bytes, the largest request cap
 
+# SMA-856: a signed webhook detector. Up to 8 providers. The table is checked even when the detectors are off.
+# A secret must hold at least 32 bytes with no leading or trailing whitespace. secret_env must not start with GATEWAY_.
+# [[tool_policy.detectors.webhook]]
+# name                 = "acme_dlp"                                   # [a-z0-9_]{1,64}, unique, not reserved
+# url                  = "https://dlp.acme.example/v1/findings"       # https, no user information, no query
+# orgs                 = ["6f1c0000-0000-4000-8000-000000000001"]     # org UUIDs, or "*" for a shared provider
+# secret_env           = "ACME_DLP_WEBHOOK_SECRET"                    # the exact bytes of the variable are the key
+# # previous_secret_env = "ACME_DLP_WEBHOOK_SECRET_OLD"               # optional, for a rotation
+# timeout_ms           = 300                                          # 1 to tool_policy.detectors.timeout_ms minus 50
+# failure_severity     = "high"                                       # info | low | medium | high
+# kinds                = ["pii_email", "pii_iban"]                    # 1 to 16, not a built-in finding kind
+# max_request_bytes    = 1048576                                      # at most the effective max_scan_bytes
+# max_in_flight        = 64                                           # 1 to 1024
+# retired              = false
+# # extra_ca_bundle_path = "/etc/paigasus/acme-ca.pem"                # ADDS to the trust store; roots only
+
 # --- SMA-755: the tool decision log (§ 5.12) ---
 # Records each tool-policy decision in a Redis stream, and a relay publishes it to NATS.
 # enabled = true needs [tool_policy] enabled = true, redis_url, digest_key, digest_key_id and [decision_log.nats].
