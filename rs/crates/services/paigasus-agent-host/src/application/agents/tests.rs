@@ -51,8 +51,12 @@ type SelfQuery = (CallerCredential, String, String, String);
 /// How the fake IAM answers a self-query.
 #[derive(Clone, Copy)]
 enum Answer {
-    /// `true` for the listed actions, on every org.
+    /// `true` for the listed actions on `org()` only. Every other org answers `false`.
     Grants(&'static [&'static str]),
+    /// `true` for the listed actions on the given org only.
+    GrantsOn(&'static [&'static str], Uuid),
+    /// `true` for the listed actions on every org, the nil org included: a probe that says yes.
+    GrantsEverywhere(&'static [&'static str]),
     /// `Unavailable` for every self-query.
     Outage,
 }
@@ -97,7 +101,9 @@ impl Iam for RecordingIam {
             .unwrap()
             .push((caller.clone(), principal_prn.to_owned(), action.to_owned(), resource_prn.to_owned()));
         match self.answer {
-            Answer::Grants(actions) => Ok(actions.contains(&action)),
+            Answer::Grants(actions) => Ok(actions.contains(&action) && resource_prn == org_prn(org())),
+            Answer::GrantsOn(actions, on) => Ok(actions.contains(&action) && resource_prn == org_prn(on)),
+            Answer::GrantsEverywhere(actions) => Ok(actions.contains(&action)),
             Answer::Outage => Err(IamError::Rpc(Status::unavailable("fake"))),
         }
     }
@@ -372,7 +378,7 @@ async fn list_self_queries_read_agents_on_the_request_org() {
 #[tokio::test]
 async fn get_of_an_unknown_id_probes_the_nil_org_with_read_agents_and_is_forbidden() {
     // The probe says yes: the answer is still Forbidden.
-    let h = harness(Answer::Grants(BOTH));
+    let h = harness(Answer::GrantsEverywhere(BOTH));
     assert_eq!(h.admin.get(&user(), key(u(0x999))).await, Err(AdminError::Forbidden));
     assert_eq!(h.iam.self_queries(), vec![query(bearer(), "ReadAgents", Uuid::nil())]);
 
@@ -411,7 +417,8 @@ async fn get_of_an_unknown_id_during_an_outage_is_iam_unavailable() {
 
 #[tokio::test]
 async fn get_with_an_agent_key_of_another_org_probes_like_an_unknown_id() {
-    let h = harness(Answer::Grants(BOTH));
+    // The probe says yes: the answer is still Forbidden.
+    let h = harness(Answer::GrantsEverywhere(BOTH));
     let agent = h.registry.seed_agent(org(), u(0x2000), "a");
     let inbox = h.registry.seed_inbox(&agent, u(0x3000), u(0x77));
     let wrong = |id| ResourceKey { id, org: Some(other_org()) };
@@ -438,7 +445,72 @@ async fn get_with_an_agent_key_of_another_org_probes_like_an_unknown_id() {
     assert_eq!(h.admin.get(&user(), right).await.expect("found").definition.id, agent);
     assert_eq!(h.iam.self_queries(), vec![query(bearer(), "ReadAgents", org())]);
     let right_inbox = ResourceKey { id: inbox.uuid(), org: Some(org()) };
+    h.iam.clear();
     assert_eq!(h.admin.get_inbox(&user(), right_inbox).await.expect("found").inbox.id(), &inbox);
+    assert_eq!(h.iam.self_queries(), vec![query(bearer(), "ReadAgents", org())]);
+}
+
+#[tokio::test]
+async fn every_call_on_an_existing_row_self_queries_the_org_of_the_row() {
+    let h = harness(Answer::Grants(BOTH));
+    let agent = h.registry.seed_agent(org(), u(0x2000), "a");
+    let inbox = h.registry.seed_inbox(&agent, u(0x3000), u(0x77));
+    // REST keys: no org in the key, so the row decides the org.
+    let calls: [(&str, &str); 6] = [
+        ("get", "ReadAgents"),
+        ("get_inbox", "ReadAgents"),
+        ("list_inboxes", "ReadAgents"),
+        ("update", "ManageAgents"),
+        ("create_inbox", "ManageAgents"),
+        ("archive", "ManageAgents"),
+    ];
+    for (call, action) in calls {
+        h.iam.clear();
+        let got = match call {
+            "get" => h.admin.get(&user(), key(agent.uuid())).await.map(|_| ()),
+            "get_inbox" => h.admin.get_inbox(&user(), key(inbox.uuid())).await.map(|_| ()),
+            "list_inboxes" => h.admin.list_inboxes(&user(), key(agent.uuid()), 0, "").await.map(|_| ()),
+            "update" => h.admin.update(&user(), key(agent.uuid()), 1, fields()).await.map(|_| ()),
+            "create_inbox" => h.admin.create_inbox(&user(), key(agent.uuid()), PrincipalId::from_uuid(u(0x78))).await.map(|_| ()),
+            _ => h.admin.archive(&user(), key(agent.uuid())).await.map(|_| ()),
+        };
+        assert_eq!(got, Ok(()), "{call}");
+        assert_eq!(h.iam.self_queries(), vec![query(bearer(), action, org())], "{call}");
+    }
+}
+
+#[tokio::test]
+async fn a_right_in_another_org_only_is_forbidden_on_a_row_of_the_org() {
+    // The caller holds both actions in other_org() only. The keys are REST keys (no org).
+    let h = harness(Answer::GrantsOn(BOTH, other_org()));
+    let agent = h.registry.seed_agent(org(), u(0x2000), "a");
+    let inbox = h.registry.seed_inbox(&agent, u(0x3000), u(0x77));
+    let calls: [(&str, &str); 7] = [
+        ("get", "ReadAgents"),
+        ("get_inbox", "ReadAgents"),
+        ("list_inboxes", "ReadAgents"),
+        ("list", "ReadAgents"),
+        ("update", "ManageAgents"),
+        ("create_inbox", "ManageAgents"),
+        ("archive", "ManageAgents"),
+    ];
+    for (call, action) in calls {
+        h.iam.clear();
+        let got = match call {
+            "get" => h.admin.get(&user(), key(agent.uuid())).await.map(|_| ()),
+            "get_inbox" => h.admin.get_inbox(&user(), key(inbox.uuid())).await.map(|_| ()),
+            "list_inboxes" => h.admin.list_inboxes(&user(), key(agent.uuid()), 0, "").await.map(|_| ()),
+            "list" => h.admin.list(&user(), org(), false, 0, "").await.map(|_| ()),
+            "update" => h.admin.update(&user(), key(agent.uuid()), 1, fields()).await.map(|_| ()),
+            "create_inbox" => h.admin.create_inbox(&user(), key(agent.uuid()), PrincipalId::from_uuid(u(0x78))).await.map(|_| ()),
+            _ => h.admin.archive(&user(), key(agent.uuid())).await.map(|_| ()),
+        };
+        assert_eq!(got, Err(AdminError::Forbidden), "{call}");
+        assert_eq!(h.iam.self_queries(), vec![query(bearer(), action, org())], "{call}");
+    }
+    assert!(h.registry.writes().is_empty(), "{:?}", h.registry.calls());
+    // The control: the same caller may act in other_org().
+    assert!(h.admin.create(&user(), other_org(), fields()).await.is_ok());
 }
 
 #[tokio::test]
@@ -481,8 +553,9 @@ async fn read_agents_without_manage_agents_is_forbidden_on_every_write() {
     assert_eq!(h.admin.archive(&user(), key(agent.uuid())).await, Err(AdminError::Forbidden));
     assert_eq!(h.admin.create_inbox(&user(), key(agent.uuid()), PrincipalId::from_uuid(u(0x77))).await, Err(AdminError::Forbidden));
     assert!(h.registry.writes().is_empty(), "{:?}", h.registry.calls());
-    let actions: Vec<String> = h.iam.self_queries().into_iter().map(|q| q.2).collect();
-    assert_eq!(actions, ["ManageAgents"; 4]);
+    // Each write asks for ManageAgents on the org of the request or of the row, with the caller's
+    // own credential and principal.
+    assert_eq!(h.iam.self_queries(), vec![query(bearer(), "ManageAgents", org()); 4]);
     // The read right still reads.
     assert!(h.admin.get(&user(), key(agent.uuid())).await.is_ok());
 }
@@ -645,7 +718,8 @@ async fn page_size_0_is_50_and_101_is_invalid_pagination() {
 
 #[tokio::test]
 async fn a_page_token_of_another_org_or_another_filter_is_invalid_page_token() {
-    let h = harness(Answer::Grants(BOTH));
+    // The list of other_org() must reach the token check, so the right holds on every org.
+    let h = harness(Answer::GrantsEverywhere(BOTH));
     let agent = h.registry.seed_agent(org(), u(0x2000), "a");
     let other = h.registry.seed_agent(org(), u(0x2001), "b");
     let token = encode(org(), false, u(0x2000));
