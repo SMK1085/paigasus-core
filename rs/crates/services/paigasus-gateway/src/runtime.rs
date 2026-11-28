@@ -751,8 +751,9 @@ mod tool_policy_tests {
     }
 
     #[test]
-    fn the_registry_reaches_the_cache_and_the_labels_reach_the_decider() {
-        // The boot log carries the provider count and nothing of the URL (A4).
+    fn the_runtime_builds_the_pipeline_with_one_registry_entry_and_the_request_side() {
+        // The end-to-end tests in `tests/tool_policy.rs` prove that the registry reaches the cache
+        // and that the labels reach the decider.
         let cfg = webhook_config(&["acme_dlp"], true);
         let rt = build_tool_policy_with_env(&cfg, rec(), None, &env_with(&["acme_dlp"])).expect("builds");
         assert_eq!(rt.detectors.expect("pipeline").registry().len(), 1);

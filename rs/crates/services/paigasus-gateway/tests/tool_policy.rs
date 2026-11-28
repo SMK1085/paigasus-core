@@ -2369,6 +2369,503 @@ mod detectors {
             std::panic::panic_any(self.0)
         }
     }
+
+    // --- SMA-856 § 7.3: the webhook detector against a mock provider -------------------------------
+
+    mod webhooks {
+        use std::time::Instant;
+
+        use paigasus_kernel::detect::Severity;
+        use support::webhook_mock::{MockProvider, Reply};
+        use tokio::sync::Barrier;
+
+        use super::*;
+
+        /// The secret of every mock provider. It holds a canary, and it is 32 bytes or more.
+        const SECRET: &str = "paigasus-webhook-secret-canary-7f3a-0001";
+        const SECRET_CANARY: &str = "secret-canary-7f3a";
+        const ARGS_CANARY: &str = "args-canary-5c2e";
+        const BODY_CANARY: &str = "body-canary-91d0";
+        /// The tenant forbid that reads the kind of the provider.
+        const NO_EMAIL: &str = r#"@id("no-email") forbid (principal, action, resource) when { context.findings.contains("pii_email") };"#;
+        const EMPTY: &str = r#"{"findings":[]}"#;
+        const EMAIL_MEDIUM: &str = r#"{"findings":[{"kind":"pii_email","severity":"medium","version":"v7"}]}"#;
+
+        /// The starter policy and `no-email`.
+        fn tenant() -> String {
+            format!("{}\n{NO_EMAIL}", starter())
+        }
+
+        /// One `[[tool_policy.detectors.webhook]]` table.
+        struct Prov {
+            name: &'static str,
+            url: String,
+            kinds: &'static str,
+            /// More keys of the table, one per line.
+            extra: &'static str,
+        }
+
+        impl Prov {
+            fn new(name: &'static str, url: &str) -> Self {
+                Prov {
+                    name,
+                    url: url.to_owned(),
+                    kinds: "\"pii_email\"",
+                    extra: "",
+                }
+            }
+
+            fn env(&self) -> String {
+                format!("{}_SECRET", self.name.to_uppercase())
+            }
+        }
+
+        /// The gateway config of one test.
+        struct Wh {
+            providers: Vec<Prov>,
+            /// The opt-in list of `ORG_A`.
+            opt_in: Vec<&'static str>,
+            org_mode: &'static str,
+            decide_secs: u64,
+            timeout_ms: u64,
+            keepalive_secs: u64,
+        }
+
+        impl Wh {
+            /// One provider `acme_dlp` that `ORG_A` opts in to. The timing rule of § 7.
+            fn one(url: &str) -> Self {
+                Wh {
+                    providers: vec![Prov::new("acme_dlp", url)],
+                    opt_in: vec!["acme_dlp"],
+                    org_mode: "enforce",
+                    decide_secs: 5,
+                    timeout_ms: 2000,
+                    keepalive_secs: 15,
+                }
+            }
+
+            fn with_extra(mut self, extra: &'static str) -> Self {
+                self.providers[0].extra = extra;
+                self
+            }
+
+            fn toml(&self, dir: &TempDir) -> String {
+                let mut t = format!(
+                    "[upstream.openai]\napi_key = \"sk-test-key\"\n[tool_interception]\nenabled = true\ndecide_timeout_secs = {}\nkeepalive_secs = {}\n\
+                     [tool_policy]\nenabled = true\non_policy_unavailable = \"closed\"\ndefault_mode = \"enforce\"\nsource = {{ kind = \"file\", dir = \"{}\" }}\n\
+                     [tool_policy.detectors]\ntimeout_ms = {}\n",
+                    self.decide_secs,
+                    self.keepalive_secs,
+                    dir.path().display(),
+                    self.timeout_ms
+                );
+                for p in &self.providers {
+                    t.push_str(&format!(
+                        "[[tool_policy.detectors.webhook]]\nname = \"{}\"\nurl = \"{}\"\norgs = [\"{ORG_A}\"]\nsecret_env = \"{}\"\nkinds = [{}]\n{}\n",
+                        p.name,
+                        p.url,
+                        p.env(),
+                        p.kinds,
+                        p.extra
+                    ));
+                }
+                let opt_in: Vec<String> = self.opt_in.iter().map(|n| format!("\"{n}\"")).collect();
+                t.push_str(&format!("[[tool_policy.org]]\nid = \"{ORG_A}\"\nmode = \"{}\"\nwebhooks = [{}]\n", self.org_mode, opt_in.join(", ")));
+                t
+            }
+
+            fn env(&self) -> HashMap<String, String> {
+                self.providers.iter().map(|p| (p.env(), SECRET.to_owned())).collect()
+            }
+
+            fn config(&self, dir: &TempDir) -> GatewayConfig {
+                let cfg = config(&self.toml(dir)).expect("loads");
+                cfg.validate().expect("validates");
+                cfg
+            }
+
+            /// The gateway as `main` builds it: `runtime::build_tool_policy_with_env` over the file
+            /// policy directory, with one recorder over a capture log.
+            fn boot(&self, dir: &TempDir) -> Stack {
+                let cfg = self.config(dir);
+                let log = Arc::new(CaptureLog::default());
+                let rt = runtime::build_tool_policy_with_env(&cfg, recorder_over(&log), None, &self.env()).expect("builds");
+                Stack {
+                    ti: runtime::tool_interception(&cfg, &rt),
+                    tp: rt.policy.map(|(_, tp)| tp),
+                    log,
+                    screens: Arc::default(),
+                }
+            }
+        }
+
+        /// A request with the function tool `fetch` and a model answer that calls `fetch` with `args`.
+        async fn fetch(s: &Stack, ep: Ep, args: &str) -> Ex {
+            s.run(ep, &ep.tools_body(&["fetch"]), &[("fetch", args)]).await
+        }
+
+        /// The finding of `detector` and `kind` in a record.
+        fn finding(r: &DecisionRecord, detector: &str, kind: &str) -> Option<paigasus_gateway_core::decision_log::FindingRecord> {
+            r.cedar.as_ref()?.findings.iter().find(|f| f.detector == detector && f.kind == kind).cloned()
+        }
+
+        /// `(severity, version)` of the finding of `detector` and `kind` in a record.
+        fn sev_ver(r: &DecisionRecord, detector: &str, kind: &str) -> (Option<Severity>, String) {
+            let f = finding(r, detector, kind).unwrap_or_else(|| panic!("no {kind} finding of {detector}: {:?}", findings(r)));
+            (f.severity, f.version)
+        }
+
+        fn failure_series(provider: &str, reason: &str) -> Series {
+            (
+                names::GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL.to_owned(),
+                vec![("provider".to_owned(), provider.to_owned()), ("reason".to_owned(), reason.to_owned())],
+            )
+        }
+
+        /// A closed loopback port.
+        fn closed_url() -> String {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("addr").port();
+            format!("http://127.0.0.1:{port}/hook")
+        }
+
+        // --- the provider answers ----------------------------------------------------------------
+
+        /// The provider answers `pii_email`: the call is blocked by the tenant forbid. The record
+        /// holds the finding with its detector, kind and severity. The mock saw a request with a
+        /// good MAC, the principal, no session and the built-in findings. The counter counts it under
+        /// `webhook`.
+        #[tokio::test]
+        async fn a_good_provider_denies_by_its_finding() {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _local = metrics::set_default_local_recorder(&recorder);
+            let mock = MockProvider::spawn("acme_dlp", SECRET, |_, _| Reply::signed(EMAIL_MEDIUM));
+            let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+            let s = Wh::one(&mock.url).boot(&dir);
+            // `send_mail` is not declared: the built-in `undeclared_tool` (medium) reaches the provider.
+            let ex = s.run(Ep::ChatJson, &Ep::ChatJson.tools_body(&["fetch"]), &[("send_mail", r#"{"to":"a@b.example"}"#)]).await;
+            assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
+            assert_eq!(call_of(&ex.entries, "send_mail"), BLOCKED);
+
+            let call = call_record(&s.log.records(), "send_mail");
+            assert_eq!(sev_ver(&call, "acme_dlp", "pii_email"), (Some(Severity::Medium), "v7".to_owned()));
+            let seen = mock.requests();
+            assert_eq!(seen.len(), 1);
+            assert!(seen[0].signature_ok, "the request MAC verifies");
+            assert_eq!(seen[0].body["subject"], PRINCIPAL_1);
+            assert!(seen[0].body["session"].is_null(), "the stack keeps no session: {}", seen[0].body);
+            assert_eq!(seen[0].body["tool"]["name"], "send_mail");
+            let built_in: Vec<&str> = seen[0].body["findings"].as_array().expect("findings").iter().filter_map(|f| f["kind"].as_str()).collect();
+            assert!(built_in.contains(&"undeclared_tool"), "the provider sees the built-in findings: {}", seen[0].body);
+
+            // The finding counts under `webhook`, whatever the provider name. Parse the number.
+            let after = counters(&snapshotter);
+            assert_eq!(after.get(&finding_series("response", "pii_email", "webhook", "medium")), Some(&1), "{after:?}");
+            assert!(
+                after
+                    .keys()
+                    .filter(|(n, _)| n != names::GATEWAY_TOOL_POLICY_WEBHOOK_FAILURES_TOTAL)
+                    .all(|(_, l)| l.iter().all(|(_, v)| v != "acme_dlp"))
+            );
+        }
+
+        /// The negative control of the test above: the same stack and policy, and an empty answer.
+        #[tokio::test]
+        async fn negative_control_an_empty_answer_passes() {
+            let mock = MockProvider::spawn("acme_dlp", SECRET, |_, _| Reply::signed(EMPTY));
+            let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+            let s = Wh::one(&mock.url).boot(&dir);
+            let ex = s.run(Ep::ChatJson, &Ep::ChatJson.tools_body(&["fetch"]), &[("send_mail", r#"{"to":"a@b.example"}"#)]).await;
+            assert_eq!(call_of(&ex.entries, "send_mail"), ALLOWED);
+            assert_eq!(mock.requests().len(), 1, "the provider was asked");
+            let call = call_record(&s.log.records(), "send_mail");
+            assert!(!findings(&call).iter().any(|(_, d)| d == "acme_dlp"), "{:?}", findings(&call));
+        }
+
+        // --- the failures ------------------------------------------------------------------------
+
+        /// A bad signature gives a `detector_error` of the provider with the version `signature`. With
+        /// the failure severity `high` the starter policy blocks the call.
+        #[tokio::test]
+        async fn a_bad_signature_gives_detector_error_signature() {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _local = metrics::set_default_local_recorder(&recorder);
+            // The finding in the answer must not count: only the signature is wrong.
+            let mock = MockProvider::spawn("acme_dlp", SECRET, |_, _| Reply::signed(EMAIL_MEDIUM).signed_with("paigasus-webhook-WRONG-secret-0000000001"));
+            let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+            let s = Wh::one(&mock.url).with_extra("failure_severity = \"high\"").boot(&dir);
+            let ex = fetch(&s, Ep::ChatJson, "{}").await;
+            assert_eq!(call_of(&ex.entries, "fetch"), BLOCKED);
+            let call = call_record(&s.log.records(), "fetch");
+            assert_eq!(sev_ver(&call, "acme_dlp", "detector_error"), (Some(Severity::High), "signature".to_owned()));
+            assert!(finding(&call, "acme_dlp", "pii_email").is_none(), "an unsigned answer gives no finding");
+            assert_eq!(mock.requests().len(), 1);
+            let after = counters(&snapshotter);
+            assert_eq!(after.get(&failure_series("acme_dlp", "signature")), Some(&1), "{after:?}");
+        }
+
+        /// A provider that is slower than its `timeout_ms` (300): with `failure_severity` high the
+        /// call is blocked, with `low` it is allowed and the record holds the low `detector_error`
+        /// with the version `timeout`.
+        #[tokio::test]
+        async fn a_slow_provider_and_the_failure_severity() {
+            for (severity, want, sev) in [("high", BLOCKED, Severity::High), ("low", ALLOWED, Severity::Low)] {
+                let recorder = DebuggingRecorder::new();
+                let snapshotter = recorder.snapshotter();
+                let _local = metrics::set_default_local_recorder(&recorder);
+                let mock = MockProvider::spawn("acme_dlp", SECRET, |_, _| Reply::signed(EMPTY).after(Duration::from_millis(1500)));
+                let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+                let extra: &'static str = if severity == "high" {
+                    "timeout_ms = 300\nfailure_severity = \"high\""
+                } else {
+                    "timeout_ms = 300\nfailure_severity = \"low\""
+                };
+                let s = Wh::one(&mock.url).with_extra(extra).boot(&dir);
+                let started = Instant::now();
+                let ex = fetch(&s, Ep::ChatJson, "{}").await;
+                assert!(started.elapsed() < Duration::from_millis(1400), "the call does not wait for the answer: {:?}", started.elapsed());
+                assert_eq!(call_of(&ex.entries, "fetch"), want, "{severity}");
+                let call = call_record(&s.log.records(), "fetch");
+                assert_eq!(sev_ver(&call, "acme_dlp", "detector_error"), (Some(sev), "timeout".to_owned()), "{severity}");
+                let after = counters(&snapshotter);
+                assert_eq!(after.get(&failure_series("acme_dlp", "timeout")), Some(&1), "{severity}: {after:?}");
+            }
+        }
+
+        /// A hold that waits for a provider: the stream carries keep-alives while it waits (1 s
+        /// keep-alive, an answer after 1.5 s).
+        #[tokio::test]
+        async fn a_provider_wait_keeps_the_stream_alive() {
+            let mock = MockProvider::spawn("acme_dlp", SECRET, |_, _| Reply::signed(EMAIL_MEDIUM).after(Duration::from_millis(1500)));
+            let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+            let mut w = Wh::one(&mock.url).with_extra("timeout_ms = 1900");
+            w.keepalive_secs = 1;
+            let s = w.boot(&dir);
+            let ex = fetch(&s, Ep::ChatSse, "{}").await;
+            assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
+            assert!(keep_alives(&ex.text) >= 1, "a keep-alive while the hold waits: {}", ex.text);
+            assert_eq!(call_of(&ex.entries, "fetch"), BLOCKED, "the late answer still counts");
+        }
+
+        /// R1: the end of one call does not touch the other calls of the batch. The provider answers
+        /// `fetch_a` and `fetch_b` at once and holds `fetch_c` past its `timeout_ms`: the first two
+        /// keep their findings and only `fetch_c` gets a failure finding.
+        ///
+        /// The reason is `timeout`, not `deadline` (ruling C2). The cut of the hold deadline is
+        /// `hold_start + decide_timeout - margin`, and an OpenAI hold starts its decision at the
+        /// moment it completes, so no route of the router has a hold that waited in a queue, and the
+        /// provider timeout (at most `timeout_ms - 50`, D21) always ends first. The `deadline`
+        /// reason has its own proofs in the adapter and pipeline unit tests (Task 5 and Task 8).
+        #[tokio::test]
+        async fn the_deadline_stops_one_call_only() {
+            let mock = MockProvider::spawn("acme_dlp", SECRET, |_, body| {
+                if body["tool"]["name"] == "fetch_c" {
+                    Reply::signed(EMAIL_MEDIUM).after(Duration::from_secs(20))
+                } else {
+                    Reply::signed(EMAIL_MEDIUM)
+                }
+            });
+            let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+            let mut w = Wh::one(&mock.url).with_extra("timeout_ms = 900");
+            w.timeout_ms = 1000;
+            let s = w.boot(&dir);
+            let calls = [("fetch_a", "{}"), ("fetch_b", "{}"), ("fetch_c", "{}")];
+            let ex = s.run(Ep::ChatJson, &Ep::ChatJson.tools_body(&["fetch_a", "fetch_b", "fetch_c"]), &calls).await;
+            assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
+            let records = s.log.records();
+            for name in ["fetch_a", "fetch_b"] {
+                let r = call_record(&records, name);
+                assert_eq!(sev_ver(&r, "acme_dlp", "pii_email").0, Some(Severity::Medium), "{name} keeps its finding: {:?}", findings(&r));
+                assert!(finding(&r, "acme_dlp", "detector_error").is_none(), "{name}");
+            }
+            let c = call_record(&records, "fetch_c");
+            assert_eq!(sev_ver(&c, "acme_dlp", "detector_error"), (Some(Severity::High), "timeout".to_owned()));
+            assert!(finding(&c, "acme_dlp", "pii_email").is_none());
+        }
+
+        /// Every other adapter reason reaches the record and the counter, with the provider name.
+        #[tokio::test]
+        async fn every_other_reason_reaches_the_record_and_the_counter() {
+            let long_pad = format!(r#"{{"findings":[],"pad":"{}"}}"#, "x".repeat(70 * 1024));
+            // (case, reason, answer, extra keys, requests that the mock sees)
+            let cases: Vec<(&str, &str, Reply, &'static str, usize)> = vec![
+                ("invalid json", "malformed", Reply::signed("this is not json"), "", 1),
+                ("undeclared kind", "malformed", Reply::signed(r#"{"findings":[{"kind":"pii_iban","severity":"low"}]}"#), "", 1),
+                ("status 500", "status", Reply::signed(EMPTY).with_status(500), "", 1),
+                ("status 302", "status", Reply::signed(EMPTY).with_status(302), "", 1),
+                ("a 70 KiB answer", "response_too_large", Reply::signed(long_pad), "", 1),
+                ("a request over max_request_bytes", "request_too_large", Reply::signed(EMPTY), "max_request_bytes = 64", 0),
+                ("a closed port", "transport", Reply::signed(EMPTY), "", 0),
+            ];
+            for (case, reason, reply, extra, want_requests) in cases {
+                let recorder = DebuggingRecorder::new();
+                let snapshotter = recorder.snapshotter();
+                let _local = metrics::set_default_local_recorder(&recorder);
+                let mock = MockProvider::spawn("acme_dlp", SECRET, move |_, _| reply.clone());
+                let url = if reason == "transport" { closed_url() } else { mock.url.clone() };
+                let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+                let s = Wh::one(&url).with_extra(extra).boot(&dir);
+                let ex = fetch(&s, Ep::ChatJson, "{}").await;
+                assert_eq!(ex.status, StatusCode::OK, "{case}: {}", ex.text);
+                assert_eq!(call_of(&ex.entries, "fetch"), BLOCKED, "{case}: the failure is high, the starter blocks");
+                let call = call_record(&s.log.records(), "fetch");
+                assert_eq!(sev_ver(&call, "acme_dlp", "detector_error"), (Some(Severity::High), reason.to_owned()), "{case}");
+                assert_eq!(mock.requests().len(), want_requests, "{case}");
+                let after = counters(&snapshotter);
+                assert_eq!(after.get(&failure_series("acme_dlp", reason)), Some(&1), "{case}: {after:?}");
+                assert_eq!(after.get(&finding_series("response", "detector_error", "webhook", "high")), Some(&1), "{case}: {after:?}");
+            }
+        }
+
+        /// Two providers: both requests are open at the same time (a barrier of three, with the
+        /// test as the third party). The fast one adds its finding, the slow one gives its failure.
+        #[tokio::test]
+        async fn two_providers_one_slow() {
+            let barrier = Arc::new(Barrier::new(3));
+            let fast = MockProvider::spawn("fast_dlp", SECRET, |_, _| Reply::signed(r#"{"findings":[{"kind":"pii_email","severity":"low","version":"f1"}]}"#)).with_barrier(Arc::clone(&barrier));
+            let slow = MockProvider::spawn("slow_dlp", SECRET, |_, _| Reply::signed(EMPTY).after(Duration::from_millis(1500))).with_barrier(Arc::clone(&barrier));
+            let dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+            let mut w = Wh::one(&fast.url);
+            w.providers = vec![Prov::new("fast_dlp", &fast.url), Prov::new("slow_dlp", &slow.url)];
+            w.providers[0].extra = "timeout_ms = 1500";
+            w.providers[1].extra = "timeout_ms = 300\nfailure_severity = \"low\"";
+            w.providers[1].kinds = "\"pii_phone\"";
+            w.opt_in = vec!["fast_dlp", "slow_dlp"];
+            let s = w.boot(&dir);
+            let (ex, ()) = tokio::join!(fetch(&s, Ep::ChatJson, "{}"), async {
+                tokio::time::timeout(Duration::from_secs(5), barrier.wait()).await.expect("both requests are open at once");
+            });
+            assert_eq!(call_of(&ex.entries, "fetch"), ALLOWED);
+            let call = call_record(&s.log.records(), "fetch");
+            assert_eq!(sev_ver(&call, "fast_dlp", "pii_email"), (Some(Severity::Low), "f1".to_owned()));
+            assert_eq!(sev_ver(&call, "slow_dlp", "detector_error"), (Some(Severity::Low), "timeout".to_owned()));
+            assert_eq!((fast.requests().len(), slow.requests().len()), (1, 1));
+        }
+
+        // --- who is asked ------------------------------------------------------------------------
+
+        /// D8 and D27: no opt-in, a tenant in mode off and a tenant set that does not compile send no
+        /// request. A retired provider sends none either, and gives `retired` at its failure severity.
+        #[tokio::test]
+        async fn the_opt_in_rules() {
+            // No opt-in.
+            let mock = MockProvider::spawn("acme_dlp", SECRET, |_, _| Reply::signed(EMAIL_MEDIUM));
+            let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+            let mut w = Wh::one(&mock.url);
+            w.opt_in = vec![];
+            let s = w.boot(&dir);
+            let ex = fetch(&s, Ep::ChatJson, "{}").await;
+            assert_eq!(call_of(&ex.entries, "fetch"), ALLOWED, "without an opt-in the provider is not asked");
+            assert_eq!(mock.requests().len(), 0, "no opt-in");
+
+            // Mode off.
+            let mut w = Wh::one(&mock.url);
+            w.org_mode = "off";
+            let s = w.boot(&dir);
+            let ex = fetch(&s, Ep::ChatJson, "{}").await;
+            assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
+            assert_eq!(mock.requests().len(), 0, "mode off");
+
+            // A tenant set that does not compile.
+            let bad = policy_dir(SHIPPED_FLOOR, "this is not cedar");
+            let s = Wh::one(&mock.url).boot(&bad);
+            let ex = fetch(&s, Ep::ChatJson, "{}").await;
+            assert_eq!(ex.status, StatusCode::OK, "{}", ex.text);
+            assert_eq!(mock.requests().len(), 0, "a tenant set that does not compile");
+
+            // Retired: no request, and `retired` at the failure severity of the provider.
+            let s = Wh::one(&mock.url).with_extra("retired = true\nfailure_severity = \"low\"").boot(&dir);
+            let ex = fetch(&s, Ep::ChatJson, "{}").await;
+            assert_eq!(call_of(&ex.entries, "fetch"), ALLOWED, "a low failure does not block");
+            assert_eq!(mock.requests().len(), 0, "retired");
+            let call = call_record(&s.log.records(), "fetch");
+            assert_eq!(sev_ver(&call, "acme_dlp", "detector_error"), (Some(Severity::Low), "retired".to_owned()));
+        }
+
+        // --- no leaks and priming ----------------------------------------------------------------
+
+        /// A4: the secret, a canary in the arguments, a canary in the answer and the URL path appear
+        /// in no log line, no decision record, no proto event, no metric label and no config dump.
+        #[tokio::test]
+        async fn no_canary_leaks() {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _local = metrics::set_default_local_recorder(&recorder);
+            let (logs, _guard) = paigasus_logging::test_support::capture_logs();
+            let canaries = [SECRET_CANARY, SECRET, ARGS_CANARY, BODY_CANARY, "/hook"];
+            let leak = |what: &str, bytes: &[u8]| {
+                for c in canaries {
+                    assert!(!bytes.windows(c.len()).any(|w| w == c.as_bytes()), "{what} holds the canary {c:?}");
+                }
+            };
+            let args = json!({"note": ARGS_CANARY}).to_string();
+            let mut all = Vec::new();
+            for answer in [
+                // A good answer with an extra field, and an answer that is not JSON. Both hold the canary.
+                format!(r#"{{"findings":[{{"kind":"pii_email","severity":"low","version":"v1"}}],"note":"{BODY_CANARY}"}}"#),
+                format!("{BODY_CANARY} is not json"),
+            ] {
+                let mock = MockProvider::spawn("acme_dlp", SECRET, move |_, _| Reply::signed(answer.clone()));
+                let dir = policy_dir(SHIPPED_FLOOR, &tenant());
+                let w = Wh::one(&mock.url);
+                let cfg = w.config(&dir);
+                leak("the config JSON", serde_json::to_string(&cfg).expect("json").as_bytes());
+                leak("the config Debug", format!("{cfg:?}").as_bytes());
+                let s = w.boot(&dir);
+                let ex = fetch(&s, Ep::ChatJson, &args).await;
+                assert_eq!(mock.requests().len(), 1);
+                leak("the report", report_text(&ex).as_bytes());
+                leak("the client answer", ex.text.as_bytes());
+                all.extend(s.log.records());
+            }
+            assert!(!all.is_empty());
+            for r in &all {
+                leak("a decision record", format!("{r:?}").as_bytes());
+                leak("a decision event", &proto::to_event(r).encode_to_vec());
+            }
+            leak("a log line", logs.text().as_bytes());
+            let mut keys = 0;
+            for (key, _, _, _) in snapshotter.snapshot().into_vec() {
+                keys += 1;
+                let key = key.key();
+                leak("a metric name", key.name().as_bytes());
+                for l in key.labels() {
+                    leak("a metric label", l.value().as_bytes());
+                }
+            }
+            assert!(keys > 0, "the metric check is not vacuous");
+        }
+
+        /// P5: every provider and every adapter reason reads 0 after the boot, before a request.
+        #[tokio::test]
+        async fn the_failure_counter_is_primed_before_the_first_request() {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _local = metrics::set_default_local_recorder(&recorder);
+            let dir = policy_dir(SHIPPED_FLOOR, PERMIT_ALL);
+            let mut w = Wh::one("http://127.0.0.1:9/hook");
+            w.providers.push(Prov::new("other_dlp", "http://127.0.0.1:9/other"));
+            let _s = w.boot(&dir);
+            let primed = counters(&snapshotter);
+            let reasons = [
+                "request_too_large",
+                "overloaded",
+                "transport",
+                "timeout",
+                "deadline",
+                "status",
+                "response_too_large",
+                "signature",
+                "malformed",
+            ];
+            for provider in ["acme_dlp", "other_dlp"] {
+                for reason in reasons {
+                    assert_eq!(primed.get(&failure_series(provider, reason)), Some(&0), "{provider}/{reason}");
+                }
+            }
+        }
+    }
 }
 
 // --- SMA-750: the Anthropic route ------------------------------------------------------------
