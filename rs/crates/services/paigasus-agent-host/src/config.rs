@@ -90,6 +90,13 @@ pub struct Config {
     /// The agents that this host can run (spec §6.2). The list can be empty.
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+    /// The model gateway (spec §7.4). Each `[[models]]` entry uses it. No `[gateway]` section
+    /// means no `[[models]]` entry.
+    #[serde(default)]
+    pub gateway: Option<GatewayConfig>,
+    /// The models that an `[[agents]]` entry can name. `scripted` is reserved and is not listed.
+    #[serde(default)]
+    pub models: Vec<ModelConfig>,
 }
 
 /// The tool names that an `[[agents]]` entry can list.
@@ -371,6 +378,11 @@ pub struct WorkerConfig {
     pub poll_interval_ms: u64,
     /// The most runs that one lease serves. Range 1 to 1000.
     pub max_runs_per_lease: u32,
+    /// The number of host faults in a row after which the worker pauses its claims. Range 1 to 100.
+    pub host_fault_pause_after: u32,
+    /// The first pause after a series of host faults, in seconds. Each next pause is double, up to
+    /// 600 seconds. Range 1 to 600.
+    pub host_fault_pause_secs: u64,
 }
 
 /// The limits of one run. Every number has a range that [`Config::validate`] checks.
@@ -413,6 +425,153 @@ pub struct AgentConfig {
     pub instructions: String,
     #[serde(default)]
     pub tools: Vec<String>,
+}
+
+/// The model name that the test model uses. A `[[models]]` entry must not use it.
+pub const RESERVED_MODEL_NAME: &str = "scripted";
+
+/// The model calls of one turn: the first call and two retries.
+pub const IN_RUN_ATTEMPTS: u32 = 3;
+
+/// The model gateway (spec §7.4). The API key is not in the config: `api_key_file` is the path of
+/// a file that holds it. `Debug` and `Serialize` never write a user name or a password of
+/// `base_url`.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayConfig {
+    /// The gateway URL. The scheme is `https`, or `http` for a loopback host. It has no user name,
+    /// password, query or fragment. A path prefix is allowed.
+    pub base_url: String,
+    /// The path of the file that holds the gateway API key. It is not empty and has no spaces at
+    /// the start or end.
+    pub api_key_file: String,
+    /// A PEM file of trust anchors. It REPLACES the platform roots. The file must hold every root
+    /// that the gateway chain needs.
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    /// The time limit to make the connection. Range 100 to 60000.
+    #[serde(default = "default_gateway_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    /// The time limit of each read, also of the wait for the response head. It must be more than
+    /// the longest silent gap of the gateway stream: the tool-hold `ping` interval (SMA-750 D12,
+    /// `tool_interception.keepalive_secs`, default 15 s) and the wait for the first upstream byte
+    /// (`first_byte_timeout_secs`, default 30 s). Range 1000 to 600000. Three times this value
+    /// must be less than `run.timeout_secs` in milliseconds.
+    #[serde(default = "default_gateway_read_timeout_ms")]
+    pub read_timeout_ms: u64,
+}
+
+fn default_gateway_connect_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_gateway_read_timeout_ms() -> u64 {
+    60_000
+}
+
+/// `base_url` without a user name and a password. A value that does not parse gives a fixed text.
+fn redact_base_url(base_url: &str) -> String {
+    match reqwest::Url::parse(base_url) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        Err(_) => "<unparsable>".to_owned(),
+    }
+}
+
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayConfig")
+            .field("base_url", &redact_base_url(&self.base_url))
+            .field("api_key_file", &self.api_key_file)
+            .field("ca_file", &self.ca_file)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("read_timeout_ms", &self.read_timeout_ms)
+            .finish()
+    }
+}
+
+impl Serialize for GatewayConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("GatewayConfig", 5)?;
+        st.serialize_field("base_url", &redact_base_url(&self.base_url))?;
+        st.serialize_field("api_key_file", &self.api_key_file)?;
+        st.serialize_field("ca_file", &self.ca_file)?;
+        st.serialize_field("connect_timeout_ms", &self.connect_timeout_ms)?;
+        st.serialize_field("read_timeout_ms", &self.read_timeout_ms)?;
+        st.end()
+    }
+}
+
+impl GatewayConfig {
+    /// The checks of the `[gateway]` section. They do no I/O. The error texts name a key and hold
+    /// no value of `base_url`.
+    fn validate(&self, run_timeout_secs: u64) -> Result<(), ConfigError> {
+        let url = reqwest::Url::parse(&self.base_url).map_err(|_| ConfigError::GatewayBaseUrlUnparsable)?;
+        let scheme_ok = match url.scheme() {
+            "https" => true,
+            "http" => is_loopback_host(&self.base_url),
+            _ => false,
+        };
+        if !scheme_ok {
+            return Err(ConfigError::GatewayBaseUrlScheme);
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(ConfigError::GatewayBaseUrlUserinfo);
+        }
+        if url.query().is_some() {
+            return Err(ConfigError::GatewayBaseUrlQuery);
+        }
+        if url.fragment().is_some() {
+            return Err(ConfigError::GatewayBaseUrlFragment);
+        }
+        if self.api_key_file.is_empty() || self.api_key_file != self.api_key_file.trim() {
+            return Err(ConfigError::GatewayKeyPathBlank);
+        }
+        if let Some(path) = self.ca_file.as_deref()
+            && (path.is_empty() || path != path.trim())
+        {
+            return Err(ConfigError::GatewayCaPathBlank);
+        }
+        for (key, value, min, max) in [
+            ("gateway.connect_timeout_ms", self.connect_timeout_ms, 100, 60_000),
+            ("gateway.read_timeout_ms", self.read_timeout_ms, 1000, 600_000),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(ConfigError::ValueOutOfRange { key, value, min, max });
+            }
+        }
+        // Both values are in range here, and `run.timeout_secs` is at most 3600, so the products
+        // cannot overflow. Three read timeouts (the first call and two retries) must fit in a run.
+        if u64::from(IN_RUN_ATTEMPTS) * self.read_timeout_ms >= run_timeout_secs * 1000 {
+            return Err(ConfigError::GatewayReadTimeoutTooLong {
+                read_timeout_ms: self.read_timeout_ms,
+                run_timeout_secs,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One `[[models]]` entry: a name that an `[[agents]]` entry can use.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ModelConfig {
+    /// The model name. It is not empty, it is unique and it is not `scripted`.
+    pub name: String,
+    pub provider: ModelProvider,
+    /// The model id that the gateway gets. It is not empty.
+    pub model: String,
+    /// The limit of output tokens of one call. Required. Range 1 to 128000.
+    pub max_output_tokens: u32,
+}
+
+/// The provider of a `[[models]]` entry. `anthropic` is the only value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelProvider {
+    Anthropic,
 }
 
 /// The inbox lease (spec §8.6, §8.7).
@@ -617,6 +776,36 @@ pub enum ConfigError {
     AgentDuplicate(String),
     #[error("agents: the agent \"{agent}\" lists the unknown tool \"{tool}\"")]
     AgentUnknownTool { agent: String, tool: String },
+    #[error("a [[models]] entry exists, but the [gateway] section is missing")]
+    GatewayMissing,
+    #[error("the [gateway] section is set, but no [[models]] entry exists")]
+    GatewayUnused,
+    #[error("gateway.base_url is not a valid URL")]
+    GatewayBaseUrlUnparsable,
+    #[error("gateway.base_url must use https, or http with a loopback host")]
+    GatewayBaseUrlScheme,
+    #[error("gateway.base_url must not hold a user name or a password")]
+    GatewayBaseUrlUserinfo,
+    #[error("gateway.base_url must not hold a query")]
+    GatewayBaseUrlQuery,
+    #[error("gateway.base_url must not hold a fragment")]
+    GatewayBaseUrlFragment,
+    #[error("gateway.api_key_file must not be empty or have spaces at the start or end")]
+    GatewayKeyPathBlank,
+    #[error("gateway.ca_file must not be empty or have spaces at the start or end (leave the key out to use the platform roots)")]
+    GatewayCaPathBlank,
+    #[error("3 x gateway.read_timeout_ms ({read_timeout_ms}) must be less than run.timeout_secs ({run_timeout_secs}) in milliseconds")]
+    GatewayReadTimeoutTooLong { read_timeout_ms: u64, run_timeout_secs: u64 },
+    #[error("models.name must not be empty")]
+    ModelNameEmpty,
+    #[error("models: the name \"{0}\" is used by two entries")]
+    ModelNameDuplicate(String),
+    #[error("models.name must not be \"scripted\": the name is reserved")]
+    ModelNameReserved,
+    #[error("models.model must not be empty (the entry \"{0}\")")]
+    ModelIdEmpty(String),
+    #[error("agents: the agents \"{first}\" and \"{other}\" use gateway models and belong to different organizations")]
+    GatewayAgentsOrgMismatch { first: String, other: String },
 }
 
 /// The defaults. `database_url` has none: it is required. `iam` has none: no `[iam]` section
@@ -804,6 +993,8 @@ impl Config {
                 concurrency: 4,
                 poll_interval_ms: 1000,
                 max_runs_per_lease: 8,
+                host_fault_pause_after: 3,
+                host_fault_pause_secs: 30,
             },
             lease: LeaseConfig {
                 ttl_secs: 30,
@@ -958,6 +1149,8 @@ impl Config {
             ("worker.concurrency", u64::from(w.concurrency), 1, 64),
             ("worker.poll_interval_ms", w.poll_interval_ms, 100, 60_000),
             ("worker.max_runs_per_lease", u64::from(w.max_runs_per_lease), 1, 1000),
+            ("worker.host_fault_pause_after", u64::from(w.host_fault_pause_after), 1, 100),
+            ("worker.host_fault_pause_secs", w.host_fault_pause_secs, 1, 600),
             ("run.max_turns", u64::from(r.max_turns), 1, 256),
             ("run.timeout_secs", r.timeout_secs, 1, 3600),
             ("retry.base_delay_secs", retry.base_delay_secs, 1, 3600),
@@ -974,11 +1167,64 @@ impl Config {
             });
         }
         self.agent_definitions()?;
+        self.validate_models()?;
         // The worker pool starts only with `worker.enabled` and an agent (see `serve`). Its run
         // commit cannot commit an external memory store yet, so that pair stops the boot. The S3
         // store stays usable when the pool does not start.
         if matches!(self.memory.backend, MemoryBackend::S3) && self.worker.enabled && !self.agents.is_empty() {
             return Err(ConfigError::WorkerNeedsPostgresMemory);
+        }
+        Ok(())
+    }
+
+    /// The rules of `[gateway]` and `[[models]]`, and the one-organization rule of the agents that
+    /// use a gateway model. Call it after the range check of `run.timeout_secs` and after
+    /// [`Config::agent_definitions`].
+    fn validate_models(&self) -> Result<(), ConfigError> {
+        match (&self.gateway, self.models.is_empty()) {
+            (None, true) => return Ok(()),
+            (None, false) => return Err(ConfigError::GatewayMissing),
+            (Some(_), true) => return Err(ConfigError::GatewayUnused),
+            (Some(gateway), false) => gateway.validate(self.run.timeout_secs)?,
+        }
+        let mut names = std::collections::HashSet::new();
+        for model in &self.models {
+            if model.name.is_empty() {
+                return Err(ConfigError::ModelNameEmpty);
+            }
+            if model.name == RESERVED_MODEL_NAME {
+                return Err(ConfigError::ModelNameReserved);
+            }
+            if !names.insert(model.name.as_str()) {
+                return Err(ConfigError::ModelNameDuplicate(model.name.clone()));
+            }
+            if model.model.trim().is_empty() {
+                return Err(ConfigError::ModelIdEmpty(model.name.clone()));
+            }
+            let (value, min, max) = (u64::from(model.max_output_tokens), 1, 128_000);
+            if !(min..=max).contains(&value) {
+                return Err(ConfigError::ValueOutOfRange {
+                    key: "models.max_output_tokens",
+                    value,
+                    min,
+                    max,
+                });
+            }
+        }
+        // Every agent on a gateway model has the same organization (D3).
+        let mut first: Option<(&AgentConfig, AgentId)> = None;
+        for agent in self.agents.iter().filter(|a| names.contains(a.model.as_str())) {
+            let id = AgentId::parse(&agent.id).map_err(|_| ConfigError::AgentIdInvalid(agent.id.clone()))?;
+            match &first {
+                None => first = Some((agent, id)),
+                Some((first_agent, first_id)) if first_id.org() != id.org() => {
+                    return Err(ConfigError::GatewayAgentsOrgMismatch {
+                        first: first_agent.id.clone(),
+                        other: agent.id.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
         }
         Ok(())
     }
@@ -2065,11 +2311,19 @@ mod tests {
     }
 
     fn agent_toml(id: &str, tools: &str) -> String {
-        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"scripted\"\ninstructions = \"Sort the request.\"\ntools = {tools}\n")
+        agent_toml_on(id, "scripted", tools)
+    }
+
+    fn agent_toml_on(id: &str, model: &str, tools: &str) -> String {
+        format!("[[agents]]\nid = \"{id}\"\nname = \"triage\"\nmodel = \"{model}\"\ninstructions = \"Sort the request.\"\ntools = {tools}\n")
     }
 
     fn agent_prn(n: u128) -> String {
-        paigasus_agent_host_core::ids::AgentId::new(Uuid::from_u128(1), Uuid::from_u128(n)).as_prn().canonical()
+        agent_prn_in(1, n)
+    }
+
+    fn agent_prn_in(org: u128, n: u128) -> String {
+        paigasus_agent_host_core::ids::AgentId::new(Uuid::from_u128(org), Uuid::from_u128(n)).as_prn().canonical()
     }
 
     #[test]
@@ -2167,6 +2421,238 @@ mod tests {
             assert_eq!(defs[0].model_id, "scripted");
             assert_eq!(defs[0].instructions, "Sort the request.");
             assert_eq!(defs[0].tool_names, ["memory"]);
+            Ok(())
+        });
+    }
+
+    const GATEWAY: &str = "[gateway]\nbase_url = \"https://gw.example/prefix\"\napi_key_file = \"/run/secrets/k\"\n";
+    const MODEL: &str = "[[models]]\nname = \"claude\"\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5-5\"\nmax_output_tokens = 16000\n";
+
+    /// Load `toml` as `agent-host.toml`. The load must succeed. `validate` is the caller's job.
+    fn gateway_cfg(toml: &str) -> Config {
+        s3_cfg(toml, None)
+    }
+
+    /// A gateway config with `base_url` replaced, and one model.
+    fn with_base_url(base_url: &str) -> Config {
+        gateway_cfg(&format!("[gateway]\nbase_url = \"{base_url}\"\napi_key_file = \"/run/secrets/k\"\n{MODEL}"))
+    }
+
+    fn valid_gateway_cfg() -> Config {
+        gateway_cfg(&format!("{GATEWAY}{MODEL}"))
+    }
+
+    #[test]
+    fn gateway_and_pause_defaults_match_the_spec() {
+        let cfg = valid_gateway_cfg();
+        let gw = cfg.gateway.as_ref().expect("gateway");
+        assert_eq!(gw.connect_timeout_ms, 5000);
+        assert_eq!(gw.read_timeout_ms, 60_000);
+        assert_eq!(gw.ca_file, None);
+        assert_eq!(cfg.worker.host_fault_pause_after, 3);
+        assert_eq!(cfg.worker.host_fault_pause_secs, 30);
+        assert_eq!(cfg.models.len(), 1);
+        assert_eq!(cfg.models[0].provider, ModelProvider::Anthropic);
+        assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn models_without_a_gateway_are_refused() {
+        assert_eq!(gateway_cfg(MODEL).validate(), Err(ConfigError::GatewayMissing));
+    }
+
+    #[test]
+    fn a_gateway_without_models_is_unused() {
+        assert_eq!(gateway_cfg(GATEWAY).validate(), Err(ConfigError::GatewayUnused));
+        assert_eq!(valid_gateway_cfg().validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_base_url_rules_hold() {
+        let table: [(&str, Result<(), ConfigError>); 10] = [
+            ("https://gw.example/prefix", Ok(())),
+            ("http://127.0.0.1:8088", Ok(())),
+            ("http://localhost:1/p", Ok(())),
+            ("http://gw.example", Err(ConfigError::GatewayBaseUrlScheme)),
+            ("http://127.0.0.1.evil.example", Err(ConfigError::GatewayBaseUrlScheme)),
+            ("ftp://gw.example", Err(ConfigError::GatewayBaseUrlScheme)),
+            ("https://u:p@gw.example", Err(ConfigError::GatewayBaseUrlUserinfo)),
+            ("https://gw.example/?a=1", Err(ConfigError::GatewayBaseUrlQuery)),
+            ("https://gw.example/#f", Err(ConfigError::GatewayBaseUrlFragment)),
+            ("not a url", Err(ConfigError::GatewayBaseUrlUnparsable)),
+        ];
+        for (url, expected) in table {
+            assert_eq!(with_base_url(url).validate(), expected, "base_url = {url}");
+        }
+    }
+
+    #[test]
+    fn blank_key_and_ca_paths_are_refused() {
+        for key in ["", " /k"] {
+            let mut cfg = valid_gateway_cfg();
+            cfg.gateway.as_mut().unwrap().api_key_file = key.to_owned();
+            assert_eq!(cfg.validate(), Err(ConfigError::GatewayKeyPathBlank), "api_key_file = {key:?}");
+        }
+        for ca in ["", "/c "] {
+            let mut cfg = valid_gateway_cfg();
+            cfg.gateway.as_mut().unwrap().ca_file = Some(ca.to_owned());
+            assert_eq!(cfg.validate(), Err(ConfigError::GatewayCaPathBlank), "ca_file = {ca:?}");
+        }
+        let mut cfg = valid_gateway_cfg();
+        cfg.gateway.as_mut().unwrap().ca_file = Some("/etc/ca.pem".to_owned());
+        assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_gateway_timeouts_have_ranges() {
+        // The run timeout is raised, so that the 3 x rule does not decide these rows.
+        let with = |connect: u64, read: u64| {
+            let mut cfg = valid_gateway_cfg();
+            cfg.run.timeout_secs = 3600;
+            let gw = cfg.gateway.as_mut().unwrap();
+            gw.connect_timeout_ms = connect;
+            gw.read_timeout_ms = read;
+            cfg.validate()
+        };
+        let connect_err = |value| ConfigError::ValueOutOfRange {
+            key: "gateway.connect_timeout_ms",
+            value,
+            min: 100,
+            max: 60_000,
+        };
+        let read_err = |value| ConfigError::ValueOutOfRange {
+            key: "gateway.read_timeout_ms",
+            value,
+            min: 1000,
+            max: 600_000,
+        };
+        assert_eq!(with(99, 60_000), Err(connect_err(99)));
+        assert_eq!(with(60_001, 60_000), Err(connect_err(60_001)));
+        assert_eq!(with(5000, 999), Err(read_err(999)));
+        assert_eq!(with(5000, 600_001), Err(read_err(600_001)));
+        assert_eq!(with(100, 60_000), Ok(()));
+        assert_eq!(with(60_000, 60_000), Ok(()));
+        assert_eq!(with(5000, 1000), Ok(()));
+    }
+
+    #[test]
+    fn three_read_timeouts_must_fit_in_the_run_timeout() {
+        let mut cfg = valid_gateway_cfg();
+        // The default pair: 3 x 60000 ms is less than 300 s.
+        assert_eq!(cfg.validate(), Ok(()));
+        cfg.run.timeout_secs = 60;
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 20_000;
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::GatewayReadTimeoutTooLong {
+                read_timeout_ms: 20_000,
+                run_timeout_secs: 60
+            })
+        );
+        cfg.gateway.as_mut().unwrap().read_timeout_ms = 19_999;
+        assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn model_names_are_unique_not_empty_and_not_scripted() {
+        let named = |name: &str| gateway_cfg(&format!("{GATEWAY}{}", MODEL.replace("\"claude\"", &format!("\"{name}\""))));
+        assert_eq!(named("claude").validate(), Ok(()));
+        assert_eq!(named("").validate(), Err(ConfigError::ModelNameEmpty));
+        assert_eq!(named("scripted").validate(), Err(ConfigError::ModelNameReserved));
+        let twice = gateway_cfg(&format!("{GATEWAY}{MODEL}{MODEL}"));
+        assert_eq!(twice.validate(), Err(ConfigError::ModelNameDuplicate("claude".to_owned())));
+    }
+
+    #[test]
+    fn the_model_id_must_not_be_empty() {
+        let cfg = gateway_cfg(&format!("{GATEWAY}{}", MODEL.replace("\"claude-sonnet-5-5\"", "\" \"")));
+        assert_eq!(cfg.validate(), Err(ConfigError::ModelIdEmpty("claude".to_owned())));
+    }
+
+    #[test]
+    fn max_output_tokens_is_required_and_in_range() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            let without = MODEL.replace("max_output_tokens = 16000\n", "");
+            jail.create_file("agent-host.toml", &format!("{GATEWAY}{without}"))?;
+            let err = Config::load().expect_err("max_output_tokens is required");
+            assert!(err.to_string().contains("max_output_tokens"), "{err}");
+            Ok(())
+        });
+        let with = |n: u32| gateway_cfg(&format!("{GATEWAY}{}", MODEL.replace("16000", &n.to_string()))).validate();
+        let err = |value| ConfigError::ValueOutOfRange {
+            key: "models.max_output_tokens",
+            value,
+            min: 1,
+            max: 128_000,
+        };
+        assert_eq!(with(0), Err(err(0)));
+        assert_eq!(with(128_001), Err(err(128_001)));
+        assert_eq!(with(1), Ok(()));
+        assert_eq!(with(128_000), Ok(()));
+    }
+
+    #[test]
+    fn an_unknown_provider_fails_the_load() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("agent-host.toml", &format!("{GATEWAY}{}", MODEL.replace("anthropic", "openai")))?;
+            let err = Config::load().expect_err("openai is not a provider");
+            assert!(err.to_string().contains("openai"), "{err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn agents_on_gateway_models_share_one_org() {
+        let base = format!("{GATEWAY}{MODEL}");
+        let (a1, a2, b1) = (agent_prn_in(1, 10), agent_prn_in(1, 11), agent_prn_in(2, 12));
+        let two_orgs = gateway_cfg(&format!("{base}{}{}", agent_toml_on(&a1, "claude", "[]"), agent_toml_on(&b1, "claude", "[]")));
+        assert_eq!(two_orgs.validate(), Err(ConfigError::GatewayAgentsOrgMismatch { first: a1.clone(), other: b1.clone() }));
+        let one_org = gateway_cfg(&format!("{base}{}{}", agent_toml_on(&a1, "claude", "[]"), agent_toml_on(&a2, "claude", "[]")));
+        assert_eq!(one_org.validate(), Ok(()));
+        // An agent on `scripted` does not count, whatever its org.
+        let other_model = gateway_cfg(&format!("{base}{}{}", agent_toml_on(&a1, "claude", "[]"), agent_toml_on(&b1, "scripted", "[]")));
+        assert_eq!(other_model.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_pause_keys_have_ranges() {
+        let with = |after: u32, secs: u64| {
+            let mut cfg = valid_gateway_cfg();
+            cfg.worker.host_fault_pause_after = after;
+            cfg.worker.host_fault_pause_secs = secs;
+            cfg.validate()
+        };
+        let err = |key, value, max| ConfigError::ValueOutOfRange { key, value, min: 1, max };
+        assert_eq!(with(0, 30), Err(err("worker.host_fault_pause_after", 0, 100)));
+        assert_eq!(with(101, 30), Err(err("worker.host_fault_pause_after", 101, 100)));
+        assert_eq!(with(3, 0), Err(err("worker.host_fault_pause_secs", 0, 600)));
+        assert_eq!(with(3, 601), Err(err("worker.host_fault_pause_secs", 601, 600)));
+        assert_eq!(with(1, 1), Ok(()));
+        assert_eq!(with(100, 600), Ok(()));
+    }
+
+    #[test]
+    fn config_debug_and_serialize_hold_no_key() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("AGENT_HOST_DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.create_file("key.txt", "sk-gw-secret")?;
+            let toml = format!("[gateway]\nbase_url = \"https://gwuser:gwpass@gw.example/p\"\napi_key_file = \"key.txt\"\n{MODEL}");
+            jail.create_file("agent-host.toml", &toml)?;
+            let cfg = with_url();
+            // The key file content is never read into the config.
+            let debug = format!("{cfg:?}");
+            let json = serde_json::to_string(&cfg).expect("serialize");
+            let error = cfg.validate().expect_err("userinfo is refused").to_string();
+            for text in [&debug, &json, &error] {
+                assert!(!text.contains("sk-gw-secret"), "{text}");
+                assert!(!text.contains("gwuser"), "{text}");
+                assert!(!text.contains("gwpass"), "{text}");
+            }
+            // Positive control: the host and the key path stay visible.
+            assert!(debug.contains("gw.example") && debug.contains("key.txt"), "{debug}");
+            assert!(json.contains("gw.example") && json.contains("key.txt"), "{json}");
             Ok(())
         });
     }
