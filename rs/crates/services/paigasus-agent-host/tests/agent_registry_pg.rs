@@ -273,6 +273,11 @@ async fn an_agent_id_of_another_org_is_not_found() {
         reg.create_inbox(&InboxId::new(u(2), u(20)), &other, &PrincipalId::from_uuid(u(30))).await.expect_err("bind"),
         RegistryError::NotFound
     );
+    // An inbox of the agent of org 1 exists, so an empty page for the other org proves the filter.
+    reg.create_inbox(&InboxId::new(u(1), u(21)), &agent_id(10), &PrincipalId::from_uuid(u(31)))
+        .await
+        .expect("bind of the real agent");
+    assert_eq!(reg.list_inboxes(&agent_id(10), page(10, None)).await.expect("list own").items.len(), 1);
     assert!(reg.list_inboxes(&other, page(10, None)).await.expect("list").items.is_empty());
     // The agent of org 1 is untouched.
     let kept = reg.get(u(10)).await.expect("get").expect("some");
