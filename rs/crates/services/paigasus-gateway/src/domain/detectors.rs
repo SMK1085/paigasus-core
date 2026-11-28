@@ -479,6 +479,9 @@ pub struct PipelineOutput {
     /// The stage of each finding, in the shape of `findings`. The pipeline sets it. A
     /// [`BuiltInStage`] leaves it empty, because all of its findings are of [`Stage::BuiltIn`].
     pub stages: Vec<Vec<Stage>>,
+    /// The time that the webhook and judge stages of one run took (SMA-856 D28). The decider leaves
+    /// it out of the overhead. It is zero when no late stage ran.
+    pub late_elapsed: std::time::Duration,
 }
 
 impl PipelineOutput {
@@ -540,6 +543,7 @@ mod tests {
             findings: batch.earlier.clone(),
             hosts: vec![Some(seen), None],
             stages: vec![vec![Stage::Webhook]],
+            ..PipelineOutput::default()
         };
         let text = format!("{out:?}");
         assert_eq!(text, "PipelineOutput { subjects: 1, findings: 1, hosts: 1 }");
@@ -558,6 +562,7 @@ mod tests {
             findings: vec![vec![detector_error_finding(), detector_error_finding()]],
             hosts: vec![None],
             stages: vec![vec![Stage::Webhook]],
+            ..PipelineOutput::default()
         };
         assert_eq!((out.stage_of(0, 0), out.stage_of(0, 1), out.stage_of(1, 0)), (Stage::Webhook, Stage::BuiltIn, Stage::BuiltIn));
     }

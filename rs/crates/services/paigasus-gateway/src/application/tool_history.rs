@@ -30,7 +30,7 @@ use tokio::time::Instant;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
-use crate::application::tool_policy::decider::count_finding;
+use crate::application::tool_policy::decider::{FindingLabels, count_finding};
 use crate::application::tool_policy::slots::PARTS as SLOT_PARTS;
 use crate::domain::decision_log::Entropy;
 use crate::domain::limits::{Clock, UnavailableKind};
@@ -384,13 +384,18 @@ impl ToolHistory {
         // The metric labels come from the closed triple table (SMA-855 P-9): detector `kernel`.
         if link.mixed_sessions {
             findings.add(MIXED_SESSIONS, Severity::Medium);
-            count_finding("request", &FindingRecord::new(MIXED_SESSIONS, Some(Severity::Medium), DETECTOR_KERNEL, ""), None);
+            count_finding(
+                FindingLabels::shared_built_in(),
+                "request",
+                &FindingRecord::new(MIXED_SESSIONS, Some(Severity::Medium), DETECTOR_KERNEL, ""),
+                None,
+            );
         }
         if link.forged_results > 0 {
             findings.add(FORGED_HISTORY, Severity::High);
             let forged = FindingRecord::new(FORGED_HISTORY, Some(Severity::High), DETECTOR_KERNEL, "");
             for _ in 0..link.forged_results {
-                count_finding("request", &forged, None);
+                count_finding(FindingLabels::shared_built_in(), "request", &forged, None);
             }
         }
 

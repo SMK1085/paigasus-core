@@ -25,7 +25,7 @@ use paigasus_observability::names;
 use uuid::Uuid;
 
 use super::cache::{CompiledTenant, FloorEntry, Lookup, PolicyCache};
-use super::decider::count_finding;
+use super::decider::{FindingLabels, count_finding};
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::{PendingWrite, ToolHistory};
@@ -203,6 +203,8 @@ pub struct RequestToolPolicy {
     /// The webhook opt-in list of each org of the config file (SMA-856 D9). The IAM path reads the
     /// list from the tenant settings instead.
     org_webhooks: HashMap<Uuid, Arc<[String]>>,
+    /// The metric labels of the findings (SMA-856 D17). The default is the built-in table.
+    labels: Arc<FindingLabels>,
 }
 
 /// The opt-in list that a snapshot holds (SMA-856 D8): the list of the org only when the mode is
@@ -277,7 +279,15 @@ impl RequestToolPolicy {
             },
             history: None,
             org_webhooks: HashMap::new(),
+            labels: Arc::new(FindingLabels::built_in()),
         }
+    }
+
+    /// Label the findings with `labels`: the webhook kinds of the config (SMA-856 D17).
+    #[must_use]
+    pub fn with_finding_labels(mut self, labels: Arc<FindingLabels>) -> Self {
+        self.labels = labels;
+        self
     }
 
     /// Set the webhook opt-in list of each org of the config file (SMA-856 D9). An org with no
@@ -571,13 +581,18 @@ impl RequestToolPolicy {
         let (body, entries, seen) = if let ToolTurn::Parsed(facts) = turn {
             // One finding per colliding tool name (SMA-755 § 5.9).
             for _ in name_collisions(&facts.definitions) {
-                count_finding("request", &FindingRecord::new(NAME_COLLISION, Some(Severity::High), DETECTOR_KERNEL, ""), None);
+                count_finding(&self.labels, "request", &FindingRecord::new(NAME_COLLISION, Some(Severity::High), DETECTOR_KERNEL, ""), None);
             }
             let screened = self.screen(ctx, &snapshot, format, &body, facts).await;
             if let Some(s) = &screened {
                 for (found, stages) in s.findings.iter().zip(&s.stages) {
                     for (f, stage) in found.iter().zip(stages) {
-                        count_finding("request", &FindingRecord::new(f.kind.clone(), Some(f.severity), f.detector.clone(), f.version.clone()), Some(*stage));
+                        count_finding(
+                            &self.labels,
+                            "request",
+                            &FindingRecord::new(f.kind.clone(), Some(f.severity), f.detector.clone(), f.version.clone()),
+                            Some(*stage),
+                        );
                     }
                 }
             }
@@ -1818,6 +1833,7 @@ mod tests {
             findings: vec![vec![medium.clone()]],
             hosts: vec![None],
             stages: Vec::new(),
+            late_elapsed: Duration::ZERO,
         };
         let mut findings = vec![Vec::new(); 4];
         let mut stages = vec![Vec::new(); 4];

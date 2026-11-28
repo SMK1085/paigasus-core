@@ -1486,7 +1486,7 @@ mod detectors {
     use paigasus_gateway::adapters::detectors::BuiltInDetector;
     use paigasus_gateway::application::decision_log::DecisionRecorder;
     use paigasus_gateway::application::detectors::DetectorPipeline;
-    use paigasus_gateway::application::tool_policy::FINDING_TRIPLES;
+    use paigasus_gateway::application::tool_policy::FindingLabels;
     use paigasus_gateway::config::{DETECTOR_MARGIN_MS, DetectorSettings, GatewayConfig};
     use paigasus_gateway::domain::decision_log::{DecisionLog, OsEntropy};
     use paigasus_gateway::domain::detectors::{BuiltInStage, DetectBatch, Detector, DetectorError, PipelineOutput, Side as DetectSide, Subject};
@@ -2244,9 +2244,9 @@ mod detectors {
 
     /// § 6.11.3: the composition root primes every valid triple at zero on both sides. A finding
     /// increments its triple, and a webhook finding counts under `webhook`. The overhead sample of
-    /// a request holds the pipeline time.
+    /// a request leaves out the webhook wait (D28).
     #[tokio::test]
-    async fn every_triple_is_primed_and_the_overhead_includes_the_pipeline() {
+    async fn every_triple_is_primed_and_the_overhead_excludes_the_webhook_wait() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
@@ -2256,7 +2256,7 @@ mod detectors {
         let rt = runtime::build_tool_policy(&cfg, Arc::new(DecisionRecorder::tracing()), None).expect("builds");
         let primed = counters(&snapshotter);
         for side in ["request", "response"] {
-            for (kind, detector, severity) in FINDING_TRIPLES {
+            for (kind, detector, severity) in FindingLabels::built_in().triples(side) {
                 assert_eq!(primed.get(&finding_series(side, kind, detector, severity)), Some(&0), "{side}/{kind}/{detector}/{severity}");
             }
         }
@@ -2290,7 +2290,7 @@ mod detectors {
         );
         assert_eq!(after.iter().filter(|((name, _), v)| name == failures && **v == 1).count(), 1, "{after:?}");
 
-        // The overhead sample holds the pipeline time: a webhook that takes 300 ms and finishes.
+        // D28: the overhead sample leaves out the webhook wait: a webhook that takes 300 ms and finishes.
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
@@ -2312,7 +2312,7 @@ mod detectors {
             })
             .collect();
         assert_eq!(samples.len(), 1, "{samples:?}");
-        assert!(samples[0] >= 0.3, "the overhead holds the 300 ms of the pipeline: {samples:?}");
+        assert!(samples[0] < 0.3, "the overhead leaves out the 300 ms of the webhook: {samples:?}");
     }
 
     // --- test-only detectors (P-2: integration tests cannot see `#[cfg(test)]` modules) ----------

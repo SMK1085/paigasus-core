@@ -150,11 +150,13 @@ impl DetectorPipeline {
                 findings: out.findings.into_iter().map(|f| self.check(DETECTOR_BUILT_IN, f)).collect(),
                 hosts: out.hosts,
                 stages: Vec::new(),
+                late_elapsed: Duration::ZERO,
             },
             Err(e) => PipelineOutput {
                 findings: failed_built_in(e, n),
                 hosts: vec![None; n],
                 stages: Vec::new(),
+                late_elapsed: Duration::ZERO,
             },
         };
         // The stage travels with each finding, so the metric label of a webhook finding is
@@ -173,7 +175,10 @@ impl DetectorPipeline {
         } else {
             batch.webhook_bodies.clone()
         };
+        let late_start = Instant::now();
         let late = self.late_stages(&batch, &calls, &out.findings, (run_start + self.timeout).min(deadline), &items, bodies).await;
+        // D28: the decider keeps this time out of the overhead.
+        out.late_elapsed = late_start.elapsed();
         // `late` holds one entry per opt-in item, then one for the judge.
         for (stage, found_by) in late {
             for (j, found) in found_by.into_iter().enumerate() {

@@ -34,7 +34,7 @@ use crate::adapters::policy_source::iam::IamPolicySource;
 use crate::application::decision_log::DecisionRecorder;
 use crate::application::detectors::DetectorPipeline;
 use crate::application::tool_history::ToolHistory;
-use crate::application::tool_policy::{CacheSettings, CedarDecider, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
+use crate::application::tool_policy::{CacheSettings, CedarDecider, FindingLabels, Invalidate, PolicyCache, RequestToolPolicy, prime_tool_policy_metrics};
 use crate::config::{GatewayConfig, PolicySourceConfig, ToolHistoryConfig};
 use crate::domain::decision_log::{Entropy, TracingDecisionLog};
 use crate::domain::limits::{ChargeDropReason, Clock};
@@ -357,7 +357,8 @@ pub fn build_tool_policy(config: &GatewayConfig, recorder: Arc<DecisionRecorder>
             "the tool policy is on (SMA-752): tool definitions, results and calls are checked against the Cedar policies"
         );
     }
-    prime_tool_policy_metrics();
+    // Task 10 wires the webhook kinds of the config here.
+    prime_tool_policy_metrics(&FindingLabels::built_in());
     let detectors = build_detectors(config);
     let mut cedar = CedarDecider::new(Arc::clone(&recorder));
     if let Some(pipeline) = &detectors {
@@ -591,15 +592,13 @@ mod tool_policy_tests {
 
     #[test]
     fn prime_tool_policy_metrics_primes_every_triple_at_zero() {
-        use crate::application::tool_policy::FINDING_TRIPLES;
         let debugging = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = debugging.snapshotter();
         let _local = metrics::set_default_local_recorder(&debugging);
         build_tool_policy(&enabled_config(), rec(), None).expect("builds");
-        let others = ["info", "low", "medium", "high"].map(|s| ("other", "other", s));
         let mut n = 0;
         for side in ["request", "response"] {
-            for (kind, detector, severity) in FINDING_TRIPLES.into_iter().chain(others) {
+            for (kind, detector, severity) in FindingLabels::built_in().triples(side) {
                 let labels = [("side", side), ("kind", kind), ("detector", detector), ("severity", severity)];
                 let v = crate::test_support::counter(&snapshotter, names::GATEWAY_TOOL_POLICY_FINDINGS_TOTAL, &labels);
                 assert_eq!(v, Some(0), "{side}/{kind}/{detector}/{severity} is primed at 0");
